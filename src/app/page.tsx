@@ -3,6 +3,34 @@ import { SetupNotice } from "@/components/setup-notice";
 import { getQueuePageData, getSystemPageData } from "@/lib/data";
 import { formatDateTime, trim } from "@/lib/format";
 
+type QueueReplyItem = {
+  _id: string;
+  provider: string;
+  delayMs: number;
+  typingMs: number;
+  text: string;
+  sourceMessage?: { text?: string } | null;
+  thread?: { title?: string; jid?: string } | null;
+};
+
+type QueueFollowupItem = {
+  _id: string;
+  reason: string;
+  dueAt: number;
+};
+
+type QueueTodoCandidate = {
+  _id: string;
+  title: string;
+  suggestedDueAt?: number;
+};
+
+type QueueGuardrailItem = {
+  _id: string;
+  severity: string;
+  reason: string;
+};
+
 export default async function QueuePage() {
   const [queueData, systemData] = await Promise.all([getQueuePageData(), getSystemPageData()]);
   const autonomyPaused = Boolean(systemData.health?.config?.autonomyPaused);
@@ -19,7 +47,7 @@ export default async function QueuePage() {
         <article className="panel-card">
           <h3>Needs Reply</h3>
           <div className="stack">
-            {(queueData.queue?.needsReply || []).map((item: any) => (
+            {((queueData.queue?.needsReply || []) as QueueReplyItem[]).map((item) => (
               <div key={item._id} className="queue-item">
                 <p className="queue-title">{item.thread?.title || item.thread?.jid || "Unknown contact"}</p>
                 <p className="queue-body">{trim(item.sourceMessage?.text || item.text || "")}</p>
@@ -50,7 +78,7 @@ export default async function QueuePage() {
         <article className="panel-card">
           <h3>Follow-up Confirmations</h3>
           <div className="stack">
-            {(queueData.queue?.followupConfirmations || []).map((item: any) => (
+            {((queueData.queue?.followupConfirmations || []) as QueueFollowupItem[]).map((item) => (
               <div key={item._id} className="queue-item">
                 <p className="queue-title">{item.reason}</p>
                 <p className="queue-body">Due: {formatDateTime(item.dueAt)}</p>
@@ -73,7 +101,7 @@ export default async function QueuePage() {
         <article className="panel-card">
           <h3>TODO Candidates</h3>
           <div className="stack">
-            {(queueData.queue?.todoCandidates || []).map((item: any) => (
+            {((queueData.queue?.todoCandidates || []) as QueueTodoCandidate[]).map((item) => (
               <div key={item._id} className="queue-item">
                 <p className="queue-title">{item.title}</p>
                 <p className="queue-meta">Suggested due: {formatDateTime(item.suggestedDueAt)}</p>
@@ -92,7 +120,7 @@ export default async function QueuePage() {
         <article className="panel-card">
           <h3>Guardrail Flags</h3>
           <div className="stack">
-            {(queueData.queue?.guardrailFlags || []).map((item: any) => (
+            {((queueData.queue?.guardrailFlags || []) as QueueGuardrailItem[]).map((item) => (
               <div key={item._id} className="queue-item">
                 <p className="queue-title">Severity: {item.severity}</p>
                 <p className="queue-body">{item.reason}</p>

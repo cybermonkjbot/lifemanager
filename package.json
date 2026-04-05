@@ -4,6 +4,10 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "dev:next": "next dev",
+    "dev:convex": "convex dev",
+    "worker": "bun run src/worker/index.ts",
+    "dev:all": "concurrently -n next,convex,worker -c cyan,magenta,yellow \"bun run dev:next\" \"bun run dev:convex\" \"bun run worker\"",
     "build": "next build",
     "start": "next start",
     "lint": "eslint"
@@ -18,6 +22,7 @@
     "date-fns": "^4.1.0",
     "next": "16.2.2",
     "pino": "^10.3.1",
+    "qrcode": "^1.5.4",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "zod": "^4.3.6"
@@ -25,6 +30,7 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
+    "@types/qrcode": "^1.5.6",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "babel-plugin-react-compiler": "1.0.0",

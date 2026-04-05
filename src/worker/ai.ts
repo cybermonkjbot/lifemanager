@@ -3,6 +3,8 @@ import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import ModelClient, { isUnexpected } from "@azure-rest/ai-inference";
+import { AzureKeyCredential } from "@azure/core-auth";
 
 const execFileAsync = promisify(execFile);
 
@@ -71,59 +73,104 @@ async function runAzure(prompt: string): Promise<AiResult> {
   }
 
   const start = Date.now();
-  const response = await fetch(cfg.endpoint, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "api-key": cfg.apiKey,
+  const messages = [
+    {
+      role: "system",
+      content: "You write human WhatsApp replies that sound like the user and preserve conversational tone.",
     },
-    body: JSON.stringify({
+    {
+      role: "user",
+      content: prompt,
+    },
+  ];
+
+  try {
+    const client = ModelClient(cfg.endpoint, new AzureKeyCredential(cfg.apiKey));
+    const response = await client.path("/chat/completions").post({
+      body: {
+        model: cfg.model,
+        messages,
+        max_tokens: 120,
+        temperature: 0.7,
+      },
+    });
+
+    if (isUnexpected(response)) {
+      throw new Error(`Azure AI SDK error: ${response.body.error?.message || response.status}`);
+    }
+
+    const content = response.body.choices?.[0]?.message?.content as unknown;
+    let text = "";
+    if (typeof content === "string") {
+      text = content;
+    } else if (Array.isArray(content)) {
+      text = content
+        .map((part) => {
+          if (part && typeof part === "object" && "text" in part) {
+            return String((part as { text?: string }).text || "");
+          }
+          return "";
+        })
+        .join("\n");
+    }
+
+    if (!text.trim()) {
+      throw new Error("Azure AI returned empty response.");
+    }
+
+    return {
+      text: text.trim(),
+      provider: "azure",
       model: cfg.model,
-      messages: [
-        {
-          role: "system",
-          content:
-            "You write human WhatsApp replies that sound like the user and preserve conversational tone.",
-        },
-        {
-          role: "user",
-          content: prompt,
-        },
-      ],
-      temperature: 0.7,
-      max_tokens: 120,
-    }),
-  });
+      latencyMs: Date.now() - start,
+      guardrailBlocked: false,
+    };
+  } catch {
+    // Fallback for environments where endpoint is a full REST URL instead of model client base URL.
+    const response = await fetch(cfg.endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "api-key": cfg.apiKey,
+      },
+      body: JSON.stringify({
+        model: cfg.model,
+        messages,
+        temperature: 0.7,
+        max_tokens: 120,
+      }),
+    });
 
-  const latencyMs = Date.now() - start;
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Azure AI failed (${response.status}): ${text.slice(0, 300)}`);
+    const latencyMs = Date.now() - start;
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`Azure AI failed (${response.status}): ${text.slice(0, 300)}`);
+    }
+
+    const data = (await response.json()) as {
+      choices?: Array<{ message?: { content?: string | Array<{ text?: string }> } }>;
+    };
+
+    const content = data.choices?.[0]?.message?.content;
+    const text =
+      typeof content === "string"
+        ? content
+        : Array.isArray(content)
+          ? content.map((p) => p.text || "").join("\n")
+          : "";
+
+    if (!text.trim()) {
+      throw new Error("Azure AI returned empty response.");
+    }
+
+    return {
+      text: text.trim(),
+      provider: "azure",
+      model: cfg.model,
+      latencyMs,
+      guardrailBlocked: false,
+    };
   }
-
-  const data = (await response.json()) as {
-    choices?: Array<{ message?: { content?: string | Array<{ text?: string }> } }>;
-  };
-
-  const content = data.choices?.[0]?.message?.content;
-  const text =
-    typeof content === "string"
-      ? content
-      : Array.isArray(content)
-        ? content.map((p) => p.text || "").join("\n")
-        : "";
-
-  if (!text.trim()) {
-    throw new Error("Azure AI returned empty response.");
-  }
-
-  return {
-    text: text.trim(),
-    provider: "azure",
-    model: cfg.model,
-    latencyMs,
-    guardrailBlocked: false,
-  };
 }
 
 async function runCodex(prompt: string): Promise<AiResult> {

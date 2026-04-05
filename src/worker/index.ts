@@ -1,7 +1,7 @@
 import makeWASocket, { DisconnectReason, useMultiFileAuthState } from "baileys";
 import pino from "pino";
 import { ConvexHttpClient } from "convex/browser";
-import { convexRefs } from "@/lib/convex-refs";
+import { convexRefs } from "../lib/convex-refs";
 import { generateReplyWithFallback, estimateDelayAndTyping } from "./ai";
 import { extractTextFromMessage, getSenderJid, getThreadJid } from "./whatsapp";
 
@@ -27,6 +27,8 @@ async function run() {
   const workerId = process.env.SLM_WORKER_ID || `worker-${process.pid}`;
   const authPath = process.env.WHATSAPP_AUTH_PATH || ".wa_auth";
 
+  // `useMultiFileAuthState` is a Baileys API, not a React hook.
+  // eslint-disable-next-line react-hooks/rules-of-hooks
   const { state, saveCreds } = await useMultiFileAuthState(authPath);
 
   let processingOutbox = false;

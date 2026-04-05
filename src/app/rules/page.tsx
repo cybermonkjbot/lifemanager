@@ -2,6 +2,13 @@ import { DashboardShell } from "@/components/dashboard-shell";
 import { SetupNotice } from "@/components/setup-notice";
 import { getRulesPageData, getSystemPageData } from "@/lib/data";
 
+type IgnoreRule = {
+  _id: string;
+  targetType: string;
+  targetValue: string;
+  enabled: boolean;
+};
+
 export default async function RulesPage() {
   const [data, systemData] = await Promise.all([getRulesPageData(), getSystemPageData()]);
   const autonomyPaused = Boolean(systemData.health?.config?.autonomyPaused);
@@ -29,7 +36,7 @@ export default async function RulesPage() {
         <article className="panel-card">
           <h3>Active Ignore Rules</h3>
           <div className="stack">
-            {(data.rules?.ignoreRules || []).map((rule: any) => (
+            {((data.rules?.ignoreRules || []) as IgnoreRule[]).map((rule) => (
               <div key={rule._id} className="queue-item">
                 <p className="queue-title">{rule.targetType}</p>
                 <p className="queue-body">{rule.targetValue}</p>

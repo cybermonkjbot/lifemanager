@@ -1,15 +1,20 @@
-import { internal } from "./_generated/api";
+import { makeFunctionReference } from "convex/server";
 import { action } from "./_generated/server";
+
+const refFollowupsList = makeFunctionReference<"query">("followups:list");
+const refSaveGenerated = makeFunctionReference<"mutation">("draft:saveGenerated");
+const refApproveDraft = makeFunctionReference<"mutation">("draft:approve");
+const refMarkQueued = makeFunctionReference<"mutation">("followupsMarkQueued:run");
 
 export const run = action({
   args: {},
   handler: async (ctx) => {
     const now = Date.now();
-    const due = await ctx.runQuery(internal.followups.list, { limit: 100 });
-    const confirmed = due.filter((f) => f.status === "confirmed" && f.dueAt <= now);
+    const due = await ctx.runQuery(refFollowupsList, { limit: 100 });
+    const confirmed = due.filter((f: { status: string; dueAt: number }) => f.status === "confirmed" && f.dueAt <= now);
 
     for (const followup of confirmed) {
-      const draftId = await ctx.runMutation(internal.draft.saveGenerated, {
+      const draftId = await ctx.runMutation(refSaveGenerated, {
         threadId: followup.threadId,
         sourceMessageId: followup.sourceMessageId,
         text: followup.draftText,
@@ -20,11 +25,11 @@ export const run = action({
         reason: `Follow-up: ${followup.reason}`,
       });
 
-      await ctx.runMutation(internal.draft.approve, {
+      await ctx.runMutation(refApproveDraft, {
         draftId,
       });
 
-      await ctx.runMutation(internal.followupsMarkQueued.run, {
+      await ctx.runMutation(refMarkQueued, {
         followUpId: followup._id,
       });
     }

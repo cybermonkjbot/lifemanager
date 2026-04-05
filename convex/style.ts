@@ -1,7 +1,10 @@
 import { v } from "convex/values";
-import { internal } from "./_generated/api";
+import { makeFunctionReference } from "convex/server";
 import { action, mutation, query } from "./_generated/server";
 import { DEFAULT_MIMICRY_LEVEL } from "./lib/constants";
+
+const refThreadsList = makeFunctionReference<"query">("threads:list");
+const refSetMimicry = makeFunctionReference<"mutation">("style:setMimicry");
 
 export const getProfile = query({
   args: {},
@@ -61,7 +64,7 @@ export const setMimicry = mutation({
 export const update = action({
   args: {},
   handler: async (ctx) => {
-    const outgoing = await ctx.runQuery(internal.threads.list, { limit: 20 });
+    const outgoing = await ctx.runQuery(refThreadsList, { limit: 20 });
     const phrases: string[] = [];
 
     for (const thread of outgoing) {
@@ -70,12 +73,12 @@ export const update = action({
       }
       const words = thread.latestDraft.text
         .split(/\s+/)
-        .filter((w) => w.length > 4)
+        .filter((w: string) => w.length > 4)
         .slice(0, 3);
       phrases.push(...words);
     }
 
-    await ctx.runMutation(internal.style.setMimicry, { mimicryLevel: 0.75 });
+    await ctx.runMutation(refSetMimicry, { mimicryLevel: 0.75 });
 
     return {
       learnedPhrases: [...new Set(phrases)].slice(0, 15),

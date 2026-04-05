@@ -3,6 +3,14 @@ import { SetupNotice } from "@/components/setup-notice";
 import { getFollowupsPageData, getSystemPageData } from "@/lib/data";
 import { formatDateTime } from "@/lib/format";
 
+type FollowupItem = {
+  _id: string;
+  reason: string;
+  dueAt: number;
+  status: string;
+  thread?: { title?: string; jid?: string } | null;
+};
+
 export default async function FollowupsPage() {
   const [data, systemData] = await Promise.all([getFollowupsPageData(), getSystemPageData()]);
   const autonomyPaused = Boolean(systemData.health?.config?.autonomyPaused);
@@ -18,7 +26,7 @@ export default async function FollowupsPage() {
       <section className="panel-card">
         <h3>Follow-up Timeline</h3>
         <div className="stack">
-          {(data.followups || []).map((item: any) => (
+          {((data.followups || []) as FollowupItem[]).map((item) => (
             <div key={item._id} className="queue-item">
               <p className="queue-title">{item.thread?.title || item.thread?.jid || "Unknown thread"}</p>
               <p className="queue-body">{item.reason}</p>

@@ -1,8 +1,16 @@
 import { v } from "convex/values";
-import { internal, api } from "./_generated/api";
+import { makeFunctionReference } from "convex/server";
 import { action, internalAction, internalQuery, mutation } from "./_generated/server";
 import { getConfig } from "./lib/config";
 import { estimateHumanTiming, evaluateGuardrail, looksLikeQuestion } from "./lib/heuristics";
+
+const refGetGenerationContext = makeFunctionReference<"query">("threads:getGenerationContext");
+const refSystemRecordEvent = makeFunctionReference<"mutation">("system:recordEvent");
+const refCreateGuardrailHold = makeFunctionReference<"mutation">("draft:createGuardrailHold");
+const refSaveGenerated = makeFunctionReference<"mutation">("draft:saveGenerated");
+const refGetAutonomyConfig = makeFunctionReference<"query">("draft:getAutonomyConfig");
+const refApproveDraft = makeFunctionReference<"mutation">("draft:approve");
+const refGenerateDraft = makeFunctionReference<"action">("draft:generate");
 
 function heuristicReply(input: string) {
   if (looksLikeQuestion(input)) {
@@ -17,7 +25,7 @@ export const generate = internalAction({
     sourceMessageId: v.id("messages"),
   },
   handler: async (ctx, args) => {
-    const context = await ctx.runQuery(internal.threads.getGenerationContext, {
+    const context = await ctx.runQuery(refGetGenerationContext, {
       threadId: args.threadId,
       sourceMessageId: args.sourceMessageId,
     });
@@ -30,7 +38,7 @@ export const generate = internalAction({
     const guardrail = evaluateGuardrail(sourceText);
 
     if (guardrail.severity !== "low") {
-      await ctx.runMutation(api.system.recordEvent, {
+      await ctx.runMutation(refSystemRecordEvent, {
         source: "convex",
         eventType: "guardrail.detected",
         detail: guardrail.reason,
@@ -39,7 +47,7 @@ export const generate = internalAction({
     }
 
     if (guardrail.blocked) {
-      await ctx.runMutation(internal.draft.createGuardrailHold, {
+      await ctx.runMutation(refCreateGuardrailHold, {
         threadId: args.threadId,
         sourceMessageId: args.sourceMessageId,
         reason: guardrail.reason,
@@ -52,7 +60,7 @@ export const generate = internalAction({
     const text = heuristicReply(sourceText);
     const timing = estimateHumanTiming(text);
 
-    const draftId = await ctx.runMutation(internal.draft.saveGenerated, {
+    const draftId = await ctx.runMutation(refSaveGenerated, {
       threadId: args.threadId,
       sourceMessageId: args.sourceMessageId,
       text,
@@ -63,10 +71,10 @@ export const generate = internalAction({
       reason: "Heuristic fallback draft",
     });
 
-    const config = await ctx.runQuery(internal.draft.getAutonomyConfig, {});
+    const config = await ctx.runQuery(refGetAutonomyConfig, {});
 
     if (!config.autonomyPaused && guardrail.severity !== "high") {
-      await ctx.runMutation(api.draft.approve, { draftId });
+      await ctx.runMutation(refApproveDraft, { draftId });
     }
 
     return {
@@ -82,7 +90,7 @@ export const generateManual = action({
     sourceMessageId: v.id("messages"),
   },
   handler: async (ctx, args) => {
-    return await ctx.runAction(internal.draft.generate, args);
+    return await ctx.runAction(refGenerateDraft, args);
   },
 });
 

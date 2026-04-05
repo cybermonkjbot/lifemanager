@@ -4,6 +4,21 @@ import { getConversationsPageData, getSystemPageData } from "@/lib/data";
 import { formatDateTime, trim } from "@/lib/format";
 import Link from "next/link";
 
+type ThreadRow = {
+  _id: string;
+  title?: string;
+  jid: string;
+  lastMessageAt: number;
+  latestDraft?: { text?: string } | null;
+};
+
+type ThreadMessage = {
+  _id: string;
+  direction: "inbound" | "outbound";
+  text: string;
+  messageAt: number;
+};
+
 export default async function ConversationsPage({
   searchParams,
 }: {
@@ -28,7 +43,7 @@ export default async function ConversationsPage({
         <article className="panel-card">
           <h3>Threads</h3>
           <div className="stack">
-            {(data.threads || []).map((thread: any) => (
+            {((data.threads || []) as ThreadRow[]).map((thread) => (
               <Link key={thread._id} href={`/conversations?threadId=${thread._id}`} className="thread-row">
                 <p className="queue-title">{thread.title || thread.jid}</p>
                 <p className="queue-body">{trim(thread.latestDraft?.text || "No draft yet")}</p>
@@ -43,7 +58,7 @@ export default async function ConversationsPage({
           {data.thread ? (
             <div className="stack">
               <p className="queue-meta">Thread: {data.thread.thread.title || data.thread.thread.jid}</p>
-              {(data.thread.messages || []).map((message: any) => (
+              {((data.thread.messages || []) as ThreadMessage[]).map((message) => (
                 <div key={message._id} className={`message-bubble ${message.direction === "outbound" ? "outbound" : "inbound"}`}>
                   <p>{message.text}</p>
                   <span>{formatDateTime(message.messageAt)}</span>

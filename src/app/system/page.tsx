@@ -3,6 +3,24 @@ import { SetupNotice } from "@/components/setup-notice";
 import { getSystemPageData } from "@/lib/data";
 import { formatDateTime, trim } from "@/lib/format";
 
+type ProviderRun = {
+  _id: string;
+  provider: string;
+  status: string;
+  model: string;
+  latencyMs: number;
+  createdAt: number;
+  error?: string;
+};
+
+type SystemEvent = {
+  _id: string;
+  source: string;
+  eventType: string;
+  detail: string;
+  createdAt: number;
+};
+
 export default async function SystemPage() {
   const data = await getSystemPageData();
   const autonomyPaused = Boolean(data.health?.config?.autonomyPaused);
@@ -19,7 +37,7 @@ export default async function SystemPage() {
         <article className="panel-card">
           <h3>Provider Runs</h3>
           <div className="stack">
-            {(data.health?.latestProviderRuns || []).map((run: any) => (
+            {((data.health?.latestProviderRuns || []) as ProviderRun[]).map((run) => (
               <div key={run._id} className="queue-item">
                 <p className="queue-title">{run.provider.toUpperCase()} · {run.status}</p>
                 <p className="queue-meta">
@@ -35,7 +53,7 @@ export default async function SystemPage() {
         <article className="panel-card">
           <h3>System Events</h3>
           <div className="stack">
-            {(data.health?.latestEvents || []).map((event: any) => (
+            {((data.health?.latestEvents || []) as SystemEvent[]).map((event) => (
               <div key={event._id} className="queue-item">
                 <p className="queue-title">{event.source} · {event.eventType}</p>
                 <p className="queue-body">{trim(event.detail, 180)}</p>

@@ -1,13 +1,16 @@
 import { v } from "convex/values";
-import { internal } from "./_generated/api";
+import { makeFunctionReference } from "convex/server";
 import { action, internalMutation } from "./_generated/server";
+
+const refThreadGet = makeFunctionReference<"query">("threads:get");
+const refUpsertSummary = makeFunctionReference<"mutation">("memory:upsertSummary");
 
 export const summarize = action({
   args: {
     threadId: v.id("threads"),
   },
   handler: async (ctx, args) => {
-    const context = await ctx.runQuery(internal.threads.get, {
+    const context = await ctx.runQuery(refThreadGet, {
       threadId: args.threadId,
     });
 
@@ -17,12 +20,12 @@ export const summarize = action({
 
     const snippet = context.messages
       .slice(-10)
-      .map((m) => `${m.direction === "inbound" ? "Them" : "You"}: ${m.text}`)
+      .map((m: { direction: "inbound" | "outbound"; text: string }) => `${m.direction === "inbound" ? "Them" : "You"}: ${m.text}`)
       .join("\n");
 
     const summary = `Recent thread summary:\n${snippet}`.slice(0, 2000);
 
-    await ctx.runMutation(internal.memory.upsertSummary, {
+    await ctx.runMutation(refUpsertSummary, {
       threadId: args.threadId,
       summary,
       styleNotes: ["Conversational", "Personal tone"],
