@@ -1,65 +1,107 @@
-import Image from "next/image";
+import { DashboardShell } from "@/components/dashboard-shell";
+import { SetupNotice } from "@/components/setup-notice";
+import { getQueuePageData, getSystemPageData } from "@/lib/data";
+import { formatDateTime, trim } from "@/lib/format";
 
-export default function Home() {
+export default async function QueuePage() {
+  const [queueData, systemData] = await Promise.all([getQueuePageData(), getSystemPageData()]);
+  const autonomyPaused = Boolean(systemData.health?.config?.autonomyPaused);
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
-    </div>
+    <DashboardShell
+      title="Action Queue"
+      subtitle="Process replies, confirmations, TODOs, and safety flags fast."
+      autonomyPaused={autonomyPaused}
+    >
+      {!queueData.ready ? <SetupNotice error={queueData.error} /> : null}
+
+      <section className="panel-grid two-col">
+        <article className="panel-card">
+          <h3>Needs Reply</h3>
+          <div className="stack">
+            {(queueData.queue?.needsReply || []).map((item: any) => (
+              <div key={item._id} className="queue-item">
+                <p className="queue-title">{item.thread?.title || item.thread?.jid || "Unknown contact"}</p>
+                <p className="queue-body">{trim(item.sourceMessage?.text || item.text || "")}</p>
+                <p className="queue-meta">
+                  Provider: {item.provider} · Delay: {Math.round(item.delayMs / 1000)}s · Typing: {Math.round(item.typingMs / 1000)}s
+                </p>
+                <div className="queue-actions">
+                  <form action="/api/actions/approve-draft" method="post">
+                    <input type="hidden" name="draftId" value={item._id} />
+                    <button type="submit" className="btn btn-primary">
+                      Send
+                    </button>
+                  </form>
+                  <form action="/api/actions/snooze-draft" method="post">
+                    <input type="hidden" name="draftId" value={item._id} />
+                    <input type="hidden" name="minutes" value="30" />
+                    <button type="submit" className="btn btn-ghost">
+                      Snooze 30m
+                    </button>
+                  </form>
+                </div>
+              </div>
+            ))}
+            {(queueData.queue?.needsReply || []).length === 0 ? <p className="empty-line">No pending replies.</p> : null}
+          </div>
+        </article>
+
+        <article className="panel-card">
+          <h3>Follow-up Confirmations</h3>
+          <div className="stack">
+            {(queueData.queue?.followupConfirmations || []).map((item: any) => (
+              <div key={item._id} className="queue-item">
+                <p className="queue-title">{item.reason}</p>
+                <p className="queue-body">Due: {formatDateTime(item.dueAt)}</p>
+                <form action="/api/actions/confirm-followup" method="post">
+                  <input type="hidden" name="followUpId" value={item._id} />
+                  <button type="submit" className="btn btn-primary">
+                    Confirm Follow-up
+                  </button>
+                </form>
+              </div>
+            ))}
+            {(queueData.queue?.followupConfirmations || []).length === 0 ? (
+              <p className="empty-line">No follow-up confirmations pending.</p>
+            ) : null}
+          </div>
+        </article>
+      </section>
+
+      <section className="panel-grid two-col">
+        <article className="panel-card">
+          <h3>TODO Candidates</h3>
+          <div className="stack">
+            {(queueData.queue?.todoCandidates || []).map((item: any) => (
+              <div key={item._id} className="queue-item">
+                <p className="queue-title">{item.title}</p>
+                <p className="queue-meta">Suggested due: {formatDateTime(item.suggestedDueAt)}</p>
+                <form action="/api/actions/todo-from-candidate" method="post">
+                  <input type="hidden" name="candidateId" value={item._id} />
+                  <button type="submit" className="btn btn-primary">
+                    Convert to TODO
+                  </button>
+                </form>
+              </div>
+            ))}
+            {(queueData.queue?.todoCandidates || []).length === 0 ? <p className="empty-line">No todo candidates.</p> : null}
+          </div>
+        </article>
+
+        <article className="panel-card">
+          <h3>Guardrail Flags</h3>
+          <div className="stack">
+            {(queueData.queue?.guardrailFlags || []).map((item: any) => (
+              <div key={item._id} className="queue-item">
+                <p className="queue-title">Severity: {item.severity}</p>
+                <p className="queue-body">{item.reason}</p>
+              </div>
+            ))}
+            {(queueData.queue?.guardrailFlags || []).length === 0 ? <p className="empty-line">No active safety flags.</p> : null}
+          </div>
+        </article>
+      </section>
+    </DashboardShell>
   );
 }

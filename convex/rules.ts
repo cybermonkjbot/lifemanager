@@ -1,0 +1,44 @@
+import { v } from "convex/values";
+import { mutation, query } from "./_generated/server";
+
+export const list = query({
+  args: {},
+  handler: async (ctx) => {
+    const ignoreRules = await ctx.db.query("ignoreRules").collect();
+    const appConfig = await ctx.db.query("appConfig").collect();
+    return {
+      ignoreRules,
+      appConfig,
+    };
+  },
+});
+
+export const upsertIgnoreRule = mutation({
+  args: {
+    targetType: v.union(v.literal("contact"), v.literal("group"), v.literal("keyword")),
+    targetValue: v.string(),
+    enabled: v.boolean(),
+  },
+  handler: async (ctx, args) => {
+    const existing = await ctx.db
+      .query("ignoreRules")
+      .withIndex("by_target", (q) => q.eq("targetType", args.targetType).eq("targetValue", args.targetValue))
+      .first();
+
+    const now = Date.now();
+
+    if (existing) {
+      await ctx.db.patch(existing._id, {
+        enabled: args.enabled,
+        updatedAt: now,
+      });
+      return existing._id;
+    }
+
+    return await ctx.db.insert("ignoreRules", {
+      ...args,
+      createdAt: now,
+      updatedAt: now,
+    });
+  },
+});
