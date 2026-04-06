@@ -117,6 +117,7 @@ export const upsertSetupStatus = mutation({
       v.literal("starting"),
       v.literal("qr_ready"),
       v.literal("code_ready"),
+      v.literal("syncing"),
       v.literal("connected"),
       v.literal("error"),
     ),

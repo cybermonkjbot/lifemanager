@@ -33,6 +33,10 @@ export const convexRefs = {
 
   styleGetProfile: makeFunctionReference<"query">("style:getProfile"),
   styleSetMimicry: makeFunctionReference<"mutation">("style:setMimicry"),
+  personalityListProfiles: makeFunctionReference<"query">("personality:listProfiles"),
+  personalityGetThreadSetting: makeFunctionReference<"query">("personality:getThreadSetting"),
+  personalitySetThreadSetting: makeFunctionReference<"mutation">("personality:setThreadSetting"),
+  personalityUpsertProfile: makeFunctionReference<"mutation">("personality:upsertProfile"),
 };
 
 export type ConvexRefs = typeof convexRefs;

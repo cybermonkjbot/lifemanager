@@ -1,4 +1,5 @@
 import makeWASocket, { Browsers, DisconnectReason, fetchLatestWaWebVersion, useMultiFileAuthState, type UserFacingSocketConfig } from "baileys";
+import { rm } from "node:fs/promises";
 import pino from "pino";
 import { ConvexHttpClient } from "convex/browser";
 import { convexRefs } from "../lib/convex-refs";
@@ -65,7 +66,16 @@ async function run() {
   // eslint-disable-next-line react-hooks/rules-of-hooks
   const { state, saveCreds } = await useMultiFileAuthState(authPath);
 
-  const isAuthLinked = () => Boolean((state as { creds?: { registered?: boolean } }).creds?.registered);
+  const isAuthLinked = () => {
+    const creds = (state as { creds?: { registered?: boolean; pairingCode?: string; me?: { id?: string } } }).creds;
+    if (creds?.registered) {
+      return true;
+    }
+    const meId = creds?.me?.id || "";
+    const hasDeviceSuffix = meId.includes(":") && meId.includes("@s.whatsapp.net");
+    const hasPendingPairingCode = Boolean(creds?.pairingCode);
+    return hasDeviceSuffix && !hasPendingPairingCode;
+  };
 
   const reportListener = async (listenerActive: boolean, listenerMessage: string) => {
     try {
@@ -78,6 +88,15 @@ async function run() {
       });
     } catch {
       // best effort status sync for setup UI
+    }
+  };
+
+  const invalidateCredentials = async () => {
+    try {
+      await rm(authPath, { recursive: true, force: true });
+      return true;
+    } catch {
+      return false;
     }
   };
 
@@ -141,19 +160,19 @@ async function run() {
     }, delayMs);
   };
 
-  const shutdown = async (code = 0) => {
+  const shutdown = async (code = 0, message = "Worker stopped.") => {
     isShuttingDown = true;
     clearReconnectTimer();
-    await reportListener(false, "Worker stopped.");
+    await reportListener(false, message);
     releaseWorkerLockSync();
     process.exit(code);
   };
 
   process.once("SIGINT", () => {
-    void shutdown(0);
+    void shutdown(0, "Worker stopped.");
   });
   process.once("SIGTERM", () => {
-    void shutdown(0);
+    void shutdown(0, "Worker stopped.");
   });
 
   const attachListeners = (socket: typeof sock) => {
@@ -172,7 +191,13 @@ async function run() {
         if (!shouldReconnect) {
           clearReconnectTimer();
           reconnectAttempts = 0;
-          await reportListener(false, "WhatsApp logged out. Re-link credentials from setup.");
+          const invalidated = await invalidateCredentials();
+          await shutdown(
+            1,
+            invalidated
+              ? "WhatsApp logged out this device. Credentials cleared. Re-link in setup."
+              : "WhatsApp logged out this device. Failed to clear credentials automatically; reset credentials in setup, then re-link.",
+          );
           return;
         }
 
@@ -183,7 +208,7 @@ async function run() {
         clearReconnectTimer();
         reconnectAttempts = 0;
         logger.info("WhatsApp connection established");
-        await reportListener(true, "Worker listener is active.");
+        await reportListener(true, "Worker listener is active. AI reply automation is running.");
       }
     });
 
@@ -218,7 +243,13 @@ async function run() {
           threadId: string;
           messageId: string;
           ignored: boolean;
+          duplicate?: boolean;
         };
+
+        if (ingest.duplicate) {
+          logger.info({ threadJid, whatsappMessageId: message.key.id }, "Inbound duplicate ignored");
+          continue;
+        }
 
         if (ingest.ignored) {
           logger.info({ threadJid }, "Inbound ignored by rules");
@@ -239,11 +270,46 @@ async function run() {
         });
 
         const styleHints = threadContext?.memory?.styleNotes || [];
+        const styleProfile = (await convex.query(convexRefs.styleGetProfile, {})) as
+          | {
+              mimicryLevel?: number;
+              commonPhrases?: string[];
+              punctuationStyle?: string[];
+              humorNotes?: string[];
+              spellingNotes?: string[];
+            }
+          | null;
+        const personalitySetting = (await convex.query(convexRefs.personalityGetThreadSetting, {
+          threadId: ingest.threadId,
+        })) as
+          | {
+              profileSlug?: string;
+              intensity?: number;
+              customPrompt?: string;
+              profile?: {
+                slug?: string;
+                name?: string;
+                description?: string;
+                prompt?: string;
+              } | null;
+            }
+          | null;
 
         const ai = await generateReplyWithFallback({
           inboundText: text,
           historyLines,
           styleHints,
+          styleProfile: styleProfile || undefined,
+          personality: personalitySetting
+            ? {
+                profileSlug: personalitySetting.profileSlug || personalitySetting.profile?.slug,
+                profileName: personalitySetting.profile?.name,
+                profileDescription: personalitySetting.profile?.description,
+                profilePrompt: personalitySetting.profile?.prompt,
+                intensity: personalitySetting.intensity,
+                customPrompt: personalitySetting.customPrompt || "",
+              }
+            : undefined,
         });
 
         if (ai.guardrailBlocked) {

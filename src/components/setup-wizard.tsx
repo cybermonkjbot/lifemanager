@@ -7,7 +7,7 @@ import { useQuery } from "convex/react";
 import Image from "next/image";
 import { useEffect, useMemo, useState } from "react";
 
-type SetupStatus = "idle" | "starting" | "qr_ready" | "code_ready" | "connected" | "error";
+type SetupStatus = "idle" | "starting" | "qr_ready" | "code_ready" | "syncing" | "connected" | "error";
 type SetupMode = "qr" | "pairing_code";
 
 type SetupState = {
@@ -33,6 +33,7 @@ function statusLabel(status: SetupStatus) {
   if (status === "starting") return "Starting";
   if (status === "qr_ready") return "QR Ready";
   if (status === "code_ready") return "Code Ready";
+  if (status === "syncing") return "Syncing";
   if (status === "connected") return "Connected";
   return "Error";
 }
@@ -53,6 +54,25 @@ function getRetryGuidance(state: SetupState | null) {
   }
 
   return "QR session expired. Auto-retrying now. Keep this page open and scan the next QR as soon as it appears.";
+}
+
+function getRevokedGuidance(state: SetupState | null) {
+  if (!state) {
+    return null;
+  }
+
+  const text = `${state.message} ${state.listenerMessage || ""}`.toLowerCase();
+  const revokedByMessage =
+    text.includes("signed this device out") ||
+    text.includes("logged out this device") ||
+    text.includes("credentials were cleared") ||
+    text.includes("credentials were invalidated");
+
+  if (!revokedByMessage) {
+    return null;
+  }
+
+  return "WhatsApp revoked this linked device session. Credentials were invalidated. Run setup again to pair a new session.";
 }
 
 async function readSetupResponse(response: Response) {
@@ -98,7 +118,12 @@ function SetupWizardContent({
     return localState.updatedAt > liveState.updatedAt ? localState : liveState;
   }, [liveState, localState]);
   const status = state?.status ?? "idle";
+  const isConnected = status === "connected" || state?.listenerActive === true;
+  const isSyncing = status === "syncing";
+  const showPairingCode = state?.mode === "pairing_code" && status === "code_ready" && Boolean(state?.pairingCode);
+  const showQrCode = state?.mode === "qr" && status === "qr_ready" && Boolean(state?.qrDataUrl);
   const retryGuidance = getRetryGuidance(state);
+  const revokedGuidance = getRevokedGuidance(state);
 
   const pendingStartQr = isPending("setup:start_qr");
   const pendingStartCode = isPending("setup:start_code");
@@ -112,9 +137,17 @@ function SetupWizardContent({
   const controls = useMemo(() => {
     const isIdleOrError = status === "idle" || status === "error";
     const isStarting = status === "starting";
+    const isSyncing = status === "syncing";
     const isReady = status === "qr_ready" || status === "code_ready";
-    const isConnected = status === "connected" || state?.listenerActive === true;
     const hasActiveQrSession = state?.mode === "qr" && status === "qr_ready";
+    const hasActiveSetupState =
+      isStarting ||
+      isSyncing ||
+      isReady ||
+      isConnected ||
+      Boolean(state?.listenerActive) ||
+      pendingStartQr ||
+      pendingStartCode;
 
     const allowStart = !anyPending && (isIdleOrError || isReady);
 
@@ -122,11 +155,21 @@ function SetupWizardContent({
       canStartQr: allowStart && !isConnected && !hasActiveQrSession,
       canStartCode: allowStart && !isConnected,
       canRefresh: !anyPending,
-      canStop: !anyPending && (isStarting || isReady),
+      canStop: !pendingStop && !pendingReset && hasActiveSetupState,
       canReset: !anyPending && (isIdleOrError || isConnected),
       canEditPhone: !anyPending,
     };
-  }, [anyPending, state?.listenerActive, state?.mode, status]);
+  }, [
+    anyPending,
+    isConnected,
+    pendingReset,
+    pendingStartCode,
+    pendingStartQr,
+    pendingStop,
+    state?.listenerActive,
+    state?.mode,
+    status,
+  ]);
 
   const pendingLabel = useMemo(() => {
     if (pendingStartQr) return "Starting QR session...";
@@ -221,7 +264,14 @@ function SetupWizardContent({
   }, [realtimeEnabled]);
 
   useEffect(() => {
-    const shouldPoll = status === "starting" || status === "qr_ready" || status === "code_ready";
+    const shouldPollForAutoStart = status === "connected" && !state?.listenerActive;
+    const shouldPoll = realtimeEnabled
+      ? ((status === "starting" || status === "syncing") && !state?.qrDataUrl && !state?.pairingCode) || shouldPollForAutoStart
+      : status === "starting" ||
+          status === "syncing" ||
+          status === "qr_ready" ||
+          status === "code_ready" ||
+          shouldPollForAutoStart;
 
     if (!shouldPoll) {
       return;
@@ -238,13 +288,13 @@ function SetupWizardContent({
       } catch {
         // best effort background sync only
       }
-    }, 1500);
+    }, status === "connected" ? 1200 : realtimeEnabled ? 2200 : 1500);
 
     return () => {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [state?.pairingCode, state?.qrDataUrl, status]);
+  }, [realtimeEnabled, state?.listenerActive, state?.pairingCode, state?.qrDataUrl, status]);
 
   return (
     <section className="setup-wizard" aria-busy={anyPending}>
@@ -257,7 +307,15 @@ function SetupWizardContent({
         </p>
 
         <div className="setup-status-row">
-          <span className={`status-pill ${state?.listenerActive || status === "connected" ? "status-active" : "status-paused"}`}>
+          <span
+            className={`status-pill ${
+              state?.listenerActive || status === "connected"
+                ? "status-active"
+                : isSyncing
+                  ? "status-syncing"
+                  : "status-paused"
+            }`}
+          >
             {state?.listenerActive ? "Connected" : statusLabel(status)}
           </span>
           <span className="queue-meta">{state?.message || "Loading status..."}</span>
@@ -272,6 +330,12 @@ function SetupWizardContent({
         {retryGuidance ? (
           <p className="setup-retry-notice" role="status" aria-live="polite">
             {retryGuidance}
+          </p>
+        ) : null}
+
+        {revokedGuidance ? (
+          <p className="setup-revoked-notice" role="alert" aria-live="assertive">
+            {revokedGuidance}
           </p>
         ) : null}
 
@@ -365,7 +429,7 @@ function SetupWizardContent({
           <article className="wizard-step">
             <p className="queue-title">Step 3</p>
             <p className="queue-body">
-              When status becomes <strong>Connected</strong>, run <code>bun run worker</code>.
+              After <strong>Connected</strong>, worker auto-starts. If not, run <code>bun run worker</code>.
             </p>
           </article>
         </div>
@@ -375,11 +439,16 @@ function SetupWizardContent({
         <p className="queue-meta">Pairing</p>
         <h3>{state?.mode === "pairing_code" ? "Pairing Code" : "QR Code"}</h3>
 
-        {state?.pairingCode ? <p className="pairing-code">{state.pairingCode}</p> : null}
+        {showPairingCode ? <p className="pairing-code">{state?.pairingCode}</p> : null}
 
-        {state?.qrDataUrl ? (
-          <div className="qr-frame">
-            <Image src={state.qrDataUrl} width={320} height={320} alt="WhatsApp setup QR code" unoptimized />
+        {showQrCode ? (
+          <div className={`qr-frame ${isConnected ? "qr-frame-connected" : ""}`}>
+            <Image src={state!.qrDataUrl!} width={320} height={320} alt="WhatsApp setup QR code" unoptimized />
+            {isConnected ? (
+              <div className="qr-frame-overlay" aria-hidden="true">
+                <span>QR Code</span>
+              </div>
+            ) : null}
           </div>
         ) : (
           <p className="empty-line">

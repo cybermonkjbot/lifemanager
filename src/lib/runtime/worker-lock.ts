@@ -9,6 +9,12 @@ type StopWorkerResult = {
   pid?: number;
 };
 
+export type WorkerRuntimeStatus = {
+  running: boolean;
+  pid?: number;
+  stalePid?: boolean;
+};
+
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -114,4 +120,21 @@ export async function ensureWorkerStopped(timeoutMs = 3500): Promise<StopWorkerR
   }
 
   return { action: "failed", pid };
+}
+
+export async function getWorkerRuntimeStatus(): Promise<WorkerRuntimeStatus> {
+  const pidPath = getWorkerPidPath();
+  const pid = await readWorkerPid();
+
+  if (!pid) {
+    await rm(pidPath, { force: true }).catch(() => undefined);
+    return { running: false };
+  }
+
+  if (isPidAlive(pid)) {
+    return { running: true, pid };
+  }
+
+  await rm(pidPath, { force: true }).catch(() => undefined);
+  return { running: false, pid, stalePid: true };
 }

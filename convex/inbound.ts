@@ -58,6 +58,34 @@ export const ingest = mutation({
 
     const ignored = thread.isIgnored || Boolean(explicitIgnore?.enabled);
 
+    if (args.whatsappMessageId) {
+      const existing = await ctx.db
+        .query("messages")
+        .withIndex("by_thread_whatsappMessageId", (q) =>
+          q.eq("threadId", thread._id).eq("whatsappMessageId", args.whatsappMessageId),
+        )
+        .first();
+
+      if (existing) {
+        await ctx.db.insert("systemEvents", {
+          source: "worker",
+          eventType: "inbound.duplicate",
+          threadId: thread._id,
+          detail: args.text.slice(0, 300),
+          createdAt: now,
+        });
+
+        return {
+          threadId: thread._id,
+          messageId: existing._id,
+          ignored: true,
+          duplicate: true,
+          promiseDetected: false,
+          todoDetected: false,
+        };
+      }
+    }
+
     const messageId = await ctx.db.insert("messages", {
       threadId: thread._id,
       direction: "inbound",
@@ -118,6 +146,7 @@ export const ingest = mutation({
       threadId: thread._id,
       messageId,
       ignored,
+      duplicate: false,
       promiseDetected: Boolean(promise),
       todoDetected: Boolean(todo),
     };

@@ -32,6 +32,7 @@ export default defineSchema({
   })
     .index("by_thread", ["threadId"])
     .index("by_thread_messageAt", ["threadId", "messageAt"])
+    .index("by_thread_whatsappMessageId", ["threadId", "whatsappMessageId"])
     .index("by_createdAt", ["createdAt"]),
 
   threadMemory: defineTable({
@@ -146,6 +147,27 @@ export default defineSchema({
     .index("by_scope", ["scope"])
     .index("by_thread", ["threadId"]),
 
+  personalityProfiles: defineTable({
+    slug: v.string(),
+    name: v.string(),
+    description: v.string(),
+    prompt: v.string(),
+    defaultIntensity: v.number(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_slug", ["slug"])
+    .index("by_updatedAt", ["updatedAt"]),
+
+  threadPersonalitySettings: defineTable({
+    threadId: v.id("threads"),
+    profileSlug: v.string(),
+    intensity: v.number(),
+    customPrompt: v.optional(v.string()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  }).index("by_thread", ["threadId"]),
+
   ignoreRules: defineTable({
     targetType: v.union(v.literal("contact"), v.literal("group"), v.literal("keyword")),
     targetValue: v.string(),
@@ -199,6 +221,7 @@ export default defineSchema({
       v.literal("starting"),
       v.literal("qr_ready"),
       v.literal("code_ready"),
+      v.literal("syncing"),
       v.literal("connected"),
       v.literal("error"),
     ),

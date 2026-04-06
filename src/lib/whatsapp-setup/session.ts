@@ -1,10 +1,11 @@
 import { readFile, rm } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { ConvexHttpClient } from "convex/browser";
 import { convexRefs } from "../convex-refs";
-import { ensureWorkerStopped } from "../runtime/worker-lock";
+import { ensureWorkerStopped, getWorkerRuntimeStatus } from "../runtime/worker-lock";
 
-type SetupStatus = "idle" | "starting" | "qr_ready" | "code_ready" | "connected" | "error";
+type SetupStatus = "idle" | "starting" | "qr_ready" | "code_ready" | "syncing" | "connected" | "error";
 export type SetupMode = "qr" | "pairing_code";
 
 export type SetupStartOptions = {
@@ -43,8 +44,9 @@ export type SetupState = {
 };
 
 class WhatsAppSetupManager {
-  private static readonly MAX_RETRIES = 6;
+  private static readonly MAX_RETRIES = 30;
   private static readonly BASE_RETRY_MS = 1250;
+  private static readonly SYNCING_GRACE_MS = 20_000;
 
   private socket: SetupSocket | null = null;
   private baileysModule: BaileysModule | null = null;
@@ -56,12 +58,102 @@ class WhatsAppSetupManager {
   private setupMode: SetupMode = "qr";
   private pairingPhoneNumber: string | undefined;
   private convexClient: ConvexHttpClient | null = null;
+  private isAutoStartingWorker = false;
   private state: Omit<SetupState, "hasAuth"> = {
     status: "idle",
     mode: "qr",
     message: "Setup not started.",
     updatedAt: Date.now(),
   };
+
+  private markConnectedAndStopSetupSocket(mode: SetupMode) {
+    this.clearRetryTimer();
+    this.retryCount = 0;
+    this.setState({
+      status: "connected",
+      mode,
+      message: "WhatsApp connected. Starting worker automatically...",
+      qrDataUrl: undefined,
+      pairingCode: undefined,
+    });
+    // We intentionally end the temporary setup socket after a successful pair.
+    // Mark this as an expected stop so we don't enter reconnect logic.
+    this.manuallyStopped = true;
+    this.closeSocket();
+    void this.autoStartWorker();
+  }
+
+  private sleep(ms: number) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private async autoStartWorker() {
+    if (this.isAutoStartingWorker) {
+      return;
+    }
+    this.isAutoStartingWorker = true;
+
+    try {
+      const before = await getWorkerRuntimeStatus();
+      if (before.running) {
+        this.setState({
+          status: "connected",
+          mode: this.setupMode,
+          message: before.pid
+            ? `WhatsApp connected. Worker is already running (PID ${before.pid}).`
+            : "WhatsApp connected. Worker is already running.",
+        });
+        return;
+      }
+
+      this.setState({
+        status: "connected",
+        mode: this.setupMode,
+        message: "WhatsApp connected. Starting worker automatically...",
+      });
+
+      try {
+        const bunBin = process.env.BUN_BIN || "bun";
+        const child = spawn(bunBin, ["run", "worker"], {
+          cwd: process.cwd(),
+          env: process.env,
+          detached: true,
+          stdio: "ignore",
+        });
+        child.unref();
+      } catch {
+        this.setState({
+          status: "connected",
+          mode: this.setupMode,
+          message: "WhatsApp connected, but auto-start failed. Run `bun run worker` manually.",
+        });
+        return;
+      }
+
+      for (let i = 0; i < 16; i += 1) {
+        await this.sleep(300);
+        const status = await getWorkerRuntimeStatus();
+        if (status.running) {
+          this.setState({
+            status: "connected",
+            mode: this.setupMode,
+            message: status.pid
+              ? `WhatsApp connected. Worker started automatically (PID ${status.pid}).`
+              : "WhatsApp connected. Worker started automatically.",
+          });
+          return;
+        }
+      }
+
+      this.setState({
+        status: "connected",
+        mode: this.setupMode,
+        message: "WhatsApp connected, but worker did not stay up. Run `bun run worker` manually.",
+      });
+    } finally {
+      this.isAutoStartingWorker = false;
+    }
+  }
 
   private get authPath() {
     return process.env.WHATSAPP_AUTH_PATH || ".wa_auth";
@@ -70,8 +162,22 @@ class WhatsAppSetupManager {
   private async hasRegisteredCreds() {
     try {
       const raw = await readFile(join(this.authPath, "creds.json"), "utf8");
-      const parsed = JSON.parse(raw) as { registered?: boolean };
-      return parsed.registered === true;
+      const parsed = JSON.parse(raw) as {
+        registered?: boolean;
+        pairingCode?: string;
+        me?: { id?: string };
+      };
+
+      if (parsed.registered === true) {
+        return true;
+      }
+
+      // In some Baileys/WA flows, `registered` may stay false even after successful link.
+      // Treat a device-style JID (contains ":<deviceId>@") without active pairing code as linked.
+      const meId = parsed.me?.id || "";
+      const hasDeviceSuffix = meId.includes(":") && meId.includes("@s.whatsapp.net");
+      const hasPendingPairingCode = Boolean(parsed.pairingCode);
+      return hasDeviceSuffix && !hasPendingPairingCode;
     } catch {
       return false;
     }
@@ -131,6 +237,26 @@ class WhatsAppSetupManager {
     }
   }
 
+  private async waitForRegisteredCreds(maxWaitMs = 3500) {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < maxWaitMs) {
+      if (await this.hasRegisteredCreds()) {
+        return true;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    return await this.hasRegisteredCreds();
+  }
+
+  private async invalidateCredentials() {
+    try {
+      await rm(this.authPath, { recursive: true, force: true });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   private closeSocket() {
     if (!this.socket) {
       return;
@@ -170,6 +296,16 @@ class WhatsAppSetupManager {
     }
     const parsed = errorLike as BaileysDisconnectError;
     return parsed.message || "";
+  }
+
+  private hasExplicitInvalidationMessage(message: string) {
+    const normalized = message.toLowerCase();
+    return (
+      normalized.includes("signed this device out") ||
+      normalized.includes("logged out this device") ||
+      normalized.includes("credentials were cleared") ||
+      normalized.includes("credentials were invalidated")
+    );
   }
 
   private isAuthStateRegistered(authState: unknown) {
@@ -296,7 +432,28 @@ class WhatsAppSetupManager {
     const sock = baileys.default(socketConfig);
 
     this.socket = sock;
-    sock.ev.on("creds.update", saveCreds);
+    sock.ev.on("creds.update", async () => {
+      try {
+        await saveCreds();
+      } catch {
+        // best effort save
+      }
+
+      if (this.manuallyStopped || this.socket !== sock) {
+        return;
+      }
+
+      if (this.state.status === "connected") {
+        return;
+      }
+
+      const hasAuth = await this.hasRegisteredCreds();
+      if (!hasAuth) {
+        return;
+      }
+
+      this.markConnectedAndStopSetupSocket(this.setupMode);
+    });
 
     if (this.setupMode === "pairing_code" && this.pairingPhoneNumber && !this.isAuthStateRegistered(state)) {
       this.setState({
@@ -338,19 +495,28 @@ class WhatsAppSetupManager {
       }
 
       if (update.connection === "open") {
+        try {
+          await saveCreds();
+        } catch {
+          // best effort auth flush before closing temporary setup socket
+        }
+
+        const mode = this.setupMode;
+        const persistedAuth = await this.waitForRegisteredCreds(1250);
+        if (persistedAuth) {
+          this.markConnectedAndStopSetupSocket(mode);
+          return;
+        }
+
         this.clearRetryTimer();
         this.retryCount = 0;
         this.setState({
-          status: "connected",
-          mode: this.setupMode,
-          message: "WhatsApp connected. You can now start the worker.",
+          status: "syncing",
+          mode,
+          message: "Connection opened. Syncing credentials with WhatsApp...",
           qrDataUrl: undefined,
           pairingCode: undefined,
         });
-        // We intentionally end the temporary setup socket after a successful pair.
-        // Mark this as an expected stop so we don't enter reconnect logic.
-        this.manuallyStopped = true;
-        this.closeSocket();
         return;
       }
 
@@ -381,10 +547,13 @@ class WhatsAppSetupManager {
 
           this.clearRetryTimer();
           this.retryCount = 0;
+          const invalidated = await this.invalidateCredentials();
           this.setState({
             status: "idle",
             mode,
-            message: "Session logged out. Start setup again to generate a new QR or pairing code.",
+            message: invalidated
+              ? "WhatsApp signed this device out. Credentials were cleared. Start setup again to generate a new QR or pairing code."
+              : "WhatsApp signed this device out. Could not clear credentials automatically; click Reset Credentials, then start setup again.",
             qrDataUrl: undefined,
             pairingCode: undefined,
           });
@@ -442,15 +611,120 @@ class WhatsAppSetupManager {
 
   async getState(): Promise<SetupState> {
     const hasAuth = await this.hasRegisteredCreds();
+    const hasExplicitInvalidation = this.hasExplicitInvalidationMessage(this.state.message);
 
-    if (hasAuth && this.state.status === "idle") {
+    if (!hasAuth && this.state.status === "syncing") {
+      const syncAgeMs = Date.now() - this.state.updatedAt;
+      if (syncAgeMs <= WhatsAppSetupManager.SYNCING_GRACE_MS) {
+        return {
+          ...this.state,
+          hasAuth,
+        };
+      }
+
+      const snapshot: SetupState = {
+        ...this.state,
+        status: "error",
+        message:
+          "Connection opened, but credentials are taking too long to sync. Wait a moment and click Refresh. If this persists, stop session and start setup again.",
+        qrDataUrl: undefined,
+        pairingCode: undefined,
+        hasAuth,
+      };
+      this.state = {
+        ...snapshot,
+      };
+      return snapshot;
+    }
+
+    if (!hasAuth && this.state.status === "connected") {
+      const message = hasExplicitInvalidation
+        ? this.state.message
+        : "No active WhatsApp credentials found. Start setup again to generate a new QR or pairing code.";
       const snapshot: SetupState = {
         ...this.state,
         status: "idle",
-        message: "Paired credentials found. Worker is not connected yet.",
+        message,
+        qrDataUrl: undefined,
+        pairingCode: undefined,
         hasAuth,
       };
-      void this.pushStateToConvex(snapshot);
+      this.state = {
+        ...snapshot,
+      };
+      return snapshot;
+    }
+
+    if (hasAuth && this.state.status === "idle") {
+      const worker = await getWorkerRuntimeStatus();
+      if (worker.running) {
+        const snapshot: SetupState = {
+          ...this.state,
+          status: "connected",
+          message: worker.pid
+            ? `WhatsApp connected. Worker is running (PID ${worker.pid}).`
+            : "WhatsApp connected. Worker is running.",
+          hasAuth,
+        };
+        this.state = {
+          ...snapshot,
+        };
+        return snapshot;
+      }
+
+      const snapshot: SetupState = {
+        ...this.state,
+        status: "connected",
+        message: "Paired credentials found. Starting worker automatically...",
+        hasAuth,
+      };
+      this.state = {
+        ...snapshot,
+      };
+      if (!this.isAutoStartingWorker) {
+        void this.autoStartWorker();
+      }
+      return snapshot;
+    }
+
+    if (hasAuth && (this.state.status === "syncing" || this.state.status === "connected")) {
+      const worker = await getWorkerRuntimeStatus();
+      if (worker.running) {
+        const snapshot: SetupState = {
+          ...this.state,
+          status: "connected",
+          message: worker.pid
+            ? `WhatsApp connected. Worker is running (PID ${worker.pid}).`
+            : "WhatsApp connected. Worker is running.",
+          hasAuth,
+        };
+        this.state = {
+          ...snapshot,
+        };
+        return snapshot;
+      }
+
+      const currentMessage = this.state.message.toLowerCase();
+      const shouldKeepFailureMessage =
+        currentMessage.includes("auto-start failed") || currentMessage.includes("did not stay up");
+      const message = shouldKeepFailureMessage
+        ? this.state.message
+        : "WhatsApp connected. Starting worker automatically...";
+
+      const snapshot: SetupState = {
+        ...this.state,
+        status: "connected",
+        message,
+        hasAuth,
+      };
+      this.state = {
+        ...snapshot,
+      };
+
+      if (!shouldKeepFailureMessage && !this.isAutoStartingWorker) {
+        void this.autoStartWorker();
+      }
+
       return snapshot;
     }
 
@@ -458,7 +732,6 @@ class WhatsAppSetupManager {
       ...this.state,
       hasAuth,
     };
-    void this.pushStateToConvex(snapshot);
     return snapshot;
   }
 
@@ -501,14 +774,15 @@ class WhatsAppSetupManager {
       this.clearRetryTimer();
       this.retryCount = 0;
       this.setState({
-        status: "idle",
+        status: "connected",
         mode,
         message: workerStoppedAutomatically
-          ? "Paired credentials found. Existing worker was paused; restart the worker to reconnect."
-          : "Paired credentials found. Start the worker to connect WhatsApp.",
+          ? "Paired credentials found. Existing worker was paused. Starting worker automatically..."
+          : "Paired credentials found. Starting worker automatically...",
         qrDataUrl: undefined,
         pairingCode: undefined,
       });
+      void this.autoStartWorker();
       return this.getState();
     }
 
@@ -551,12 +825,31 @@ class WhatsAppSetupManager {
     this.clearRetryTimer();
     this.retryCount = 0;
     this.closeSocket();
+    const workerStop = await ensureWorkerStopped();
+    if (workerStop.action === "failed") {
+      this.setState({
+        status: "error",
+        mode: this.setupMode,
+        message: "Could not stop the running worker automatically. Stop `bun run worker`, then retry Stop Session.",
+        qrDataUrl: undefined,
+        pairingCode: undefined,
+      });
+      return this.getState();
+    }
+
+    const workerStopped = workerStop.action === "terminated" || workerStop.action === "killed";
     const hasAuth = await this.hasRegisteredCreds();
 
     this.setState({
       status: "idle",
       mode: this.setupMode,
-      message: hasAuth ? "Setup session stopped. Paired credentials found." : "Setup session stopped.",
+      message: workerStopped
+        ? hasAuth
+          ? "Setup session stopped and worker stopped. Paired credentials found."
+          : "Setup session stopped and worker stopped."
+        : hasAuth
+          ? "Setup session stopped. Paired credentials found."
+          : "Setup session stopped.",
       qrDataUrl: undefined,
       pairingCode: undefined,
     });
@@ -571,13 +864,28 @@ class WhatsAppSetupManager {
     this.closeSocket();
     this.setupMode = "qr";
     this.pairingPhoneNumber = undefined;
+    const workerStop = await ensureWorkerStopped();
+    if (workerStop.action === "failed") {
+      this.setState({
+        status: "error",
+        mode: "qr",
+        message: "Could not stop the running worker automatically. Stop `bun run worker`, then retry Reset Credentials.",
+        qrDataUrl: undefined,
+        pairingCode: undefined,
+      });
+      return this.getState();
+    }
+
+    const workerStopped = workerStop.action === "terminated" || workerStop.action === "killed";
 
     try {
       await rm(this.authPath, { recursive: true, force: true });
       this.setState({
         status: "idle",
         mode: "qr",
-        message: "Credentials reset. Start setup again to generate a fresh QR or pairing code.",
+        message: workerStopped
+          ? "Credentials reset and worker stopped. Start setup again to generate a fresh QR or pairing code."
+          : "Credentials reset. Start setup again to generate a fresh QR or pairing code.",
         qrDataUrl: undefined,
         pairingCode: undefined,
       });

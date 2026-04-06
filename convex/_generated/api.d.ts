@@ -22,6 +22,7 @@ import type * as lib_types from "../lib/types.js";
 import type * as memory from "../memory.js";
 import type * as memoryBatch from "../memoryBatch.js";
 import type * as outbox from "../outbox.js";
+import type * as personality from "../personality.js";
 import type * as queue from "../queue.js";
 import type * as retention from "../retention.js";
 import type * as rules from "../rules.js";
@@ -51,6 +52,7 @@ declare const fullApi: ApiFromModules<{
   memory: typeof memory;
   memoryBatch: typeof memoryBatch;
   outbox: typeof outbox;
+  personality: typeof personality;
   queue: typeof queue;
   retention: typeof retention;
   rules: typeof rules;

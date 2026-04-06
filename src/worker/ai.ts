@@ -17,6 +17,23 @@ type AiResult = {
   guardrailReason?: string;
 };
 
+type StyleProfileContext = {
+  mimicryLevel?: number;
+  commonPhrases?: string[];
+  punctuationStyle?: string[];
+  humorNotes?: string[];
+  spellingNotes?: string[];
+};
+
+type PersonalityContext = {
+  profileSlug?: string;
+  profileName?: string;
+  profileDescription?: string;
+  profilePrompt?: string;
+  intensity?: number;
+  customPrompt?: string;
+};
+
 const HIGH_RISK_PATTERNS = [
   /password/i,
   /otp/i,
@@ -25,37 +42,125 @@ const HIGH_RISK_PATTERNS = [
   /social\s*security/i,
 ];
 
+function clamp01(value: number) {
+  if (!Number.isFinite(value)) {
+    return 0.72;
+  }
+  return Math.max(0, Math.min(value, 1));
+}
+
+function pickVariant(input: string, options: string[]) {
+  if (options.length === 0) {
+    return "";
+  }
+  const sum = [...input].reduce((acc, char) => acc + char.charCodeAt(0), 0);
+  return options[sum % options.length];
+}
+
 function heuristicReply(input: string) {
   if (/\?|\b(can you|could you|when|where|what|why|how)\b/i.test(input)) {
-    return "Yeah that works on my side. Give me a bit and I'll send details shortly.";
+    return pickVariant(input, [
+      "Yeah, that works on my side. Give me a bit and I'll send details shortly.",
+      "Yep, I can do that. Let me sort it and get back to you shortly.",
+      "That works. Give me a little time and I'll send the details.",
+    ]);
   }
 
   if (/\b(thanks|thank you)\b/i.test(input)) {
-    return "Anytime. Happy to help.";
+    return pickVariant(input, ["Anytime.", "Always happy to help.", "No worries at all."]);
   }
 
-  return "Noted. I’m on it and I’ll circle back soon.";
+  if (/\b(sorry|apolog|my bad)\b/i.test(input)) {
+    return pickVariant(input, ["All good.", "No stress, we're good.", "You're fine, no worries."]);
+  }
+
+  return pickVariant(input, [
+    "Noted. I'm on it and I'll circle back soon.",
+    "Sounds good. I'll handle it and update you soon.",
+    "Got it, I'm on it.",
+  ]);
 }
 
 function buildPrompt(args: {
   inboundText: string;
   historyLines: string[];
   styleHints: string[];
+  styleProfile?: StyleProfileContext;
+  personality?: PersonalityContext;
 }) {
   const history = args.historyLines.slice(-14).join("\n");
-  const hints = args.styleHints.join(", ");
+  const outboundSamples = args.historyLines
+    .filter((line) => line.startsWith("Me:"))
+    .slice(-4)
+    .map((line) => line.replace(/^Me:\s*/, "").trim())
+    .filter(Boolean)
+    .join(" | ");
+  const mimicryLevel = clamp01(args.styleProfile?.mimicryLevel ?? 0.72);
+  const mimicryInstruction =
+    mimicryLevel >= 0.85
+      ? "Strongly mirror the user's wording, rhythm, and punctuation."
+      : mimicryLevel >= 0.6
+        ? "Moderately mirror the user's wording and rhythm while staying clear."
+        : "Use a friendly, clear baseline voice with light mirroring.";
+  const hints = [
+    ...args.styleHints,
+    ...(args.styleProfile?.humorNotes || []),
+    ...(args.styleProfile?.punctuationStyle || []),
+    ...(args.styleProfile?.spellingNotes || []),
+  ]
+    .filter(Boolean)
+    .slice(0, 12)
+    .join(", ");
+  const phrases = (args.styleProfile?.commonPhrases || []).filter(Boolean).slice(0, 8).join(", ");
+  const personalityIntensity = clamp01(args.personality?.intensity ?? 0.6);
+  const personalityLevelInstruction =
+    personalityIntensity >= 0.85
+      ? "Apply the selected personality strongly and consistently."
+      : personalityIntensity >= 0.6
+        ? "Apply the selected personality moderately while staying natural."
+        : "Apply the selected personality lightly and keep responses neutral-first.";
+  const personalityLabel = args.personality?.profileName || args.personality?.profileSlug || "";
 
   return [
-    "You are writing a WhatsApp reply as the user.",
-    "Keep it concise and casual. Keep natural spelling and punctuation.",
-    "Do not mention that you are an AI. Do not sound robotic.",
+    "You are writing one WhatsApp reply as the account owner.",
+    "Write like a real person: warm, calm, confident, and practical.",
+    "Default to 1-2 short sentences unless the message clearly needs more detail.",
+    "Sound conversational and specific, never stiff or corporate.",
+    "Do not mention AI, policies, prompt rules, or internal reasoning.",
+    "Do not overpromise. If timing is uncertain, say you'll confirm shortly.",
+    "Avoid generic fillers like 'Noted', 'As an AI', 'I hope this message finds you well', or repetitive templates.",
+    mimicryInstruction,
+    personalityLevelInstruction,
+    personalityLabel ? `Selected relationship/personality mode: ${personalityLabel}` : "",
+    args.personality?.profileDescription ? `Personality description: ${args.personality.profileDescription}` : "",
+    args.personality?.profilePrompt ? `Personality behavior instruction: ${args.personality.profilePrompt}` : "",
+    args.personality?.customPrompt ? `Thread-specific personality note: ${args.personality.customPrompt}` : "",
     hints ? `Style hints: ${hints}` : "",
+    phrases ? `Frequent personal phrases to reuse naturally: ${phrases}` : "",
+    outboundSamples ? `Recent sent-message examples: ${outboundSamples}` : "",
     history ? `Recent chat:\n${history}` : "",
     `Latest inbound message: ${args.inboundText}`,
     "Return only the final reply text.",
   ]
     .filter(Boolean)
     .join("\n\n");
+}
+
+function sanitizeReplyText(raw: string) {
+  let text = raw.trim();
+  text = text.replace(/^reply\s*[:\-]\s*/i, "").trim();
+  text = text.replace(/^["'`]+|["'`]+$/g, "").trim();
+  text = text
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join("\n");
+
+  if (text.length > 320) {
+    text = text.slice(0, 320).trim();
+  }
+
+  return text;
 }
 
 function getAzureConfig() {
@@ -114,12 +219,13 @@ async function runAzure(prompt: string): Promise<AiResult> {
         .join("\n");
     }
 
-    if (!text.trim()) {
+    const cleaned = sanitizeReplyText(text);
+    if (!cleaned) {
       throw new Error("Azure AI returned empty response.");
     }
 
     return {
-      text: text.trim(),
+      text: cleaned,
       provider: "azure",
       model: cfg.model,
       latencyMs: Date.now() - start,
@@ -159,12 +265,13 @@ async function runAzure(prompt: string): Promise<AiResult> {
           ? content.map((p) => p.text || "").join("\n")
           : "";
 
-    if (!text.trim()) {
+    const cleaned = sanitizeReplyText(text);
+    if (!cleaned) {
       throw new Error("Azure AI returned empty response.");
     }
 
     return {
-      text: text.trim(),
+      text: cleaned,
       provider: "azure",
       model: cfg.model,
       latencyMs,
@@ -184,7 +291,7 @@ async function runCodex(prompt: string): Promise<AiResult> {
     maxBuffer: 1024 * 1024,
   });
 
-  const text = (await fs.readFile(outFile, "utf8")).trim();
+  const text = sanitizeReplyText(await fs.readFile(outFile, "utf8"));
   await fs.unlink(outFile).catch(() => undefined);
 
   if (!text) {
@@ -204,6 +311,8 @@ export async function generateReplyWithFallback(args: {
   inboundText: string;
   historyLines: string[];
   styleHints: string[];
+  styleProfile?: StyleProfileContext;
+  personality?: PersonalityContext;
 }): Promise<AiResult> {
   const blocked = HIGH_RISK_PATTERNS.find((pattern) => pattern.test(args.inboundText));
   if (blocked) {
