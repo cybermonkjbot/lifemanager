@@ -7,9 +7,21 @@ import type { Id } from "../../convex/_generated/dataModel";
 import { useMutation, useQuery } from "convex/react";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
+type LearnedTraitField = "commonPhrases" | "punctuationStyle" | "spellingNotes" | "humorNotes";
+
+const LEARNED_TRAIT_SECTIONS: Array<{ trait: LearnedTraitField; label: string; emptyLabel: string }> = [
+  { trait: "commonPhrases", label: "Common phrases", emptyLabel: "Not enough data yet." },
+  { trait: "punctuationStyle", label: "Punctuation style", emptyLabel: "No punctuation profile yet." },
+  { trait: "spellingNotes", label: "Spelling style", emptyLabel: "No spelling profile yet." },
+  { trait: "humorNotes", label: "Humor markers", emptyLabel: "No humor markers yet." },
+];
+
 function StyleLabContent() {
   const setMimicry = useMutation(api.style.setMimicry);
   const rollbackHistory = useMutation(api.style.rollbackHistory);
+  const updateLearnedTrait = useMutation(api.style.updateLearnedTrait);
+  const removeLearnedTrait = useMutation(api.style.removeLearnedTrait);
+  const clearLearnedTraitSection = useMutation(api.style.clearLearnedTraitSection);
   const { runAction, getRecord, notices, dismissNotice } = useActionStateRegistry();
   const key = "style:mimicry";
 
@@ -17,6 +29,7 @@ function StyleLabContent() {
     | {
         mimicryLevel: number;
         commonPhrases: string[];
+        punctuationStyle: string[];
         spellingNotes: string[];
         humorNotes: string[];
       }
@@ -44,6 +57,24 @@ function StyleLabContent() {
 
   const record = getRecord(key);
   const rollbackRecord = getRecord("style:rollback");
+  const [editingTrait, setEditingTrait] = useState<{ trait: LearnedTraitField; value: string } | null>(null);
+  const [traitDraft, setTraitDraft] = useState("");
+  const [newTraitDrafts, setNewTraitDrafts] = useState<Record<LearnedTraitField, string>>({
+    commonPhrases: "",
+    punctuationStyle: "",
+    spellingNotes: "",
+    humorNotes: "",
+  });
+
+  const traitsByField = useMemo<Record<LearnedTraitField, string[]>>(
+    () => ({
+      commonPhrases: profile?.commonPhrases || [],
+      punctuationStyle: profile?.punctuationStyle || [],
+      spellingNotes: profile?.spellingNotes || [],
+      humorNotes: profile?.humorNotes || [],
+    }),
+    [profile],
+  );
 
   const previewNeutral = useMemo(() => {
     if (mimicryLevel <= 0.3) {
@@ -139,16 +170,242 @@ function StyleLabContent() {
           {profileLoading ? (
             <p className="empty-line">Loading learned traits…</p>
           ) : (
-            <>
-              <p className="queue-meta">Common phrases</p>
-              <p>{(profile?.commonPhrases || []).join(", ") || "Not enough data yet."}</p>
+            LEARNED_TRAIT_SECTIONS.map((section) => {
+              const values = traitsByField[section.trait];
+              const addKey = `style:trait:add:${section.trait}`;
+              const clearKey = `style:trait:clear:${section.trait}`;
+              const addRecord = getRecord(addKey);
+              const clearRecord = getRecord(clearKey);
+              const addDraft = newTraitDrafts[section.trait];
+              const addDraftTrimmed = addDraft.trim();
+              const hasDuplicateDraft = values.some((item) => item.toLowerCase() === addDraftTrimmed.toLowerCase());
+              const addPending = addRecord.pending || clearRecord.pending;
+              return (
+                <div key={section.trait} className="stack">
+                  <p className="queue-meta">{section.label}</p>
+                  <form
+                    className="stack compact"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      if (!addDraftTrimmed || hasDuplicateDraft || addPending) {
+                        return;
+                      }
+                      void runAction(
+                        addKey,
+                        async () => {
+                          await updateLearnedTrait({
+                            trait: section.trait,
+                            value: addDraft,
+                          });
+                          setNewTraitDrafts((prev) => ({ ...prev, [section.trait]: "" }));
+                        },
+                        {
+                          pendingLabel: "Adding trait...",
+                          successMessage: "Learned trait added.",
+                        },
+                      );
+                    }}
+                  >
+                    <input
+                      type="text"
+                      placeholder={`Add ${section.label.toLowerCase()} entry`}
+                      value={addDraft}
+                      onChange={(event) => setNewTraitDrafts((prev) => ({ ...prev, [section.trait]: event.target.value }))}
+                      disabled={addPending}
+                      aria-disabled={addPending}
+                    />
+                    <div className="queue-actions">
+                      <button
+                        type="submit"
+                        className="btn btn-primary"
+                        disabled={!addDraftTrimmed || hasDuplicateDraft || addPending}
+                        aria-disabled={!addDraftTrimmed || hasDuplicateDraft || addPending}
+                      >
+                        {addRecord.pending ? "Adding..." : "Add"}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        onClick={() =>
+                          void runAction(
+                            clearKey,
+                            async () => {
+                              await clearLearnedTraitSection({ trait: section.trait });
+                              setNewTraitDrafts((prev) => ({ ...prev, [section.trait]: "" }));
+                              if (editingTrait?.trait === section.trait) {
+                                setEditingTrait(null);
+                                setTraitDraft("");
+                              }
+                            },
+                            {
+                              pendingLabel: "Clearing traits...",
+                              successMessage: `${section.label} cleared.`,
+                            },
+                          )
+                        }
+                        disabled={values.length === 0 || addPending}
+                        aria-disabled={values.length === 0 || addPending}
+                      >
+                        {clearRecord.pending ? "Clearing..." : "Clear all"}
+                      </button>
+                    </div>
+                    {hasDuplicateDraft ? (
+                      <p className="queue-meta action-inline-error" role="status">
+                        This entry already exists in this section.
+                      </p>
+                    ) : null}
+                    {addRecord.error ? (
+                      <p className="queue-meta action-inline-error" role="alert">
+                        {addRecord.error}
+                      </p>
+                    ) : null}
+                    {clearRecord.error ? (
+                      <p className="queue-meta action-inline-error" role="alert">
+                        {clearRecord.error}
+                      </p>
+                    ) : null}
+                  </form>
+                  {values.length === 0 ? (
+                    <p>{section.emptyLabel}</p>
+                  ) : (
+                    values.map((item) => {
+                      const editKey = `style:trait:update:${section.trait}:${item}`;
+                      const removeKey = `style:trait:remove:${section.trait}:${item}`;
+                      const editRecord = getRecord(editKey);
+                      const removeRecord = getRecord(removeKey);
+                      const isEditing = editingTrait?.trait === section.trait && editingTrait.value === item;
+                      const trimmedDraft = traitDraft.trim();
+                      const unchanged = trimmedDraft === item.trim();
+                      const actionPending = editRecord.pending || removeRecord.pending;
 
-              <p className="queue-meta">Spelling style</p>
-              <p>{(profile?.spellingNotes || []).join(", ") || "No spelling profile yet."}</p>
+                      if (isEditing) {
+                        return (
+                          <form
+                            key={`${section.trait}:${item}`}
+                            className="queue-item stack compact"
+                            onSubmit={(event) => {
+                              event.preventDefault();
+                              if (!trimmedDraft || unchanged || actionPending) {
+                                return;
+                              }
+                              void runAction(
+                                editKey,
+                                async () => {
+                                  await updateLearnedTrait({
+                                    trait: section.trait,
+                                    previousValue: item,
+                                    value: traitDraft,
+                                  });
+                                  setEditingTrait(null);
+                                  setTraitDraft("");
+                                },
+                                {
+                                  pendingLabel: "Saving trait...",
+                                  successMessage: "Learned trait updated.",
+                                },
+                              );
+                            }}
+                          >
+                            <input
+                              type="text"
+                              value={traitDraft}
+                              onChange={(event) => setTraitDraft(event.target.value)}
+                              disabled={actionPending}
+                              aria-disabled={actionPending}
+                            />
+                            <div className="queue-actions">
+                              <button
+                                type="submit"
+                                className="btn btn-primary"
+                                disabled={!trimmedDraft || unchanged || actionPending}
+                                aria-disabled={!trimmedDraft || unchanged || actionPending}
+                              >
+                                {editRecord.pending ? "Saving..." : "Save"}
+                              </button>
+                              <button
+                                type="button"
+                                className="btn btn-ghost"
+                                onClick={() => {
+                                  if (actionPending) {
+                                    return;
+                                  }
+                                  setEditingTrait(null);
+                                  setTraitDraft("");
+                                }}
+                                disabled={actionPending}
+                                aria-disabled={actionPending}
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                            {editRecord.error ? (
+                              <p className="queue-meta action-inline-error" role="alert">
+                                {editRecord.error}
+                              </p>
+                            ) : null}
+                          </form>
+                        );
+                      }
 
-              <p className="queue-meta">Humor markers</p>
-              <p>{(profile?.humorNotes || []).join(", ") || "No humor markers yet."}</p>
-            </>
+                      return (
+                        <div key={`${section.trait}:${item}`} className="queue-item">
+                          <p className="queue-body">{item}</p>
+                          <div className="queue-actions">
+                            <button
+                              type="button"
+                              className="btn btn-ghost"
+                              onClick={() => {
+                                if (actionPending) {
+                                  return;
+                                }
+                                setEditingTrait({ trait: section.trait, value: item });
+                                setTraitDraft(item);
+                              }}
+                              disabled={actionPending}
+                              aria-disabled={actionPending}
+                            >
+                              Edit
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-ghost"
+                              onClick={() =>
+                                void runAction(
+                                  removeKey,
+                                  async () => {
+                                    await removeLearnedTrait({
+                                      trait: section.trait,
+                                      value: item,
+                                    });
+                                    if (isEditing) {
+                                      setEditingTrait(null);
+                                      setTraitDraft("");
+                                    }
+                                  },
+                                  {
+                                    pendingLabel: "Removing trait...",
+                                    successMessage: "Learned trait removed.",
+                                  },
+                                )
+                              }
+                              disabled={actionPending}
+                              aria-disabled={actionPending}
+                            >
+                              {removeRecord.pending ? "Removing..." : "Delete"}
+                            </button>
+                          </div>
+                          {removeRecord.error ? (
+                            <p className="queue-meta action-inline-error" role="alert">
+                              {removeRecord.error}
+                            </p>
+                          ) : null}
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              );
+            })
           )}
         </div>
 

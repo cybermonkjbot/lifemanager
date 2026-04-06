@@ -84,7 +84,39 @@ The setup wizard uses API routes:
 - `bun run dev:next` - Next.js dashboard only
 - `bun run dev:convex` - Convex backend only
 - `bun run worker` - WhatsApp worker only
+- `bun run self-improve --dry-run` - build improvement context and prompt without calling Codex
+- `bun run self-improve` - run one Codex self-improvement cycle
+- `bun run self-improve:daemon` - run recurring self-improvement cycles locally
 - `bun run lint` - lint checks
+
+## Self-Improvement Cycle (Local Codex Job)
+
+This repo includes a local recurring job runner that feeds project context/logs into `codex exec` and writes actionable improvement reports.
+
+- Config file: `self-improvement.config.json`
+- Runner: `scripts/self-improvement-cycle.ts`
+- Reports output: `.slm/self-improvement/runs/<run-id>/report.md`
+- Latest report shortcut: `.slm/self-improvement/latest.md`
+
+Run one cycle:
+
+```bash
+bun run self-improve
+```
+
+Run continuously (default every 240 minutes, configurable):
+
+```bash
+bun run self-improve:daemon
+```
+
+Use system cron (example: every 6 hours):
+
+```bash
+0 */6 * * * cd /Users/joshua/Documents/lifemanager && /opt/homebrew/bin/bun run self-improve >> .slm/self-improvement/cron.log 2>&1
+```
+
+More setup/tuning details: `docs/self-improvement-cycle.md`
 
 ## Voice Notes (whisper.cpp, No API Key)
 

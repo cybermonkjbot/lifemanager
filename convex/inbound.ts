@@ -1,7 +1,7 @@
 import { v } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
-import { api, internal } from "./_generated/api";
+import { internal } from "./_generated/api";
 import { mutation } from "./_generated/server";
 import { getConfig } from "./lib/config";
 import { detectPromiseOrPlan, detectTodoCandidate } from "./lib/heuristics";
@@ -21,6 +21,21 @@ const GHOST_ACTIVITY_MIN_OUTBOUND_MESSAGES = 3;
 const GHOST_ACTIVITY_MIN_TURNS = 4;
 const GHOST_TRIGGER_PROBABILITY = 0.2;
 type IngestMode = "live" | "history_sync" | "history_fetch";
+type InboundMessageType = "text" | "reaction" | "sticker" | "meme";
+
+type IngestHistoricalResult = {
+  threadId: Id<"threads">;
+  messageId: Id<"messages">;
+  duplicate: boolean;
+  ingestMode?: IngestMode;
+  ignored?: boolean;
+  blockedReason?: string;
+  stale?: boolean;
+  messageType?: InboundMessageType;
+  reactionTargetMessageId?: Id<"messages">;
+  promiseDetected?: boolean;
+  todoDetected?: boolean;
+};
 
 function normalizeTimestampMs(raw: number | undefined, fallbackMs: number) {
   if (!Number.isFinite(raw) || (raw ?? 0) <= 0) {
@@ -483,34 +498,12 @@ export const ingestHistorical = mutation({
     whatsappMessageId: v.optional(v.string()),
     messageAt: v.optional(v.number()),
   },
-  handler: async (ctx, args) => {
-    if (args.direction === "inbound") {
-      return await ctx.runMutation(api.inbound.ingest, {
-        threadJid: args.threadJid,
-        senderJid: args.senderJid,
-        senderTitle: args.senderTitle,
-        text: args.text,
-        messageType: args.messageType,
-        reactionEmoji: args.reactionEmoji,
-        reactionTargetWhatsAppMessageId: args.reactionTargetWhatsAppMessageId,
-        mediaAssetId: args.mediaAssetId,
-        mediaCaption: args.mediaCaption,
-        isGroup: args.isGroup,
-        threadKind: args.threadKind,
-        isArchived: args.isArchived,
-        archivedAt: args.archivedAt,
-        whatsappMessageId: args.whatsappMessageId,
-        messageAt: args.messageAt,
-        skipDraftGeneration: true,
-        ingestMode: args.ingestMode,
-      });
-    }
-
+  handler: async (ctx, args): Promise<IngestHistoricalResult> => {
     const now = Date.now();
     const messageAt = normalizeTimestampMs(args.messageAt, now);
     const threadKind = args.threadKind || classifyThreadKind({ jid: args.threadJid, isGroupHint: args.isGroup });
     const normalizedArchivedAt = normalizeTimestampMs(args.archivedAt, messageAt);
-    const normalizedText = args.text.trim() || "[Historical outbound message]";
+    const normalizedText = args.text.trim() || (args.direction === "outbound" ? "[Historical outbound message]" : "[Historical inbound message]");
     let thread = await ctx.db
       .query("threads")
       .withIndex("by_jid", (q) => q.eq("jid", args.threadJid))
@@ -571,7 +564,7 @@ export const ingestHistorical = mutation({
 
     const messageId = await ctx.db.insert("messages", {
       threadId: thread._id,
-      direction: "outbound",
+      direction: args.direction,
       origin: args.ingestMode,
       whatsappMessageId: args.whatsappMessageId,
       senderJid: args.senderJid,
@@ -587,7 +580,14 @@ export const ingestHistorical = mutation({
 
     await ctx.db.insert("systemEvents", {
       source: "worker",
-      eventType: args.ingestMode === "history_fetch" ? "outbound.history_fetch.received" : "outbound.history_sync.received",
+      eventType:
+        args.direction === "outbound"
+          ? args.ingestMode === "history_fetch"
+            ? "outbound.history_fetch.received"
+            : "outbound.history_sync.received"
+          : args.ingestMode === "history_fetch"
+            ? "inbound.history_fetch.received"
+            : "inbound.history_sync.received",
       threadId: thread._id,
       detail: normalizedText.slice(0, 300),
       createdAt: now,

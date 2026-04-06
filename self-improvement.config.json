@@ -1,0 +1,68 @@
+{
+  "intervalMinutes": 240,
+  "codexPath": "codex",
+  "codexModel": "gpt-5.2",
+  "timeoutMs": 300000,
+  "outputDir": ".slm/self-improvement",
+  "maxContextChars": 120000,
+  "latestReportChars": 8000,
+  "maxFileScanEntries": 20000,
+  "promptTemplate": "You are running a recurring self-improvement cycle for this repository.\nProject root: {{PROJECT_ROOT}}\nRun ID: {{RUN_ID}}\nTimestamp: {{TIMESTAMP}}\n\nUse the provided context (logs, docs, source snapshots, git state) to identify the most impactful improvements.\nFocus on reliability, safety, test coverage, performance, and maintainability.\n\nReturn markdown with exactly these sections:\n1) What Changed\n2) Top Improvement Opportunities (max 6 items, each with impact, effort, and exact file targets)\n3) Proposed Execution Plan (ordered, small PR-sized steps)\n4) Validation Checklist\n5) Ready-to-Run Codex Prompts (max 3 prompts)\n\nBe concrete. Reference real file paths. Avoid generic advice.",
+  "sources": [
+    {
+      "type": "file",
+      "path": "README.md",
+      "maxChars": 18000
+    },
+    {
+      "type": "file",
+      "path": "docs/whatsapp-autopilot-technical-gap.md",
+      "optional": true,
+      "maxChars": 24000
+    },
+    {
+      "type": "glob",
+      "pattern": "convex/**/*.ts",
+      "maxFiles": 20,
+      "maxCharsPerFile": 7000
+    },
+    {
+      "type": "glob",
+      "pattern": "src/worker/**/*.ts",
+      "maxFiles": 20,
+      "maxCharsPerFile": 7000
+    },
+    {
+      "type": "glob",
+      "pattern": ".next/dev/logs/**/*.log",
+      "optional": true,
+      "maxFiles": 8,
+      "maxCharsPerFile": 8000
+    },
+    {
+      "type": "glob",
+      "pattern": ".slm/**/*.log",
+      "optional": true,
+      "maxFiles": 8,
+      "maxCharsPerFile": 8000
+    },
+    {
+      "type": "command",
+      "name": "git-status",
+      "command": "git status --short",
+      "maxChars": 4000
+    },
+    {
+      "type": "command",
+      "name": "git-diff-stat",
+      "command": "git diff --stat",
+      "maxChars": 5000
+    },
+    {
+      "type": "command",
+      "name": "recent-commits",
+      "command": "git log -n 12 --oneline",
+      "maxChars": 4000
+    }
+  ]
+}

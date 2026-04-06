@@ -7,6 +7,11 @@ const DEFAULT_MODEL = "Xenova/all-MiniLM-L6-v2";
 const DEFAULT_MODEL_VERSION = "all-MiniLM-L6-v2";
 let extractorPromise: Promise<(input: string[] | string, options: Record<string, unknown>) => Promise<unknown>> | null = null;
 let initFailure: string | null = null;
+type PipelineFactory = (
+  task: string,
+  model: string,
+  options?: Record<string, unknown>,
+) => Promise<(input: string[] | string, options: Record<string, unknown>) => Promise<unknown>>;
 
 function isLocalEmbeddingsEnabled() {
   const value = (process.env.SLM_EMBEDDINGS_LOCAL_ENABLED || "true").trim().toLowerCase();
@@ -80,7 +85,7 @@ async function getExtractor() {
       env.allowLocalModels = true;
       env.useBrowserCache = false;
     }
-    return await (transformers as unknown as { pipeline: Function }).pipeline("feature-extraction", model, {
+    return await (transformers as unknown as { pipeline: PipelineFactory }).pipeline("feature-extraction", model, {
       quantized: true,
     });
   })().catch((error) => {

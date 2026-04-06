@@ -1,6 +1,7 @@
 import { v } from "convex/values";
 import { makeFunctionReference } from "convex/server";
-import { action, mutation, query } from "./_generated/server";
+import type { Doc } from "./_generated/dataModel";
+import { action, mutation, query, type MutationCtx } from "./_generated/server";
 import { DEFAULT_MIMICRY_LEVEL } from "./lib/constants";
 import { getConfig } from "./lib/config";
 
@@ -9,10 +10,91 @@ const refSetMimicry = makeFunctionReference<"mutation">("style:setMimicry");
 const HUMOR_SIGNAL_PATTERN = /\b(lol|lmao|rofl|haha|hehe|banter|joke|meme|funny|dead)\b/i;
 const STATUS_BANTER_PATTERN = /\b(status|story|update)\b/i;
 const LAUGH_REACTION_EMOJIS = new Set(["😂", "🤣", "😹", "😆", "😄", "😁", "😅"]);
+const LEARNED_TRAIT_LIMITS = {
+  commonPhrases: 40,
+  punctuationStyle: 30,
+  humorNotes: 30,
+  spellingNotes: 30,
+} as const;
+type LearnedTraitField = keyof typeof LEARNED_TRAIT_LIMITS;
 
 function mergeLimited(base: string[], additions: string[], limit: number) {
   const merged = [...new Set([...base, ...additions].map((item) => item.trim()).filter(Boolean))];
   return merged.slice(0, limit);
+}
+
+function normalizeTraitValue(value: string) {
+  return value.trim().replace(/\s+/g, " ");
+}
+
+function normalizeTraitList(values: string[], limit: number) {
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const value of values) {
+    const clean = normalizeTraitValue(value);
+    const key = clean.toLowerCase();
+    if (!clean || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    normalized.push(clean);
+    if (normalized.length >= limit) {
+      break;
+    }
+  }
+  return normalized;
+}
+
+function arrayEquals(left: string[], right: string[]) {
+  if (left.length !== right.length) {
+    return false;
+  }
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function getTraitValues(profile: Doc<"styleProfiles">, trait: LearnedTraitField) {
+  switch (trait) {
+    case "commonPhrases":
+      return profile.commonPhrases || [];
+    case "punctuationStyle":
+      return profile.punctuationStyle || [];
+    case "humorNotes":
+      return profile.humorNotes || [];
+    case "spellingNotes":
+      return profile.spellingNotes || [];
+  }
+}
+
+function makeTraitPatch(trait: LearnedTraitField, values: string[]) {
+  switch (trait) {
+    case "commonPhrases":
+      return { commonPhrases: values };
+    case "punctuationStyle":
+      return { punctuationStyle: values };
+    case "humorNotes":
+      return { humorNotes: values };
+    case "spellingNotes":
+      return { spellingNotes: values };
+  }
+}
+
+async function snapshotProfile(ctx: MutationCtx, profile: Doc<"styleProfiles">, reason: string, createdAt: number) {
+  await ctx.db.insert("styleProfileHistory", {
+    scope: profile.scope,
+    threadId: profile.threadId,
+    mimicryLevel: profile.mimicryLevel,
+    commonPhrases: profile.commonPhrases || [],
+    punctuationStyle: profile.punctuationStyle || [],
+    humorNotes: profile.humorNotes || [],
+    spellingNotes: profile.spellingNotes || [],
+    reason,
+    createdAt,
+  });
 }
 
 function extractReusablePhrases(text: string) {
@@ -130,17 +212,7 @@ export const setMimicry = mutation({
 
     if (existing) {
       if (Math.abs(existing.mimicryLevel - bounded) >= 0.0001) {
-        await ctx.db.insert("styleProfileHistory", {
-          scope: existing.scope,
-          threadId: existing.threadId,
-          mimicryLevel: existing.mimicryLevel,
-          commonPhrases: existing.commonPhrases || [],
-          punctuationStyle: existing.punctuationStyle || [],
-          humorNotes: existing.humorNotes || [],
-          spellingNotes: existing.spellingNotes || [],
-          reason: "pre-mimicry-update",
-          createdAt: Date.now(),
-        });
+        await snapshotProfile(ctx, existing, "pre-mimicry-update", Date.now());
       }
       await ctx.db.patch(existing._id, {
         mimicryLevel: bounded,
@@ -192,17 +264,7 @@ export const rollbackHistory = mutation({
     const now = Date.now();
 
     if (existing) {
-      await ctx.db.insert("styleProfileHistory", {
-        scope: existing.scope,
-        threadId: existing.threadId,
-        mimicryLevel: existing.mimicryLevel,
-        commonPhrases: existing.commonPhrases || [],
-        punctuationStyle: existing.punctuationStyle || [],
-        humorNotes: existing.humorNotes || [],
-        spellingNotes: existing.spellingNotes || [],
-        reason: "pre-rollback-snapshot",
-        createdAt: now,
-      });
+      await snapshotProfile(ctx, existing, "pre-rollback-snapshot", now);
 
       await ctx.db.patch(existing._id, {
         mimicryLevel: row.mimicryLevel,
@@ -225,6 +287,144 @@ export const rollbackHistory = mutation({
       spellingNotes: row.spellingNotes,
       updatedAt: now,
     });
+  },
+});
+
+export const updateLearnedTrait = mutation({
+  args: {
+    trait: v.union(v.literal("commonPhrases"), v.literal("punctuationStyle"), v.literal("humorNotes"), v.literal("spellingNotes")),
+    value: v.string(),
+    previousValue: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const trait = args.trait as LearnedTraitField;
+    const limit = LEARNED_TRAIT_LIMITS[trait];
+    const nextValue = normalizeTraitValue(args.value);
+    if (!nextValue) {
+      throw new Error("Trait value cannot be empty.");
+    }
+
+    const profile = await ctx.db
+      .query("styleProfiles")
+      .withIndex("by_scope", (q) => q.eq("scope", "global"))
+      .first();
+    const now = Date.now();
+
+    if (!profile) {
+      const seedValues = normalizeTraitList([nextValue], limit);
+      const patch = makeTraitPatch(trait, seedValues);
+      return await ctx.db.insert("styleProfiles", {
+        scope: "global",
+        mimicryLevel: DEFAULT_MIMICRY_LEVEL,
+        commonPhrases: patch.commonPhrases || [],
+        punctuationStyle: patch.punctuationStyle || [],
+        humorNotes: patch.humorNotes || [],
+        spellingNotes: patch.spellingNotes || [],
+        updatedAt: now,
+      });
+    }
+
+    const currentValues = normalizeTraitList(getTraitValues(profile, trait), limit);
+    const previousValue = normalizeTraitValue(args.previousValue || "");
+    let nextValues = currentValues;
+
+    if (args.previousValue !== undefined) {
+      let replaced = false;
+      nextValues = currentValues.map((item) => {
+        if (!replaced && item.toLowerCase() === previousValue.toLowerCase()) {
+          replaced = true;
+          return nextValue;
+        }
+        return item;
+      });
+      if (!replaced) {
+        nextValues = [...nextValues, nextValue];
+      }
+    } else {
+      nextValues = [...currentValues, nextValue];
+    }
+
+    nextValues = normalizeTraitList(nextValues, limit);
+    if (arrayEquals(currentValues, nextValues)) {
+      return profile._id;
+    }
+
+    await snapshotProfile(ctx, profile, `pre-trait-update:${trait}`, now);
+    await ctx.db.patch(profile._id, {
+      ...makeTraitPatch(trait, nextValues),
+      updatedAt: now,
+    });
+    return profile._id;
+  },
+});
+
+export const removeLearnedTrait = mutation({
+  args: {
+    trait: v.union(v.literal("commonPhrases"), v.literal("punctuationStyle"), v.literal("humorNotes"), v.literal("spellingNotes")),
+    value: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const trait = args.trait as LearnedTraitField;
+    const limit = LEARNED_TRAIT_LIMITS[trait];
+    const target = normalizeTraitValue(args.value);
+    if (!target) {
+      throw new Error("Trait value cannot be empty.");
+    }
+
+    const profile = await ctx.db
+      .query("styleProfiles")
+      .withIndex("by_scope", (q) => q.eq("scope", "global"))
+      .first();
+    if (!profile) {
+      return null;
+    }
+
+    const currentValues = normalizeTraitList(getTraitValues(profile, trait), limit);
+    const nextValues = normalizeTraitList(
+      currentValues.filter((item) => item.toLowerCase() !== target.toLowerCase()),
+      limit,
+    );
+    if (arrayEquals(currentValues, nextValues)) {
+      return profile._id;
+    }
+
+    const now = Date.now();
+    await snapshotProfile(ctx, profile, `pre-trait-remove:${trait}`, now);
+    await ctx.db.patch(profile._id, {
+      ...makeTraitPatch(trait, nextValues),
+      updatedAt: now,
+    });
+    return profile._id;
+  },
+});
+
+export const clearLearnedTraitSection = mutation({
+  args: {
+    trait: v.union(v.literal("commonPhrases"), v.literal("punctuationStyle"), v.literal("humorNotes"), v.literal("spellingNotes")),
+  },
+  handler: async (ctx, args) => {
+    const trait = args.trait as LearnedTraitField;
+    const limit = LEARNED_TRAIT_LIMITS[trait];
+    const profile = await ctx.db
+      .query("styleProfiles")
+      .withIndex("by_scope", (q) => q.eq("scope", "global"))
+      .first();
+    if (!profile) {
+      return null;
+    }
+
+    const currentValues = normalizeTraitList(getTraitValues(profile, trait), limit);
+    if (currentValues.length === 0) {
+      return profile._id;
+    }
+
+    const now = Date.now();
+    await snapshotProfile(ctx, profile, `pre-trait-clear:${trait}`, now);
+    await ctx.db.patch(profile._id, {
+      ...makeTraitPatch(trait, []),
+      updatedAt: now,
+    });
+    return profile._id;
   },
 });
 

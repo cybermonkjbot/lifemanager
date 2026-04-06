@@ -24,6 +24,8 @@
 .DS_Store
 *.pem
 .wa_auth/
+.slm/*.pid
+.slm/self-improvement/
 
 # debug
 npm-debug.log*

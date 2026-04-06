@@ -7,6 +7,8 @@
     "dev:next": "next dev",
     "dev:convex": "convex dev",
     "worker": "bun run src/worker/index.ts",
+    "self-improve": "bun run scripts/self-improvement-cycle.ts once",
+    "self-improve:daemon": "bun run scripts/self-improvement-cycle.ts daemon",
     "dev:all": "concurrently -n next,convex,worker -c cyan,magenta,yellow \"bun run dev:next\" \"bun run dev:convex\" \"bun run worker\"",
     "build": "next build",
     "start": "next start",

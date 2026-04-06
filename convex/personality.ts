@@ -24,11 +24,7 @@ type PersonalityProfileView = {
 
 type PromptProfileSource = "manual" | "auto";
 
-const DAY_MS = 24 * 60 * 60 * 1000;
 const MAX_PROMPT_PROFILE_CHARS = 2400;
-const AUTO_MIN_LOOKBACK_DAYS = 7;
-const AUTO_MAX_LOOKBACK_DAYS = 365;
-const AUTO_MAX_MESSAGES = 800;
 const EMOJI_REGEX = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu;
 
 const DEFAULT_PERSONALITY_PROFILES: DefaultPersonalityProfile[] = [
@@ -71,13 +67,6 @@ function clamp01(value: number) {
     return 0.7;
   }
   return Math.max(0, Math.min(value, 1));
-}
-
-function clampWhole(value: number, min: number, max: number, fallback: number) {
-  if (!Number.isFinite(value)) {
-    return fallback;
-  }
-  return Math.round(Math.max(min, Math.min(value, max)));
 }
 
 function normalizeSlug(value: string) {
@@ -327,14 +316,16 @@ function describeQuestionStyle(questionRate: number) {
   return "Use questions selectively and only when they feel natural.";
 }
 
-function buildAutoPromptProfile(messages: Doc<"messages">[], lookbackDays: number) {
+function buildAutoPromptProfile(messages: Doc<"messages">[], syncedHistoryCount: number) {
   const outbound = messages.filter((message) => message.direction === "outbound" && normalizeCompactText(message.text, 800));
   const inboundCount = messages.length - outbound.length;
 
   if (outbound.length === 0) {
     const fallback = [
       "Use this conversation-specific style guide.",
-      `- Built from the last ${lookbackDays} days of chat history.`,
+      syncedHistoryCount > 0
+        ? `- Built from all available conversation history, including ${syncedHistoryCount} WhatsApp synced history messages.`
+        : "- Built from all available conversation history.",
       "- Keep the tone warm, clear, and grounded.",
       "- Stay concise unless extra detail is clearly needed.",
       "- Mirror the contact's current mood and pace.",
@@ -377,7 +368,9 @@ function buildAutoPromptProfile(messages: Doc<"messages">[], lookbackDays: numbe
 
   const lines = [
     "Use this conversation-specific style guide.",
-    `- Built from the last ${lookbackDays} days (${messages.length} messages, ${outbound.length} sent by me).`,
+    syncedHistoryCount > 0
+      ? `- Built from all available conversation history (${messages.length} total messages, ${outbound.length} sent by me), including ${syncedHistoryCount} WhatsApp synced history messages.`
+      : `- Built from all available conversation history (${messages.length} messages, ${outbound.length} sent by me).`,
     `- ${describeLengthStyle(averageWords)}`,
     `- ${describeEmojiStyle(emojiRate)}`,
     `- ${describeEnergyStyle(exclamationRate)}`,
@@ -709,32 +702,33 @@ export const autoBuildThreadPromptProfile = mutation({
     lookbackDays: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const lookbackDays = clampWhole(args.lookbackDays ?? AUTO_MAX_LOOKBACK_DAYS, AUTO_MIN_LOOKBACK_DAYS, AUTO_MAX_LOOKBACK_DAYS, AUTO_MAX_LOOKBACK_DAYS);
-    const windowStart = Date.now() - lookbackDays * DAY_MS;
-
-    const messages = await ctx.db
+    const messages: Doc<"messages">[] = [];
+    const source = ctx.db
       .query("messages")
-      .withIndex("by_thread_messageAt", (q) => q.eq("threadId", args.threadId).gte("messageAt", windowStart))
-      .order("desc")
-      .take(AUTO_MAX_MESSAGES);
-
-    if (messages.length === 0) {
-      throw new Error("No conversation messages found in the selected lookback window.");
+      .withIndex("by_thread_messageAt", (q) => q.eq("threadId", args.threadId));
+    let syncedHistoryCount = 0;
+    for await (const message of source) {
+      if (message.origin === "history_sync" || message.origin === "history_fetch") {
+        syncedHistoryCount += 1;
+      }
+      messages.push(message);
     }
 
-    const profile = buildAutoPromptProfile(messages, lookbackDays);
+    if (messages.length === 0) {
+      throw new Error("No conversation messages found for this thread.");
+    }
+
+    const profile = buildAutoPromptProfile(messages, syncedHistoryCount);
     const settingId = await savePromptProfile(ctx, {
       threadId: args.threadId,
       promptProfile: profile.promptProfile,
       source: "auto",
-      lookbackDays,
       messageCount: profile.messageCount,
     });
 
     return {
       settingId,
       promptProfile: profile.promptProfile,
-      lookbackDays,
       messageCount: profile.messageCount,
       outboundCount: profile.outboundCount,
       inboundCount: profile.inboundCount,

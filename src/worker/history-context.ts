@@ -48,14 +48,6 @@ type HistoryFetchConfig = {
   maxRounds: number;
 };
 
-type HistorySearchOverride = {
-  lines: string[];
-  candidateCount: number;
-  semanticRerankCount: number;
-  confidence: number;
-  retrievalStage: "lexical" | "semantic" | "semantic_fallback";
-};
-
 type WasocketLike = {
   fetchMessageHistory?: (count: number, oldestMsgKey: { remoteJid?: string; id?: string; fromMe?: boolean; participant?: string }, oldestMsgTimestamp: number) => Promise<string>;
 };

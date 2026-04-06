@@ -58,12 +58,11 @@ type ThreadPersonalityFormProps = {
 
 type PromptProfileFormProps = {
   initialPromptProfile: string;
-  initialLookbackDays: number;
   source?: "manual" | "auto";
   messageCount?: number;
   updatedAt?: number;
   pending: boolean;
-  onAutoBuild: (lookbackDays: number) => void;
+  onAutoBuild: () => void;
   onSaveManual: (promptProfile: string) => void;
 };
 
@@ -202,13 +201,6 @@ function clamp01(value: number) {
   return Math.max(0, Math.min(value, 1));
 }
 
-function clampLookbackDays(value: number) {
-  if (!Number.isFinite(value)) {
-    return 365;
-  }
-  return Math.round(Math.max(7, Math.min(value, 365)));
-}
-
 function ThreadPersonalityForm({
   profiles,
   initialProfileSlug,
@@ -290,7 +282,6 @@ function ThreadPersonalityForm({
 
 function PromptProfileForm({
   initialPromptProfile,
-  initialLookbackDays,
   source,
   messageCount,
   updatedAt,
@@ -299,45 +290,22 @@ function PromptProfileForm({
   onSaveManual,
 }: PromptProfileFormProps) {
   const [promptProfile, setPromptProfile] = useState(initialPromptProfile);
-  const [lookbackDays, setLookbackDays] = useState(clampLookbackDays(initialLookbackDays));
 
   const promptChanged = useMemo(() => promptProfile.trim() !== initialPromptProfile.trim(), [initialPromptProfile, promptProfile]);
-  const normalizedLookback = clampLookbackDays(lookbackDays);
 
   return (
     <div className="personality-config-block">
       <h3>Prompt Profile Builder</h3>
-      <p className="queue-meta">Auto-build this conversation profile from up to 1 year of history, then edit manually if needed.</p>
-
-      <label className="setup-input-group">
-        <span className="queue-meta">Auto-build lookback window (days)</span>
-        <input
-          type="number"
-          min={7}
-          max={365}
-          step={1}
-          value={lookbackDays}
-          onChange={(event) => {
-            const parsed = Number(event.target.value);
-            if (!Number.isFinite(parsed)) {
-              setLookbackDays(365);
-              return;
-            }
-            setLookbackDays(parsed);
-          }}
-          disabled={pending}
-          aria-disabled={pending}
-        />
-      </label>
+      <p className="queue-meta">Auto-build this conversation profile from all available thread history, including WhatsApp synced history, then edit manually if needed.</p>
 
       <button
         type="button"
         className="btn btn-primary"
-        onClick={() => onAutoBuild(normalizedLookback)}
+        onClick={onAutoBuild}
         disabled={pending}
         aria-disabled={pending}
       >
-        {pending ? "Building..." : `Auto-Build From ${normalizedLookback} Days`}
+        {pending ? "Building..." : "Auto-Build From All History"}
       </button>
 
       <label className="setup-input-group">
@@ -689,7 +657,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
     );
   };
 
-  const autoBuildPromptProfile = (lookbackDays: number) => {
+  const autoBuildPromptProfile = () => {
     if (!selectedThreadId) {
       return;
     }
@@ -699,7 +667,6 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
       async () => {
         await autoBuildThreadPromptProfile({
           threadId: selectedThreadId as Id<"threads">,
-          lookbackDays: clampLookbackDays(lookbackDays),
         });
       },
       {
@@ -1071,7 +1038,6 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
               <PromptProfileForm
                 key={promptProfileFormKey}
                 initialPromptProfile={threadPersonality?.threadPromptProfile || ""}
-                initialLookbackDays={threadPersonality?.threadPromptProfileLookbackDays || 365}
                 source={threadPersonality?.threadPromptProfileSource}
                 messageCount={threadPersonality?.threadPromptProfileMessageCount}
                 updatedAt={threadPersonality?.threadPromptProfileUpdatedAt}
