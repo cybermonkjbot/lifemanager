@@ -31,6 +31,12 @@ export type AppConfig = {
   inboundMergeWindowMs: number;
   inboundConcurrency: number;
   outboxSendConcurrency: number;
+  quietHoursEnabled: boolean;
+  quietHoursStartHour: number;
+  quietHoursEndHour: number;
+  sendRateWindowMinutes: number;
+  sendMaxPerThreadInWindow: number;
+  sendMaxGlobalInWindow: number;
   outreachEnabled: boolean;
   outreachCadenceHours: number;
   outreachMaxContactsPerRun: number;
@@ -68,6 +74,12 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
   inboundMergeWindowMs: 45_000,
   inboundConcurrency: 4,
   outboxSendConcurrency: 4,
+  quietHoursEnabled: false,
+  quietHoursStartHour: 23,
+  quietHoursEndHour: 7,
+  sendRateWindowMinutes: 60,
+  sendMaxPerThreadInWindow: 4,
+  sendMaxGlobalInWindow: 40,
   outreachEnabled: false,
   outreachCadenceHours: 36,
   outreachMaxContactsPerRun: 3,
@@ -160,6 +172,26 @@ export async function getConfig(ctx: QueryCtx | MutationCtx): Promise<AppConfig>
     inboundConcurrency: Math.round(clamp(parseNumber(map.get("inboundConcurrency"), DEFAULT_APP_CONFIG.inboundConcurrency), 1, 16)),
     outboxSendConcurrency: Math.round(
       clamp(parseNumber(map.get("outboxSendConcurrency"), DEFAULT_APP_CONFIG.outboxSendConcurrency), 1, 16),
+    ),
+    quietHoursEnabled: parseBoolean(map.get("quietHoursEnabled"), DEFAULT_APP_CONFIG.quietHoursEnabled),
+    quietHoursStartHour: Math.round(
+      clamp(parseNumber(map.get("quietHoursStartHour"), DEFAULT_APP_CONFIG.quietHoursStartHour), 0, 23),
+    ),
+    quietHoursEndHour: Math.round(
+      clamp(parseNumber(map.get("quietHoursEndHour"), DEFAULT_APP_CONFIG.quietHoursEndHour), 0, 23),
+    ),
+    sendRateWindowMinutes: Math.round(
+      clamp(parseNumber(map.get("sendRateWindowMinutes"), DEFAULT_APP_CONFIG.sendRateWindowMinutes), 5, 24 * 60),
+    ),
+    sendMaxPerThreadInWindow: Math.round(
+      clamp(
+        parseNumber(map.get("sendMaxPerThreadInWindow"), DEFAULT_APP_CONFIG.sendMaxPerThreadInWindow),
+        1,
+        100,
+      ),
+    ),
+    sendMaxGlobalInWindow: Math.round(
+      clamp(parseNumber(map.get("sendMaxGlobalInWindow"), DEFAULT_APP_CONFIG.sendMaxGlobalInWindow), 1, 1000),
     ),
     outreachEnabled: parseBoolean(map.get("outreachEnabled"), DEFAULT_APP_CONFIG.outreachEnabled),
     outreachCadenceHours: Math.round(

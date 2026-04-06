@@ -18,10 +18,86 @@ export const health = query({
       .order("desc")
       .take(12);
 
+    const providerWindow = await ctx.db
+      .query("providerRuns")
+      .withIndex("by_createdAt")
+      .order("desc")
+      .take(240);
+    const successCount = providerWindow.filter((row) => row.status === "success").length;
+    const errorCount = providerWindow.filter((row) => row.status === "error").length;
+    const totalProviderRuns = providerWindow.length;
+    const fallbackCount = providerWindow.filter((row) => row.status === "success" && row.provider !== "azure").length;
+    const errorRate = totalProviderRuns > 0 ? errorCount / totalProviderRuns : 0;
+    const fallbackRate = successCount > 0 ? fallbackCount / successCount : 0;
+    const latencies = providerWindow.map((row) => row.latencyMs).sort((a, b) => a - b);
+    const p95LatencyMs = latencies.length > 0 ? latencies[Math.floor((latencies.length - 1) * 0.95)] : 0;
+
+    const openGuardrails = (await ctx.db.query("guardrailEvents").withIndex("by_createdAt").order("desc").take(300)).filter(
+      (row) => !row.resolvedAt,
+    ).length;
+    const pendingOutbox = await ctx.db
+      .query("outbox")
+      .withIndex("by_status_sendAt", (q) => q.eq("status", "pending"))
+      .order("asc")
+      .take(250);
+    const dueNow = pendingOutbox.filter((row) => row.sendAt <= Date.now()).length;
+    const failedOutbox = await ctx.db
+      .query("outbox")
+      .withIndex("by_status_sendAt", (q) => q.eq("status", "failed"))
+      .order("desc")
+      .take(120);
+
+    const alerts: string[] = [];
+    if (errorRate > 0.2 && totalProviderRuns >= 20) {
+      alerts.push(`High provider error rate: ${(errorRate * 100).toFixed(1)}% over last ${totalProviderRuns} runs.`);
+    }
+    if (fallbackRate > 0.45 && successCount >= 20) {
+      alerts.push(`Fallback dependency elevated: ${(fallbackRate * 100).toFixed(1)}% of successful runs are non-Azure.`);
+    }
+    if (openGuardrails >= 8) {
+      alerts.push(`Guardrail queue is growing (${openGuardrails} unresolved flags).`);
+    }
+    if (dueNow >= 25) {
+      alerts.push(`Outbox due queue is elevated (${dueNow} pending sends due now).`);
+    }
+
     return {
       config,
       latestEvents,
       latestProviderRuns,
+      metrics: {
+        providerRunsWindow: totalProviderRuns,
+        providerSuccess: successCount,
+        providerErrors: errorCount,
+        providerErrorRate: errorRate,
+        providerFallbackRate: fallbackRate,
+        providerP95LatencyMs: p95LatencyMs,
+        openGuardrails,
+        pendingOutbox: pendingOutbox.length,
+        dueOutbox: dueNow,
+        failedOutboxRecent: failedOutbox.length,
+      },
+      alerts,
+      runbooks: [
+        {
+          title: "Reconnect Storm",
+          key: "reconnect-storm",
+          steps:
+            "Pause autonomy, restart worker once, verify setup status is connected, then inspect latest system events for repeated socket resets.",
+        },
+        {
+          title: "Provider Outage",
+          key: "provider-outage",
+          steps:
+            "Switch to broader fallback mode, validate test reply in System tab, and monitor provider error rate until stable.",
+        },
+        {
+          title: "Outbox Backlog",
+          key: "outbox-backlog",
+          steps:
+            "Review due queue size, inspect failed outbox rows, and reduce outbound throttles only if policy-safe.",
+        },
+      ],
     };
   },
 });

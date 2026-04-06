@@ -1,7 +1,7 @@
 import type { Doc } from "../_generated/dataModel";
 
 export type ThreadKind = "direct" | "group" | "broadcast_or_system";
-export type EligibilityReason = "group_ignored" | "archived" | "broadcast_or_system" | "explicit_ignore";
+export type EligibilityReason = "group_ignored" | "archived" | "broadcast_or_system" | "explicit_ignore" | "temporary_ghost";
 
 export type EligibilityResult =
   | {
@@ -42,10 +42,12 @@ export function classifyThreadKind(args: { jid: string; isGroupHint?: boolean })
 }
 
 export function resolveThreadEligibility(args: {
-  thread: Pick<Doc<"threads">, "jid" | "isIgnored" | "isArchived" | "threadKind">;
+  thread: Pick<Doc<"threads">, "jid" | "isIgnored" | "isArchived" | "threadKind" | "ghostedUntil">;
   ignoreGroupsByDefault: boolean;
   explicitIgnoreEnabled: boolean;
+  nowMs?: number;
 }): EligibilityResult {
+  const nowMs = args.nowMs ?? Date.now();
   const threadKind = args.thread.threadKind || classifyThreadKind({ jid: args.thread.jid });
 
   if (threadKind === "broadcast_or_system") {
@@ -77,6 +79,13 @@ export function resolveThreadEligibility(args: {
     };
   }
 
+  if ((args.thread.ghostedUntil || 0) > nowMs) {
+    return {
+      allowed: false,
+      reason: "temporary_ghost",
+    };
+  }
+
   return {
     allowed: true,
   };
@@ -91,6 +100,9 @@ export function eligibilityReasonLabel(reason: EligibilityReason) {
   }
   if (reason === "broadcast_or_system") {
     return "broadcast/system thread";
+  }
+  if (reason === "temporary_ghost") {
+    return "temporary ghost mode active";
   }
   return "explicit ignore rule";
 }

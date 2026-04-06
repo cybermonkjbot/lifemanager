@@ -27,6 +27,7 @@ import {
   parseInboundMessage,
   type ParsedInboundMessage,
 } from "./whatsapp";
+import { transcribeWithWhisperCpp, type WhisperTranscriptionResult } from "./stt";
 
 const logger = pino({
   name: "slm-worker",
@@ -453,10 +454,61 @@ async function run() {
   const chatArchiveState = new Map<string, { isArchived: boolean; archivedAt: number }>();
   const inboundThreadLanes = new Map<string, Promise<void>>();
   const outboxThreadLanes = new Map<string, Promise<void>>();
+  const automatedOutboundIds = new Map<string, number>();
+  const automatedOutboundThreadSends = new Map<string, number>();
   let inboundConcurrency = Math.round(clamp(Number(process.env.SLM_INBOUND_CONCURRENCY || 4), 1, 16));
   let outboxSendConcurrency = Math.round(clamp(Number(process.env.SLM_OUTBOX_CONCURRENCY || 4), 1, 16));
   const runInboundWithLimit = createDynamicLimiter(() => inboundConcurrency);
   const runOutboxWithLimit = createDynamicLimiter(() => outboxSendConcurrency);
+  const pruneAutomatedOutboundIds = () => {
+    const cutoff = Date.now() - 5 * 60 * 1000;
+    for (const [id, seenAt] of automatedOutboundIds.entries()) {
+      if (seenAt < cutoff) {
+        automatedOutboundIds.delete(id);
+      }
+    }
+    for (const [threadJid, seenAt] of automatedOutboundThreadSends.entries()) {
+      if (seenAt < cutoff) {
+        automatedOutboundThreadSends.delete(threadJid);
+      }
+    }
+  };
+  const rememberAutomatedOutboundId = (messageId: string | undefined) => {
+    if (!messageId) {
+      return;
+    }
+    pruneAutomatedOutboundIds();
+    automatedOutboundIds.set(messageId, Date.now());
+  };
+  const consumeAutomatedOutboundId = (messageId: string | undefined) => {
+    if (!messageId) {
+      return false;
+    }
+    pruneAutomatedOutboundIds();
+    const seen = automatedOutboundIds.has(messageId);
+    if (seen) {
+      automatedOutboundIds.delete(messageId);
+    }
+    return seen;
+  };
+  const rememberAutomatedThreadSend = (threadJid: string) => {
+    if (!threadJid) {
+      return;
+    }
+    pruneAutomatedOutboundIds();
+    automatedOutboundThreadSends.set(threadJid, Date.now());
+  };
+  const isLikelyAutomatedThreadSend = (threadJid: string, messageAt: number) => {
+    if (!threadJid) {
+      return false;
+    }
+    pruneAutomatedOutboundIds();
+    const lastSentAt = automatedOutboundThreadSends.get(threadJid);
+    if (!lastSentAt) {
+      return false;
+    }
+    return Math.abs(lastSentAt - messageAt) <= 15_000;
+  };
 
   const applyRuntimeConcurrency = (runtimeSettings: RuntimeSettings | null) => {
     if (!runtimeSettings) {
@@ -547,6 +599,56 @@ async function run() {
       .catch(() => undefined);
   };
 
+  const processOwnMessage = async (message: {
+    key: { id?: string | null; remoteJid?: string | null; participant?: string | null };
+    message?: unknown;
+    messageTimestamp?: unknown;
+  }) => {
+    try {
+      const outboundMessageId = message.key.id || undefined;
+      const rawThreadJid = getThreadJid(message.key as Parameters<typeof getThreadJid>[0]);
+      const senderJid = getSenderJid(message.key as Parameters<typeof getSenderJid>[0]);
+      const isStatusBroadcast = rawThreadJid === "status@broadcast";
+      const threadJid = isStatusBroadcast ? senderJid : rawThreadJid;
+      if (!threadJid) {
+        return;
+      }
+      const messageAt = normalizeIncomingMessageTimestamp(message.messageTimestamp, Date.now());
+      if (consumeAutomatedOutboundId(outboundMessageId) || isLikelyAutomatedThreadSend(threadJid, messageAt)) {
+        return;
+      }
+
+      const parsed = parseInboundMessage(message.message as Parameters<typeof parseInboundMessage>[0]);
+      if (parsed.kind === "unsupported") {
+        return;
+      }
+
+      const messageType: "text" | "reaction" | "sticker" | "meme" =
+        parsed.kind === "reaction" ? "reaction" : parsed.kind === "sticker" ? "sticker" : "text";
+
+      await convex.mutation(convexRefs.outboxSuppressForManualIntervention, {
+        threadJid,
+        whatsappMessageId: outboundMessageId,
+        text: parsed.text,
+        messageType,
+        reactionEmoji: parsed.kind === "reaction" ? parsed.emoji : undefined,
+        reactionTargetWhatsAppMessageId: parsed.kind === "reaction" ? parsed.targetWhatsAppMessageId : undefined,
+        mediaCaption: parsed.kind === "sticker" || parsed.kind === "image" ? parsed.caption : undefined,
+        messageAt,
+      });
+    } catch (error) {
+      const err = error instanceof Error ? error.message : String(error);
+      logger.warn({ err, messageKey: message.key?.id }, "Own outbound processing error");
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: "outbound.manual.sync_error",
+          detail: err.slice(0, 320),
+        })
+        .catch(() => undefined);
+    }
+  };
+
   const processInboundMessage = async (message: {
     key: { id?: string | null; fromMe?: boolean | null; remoteJid?: string | null; participant?: string | null };
     pushName?: string | null;
@@ -559,6 +661,8 @@ async function run() {
       }
 
       const parsed = parseInboundMessage(message.message as Parameters<typeof parseInboundMessage>[0]);
+      let effectiveParsed: ParsedInboundMessage = parsed;
+      let audioTranscription: WhisperTranscriptionResult | null = null;
       const rawThreadJid = getThreadJid(message.key as Parameters<typeof getThreadJid>[0]);
       const senderJid = getSenderJid(message.key as Parameters<typeof getSenderJid>[0]);
       const isStatusBroadcast = rawThreadJid === "status@broadcast";
@@ -575,6 +679,47 @@ async function run() {
         return;
       }
 
+      if (parsed.kind === "audio") {
+        try {
+          const mediaBytes = await downloadMediaMessage(
+            message as Parameters<typeof downloadMediaMessage>[0],
+            "buffer",
+            {},
+            {
+              reuploadRequest: (msg) => sock.updateMediaMessage(msg),
+              logger,
+            },
+          );
+          audioTranscription = await transcribeWithWhisperCpp({
+            audioBytes: Buffer.from(mediaBytes),
+            mimeType: parsed.mimeType,
+          });
+
+          if (audioTranscription.status === "success") {
+            effectiveParsed = {
+              ...parsed,
+              text: audioTranscription.text,
+            };
+          } else {
+            effectiveParsed = {
+              ...parsed,
+              text: parsed.isVoiceNote ? "[Voice note] (transcription unavailable)" : "[Audio] (transcription unavailable)",
+            };
+          }
+        } catch (error) {
+          const err = error instanceof Error ? error.message : String(error);
+          audioTranscription = {
+            status: "error",
+            error: err,
+            latencyMs: 0,
+          };
+          effectiveParsed = {
+            ...parsed,
+            text: parsed.isVoiceNote ? "[Voice note] (transcription unavailable)" : "[Audio] (transcription unavailable)",
+          };
+        }
+      }
+
       const messageAt = normalizeIncomingMessageTimestamp(message.messageTimestamp, Date.now());
       const threadKind = classifyThreadKindFromJid(threadJid);
       const archivedState = chatArchiveState.get(threadJid);
@@ -583,11 +728,11 @@ async function run() {
         threadJid,
         senderJid,
         senderTitle: message.pushName || undefined,
-        text: parsed.text,
-        messageType: parsed.kind === "reaction" ? "reaction" : parsed.kind === "sticker" ? "sticker" : "text",
-        reactionEmoji: parsed.kind === "reaction" ? parsed.emoji : undefined,
-        reactionTargetWhatsAppMessageId: parsed.kind === "reaction" ? parsed.targetWhatsAppMessageId : undefined,
-        mediaCaption: parsed.kind === "sticker" || parsed.kind === "image" ? parsed.caption : undefined,
+        text: effectiveParsed.text,
+        messageType: effectiveParsed.kind === "reaction" ? "reaction" : effectiveParsed.kind === "sticker" ? "sticker" : "text",
+        reactionEmoji: effectiveParsed.kind === "reaction" ? effectiveParsed.emoji : undefined,
+        reactionTargetWhatsAppMessageId: effectiveParsed.kind === "reaction" ? effectiveParsed.targetWhatsAppMessageId : undefined,
+        mediaCaption: effectiveParsed.kind === "sticker" || effectiveParsed.kind === "image" ? effectiveParsed.caption : undefined,
         isGroup: isGroupJid(threadJid),
         threadKind,
         isArchived: archivedState?.isArchived,
@@ -599,7 +744,7 @@ async function run() {
         threadId: string;
         messageId: string;
         ignored: boolean;
-        blockedReason?: "group_ignored" | "archived" | "broadcast_or_system" | "explicit_ignore";
+        blockedReason?: "group_ignored" | "archived" | "broadcast_or_system" | "explicit_ignore" | "temporary_ghost";
         duplicate?: boolean;
         stale?: boolean;
         reactionTargetMessageId?: string;
@@ -621,6 +766,37 @@ async function run() {
       if (ingest.ignored) {
         logger.info({ threadJid, blockedReason: ingest.blockedReason }, "Inbound ignored by rules");
         return;
+      }
+
+      if (parsed.kind === "audio" && audioTranscription) {
+        if (audioTranscription.status === "success") {
+          await convex
+            .mutation(convexRefs.systemRecordEvent, {
+              source: "worker",
+              eventType: "inbound.audio.transcribed",
+              threadId: ingest.threadId as Id<"threads">,
+              detail: `${audioTranscription.latencyMs}ms · ${audioTranscription.modelPath} · source=${audioTranscription.usedSource}`,
+            })
+            .catch(() => undefined);
+        } else if (audioTranscription.status === "not_configured") {
+          await convex
+            .mutation(convexRefs.systemRecordEvent, {
+              source: "worker",
+              eventType: "inbound.audio.transcription_unavailable",
+              threadId: ingest.threadId as Id<"threads">,
+              detail: audioTranscription.reason.slice(0, 260),
+            })
+            .catch(() => undefined);
+        } else {
+          await convex
+            .mutation(convexRefs.systemRecordEvent, {
+              source: "worker",
+              eventType: "inbound.audio.transcription_error",
+              threadId: ingest.threadId as Id<"threads">,
+              detail: audioTranscription.error.slice(0, 260),
+            })
+            .catch(() => undefined);
+        }
       }
 
       const runtimeSettings = (await convex.query(convexRefs.settingsGet, {})) as RuntimeSettings | null;
@@ -645,7 +821,7 @@ async function run() {
       };
       let visualAnalysisPromise: Promise<Awaited<ReturnType<typeof describeInboundImageWithFallback>> | null> | null = null;
       const getVisualAnalysis = async () => {
-        if (parsed.kind !== "image" && parsed.kind !== "sticker") {
+        if (effectiveParsed.kind !== "image" && effectiveParsed.kind !== "sticker") {
           return null;
         }
         if (!visualAnalysisPromise) {
@@ -662,8 +838,8 @@ async function run() {
               );
               const visualAnalysis = await describeInboundImageWithFallback({
                 imageBytes: mediaBytes,
-                mimeType: parsed.mimeType,
-                caption: parsed.caption,
+                mimeType: effectiveParsed.mimeType,
+                caption: effectiveParsed.caption,
                 runtime: runtimeAiConfig,
               });
               await convex
@@ -707,8 +883,8 @@ async function run() {
       }
 
       if (isStatusBroadcast && (runtimeSettings?.statusReplyRequireFunny ?? true)) {
-        const funnySignalTextParts = [parsed.text];
-        if (parsed.kind === "image" || parsed.kind === "sticker") {
+        const funnySignalTextParts = [effectiveParsed.text];
+        if (effectiveParsed.kind === "image" || effectiveParsed.kind === "sticker") {
           const visualAnalysis = await getVisualAnalysis();
           if (visualAnalysis?.description) {
             funnySignalTextParts.push(visualAnalysis.description);
@@ -733,22 +909,25 @@ async function run() {
         }
       }
 
-      if ((runtimeSettings?.humorLearningEnabled ?? true) && (parsed.kind === "text" || parsed.kind === "reaction")) {
+      if (
+        (runtimeSettings?.humorLearningEnabled ?? true) &&
+        (effectiveParsed.kind === "text" || effectiveParsed.kind === "reaction")
+      ) {
         await convex
           .mutation(convexRefs.styleLearnFromHumorSignal, {
             threadId: ingest.threadId as Id<"threads">,
-            inboundText: parsed.text,
-            signalKind: parsed.kind === "reaction" ? "reaction" : "text",
-            reactionEmoji: parsed.kind === "reaction" ? parsed.emoji : undefined,
+            inboundText: effectiveParsed.text,
+            signalKind: effectiveParsed.kind === "reaction" ? "reaction" : "text",
+            reactionEmoji: effectiveParsed.kind === "reaction" ? effectiveParsed.emoji : undefined,
           })
           .catch(() => undefined);
       }
 
-      if (parsed.kind === "reaction") {
+      if (effectiveParsed.kind === "reaction") {
         return;
       }
 
-      if (parsed.kind === "sticker") {
+      if (effectiveParsed.kind === "sticker") {
         const visualAnalysis = await getVisualAnalysis();
         const stickerUnderstood = Boolean(
           visualAnalysis?.description && visualAnalysis.provider === "azure" && !visualAnalysis.error,
@@ -809,13 +988,13 @@ async function run() {
           }
         | null;
 
-      let inboundForPolicy: ParsedInboundMessage = parsed;
-      if (parsed.kind === "image" || parsed.kind === "sticker") {
+      let inboundForPolicy: ParsedInboundMessage = effectiveParsed;
+      if (effectiveParsed.kind === "image" || effectiveParsed.kind === "sticker") {
         const visualAnalysis = await getVisualAnalysis();
         if (visualAnalysis?.description) {
           inboundForPolicy = {
-            ...parsed,
-            text: `${parsed.text}\n${visualAnalysis.description}`,
+            ...effectiveParsed,
+            text: `${effectiveParsed.text}\n${visualAnalysis.description}`,
           };
         }
       }
@@ -828,18 +1007,18 @@ async function run() {
 
       const shouldGenerateAiText = outboundPolicy.mode === "text" || outboundPolicy.mode === "reaction_plus_text" || outboundPolicy.mode === "meme";
       let inboundTextForAi =
-        parsed.kind === "sticker"
-          ? `${parsed.text}${parsed.caption ? ` (${parsed.caption})` : ""}`
-          : parsed.text;
+        effectiveParsed.kind === "sticker"
+          ? `${effectiveParsed.text}${effectiveParsed.caption ? ` (${effectiveParsed.caption})` : ""}`
+          : effectiveParsed.text;
 
-      if ((parsed.kind === "image" || parsed.kind === "sticker") && shouldGenerateAiText) {
+      if ((effectiveParsed.kind === "image" || effectiveParsed.kind === "sticker") && shouldGenerateAiText) {
         const visualAnalysis = await getVisualAnalysis();
         if (visualAnalysis?.description) {
-          inboundTextForAi = `${parsed.text}\n\nVisual analysis: ${visualAnalysis.description}`;
+          inboundTextForAi = `${effectiveParsed.text}\n\nVisual analysis: ${visualAnalysis.description}`;
         } else {
-          inboundTextForAi = parsed.caption
-            ? `${parsed.text} ${parsed.caption}\n\nVisual analysis: Media received, but visual details could not be analyzed.`
-            : `${parsed.text}\n\nVisual analysis: Media received, but visual details could not be analyzed.`;
+          inboundTextForAi = effectiveParsed.caption
+            ? `${effectiveParsed.text} ${effectiveParsed.caption}\n\nVisual analysis: Media received, but visual details could not be analyzed.`
+            : `${effectiveParsed.text}\n\nVisual analysis: Media received, but visual details could not be analyzed.`;
         }
       }
 
@@ -1069,6 +1248,14 @@ async function run() {
 
       for (const message of event.messages) {
         const laneKey = getThreadJid(message.key) || `unknown:${message.key.id || Date.now()}`;
+        if (message.key.fromMe) {
+          void enqueueByThreadLane(inboundThreadLanes, laneKey, () =>
+            runInboundWithLimit(async () => {
+              await processOwnMessage(message);
+            }),
+          );
+          continue;
+        }
         void enqueueByThreadLane(inboundThreadLanes, laneKey, () =>
           runInboundWithLimit(async () => {
             await processInboundMessage(message);
@@ -1321,7 +1508,7 @@ async function run() {
                 threadId: item.threadId,
               })) as {
                 allowed: boolean;
-                reason?: "group_ignored" | "archived" | "broadcast_or_system" | "explicit_ignore";
+                reason?: "group_ignored" | "archived" | "broadcast_or_system" | "explicit_ignore" | "temporary_ghost";
                 detail?: string;
               };
               if (!eligibility.allowed) {
@@ -1348,9 +1535,16 @@ async function run() {
               }
 
               const hydrated = await hydrateAiOutreach(item, runtimeSettings);
+              const initialDisposition = (await convex.query(convexRefs.outboxGetSendDisposition, {
+                outboxId: item.outboxId,
+              })) as { canSend: boolean; reason?: string };
+              if (!initialDisposition.canSend) {
+                return;
+              }
 
               if (hydrated.reactionEmoji && hydrated.reactionTargetWhatsAppMessageId && hydrated.sendKind === "text") {
-                await sock.sendMessage(item.jid, {
+                rememberAutomatedThreadSend(item.jid);
+                const preReactionSent = await sock.sendMessage(item.jid, {
                   react: {
                     text: hydrated.reactionEmoji,
                     key: {
@@ -1360,6 +1554,7 @@ async function run() {
                     },
                   },
                 });
+                rememberAutomatedOutboundId(preReactionSent?.key?.id || undefined);
               }
 
               let sent: { key?: { id?: string | null } } | undefined;
@@ -1367,6 +1562,7 @@ async function run() {
                 if (!hydrated.reactionEmoji || !hydrated.reactionTargetWhatsAppMessageId) {
                   throw new Error("Reaction outbox item missing emoji or target message id.");
                 }
+                rememberAutomatedThreadSend(item.jid);
                 sent = await sock.sendMessage(item.jid, {
                   react: {
                     text: hydrated.reactionEmoji,
@@ -1382,6 +1578,7 @@ async function run() {
                   throw new Error("Sticker outbox item missing media asset id.");
                 }
                 const stickerBuffer = await fetchMediaAssetBuffer(hydrated.mediaAssetId);
+                rememberAutomatedThreadSend(item.jid);
                 sent = await sock.sendMessage(item.jid, {
                   sticker: stickerBuffer,
                 });
@@ -1392,7 +1589,15 @@ async function run() {
                 await sock.sendPresenceUpdate("composing", item.jid);
                 await convex.mutation(convexRefs.outboxMarkTyping, { outboxId: item.outboxId });
                 await sleep(hydrated.typingMs);
+                const postTypingDisposition = (await convex.query(convexRefs.outboxGetSendDisposition, {
+                  outboxId: item.outboxId,
+                })) as { canSend: boolean; reason?: string };
+                if (!postTypingDisposition.canSend) {
+                  await sock.sendPresenceUpdate("paused", item.jid);
+                  return;
+                }
                 const memeBuffer = await fetchMediaAssetBuffer(hydrated.mediaAssetId);
+                rememberAutomatedThreadSend(item.jid);
                 sent = await sock.sendMessage(item.jid, {
                   image: memeBuffer,
                   caption: hydrated.mediaCaption || hydrated.messageText,
@@ -1402,10 +1607,19 @@ async function run() {
                 await sock.sendPresenceUpdate("composing", item.jid);
                 await convex.mutation(convexRefs.outboxMarkTyping, { outboxId: item.outboxId });
                 await sleep(hydrated.typingMs);
+                const postTypingDisposition = (await convex.query(convexRefs.outboxGetSendDisposition, {
+                  outboxId: item.outboxId,
+                })) as { canSend: boolean; reason?: string };
+                if (!postTypingDisposition.canSend) {
+                  await sock.sendPresenceUpdate("paused", item.jid);
+                  return;
+                }
+                rememberAutomatedThreadSend(item.jid);
                 sent = await sock.sendMessage(item.jid, { text: hydrated.messageText });
                 await sock.sendPresenceUpdate("paused", item.jid);
               }
 
+              rememberAutomatedOutboundId(sent?.key?.id || undefined);
               await convex.mutation(convexRefs.outboxMarkSent, {
                 outboxId: item.outboxId,
                 whatsappMessageId: sent?.key?.id || undefined,

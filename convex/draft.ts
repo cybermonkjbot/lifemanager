@@ -470,6 +470,55 @@ export const approve = mutation({
   },
 });
 
+export const updateDraftContent = mutation({
+  args: {
+    draftId: v.id("replyDrafts"),
+    text: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const draft = await ctx.db.get(args.draftId);
+    if (!draft) {
+      throw new Error("Draft not found");
+    }
+
+    const nextText = args.text.trim();
+    if (!nextText) {
+      throw new Error("Draft text cannot be empty.");
+    }
+
+    const now = Date.now();
+    await ctx.db.patch(draft._id, {
+      text: nextText,
+      updatedAt: now,
+    });
+
+    const outboxRows = await ctx.db
+      .query("outbox")
+      .withIndex("by_draft", (q) => q.eq("draftId", draft._id))
+      .order("desc")
+      .take(10);
+
+    for (const row of outboxRows) {
+      if (row.status !== "pending" && row.status !== "claimed") {
+        continue;
+      }
+      await ctx.db.patch(row._id, {
+        messageText: nextText,
+        status: "pending",
+        workerId: undefined,
+        leaseExpiresAt: undefined,
+        updatedAt: now,
+      });
+    }
+
+    await ctx.scheduler.runAfter(0, internal.backlog.refreshThread, {
+      threadId: draft.threadId,
+    });
+
+    return draft._id;
+  },
+});
+
 export const reject = mutation({
   args: {
     draftId: v.id("replyDrafts"),

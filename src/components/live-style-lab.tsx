@@ -3,11 +3,13 @@
 import { ActionNotices } from "@/components/action-notices";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
 import { api } from "../../convex/_generated/api";
+import type { Id } from "../../convex/_generated/dataModel";
 import { useMutation, useQuery } from "convex/react";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
 function StyleLabContent() {
   const setMimicry = useMutation(api.style.setMimicry);
+  const rollbackHistory = useMutation(api.style.rollbackHistory);
   const { runAction, getRecord, notices, dismissNotice } = useActionStateRegistry();
   const key = "style:mimicry";
 
@@ -20,6 +22,14 @@ function StyleLabContent() {
       }
     | undefined;
   const profileLoading = profile === undefined;
+  const history = useQuery(api.style.listHistory, { limit: 20 }) as
+    | Array<{
+        _id: string;
+        mimicryLevel: number;
+        reason?: string;
+        createdAt: number;
+      }>
+    | undefined;
 
   const currentLevel = profile?.mimicryLevel ?? 0.72;
   const [mimicryLevel, setMimicryLevel] = useState(currentLevel);
@@ -33,6 +43,33 @@ function StyleLabContent() {
   }, [mimicryLevel, currentLevel]);
 
   const record = getRecord(key);
+  const rollbackRecord = getRecord("style:rollback");
+
+  const previewNeutral = useMemo(() => {
+    if (mimicryLevel <= 0.3) {
+      return "Thanks for the update. I appreciate it.";
+    }
+    if (mimicryLevel <= 0.65) {
+      return "Thanks for the update, got it. I appreciate you sharing.";
+    }
+    if (mimicryLevel <= 0.85) {
+      return "Haha thanks for the update, got you. Appreciate you sharing this.";
+    }
+    return "Haha got you, thanks for the update. Really appreciate you sharing this with me.";
+  }, [mimicryLevel]);
+
+  const previewPlayful = useMemo(() => {
+    if (mimicryLevel <= 0.3) {
+      return "Sounds good. I can handle that.";
+    }
+    if (mimicryLevel <= 0.65) {
+      return "Sounds good, I can handle that. Give me a little time.";
+    }
+    if (mimicryLevel <= 0.85) {
+      return "Sounds good haha, I can handle that. Give me a little time and I’ll update you.";
+    }
+    return "Sounds good haha, I can handle that for sure. Give me a little time and I’ll update you asap.";
+  }, [mimicryLevel]);
 
   const onSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -87,6 +124,13 @@ function StyleLabContent() {
             {record.error}
           </p>
         ) : null}
+
+        <div className="stack">
+          <p className="queue-meta">Preview: neutral context</p>
+          <p>{previewNeutral}</p>
+          <p className="queue-meta">Preview: playful context</p>
+          <p>{previewPlayful}</p>
+        </div>
       </article>
 
       <article className="panel-card">
@@ -106,6 +150,39 @@ function StyleLabContent() {
               <p>{(profile?.humorNotes || []).join(", ") || "No humor markers yet."}</p>
             </>
           )}
+        </div>
+
+        <h3>Mimicry History</h3>
+        <div className="stack">
+          {(history || []).map((item) => (
+            <div key={item._id} className="queue-item">
+              <p className="queue-title">{Math.round(item.mimicryLevel * 100)}%</p>
+              <p className="queue-meta">
+                {item.reason || "snapshot"} · {new Date(item.createdAt).toLocaleString()}
+              </p>
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={() =>
+                  void runAction(
+                    "style:rollback",
+                    async () => {
+                      await rollbackHistory({ historyId: item._id as Id<"styleProfileHistory"> });
+                    },
+                    {
+                      pendingLabel: "Rolling back style...",
+                      successMessage: "Style profile rolled back.",
+                    },
+                  )
+                }
+                disabled={rollbackRecord.pending}
+                aria-disabled={rollbackRecord.pending}
+              >
+                Rollback
+              </button>
+            </div>
+          ))}
+          {history !== undefined && history.length === 0 ? <p className="empty-line">No history yet.</p> : null}
         </div>
       </article>
     </section>

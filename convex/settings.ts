@@ -47,6 +47,12 @@ export const save = mutation({
     inboundMergeWindowMs: v.number(),
     inboundConcurrency: v.optional(v.number()),
     outboxSendConcurrency: v.optional(v.number()),
+    quietHoursEnabled: v.optional(v.boolean()),
+    quietHoursStartHour: v.optional(v.number()),
+    quietHoursEndHour: v.optional(v.number()),
+    sendRateWindowMinutes: v.optional(v.number()),
+    sendMaxPerThreadInWindow: v.optional(v.number()),
+    sendMaxGlobalInWindow: v.optional(v.number()),
     outreachEnabled: v.boolean(),
     outreachCadenceHours: v.number(),
     outreachMaxContactsPerRun: v.number(),
@@ -89,6 +95,16 @@ export const save = mutation({
       inboundMergeWindowMs: clampInt(args.inboundMergeWindowMs, 2_000, 180_000),
       inboundConcurrency: clampInt(args.inboundConcurrency ?? DEFAULT_APP_CONFIG.inboundConcurrency, 1, 16),
       outboxSendConcurrency: clampInt(args.outboxSendConcurrency ?? DEFAULT_APP_CONFIG.outboxSendConcurrency, 1, 16),
+      quietHoursEnabled: args.quietHoursEnabled ?? DEFAULT_APP_CONFIG.quietHoursEnabled,
+      quietHoursStartHour: clampInt(args.quietHoursStartHour ?? DEFAULT_APP_CONFIG.quietHoursStartHour, 0, 23),
+      quietHoursEndHour: clampInt(args.quietHoursEndHour ?? DEFAULT_APP_CONFIG.quietHoursEndHour, 0, 23),
+      sendRateWindowMinutes: clampInt(args.sendRateWindowMinutes ?? DEFAULT_APP_CONFIG.sendRateWindowMinutes, 5, 24 * 60),
+      sendMaxPerThreadInWindow: clampInt(
+        args.sendMaxPerThreadInWindow ?? DEFAULT_APP_CONFIG.sendMaxPerThreadInWindow,
+        1,
+        100,
+      ),
+      sendMaxGlobalInWindow: clampInt(args.sendMaxGlobalInWindow ?? DEFAULT_APP_CONFIG.sendMaxGlobalInWindow, 1, 1000),
       outreachEnabled: args.outreachEnabled,
       outreachCadenceHours: clampInt(args.outreachCadenceHours, 6, 24 * 14),
       outreachMaxContactsPerRun: clampInt(args.outreachMaxContactsPerRun, 1, 25),
@@ -136,6 +152,12 @@ export const save = mutation({
     await setConfigValue(ctx, "inboundMergeWindowMs", String(normalized.inboundMergeWindowMs));
     await setConfigValue(ctx, "inboundConcurrency", String(normalized.inboundConcurrency));
     await setConfigValue(ctx, "outboxSendConcurrency", String(normalized.outboxSendConcurrency));
+    await setConfigValue(ctx, "quietHoursEnabled", normalized.quietHoursEnabled ? "true" : "false");
+    await setConfigValue(ctx, "quietHoursStartHour", String(normalized.quietHoursStartHour));
+    await setConfigValue(ctx, "quietHoursEndHour", String(normalized.quietHoursEndHour));
+    await setConfigValue(ctx, "sendRateWindowMinutes", String(normalized.sendRateWindowMinutes));
+    await setConfigValue(ctx, "sendMaxPerThreadInWindow", String(normalized.sendMaxPerThreadInWindow));
+    await setConfigValue(ctx, "sendMaxGlobalInWindow", String(normalized.sendMaxGlobalInWindow));
     await setConfigValue(ctx, "outreachEnabled", normalized.outreachEnabled ? "true" : "false");
     await setConfigValue(ctx, "outreachCadenceHours", String(normalized.outreachCadenceHours));
     await setConfigValue(ctx, "outreachMaxContactsPerRun", String(normalized.outreachMaxContactsPerRun));

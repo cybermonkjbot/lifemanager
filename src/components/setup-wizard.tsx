@@ -98,6 +98,31 @@ function getRevokedGuidance(state: SetupState | null) {
   return "WhatsApp revoked this linked device session. Credentials were invalidated. Run setup again to pair a new session.";
 }
 
+function getFailureChecklist(state: SetupState | null) {
+  if (!state) {
+    return [];
+  }
+
+  const text = `${state.message} ${state.listenerMessage || ""}`.toLowerCase();
+  const checks: string[] = [];
+  if (text.includes("timed out") || text.includes("expired")) {
+    checks.push("Session expired. Start a fresh QR/pairing session and complete pairing immediately.");
+  }
+  if (text.includes("network") || text.includes("socket") || text.includes("connection")) {
+    checks.push("Connection instability detected. Keep this page open and retry once network is stable.");
+  }
+  if (text.includes("credentials") || text.includes("logged out") || text.includes("signed this device out")) {
+    checks.push("Credentials are invalid. Use Reset Credentials, then pair again.");
+  }
+  if (text.includes("worker") && text.includes("offline")) {
+    checks.push("Worker listener is offline. Restart worker after successful pairing.");
+  }
+  if (checks.length === 0 && state.status === "error") {
+    checks.push("Unknown setup error. Refresh status, retry pairing, then restart worker.");
+  }
+  return checks;
+}
+
 async function readSetupResponse(response: Response) {
   let body: SetupState | null = null;
 
@@ -148,6 +173,7 @@ function SetupWizardContent({
   const showQrCode = state?.mode === "qr" && status === "qr_ready" && Boolean(state?.qrDataUrl);
   const retryGuidance = getRetryGuidance(state);
   const revokedGuidance = getRevokedGuidance(state);
+  const failureChecklist = getFailureChecklist(state);
   const uiStatusMessage = simplifySetupMessage(state?.message);
 
   const pendingStartQr = isPending("setup:start_qr");
@@ -380,6 +406,17 @@ function SetupWizardContent({
           <p className="setup-revoked-notice" role="alert" aria-live="assertive">
             {revokedGuidance}
           </p>
+        ) : null}
+
+        {failureChecklist.length > 0 ? (
+          <div className="queue-item">
+            <p className="queue-title">Failure Diagnosis</p>
+            {failureChecklist.map((item) => (
+              <p key={item} className="queue-meta">
+                - {item}
+              </p>
+            ))}
+          </div>
         ) : null}
 
         {pendingLabel ? (

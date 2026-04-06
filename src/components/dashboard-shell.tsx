@@ -1,8 +1,8 @@
-import { AutonomyControls } from "@/components/autonomy-controls";
 import { ConvexAppProvider } from "@/components/convex-app-provider";
 import { LogWatcher } from "@/components/log-watcher";
+import { ShellControlsModal } from "@/components/shell-controls-modal";
+import { ShellNavigation } from "@/components/shell-navigation";
 import { SetupNotice } from "@/components/setup-notice";
-import Link from "next/link";
 import { ReactNode } from "react";
 
 type DashboardShellProps = {
@@ -15,15 +15,55 @@ type DashboardShellProps = {
 };
 
 const navItems = [
-  { href: "/setup", label: "Setup" },
-  { href: "/", label: "Queue" },
-  { href: "/conversations", label: "Conversations" },
-  { href: "/backlog", label: "Unread Backlog" },
-  { href: "/followups", label: "Follow-ups" },
-  { href: "/style-lab", label: "Style Lab" },
-  { href: "/rules", label: "Rules" },
-  { href: "/settings", label: "Settings" },
-  { href: "/system", label: "System" },
+  {
+    href: "/",
+    label: "Queue",
+    description: "Process actionable replies, follow-ups, and safety items.",
+    primary: true,
+  },
+  {
+    href: "/conversations",
+    label: "Conversations",
+    description: "Read context and tune thread-level communication.",
+    primary: true,
+  },
+  {
+    href: "/backlog",
+    label: "Backlog",
+    description: "Triage unread threads and restart stale relationships.",
+    primary: true,
+  },
+  {
+    href: "/followups",
+    label: "Follow-ups",
+    description: "Confirm and track scheduled outreach commitments.",
+    primary: true,
+  },
+  {
+    href: "/setup",
+    label: "Setup",
+    description: "Pair WhatsApp and run environment checks.",
+  },
+  {
+    href: "/style-lab",
+    label: "Style Lab",
+    description: "Tune mimicry and voice behavior.",
+  },
+  {
+    href: "/rules",
+    label: "Rules",
+    description: "Adjust guardrails, boundaries, and initiations.",
+  },
+  {
+    href: "/settings",
+    label: "Settings",
+    description: "Configure runtime defaults and queue behavior.",
+  },
+  {
+    href: "/system",
+    label: "System",
+    description: "Inspect health, logs, and provider traces.",
+  },
 ];
 
 export function DashboardShell({
@@ -38,33 +78,24 @@ export function DashboardShell({
 
   return (
     <div className="shell-root">
-      <aside className="shell-nav">
-        <div className="brand-block">
-          <p className="brand-kicker">Social Life Manager</p>
-          <h1 className="brand-title">WhatsApp Brain</h1>
-          <p className="brand-note">Local-first command center for your social autopilot.</p>
-        </div>
-
-        <nav className="nav-links">
-          {navItems.map((item) => (
-            <Link key={item.href} href={item.href} className="nav-link">
-              {item.label}
-            </Link>
-          ))}
-        </nav>
-      </aside>
-
       <ConvexAppProvider convexUrl={convexUrl}>
         <div className="shell-main-wrap">
           <header className="shell-topbar">
-            <div>
-              <p className="panel-kicker">Action Studio</p>
-              <h2 className="panel-title">{title}</h2>
-              <p className="panel-subtitle">{subtitle}</p>
+            <div className="brand-block">
+              <p className="brand-kicker">Social Life Manager</p>
+              <h1 className="brand-title">WhatsApp Brain</h1>
+              <p className="brand-note">Focused workspace: one active job at a time.</p>
             </div>
-
-            <AutonomyControls realtimeEnabled={realtimeEnabled} fallbackPaused={autonomyPaused} />
+            <ShellControlsModal realtimeEnabled={realtimeEnabled} fallbackPaused={autonomyPaused} />
           </header>
+
+          <ShellNavigation items={navItems} />
+
+          <section className="view-header">
+            <p className="panel-kicker">Focused Workspace</p>
+            <h2 className="panel-title">{title}</h2>
+            <p className="panel-subtitle">{subtitle}</p>
+          </section>
 
           <main className="shell-main">
             {!realtimeEnabled ? <SetupNotice error={null} /> : null}

@@ -33,6 +33,12 @@ type SettingsState = {
   outboxClaimLimit: number;
   outboxPollMs: number;
   inboundMergeWindowMs: number;
+  quietHoursEnabled: boolean;
+  quietHoursStartHour: number;
+  quietHoursEndHour: number;
+  sendRateWindowMinutes: number;
+  sendMaxPerThreadInWindow: number;
+  sendMaxGlobalInWindow: number;
   outreachEnabled: boolean;
   outreachCadenceHours: number;
   outreachMaxContactsPerRun: number;
@@ -75,6 +81,12 @@ function toState(source: Partial<SettingsState> | undefined): SettingsState {
     outboxClaimLimit: source?.outboxClaimLimit ?? 8,
     outboxPollMs: source?.outboxPollMs ?? 3000,
     inboundMergeWindowMs: source?.inboundMergeWindowMs ?? 45000,
+    quietHoursEnabled: source?.quietHoursEnabled ?? false,
+    quietHoursStartHour: source?.quietHoursStartHour ?? 23,
+    quietHoursEndHour: source?.quietHoursEndHour ?? 7,
+    sendRateWindowMinutes: source?.sendRateWindowMinutes ?? 60,
+    sendMaxPerThreadInWindow: source?.sendMaxPerThreadInWindow ?? 4,
+    sendMaxGlobalInWindow: source?.sendMaxGlobalInWindow ?? 40,
     outreachEnabled: source?.outreachEnabled ?? false,
     outreachCadenceHours: source?.outreachCadenceHours ?? 36,
     outreachMaxContactsPerRun: source?.outreachMaxContactsPerRun ?? 3,
@@ -115,6 +127,12 @@ function stateEquals(a: SettingsState, b: SettingsState) {
     nearlyEqual(a.outboxClaimLimit, b.outboxClaimLimit) &&
     nearlyEqual(a.outboxPollMs, b.outboxPollMs) &&
     nearlyEqual(a.inboundMergeWindowMs, b.inboundMergeWindowMs) &&
+    a.quietHoursEnabled === b.quietHoursEnabled &&
+    nearlyEqual(a.quietHoursStartHour, b.quietHoursStartHour) &&
+    nearlyEqual(a.quietHoursEndHour, b.quietHoursEndHour) &&
+    nearlyEqual(a.sendRateWindowMinutes, b.sendRateWindowMinutes) &&
+    nearlyEqual(a.sendMaxPerThreadInWindow, b.sendMaxPerThreadInWindow) &&
+    nearlyEqual(a.sendMaxGlobalInWindow, b.sendMaxGlobalInWindow) &&
     a.outreachEnabled === b.outreachEnabled &&
     nearlyEqual(a.outreachCadenceHours, b.outreachCadenceHours) &&
     nearlyEqual(a.outreachMaxContactsPerRun, b.outreachMaxContactsPerRun) &&
@@ -198,6 +216,12 @@ export function LiveSettings() {
           outboxClaimLimit: Math.round(draft.outboxClaimLimit),
           outboxPollMs: Math.round(draft.outboxPollMs),
           inboundMergeWindowMs: Math.round(draft.inboundMergeWindowMs),
+          quietHoursEnabled: draft.quietHoursEnabled,
+          quietHoursStartHour: Math.round(draft.quietHoursStartHour),
+          quietHoursEndHour: Math.round(draft.quietHoursEndHour),
+          sendRateWindowMinutes: Math.round(draft.sendRateWindowMinutes),
+          sendMaxPerThreadInWindow: Math.round(draft.sendMaxPerThreadInWindow),
+          sendMaxGlobalInWindow: Math.round(draft.sendMaxGlobalInWindow),
           outreachEnabled: draft.outreachEnabled,
           outreachCadenceHours: Math.round(draft.outreachCadenceHours),
           outreachMaxContactsPerRun: Math.round(draft.outreachMaxContactsPerRun),
@@ -501,7 +525,7 @@ export function LiveSettings() {
               disabled={record.pending}
               aria-disabled={record.pending}
             >
-              <option value="true">On (human warmth + playful tone)</option>
+              <option value="true">On (identity-led voice: everything sounds like me)</option>
               <option value="false">Off (neutral tone)</option>
             </select>
           </label>
@@ -694,6 +718,105 @@ export function LiveSettings() {
             <span className="queue-meta">
               New inbound messages in the same chat within this window update the pending unsent reply instead of creating another one.
             </span>
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Quiet hours</span>
+            <select
+              value={draft.quietHoursEnabled ? "true" : "false"}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  quietHoursEnabled: event.target.value === "true",
+                }))
+              }
+              disabled={record.pending}
+              aria-disabled={record.pending}
+            >
+              <option value="false">Disabled</option>
+              <option value="true">Enabled</option>
+            </select>
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Quiet start hour (0-23)</span>
+            <input
+              type="number"
+              min={0}
+              max={23}
+              step={1}
+              value={draft.quietHoursStartHour}
+              onChange={(event) =>
+                setDraft((prev) => ({ ...prev, quietHoursStartHour: parseNumber(event.target.value, prev.quietHoursStartHour) }))
+              }
+              disabled={record.pending || !draft.quietHoursEnabled}
+              aria-disabled={record.pending || !draft.quietHoursEnabled}
+            />
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Quiet end hour (0-23)</span>
+            <input
+              type="number"
+              min={0}
+              max={23}
+              step={1}
+              value={draft.quietHoursEndHour}
+              onChange={(event) =>
+                setDraft((prev) => ({ ...prev, quietHoursEndHour: parseNumber(event.target.value, prev.quietHoursEndHour) }))
+              }
+              disabled={record.pending || !draft.quietHoursEnabled}
+              aria-disabled={record.pending || !draft.quietHoursEnabled}
+            />
+            <span className="queue-meta">Server-local time window where sends are deferred.</span>
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Rate window (minutes)</span>
+            <input
+              type="number"
+              min={5}
+              max={1440}
+              step={1}
+              value={draft.sendRateWindowMinutes}
+              onChange={(event) =>
+                setDraft((prev) => ({ ...prev, sendRateWindowMinutes: parseNumber(event.target.value, prev.sendRateWindowMinutes) }))
+              }
+              disabled={record.pending}
+              aria-disabled={record.pending}
+            />
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Max sends per thread in window</span>
+            <input
+              type="number"
+              min={1}
+              max={100}
+              step={1}
+              value={draft.sendMaxPerThreadInWindow}
+              onChange={(event) =>
+                setDraft((prev) => ({ ...prev, sendMaxPerThreadInWindow: parseNumber(event.target.value, prev.sendMaxPerThreadInWindow) }))
+              }
+              disabled={record.pending}
+              aria-disabled={record.pending}
+            />
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Max global sends in window</span>
+            <input
+              type="number"
+              min={1}
+              max={1000}
+              step={1}
+              value={draft.sendMaxGlobalInWindow}
+              onChange={(event) =>
+                setDraft((prev) => ({ ...prev, sendMaxGlobalInWindow: parseNumber(event.target.value, prev.sendMaxGlobalInWindow) }))
+              }
+              disabled={record.pending}
+              aria-disabled={record.pending}
+            />
           </label>
 
           <p className="queue-meta">

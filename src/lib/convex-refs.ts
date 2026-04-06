@@ -33,6 +33,8 @@ export const convexRefs = {
 
   outboxClaimDue: makeFunctionReference<"mutation">("outbox:claimDue"),
   outboxMarkTyping: makeFunctionReference<"mutation">("outbox:markTyping"),
+  outboxGetSendDisposition: makeFunctionReference<"query">("outbox:getSendDisposition"),
+  outboxSuppressForManualIntervention: makeFunctionReference<"mutation">("outbox:suppressForManualIntervention"),
   outboxHydrateAiOutreach: makeFunctionReference<"mutation">("outbox:hydrateAiOutreach"),
   outboxMarkSent: makeFunctionReference<"mutation">("outbox:markSent"),
   outboxMarkFailed: makeFunctionReference<"mutation">("outbox:markFailed"),

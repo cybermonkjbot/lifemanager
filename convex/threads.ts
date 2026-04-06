@@ -90,9 +90,11 @@ export const getEligibility = query({
         isIgnored: thread.isIgnored,
         isArchived: thread.isArchived,
         threadKind,
+        ghostedUntil: thread.ghostedUntil,
       },
       ignoreGroupsByDefault: config.ignoreGroupsByDefault,
       explicitIgnoreEnabled: Boolean(explicitIgnore?.enabled),
+      nowMs: Date.now(),
     });
 
     return {

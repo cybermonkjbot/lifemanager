@@ -112,19 +112,25 @@ function BacklogContent() {
   const [tab, setTab] = useState<BacklogTab>("all");
   const [sort, setSort] = useState<SortMode>("importance");
   const [relationshipFilter, setRelationshipFilter] = useState<"all" | RelationshipValue>("all");
+  const [search, setSearch] = useState("");
+  const [limit, setLimit] = useState(120);
+  const [snoozeMinutes, setSnoozeMinutes] = useState(24 * 60);
+  const [snoozeReason, setSnoozeReason] = useState("");
+  const [selectedThreadIds, setSelectedThreadIds] = useState<string[]>([]);
   const hasHydratedRef = useRef(false);
 
   const queryArgs = useMemo(() => {
     return {
-      limit: 240,
+      limit,
       importance: "all",
       recommendation: "all",
       relationship: relationshipFilter,
       scope: "all",
       sort,
       includeIgnored: true,
+      search,
     } as const;
-  }, [relationshipFilter, sort]);
+  }, [limit, relationshipFilter, search, sort]);
 
   const backlog = useQuery(api.backlog.list, queryArgs) as BacklogItem[] | undefined;
   const loading = backlog === undefined;
@@ -169,6 +175,7 @@ function BacklogContent() {
 
     return items.filter((item) => !item.isSnoozed);
   }, [items, tab]);
+  const allVisibleSelected = visibleItems.length > 0 && visibleItems.every((item) => selectedThreadIds.includes(item.threadId));
 
   const onRefresh = () => {
     void runAction(
@@ -208,6 +215,7 @@ function BacklogContent() {
         await snooze({
           threadId: threadId as Id<"threads">,
           minutes,
+          reason: snoozeReason.trim() || undefined,
         });
       },
       {
@@ -215,6 +223,60 @@ function BacklogContent() {
         successMessage: "Thread snoozed.",
       },
     );
+  };
+
+  const bulkSnooze = () => {
+    const targets = [...selectedThreadIds];
+    if (targets.length === 0) {
+      return;
+    }
+    void runAction(
+      "backlog:bulk-snooze",
+      async () => {
+        for (const threadId of targets) {
+          await snooze({
+            threadId: threadId as Id<"threads">,
+            minutes: Math.max(5, Math.round(snoozeMinutes)),
+            reason: snoozeReason.trim() || undefined,
+          });
+        }
+      },
+      {
+        pendingLabel: "Snoozing selected threads...",
+        successMessage: `Snoozed ${targets.length} thread${targets.length === 1 ? "" : "s"}.`,
+      },
+    );
+  };
+
+  const bulkIgnore = (enabled: boolean) => {
+    const targets = [...selectedThreadIds];
+    if (targets.length === 0) {
+      return;
+    }
+    void runAction(
+      enabled ? "backlog:bulk-ignore" : "backlog:bulk-unignore",
+      async () => {
+        for (const threadId of targets) {
+          await ignoreThread({
+            threadId: threadId as Id<"threads">,
+            enabled,
+          });
+        }
+      },
+      {
+        pendingLabel: enabled ? "Ignoring selected threads..." : "Restoring selected threads...",
+        successMessage: enabled ? `Ignored ${targets.length} thread${targets.length === 1 ? "" : "s"}.` : `Restored ${targets.length} thread${targets.length === 1 ? "" : "s"}.`,
+      },
+    );
+  };
+
+  const toggleSelected = (threadId: string, checked: boolean) => {
+    setSelectedThreadIds((prev) => {
+      if (checked) {
+        return prev.includes(threadId) ? prev : [...prev, threadId];
+      }
+      return prev.filter((id) => id !== threadId);
+    });
   };
 
   const onUnsnooze = (threadId: string) => {
@@ -306,6 +368,19 @@ function BacklogContent() {
 
         <div className="backlog-filters">
           <label className="setup-input-group inline">
+            <span className="queue-meta">Search</span>
+            <input
+              type="text"
+              value={search}
+              placeholder="Search contact or message..."
+              onChange={(event) => {
+                setSearch(event.target.value);
+                setLimit(120);
+              }}
+            />
+          </label>
+
+          <label className="setup-input-group inline">
             <span className="queue-meta">Relationship</span>
             <select value={relationshipFilter} onChange={(event) => setRelationshipFilter(event.target.value as "all" | RelationshipValue)}>
               <option value="all">All</option>
@@ -338,7 +413,41 @@ function BacklogContent() {
           >
             {getRecord("backlog:refresh").pending ? "Refreshing..." : "Refresh"}
           </button>
+
+          <button type="button" className="btn btn-ghost" onClick={() => setLimit((prev) => Math.min(prev + 120, 480))}>
+            Load More
+          </button>
         </div>
+      </div>
+
+      <div className="queue-actions">
+        <label className="queue-meta">
+          <input
+            type="checkbox"
+            checked={allVisibleSelected}
+            onChange={(event) =>
+              setSelectedThreadIds(event.target.checked ? visibleItems.map((item) => item.threadId) : [])
+            }
+          />{" "}
+          Select visible
+        </label>
+        <label className="setup-input-group inline">
+          <span className="queue-meta">Snooze (minutes)</span>
+          <input type="number" min={5} step={5} value={snoozeMinutes} onChange={(event) => setSnoozeMinutes(Number(event.target.value) || 5)} />
+        </label>
+        <label className="setup-input-group inline">
+          <span className="queue-meta">Reason</span>
+          <input type="text" value={snoozeReason} onChange={(event) => setSnoozeReason(event.target.value)} placeholder="Optional note" />
+        </label>
+        <button type="button" className="btn btn-ghost" onClick={bulkSnooze} disabled={selectedThreadIds.length === 0}>
+          Snooze Selected
+        </button>
+        <button type="button" className="btn btn-ghost" onClick={() => bulkIgnore(true)} disabled={selectedThreadIds.length === 0}>
+          Ignore Selected
+        </button>
+        <button type="button" className="btn btn-ghost" onClick={() => bulkIgnore(false)} disabled={selectedThreadIds.length === 0}>
+          Unignore Selected
+        </button>
       </div>
 
       <div className="stack">
@@ -366,6 +475,15 @@ function BacklogContent() {
 
           return (
             <div key={item.stateId} className="queue-item" aria-busy={isPending}>
+              <label className="queue-meta">
+                <input
+                  type="checkbox"
+                  checked={selectedThreadIds.includes(item.threadId)}
+                  onChange={(event) => toggleSelected(item.threadId, event.target.checked)}
+                  disabled={isPending}
+                />{" "}
+                Select
+              </label>
               <div className="backlog-row-head">
                 <p className="queue-title">{item.title || item.jid}</p>
                 <div className="backlog-badges">
@@ -411,8 +529,14 @@ function BacklogContent() {
                     Unsnooze
                   </button>
                 ) : (
-                  <button type="button" className="btn btn-ghost" onClick={() => onSnooze(item.threadId, 24 * 60)} disabled={isPending} aria-disabled={isPending}>
-                    Snooze 1d
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    onClick={() => onSnooze(item.threadId, Math.max(5, Math.round(snoozeMinutes)))}
+                    disabled={isPending}
+                    aria-disabled={isPending}
+                  >
+                    Snooze
                   </button>
                 )}
 

@@ -41,20 +41,11 @@ a {
 
 .shell-root {
   min-height: 100vh;
-  display: grid;
-  grid-template-columns: 260px minmax(0, 1fr);
-}
-
-.shell-nav {
-  border-right: 1px solid var(--line);
-  padding: 24px 18px;
-  backdrop-filter: blur(14px);
-  background: linear-gradient(180deg, rgba(8, 8, 8, 0.96), rgba(5, 5, 5, 0.88));
+  display: block;
 }
 
 .brand-block {
-  padding-bottom: 28px;
-  border-bottom: 1px solid var(--line);
+  min-width: 0;
 }
 
 .brand-kicker {
@@ -79,30 +70,12 @@ a {
   line-height: 1.4;
 }
 
-.nav-links {
-  margin-top: 18px;
+.shell-main-wrap {
+  width: 100%;
+  padding: 24px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-}
-
-.nav-link {
-  border: 1px solid transparent;
-  border-radius: 12px;
-  padding: 10px 12px;
-  color: #f0f0f0;
-  background: transparent;
-  transition: all 0.2s ease;
-}
-
-.nav-link:hover {
-  border-color: var(--line);
-  background: rgba(255, 255, 255, 0.04);
-  transform: translateX(3px);
-}
-
-.shell-main-wrap {
-  padding: 28px;
+  gap: 14px;
 }
 
 .shell-topbar {
@@ -110,7 +83,118 @@ a {
   justify-content: space-between;
   gap: 20px;
   align-items: center;
-  margin-bottom: 18px;
+}
+
+.shell-tabbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 8px;
+}
+
+.shell-tabs-row {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.shell-tab {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 9px 12px;
+  color: #f0f0f0;
+  background: rgba(255, 255, 255, 0.02);
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.shell-tab:hover {
+  border-color: rgba(255, 255, 255, 0.36);
+}
+
+.shell-tab-active {
+  border-color: rgba(255, 255, 255, 0.58);
+  background: rgba(255, 255, 255, 0.14);
+  color: #ffffff;
+}
+
+.view-header {
+  border-top: 1px solid var(--line-strong);
+  padding-top: 12px;
+}
+
+.workspace-modal-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.workspace-modal-link {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.workspace-modal-link-active {
+  border-color: rgba(255, 255, 255, 0.56);
+  background: rgba(255, 255, 255, 0.13);
+}
+
+.ui-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.72);
+  backdrop-filter: blur(5px);
+}
+
+.ui-modal {
+  width: min(720px, 100%);
+  max-height: min(82vh, 900px);
+  overflow-y: auto;
+  border: 1px solid var(--line-strong);
+  border-radius: 16px;
+  padding: 16px;
+  background:
+    radial-gradient(circle at top right, rgba(255, 255, 255, 0.09), transparent 55%),
+    rgba(9, 9, 9, 0.96);
+}
+
+.ui-modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.ui-modal-header h3 {
+  margin: 0 0 6px;
+  font-family: var(--font-display), sans-serif;
+}
+
+.ui-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ui-modal .topbar-controls {
+  flex-wrap: wrap;
+}
+
+.ui-modal .topbar-controls-shell {
+  align-items: flex-start;
 }
 
 .panel-kicker {
@@ -296,6 +380,13 @@ a {
   overflow-y: auto;
 }
 
+.thread-list-footer {
+  border-top: 1px solid rgba(255, 255, 255, 0.14);
+  padding: 12px 0;
+  display: flex;
+  justify-content: center;
+}
+
 .queue-title {
   margin: 0;
   font-weight: 700;
@@ -318,6 +409,20 @@ a {
   gap: 8px;
   margin-top: 8px;
   flex-wrap: wrap;
+}
+
+.queue-focus-tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.queue-item-condensed {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 14px;
 }
 
 .conversation-chat {
@@ -819,22 +924,14 @@ textarea {
 .btn:focus-visible,
 .action-notice-dismiss:focus-visible,
 input:focus-visible,
-.nav-link:focus-visible,
+.shell-tab:focus-visible,
+.workspace-modal-link:focus-visible,
 .thread-row:focus-visible {
   outline: 2px solid #ffffff;
   outline-offset: 2px;
 }
 
 @media (max-width: 980px) {
-  .shell-root {
-    grid-template-columns: 1fr;
-  }
-
-  .shell-nav {
-    border-right: 0;
-    border-bottom: 1px solid var(--line);
-  }
-
   .panel-grid.two-col,
   .panel-grid.split-view,
   .setup-wizard,
@@ -847,6 +944,11 @@ input:focus-visible,
   }
 
   .shell-topbar {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .shell-tabbar {
     flex-direction: column;
     align-items: flex-start;
   }

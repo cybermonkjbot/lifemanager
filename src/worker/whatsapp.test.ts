@@ -59,6 +59,23 @@ test("parseInboundMessage handles images with caption", () => {
   });
 });
 
+test("parseInboundMessage handles voice notes", () => {
+  const parsed = parseInboundMessage({
+    audioMessage: {
+      mimetype: "audio/ogg; codecs=opus",
+      seconds: 19,
+      ptt: true,
+    },
+  } as unknown as Parameters<typeof parseInboundMessage>[0]);
+  assert.deepEqual(parsed, {
+    kind: "audio",
+    text: "[Voice note]",
+    mimeType: "audio/ogg; codecs=opus",
+    durationSeconds: 19,
+    isVoiceNote: true,
+  });
+});
+
 test("parseInboundMessage unwraps ephemeral wrappers", () => {
   const parsed = parseInboundMessage({
     ephemeralMessage: {

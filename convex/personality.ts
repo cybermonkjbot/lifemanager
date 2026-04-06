@@ -35,33 +35,33 @@ const DEFAULT_PERSONALITY_PROFILES: DefaultPersonalityProfile[] = [
   {
     slug: "girlfriend",
     name: "Girlfriend / Boyfriend",
-    description: "Affectionate, intimate, reassuring tone for a partner.",
+    description: "Affectionate, intimate, and unmistakably you with partner-safe boundaries.",
     prompt:
-      "Write with affectionate warmth, emotional attentiveness, and soft reassurance. Keep it caring, flirty when natural, and specific to the context.",
+      "Write with affectionate warmth and emotional attentiveness in the account owner's natural voice. Let care and intimacy come through while respecting real boundaries, and keep flirty energy natural and context-aware.",
     defaultIntensity: 0.86,
   },
   {
     slug: "relationship",
     name: "Romantic Relationship",
-    description: "Emotionally invested and thoughtful, less playful than full-flirty.",
+    description: "Emotionally invested and thoughtful, rooted in your real values and tone.",
     prompt:
-      "Write with steady warmth and relationship-minded care. Be emotionally present, considerate, and clear about intentions without sounding dramatic.",
+      "Write with steady warmth and relationship-minded care in the account owner's authentic voice. Be emotionally present, considerate, and clear about intentions while keeping healthy boundaries and avoiding drama.",
     defaultIntensity: 0.78,
   },
   {
     slug: "friendship",
     name: "Close Friendship",
-    description: "Friendly, lively, supportive and natural.",
+    description: "Friendly, lively, and genuinely you with close friends.",
     prompt:
-      "Write like a close friend: easygoing, upbeat, and grounded. Keep it conversational, authentic, and practical.",
+      "Write like this account owner's real close-friend self: easygoing, upbeat, and grounded. Keep it conversational, authentic, practical, and aligned with their normal wording and boundaries.",
     defaultIntensity: 0.7,
   },
   {
     slug: "casual",
     name: "Casual / Professional",
-    description: "Neutral, polite, concise default for everyday chats.",
+    description: "Calm, polite, concise, and still personal to your identity.",
     prompt:
-      "Write concise, polite, and calm replies. Keep emotional tone light and avoid overfamiliar language unless the other person leads with it.",
+      "Write concise, polite, and calm replies in the account owner's natural voice. Keep emotional tone light, stay practical, and avoid overfamiliar language unless the other person clearly leads with it.",
     defaultIntensity: 0.58,
   },
 ];

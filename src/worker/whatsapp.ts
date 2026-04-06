@@ -24,6 +24,13 @@ export type ParsedInboundMessage =
       mimeType?: string;
     }
   | {
+      kind: "audio";
+      text: string;
+      mimeType?: string;
+      durationSeconds?: number;
+      isVoiceNote: boolean;
+    }
+  | {
       kind: "unsupported";
       text: "";
     };
@@ -111,12 +118,26 @@ export function parseInboundMessage(message: proto.IMessage | null | undefined):
     };
   }
 
+  if (unwrapped.audioMessage) {
+    const mimeType = (unwrapped.audioMessage.mimetype || "").trim() || undefined;
+    const durationRaw = Number(unwrapped.audioMessage.seconds);
+    const durationSeconds = Number.isFinite(durationRaw) && durationRaw > 0 ? Math.round(durationRaw) : undefined;
+    const isVoiceNote = Boolean(unwrapped.audioMessage.ptt);
+    return {
+      kind: "audio",
+      text: isVoiceNote ? "[Voice note]" : "[Audio]",
+      mimeType,
+      durationSeconds,
+      isVoiceNote,
+    };
+  }
+
   const text = extractTextFromMessage(unwrapped);
   if (text) {
     return { kind: "text", text };
   }
 
-  if (unwrapped.videoMessage || unwrapped.documentMessage || unwrapped.audioMessage || unwrapped.ptvMessage) {
+  if (unwrapped.videoMessage || unwrapped.documentMessage || unwrapped.ptvMessage) {
     return {
       kind: "text",
       text: "[Media message]",

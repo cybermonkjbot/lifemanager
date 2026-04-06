@@ -526,6 +526,7 @@ export const list = query({
     scope: v.optional(scopeValidator),
     sort: v.optional(sortValidator),
     includeIgnored: v.optional(v.boolean()),
+    search: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const limit = clamp(Math.round(args.limit ?? 80), 1, 200);
@@ -535,6 +536,7 @@ export const list = query({
     const scope = args.scope || "active";
     const sort = args.sort || "importance";
     const includeIgnored = Boolean(args.includeIgnored);
+    const search = (args.search || "").trim().toLowerCase();
 
     const stateRows = await ctx.db
       .query("backlogThreadState")
@@ -574,6 +576,13 @@ export const list = query({
 
         if (!relationshipMatches(state.relationship, relationshipFilter)) {
           return null;
+        }
+
+        if (search) {
+          const haystack = `${thread.title || ""}\n${thread.jid}\n${state.latestUnresolvedText || ""}`.toLowerCase();
+          if (!haystack.includes(search)) {
+            return null;
+          }
         }
 
         return {

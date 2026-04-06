@@ -16,6 +16,7 @@ export default defineSchema({
     threadKind: v.optional(v.union(v.literal("direct"), v.literal("group"), v.literal("broadcast_or_system"))),
     isArchived: v.optional(v.boolean()),
     archivedAt: v.optional(v.number()),
+    ghostedUntil: v.optional(v.number()),
     lastMessageAt: v.number(),
     createdAt: v.number(),
     updatedAt: v.number(),

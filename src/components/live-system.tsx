@@ -181,6 +181,24 @@ function AiTestBench() {
 function SystemContent() {
   const health = useQuery(api.system.health, {}) as
     | {
+        metrics?: {
+          providerRunsWindow: number;
+          providerSuccess: number;
+          providerErrors: number;
+          providerErrorRate: number;
+          providerFallbackRate: number;
+          providerP95LatencyMs: number;
+          openGuardrails: number;
+          pendingOutbox: number;
+          dueOutbox: number;
+          failedOutboxRecent: number;
+        };
+        alerts?: string[];
+        runbooks?: Array<{
+          title: string;
+          key: string;
+          steps: string;
+        }>;
         latestProviderRuns: Array<{
           _id: string;
           provider: string;
@@ -202,10 +220,47 @@ function SystemContent() {
   const healthLoading = health === undefined;
   const providerRuns = health?.latestProviderRuns || [];
   const latestEvents = health?.latestEvents || [];
+  const metrics = health?.metrics;
+  const alerts = health?.alerts || [];
+  const runbooks = health?.runbooks || [];
 
   return (
     <section className="panel-grid two-col">
       <AiTestBench />
+
+      <article className="panel-card">
+        <h3>SLO Snapshot</h3>
+        {healthLoading ? (
+          <p className="empty-line">Loading SLO metrics…</p>
+        ) : metrics ? (
+          <div className="stack">
+            <p className="queue-meta">
+              Provider success/error: {metrics.providerSuccess}/{metrics.providerErrors} (window {metrics.providerRunsWindow})
+            </p>
+            <p className="queue-meta">Provider error rate: {(metrics.providerErrorRate * 100).toFixed(1)}%</p>
+            <p className="queue-meta">Fallback rate: {(metrics.providerFallbackRate * 100).toFixed(1)}%</p>
+            <p className="queue-meta">P95 provider latency: {Math.round(metrics.providerP95LatencyMs)}ms</p>
+            <p className="queue-meta">Open guardrails: {metrics.openGuardrails}</p>
+            <p className="queue-meta">Outbox pending/due: {metrics.pendingOutbox}/{metrics.dueOutbox}</p>
+            <p className="queue-meta">Recent failed outbox items: {metrics.failedOutboxRecent}</p>
+          </div>
+        ) : (
+          <p className="empty-line">No metrics yet.</p>
+        )}
+      </article>
+
+      <article className="panel-card">
+        <h3>Active Alerts</h3>
+        <div className="stack">
+          {healthLoading ? <p className="empty-line">Loading alerts…</p> : null}
+          {alerts.map((alert, index) => (
+            <div key={`${index}:${alert}`} className="queue-item">
+              <p className="queue-body">{alert}</p>
+            </div>
+          ))}
+          {!healthLoading && alerts.length === 0 ? <p className="empty-line">No active alerts.</p> : null}
+        </div>
+      </article>
 
       <article className="panel-card">
         <h3>Provider Runs</h3>
@@ -240,6 +295,20 @@ function SystemContent() {
             </div>
           ))}
           {!healthLoading && latestEvents.length === 0 ? <p className="empty-line">No events captured yet.</p> : null}
+        </div>
+      </article>
+
+      <article className="panel-card">
+        <h3>Runbooks</h3>
+        <div className="stack">
+          {healthLoading ? <p className="empty-line">Loading runbooks…</p> : null}
+          {runbooks.map((book) => (
+            <div key={book.key} className="queue-item">
+              <p className="queue-title">{book.title}</p>
+              <p className="queue-body">{book.steps}</p>
+            </div>
+          ))}
+          {!healthLoading && runbooks.length === 0 ? <p className="empty-line">No runbooks defined.</p> : null}
         </div>
       </article>
     </section>

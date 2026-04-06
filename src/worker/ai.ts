@@ -445,7 +445,7 @@ function buildPrompt(args: {
     hasKeyword(args.inboundText, funnyKeywords) ||
     hasEmoji(args.inboundText, funnyEmojis);
   const soulInstruction = soulModeEnabled
-    ? "Keep a grounded, emotionally-aware human tone. Show warmth and personality without sounding scripted."
+    ? "Let the account owner's identity lead every reply. Keep the tone grounded and emotionally aware, and express their values, boundaries, and voice without sounding scripted."
     : "Use a neutral, practical tone and avoid playful language.";
   const playfulInstruction =
     soulModeEnabled && playfulMoment

@@ -3,6 +3,7 @@
 import { ActionNotices } from "@/components/action-notices";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
 import { api } from "../../convex/_generated/api";
+import type { Id } from "../../convex/_generated/dataModel";
 import { useMutation, useQuery } from "convex/react";
 import { FormEvent, useMemo, useState } from "react";
 
@@ -15,6 +16,8 @@ type KnownContact = {
 
 function RulesContent() {
   const upsertIgnoreRule = useMutation(api.rules.upsertIgnoreRule);
+  const setIgnoreRuleEnabled = useMutation(api.rules.setIgnoreRuleEnabled);
+  const deleteIgnoreRule = useMutation(api.rules.deleteIgnoreRule);
   const { runAction, getRecord, notices, dismissNotice } = useActionStateRegistry();
 
   const [targetValue, setTargetValue] = useState("");
@@ -146,6 +149,53 @@ function RulesContent() {
               <p className="queue-title">{rule.targetType}</p>
               <p className="queue-body">{rule.targetValue}</p>
               <p className="queue-meta">Enabled: {rule.enabled ? "Yes" : "No"}</p>
+              <div className="queue-actions">
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  onClick={() =>
+                    void runAction(
+                      `rules:toggle:${rule._id}`,
+                      async () => {
+                        await setIgnoreRuleEnabled({
+                          ruleId: rule._id as Id<"ignoreRules">,
+                          enabled: !rule.enabled,
+                        });
+                      },
+                      {
+                        pendingLabel: rule.enabled ? "Disabling..." : "Enabling...",
+                        successMessage: rule.enabled ? "Rule disabled." : "Rule enabled.",
+                      },
+                    )
+                  }
+                  disabled={getRecord(`rules:toggle:${rule._id}`).pending}
+                  aria-disabled={getRecord(`rules:toggle:${rule._id}`).pending}
+                >
+                  {rule.enabled ? "Disable" : "Enable"}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  onClick={() =>
+                    void runAction(
+                      `rules:delete:${rule._id}`,
+                      async () => {
+                        await deleteIgnoreRule({
+                          ruleId: rule._id as Id<"ignoreRules">,
+                        });
+                      },
+                      {
+                        pendingLabel: "Deleting...",
+                        successMessage: "Rule deleted.",
+                      },
+                    )
+                  }
+                  disabled={getRecord(`rules:delete:${rule._id}`).pending}
+                  aria-disabled={getRecord(`rules:delete:${rule._id}`).pending}
+                >
+                  Delete
+                </button>
+              </div>
             </div>
           ))}
           {!rulesLoading && ignoreRules.length === 0 ? <p className="empty-line">No ignore rules yet.</p> : null}

@@ -76,6 +76,29 @@ The setup wizard uses API routes:
 - `bun run worker` - WhatsApp worker only
 - `bun run lint` - lint checks
 
+## Voice Notes (whisper.cpp, No API Key)
+
+Incoming WhatsApp voice notes/audio can be transcribed locally and fed into the same AI reply flow.
+
+1. Build/install `whisper.cpp` locally so `whisper-cli` is available.
+2. Download a Whisper GGML model file (for example `ggml-base.en.bin`).
+3. Set env vars in `.env.local`:
+
+```bash
+SLM_WHISPER_ENABLED=true
+SLM_WHISPER_CLI_PATH=whisper-cli
+SLM_WHISPER_MODEL_PATH=/absolute/path/to/ggml-base.en.bin
+SLM_WHISPER_LANGUAGE=auto
+SLM_WHISPER_THREADS=4
+SLM_WHISPER_TIMEOUT_MS=120000
+SLM_FFMPEG_PATH=ffmpeg
+```
+
+Notes:
+- `SLM_WHISPER_MODEL_PATH` is required.
+- `ffmpeg` is optional but recommended; when available, audio is converted to 16k mono WAV before transcription for better compatibility.
+- When transcription fails or is not configured, the worker still ingests the message and marks transcription as unavailable in logs/events.
+
 ## Project Map
 
 - `src/app/*` dashboard pages + route handlers

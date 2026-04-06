@@ -1,5 +1,5 @@
 import { v } from "convex/values";
-import type { Id } from "./_generated/dataModel";
+import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { mutation } from "./_generated/server";
@@ -12,6 +12,14 @@ import {
 } from "./lib/threadEligibility";
 
 const INBOUND_STALE_GRACE_MS = 2 * 60 * 1000;
+const GHOST_MODE_DURATION_MS = 30 * 60 * 1000;
+const GHOST_ACTIVITY_WINDOW_MS = 18 * 60 * 1000;
+const GHOST_ACTIVITY_WINDOW_MESSAGE_LIMIT = 36;
+const GHOST_ACTIVITY_MIN_TOTAL_MESSAGES = 7;
+const GHOST_ACTIVITY_MIN_INBOUND_MESSAGES = 3;
+const GHOST_ACTIVITY_MIN_OUTBOUND_MESSAGES = 3;
+const GHOST_ACTIVITY_MIN_TURNS = 4;
+const GHOST_TRIGGER_PROBABILITY = 0.2;
 
 function normalizeTimestampMs(raw: number | undefined, fallbackMs: number) {
   if (!Number.isFinite(raw) || (raw ?? 0) <= 0) {
@@ -37,6 +45,49 @@ export function extractAliasesFromText(text: string) {
     }
   }
   return aliases;
+}
+
+export function hasGoodActiveChattingWindow(
+  messages: Array<Pick<Doc<"messages">, "direction" | "messageAt">>,
+) {
+  if (messages.length < GHOST_ACTIVITY_MIN_TOTAL_MESSAGES) {
+    return false;
+  }
+
+  let inbound = 0;
+  let outbound = 0;
+  let turns = 0;
+
+  for (let index = 0; index < messages.length; index += 1) {
+    const current = messages[index];
+    if (current.direction === "inbound") {
+      inbound += 1;
+    } else {
+      outbound += 1;
+    }
+
+    if (index > 0 && messages[index - 1].direction !== current.direction) {
+      turns += 1;
+    }
+  }
+
+  return (
+    inbound >= GHOST_ACTIVITY_MIN_INBOUND_MESSAGES &&
+    outbound >= GHOST_ACTIVITY_MIN_OUTBOUND_MESSAGES &&
+    turns >= GHOST_ACTIVITY_MIN_TURNS
+  );
+}
+
+export function shouldEnterGhostMode(args: {
+  messages: Array<Pick<Doc<"messages">, "direction" | "messageAt">>;
+  randomValue?: number;
+}) {
+  if (!hasGoodActiveChattingWindow(args.messages)) {
+    return false;
+  }
+
+  const roll = args.randomValue ?? Math.random();
+  return roll < GHOST_TRIGGER_PROBABILITY;
 }
 
 async function updateAutoAliases(args: {
@@ -123,6 +174,7 @@ export const ingest = mutation({
         threadKind: inputThreadKind,
         isArchived: args.isArchived || false,
         archivedAt: args.isArchived ? normalizedArchivedAt : undefined,
+        ghostedUntil: undefined,
         lastMessageAt: messageAt,
         createdAt: now,
         updatedAt: now,
@@ -151,24 +203,18 @@ export const ingest = mutation({
 
     const threadKind = args.threadKind || thread.threadKind || inputThreadKind;
     const isArchived = args.isArchived === undefined ? thread.isArchived || false : args.isArchived;
+
+    let ghostedUntil = thread.ghostedUntil;
+    if ((ghostedUntil || 0) <= now) {
+      ghostedUntil = undefined;
+    }
+
     const explicitIgnore = await ctx.db
       .query("ignoreRules")
       .withIndex("by_target", (q) =>
         q.eq("targetType", threadKind === "group" ? "group" : "contact").eq("targetValue", args.threadJid),
       )
       .first();
-
-    const eligibility = resolveThreadEligibility({
-      thread: {
-        jid: thread.jid,
-        isIgnored: thread.isIgnored,
-        isArchived,
-        threadKind,
-      },
-      ignoreGroupsByDefault: config.ignoreGroupsByDefault,
-      explicitIgnoreEnabled: Boolean(explicitIgnore?.enabled),
-    });
-    const ignored = !eligibility.allowed;
 
     if (args.whatsappMessageId) {
       const existing = await ctx.db
@@ -199,12 +245,56 @@ export const ingest = mutation({
       }
     }
 
-    const latestMessage = await ctx.db
+    const recentWindowMessages = await ctx.db
       .query("messages")
-      .withIndex("by_thread_messageAt", (q) => q.eq("threadId", thread._id))
+      .withIndex("by_thread_messageAt", (q) =>
+        q.eq("threadId", thread._id).gte("messageAt", now - GHOST_ACTIVITY_WINDOW_MS),
+      )
       .order("desc")
-      .first();
+      .take(GHOST_ACTIVITY_WINDOW_MESSAGE_LIMIT);
+
+    const latestMessage = recentWindowMessages[0];
     const stale = Boolean(latestMessage && messageAt + INBOUND_STALE_GRACE_MS < latestMessage.messageAt);
+
+    const eligibleForGhostStart =
+      threadKind === "direct" &&
+      !isArchived &&
+      !stale &&
+      !ghostedUntil &&
+      messageType !== "reaction";
+    if (
+      eligibleForGhostStart &&
+      shouldEnterGhostMode({
+        messages: [...recentWindowMessages].reverse(),
+      })
+    ) {
+      ghostedUntil = now + GHOST_MODE_DURATION_MS;
+      await ctx.db.patch(thread._id, {
+        ghostedUntil,
+        updatedAt: now,
+      });
+      await ctx.db.insert("systemEvents", {
+        source: "worker",
+        eventType: "thread.ghost_mode.started",
+        threadId: thread._id,
+        detail: `Auto-replies paused until ${new Date(ghostedUntil).toISOString()} after active back-and-forth.`,
+        createdAt: now,
+      });
+    }
+
+    const eligibility = resolveThreadEligibility({
+      thread: {
+        jid: thread.jid,
+        isIgnored: thread.isIgnored,
+        isArchived,
+        threadKind,
+        ghostedUntil,
+      },
+      ignoreGroupsByDefault: config.ignoreGroupsByDefault,
+      explicitIgnoreEnabled: Boolean(explicitIgnore?.enabled),
+      nowMs: now,
+    });
+    const ignored = !eligibility.allowed;
 
     let reactionTargetMessageId: Id<"messages"> | undefined;
     if (messageType === "reaction" && args.reactionTargetWhatsAppMessageId) {

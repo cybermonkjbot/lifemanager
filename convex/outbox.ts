@@ -1,6 +1,6 @@
 import { v } from "convex/values";
 import { internal } from "./_generated/api";
-import { internalMutation, mutation } from "./_generated/server";
+import { internalMutation, mutation, query } from "./_generated/server";
 import { DEFAULT_LEASE_MS, DEFAULT_RETRY_LIMIT } from "./lib/constants";
 import { getConfig } from "./lib/config";
 import {
@@ -8,6 +8,57 @@ import {
   eligibilityReasonLabel,
   resolveThreadEligibility,
 } from "./lib/threadEligibility";
+
+function isWithinQuietHours(hour: number, startHour: number, endHour: number) {
+  if (startHour === endHour) {
+    return false;
+  }
+  if (startHour < endHour) {
+    return hour >= startHour && hour < endHour;
+  }
+  return hour >= startHour || hour < endHour;
+}
+
+function nextAllowedAfterQuietHours(now: number, startHour: number, endHour: number) {
+  const next = new Date(now);
+  const hour = next.getHours();
+
+  if (startHour === endHour) {
+    return now;
+  }
+
+  if (startHour < endHour) {
+    if (hour >= startHour && hour < endHour) {
+      next.setHours(endHour, 0, 5, 0);
+      return next.getTime();
+    }
+    return now;
+  }
+
+  if (hour >= startHour) {
+    next.setDate(next.getDate() + 1);
+    next.setHours(endHour, 0, 5, 0);
+    return next.getTime();
+  }
+
+  if (hour < endHour) {
+    next.setHours(endHour, 0, 5, 0);
+    return next.getTime();
+  }
+
+  return now;
+}
+
+function normalizeTimestampMs(raw: number | undefined, fallbackMs: number) {
+  if (!Number.isFinite(raw) || (raw ?? 0) <= 0) {
+    return fallbackMs;
+  }
+  const parsed = Number(raw);
+  if (parsed < 10_000_000_000) {
+    return parsed * 1000;
+  }
+  return parsed;
+}
 
 export const claimDue = mutation({
   args: {
@@ -65,6 +116,60 @@ export const claimDue = mutation({
         continue;
       }
 
+      let deferUntil = 0;
+      const deferReasons: string[] = [];
+      const nowHour = new Date(now).getHours();
+      if (config.quietHoursEnabled && isWithinQuietHours(nowHour, config.quietHoursStartHour, config.quietHoursEndHour)) {
+        deferUntil = Math.max(deferUntil, nextAllowedAfterQuietHours(now, config.quietHoursStartHour, config.quietHoursEndHour));
+        deferReasons.push("quiet-hours");
+      }
+
+      const windowMs = Math.max(5, config.sendRateWindowMinutes) * 60 * 1000;
+      const cutoff = now - windowMs;
+
+      const recentThread = await ctx.db
+        .query("messages")
+        .withIndex("by_thread_messageAt", (q) => q.eq("threadId", thread._id).gte("messageAt", cutoff))
+        .order("desc")
+        .take(Math.min(config.sendMaxPerThreadInWindow + 5, 120));
+      const recentThreadOutbound = recentThread.filter((message) => message.direction === "outbound");
+      if (recentThreadOutbound.length >= config.sendMaxPerThreadInWindow) {
+        const oldestThreadWindow = Math.min(...recentThreadOutbound.slice(0, config.sendMaxPerThreadInWindow).map((message) => message.messageAt));
+        deferUntil = Math.max(deferUntil, oldestThreadWindow + windowMs + 1_000);
+        deferReasons.push("thread-rate-limit");
+      }
+
+      const recentGlobal = await ctx.db
+        .query("messages")
+        .withIndex("by_createdAt", (q) => q.gte("createdAt", cutoff))
+        .order("desc")
+        .take(Math.min(config.sendMaxGlobalInWindow + 80, 800));
+      const recentGlobalOutbound = recentGlobal.filter((message) => message.direction === "outbound" && message.messageAt >= cutoff);
+      if (recentGlobalOutbound.length >= config.sendMaxGlobalInWindow) {
+        const oldestGlobalWindow = Math.min(...recentGlobalOutbound.slice(0, config.sendMaxGlobalInWindow).map((message) => message.messageAt));
+        deferUntil = Math.max(deferUntil, oldestGlobalWindow + windowMs + 1_000);
+        deferReasons.push("global-rate-limit");
+      }
+
+      if (deferUntil > now) {
+        await ctx.db.patch(item._id, {
+          status: "pending",
+          workerId: undefined,
+          leaseExpiresAt: undefined,
+          sendAt: deferUntil,
+          updatedAt: now,
+        });
+        await ctx.db.insert("systemEvents", {
+          source: "worker",
+          eventType: "outbox.deferred.policy",
+          threadId: item.threadId,
+          outboxId: item._id,
+          detail: `Deferred send due to ${deferReasons.join(", ")}.`,
+          createdAt: now,
+        });
+        continue;
+      }
+
       const threadKind = thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup });
       const explicitIgnore = await ctx.db
         .query("ignoreRules")
@@ -78,11 +183,33 @@ export const claimDue = mutation({
           isIgnored: thread.isIgnored,
           isArchived: thread.isArchived,
           threadKind,
+          ghostedUntil: thread.ghostedUntil,
         },
         ignoreGroupsByDefault: config.ignoreGroupsByDefault,
         explicitIgnoreEnabled: Boolean(explicitIgnore?.enabled),
+        nowMs: now,
       });
       if (!eligibility.allowed) {
+        if (eligibility.reason === "temporary_ghost") {
+          const ghostUntil = Math.max(thread.ghostedUntil ?? now, now + 30_000);
+          await ctx.db.patch(item._id, {
+            status: "pending",
+            workerId: undefined,
+            leaseExpiresAt: undefined,
+            sendAt: ghostUntil + 2_000,
+            updatedAt: now,
+          });
+          await ctx.db.insert("systemEvents", {
+            source: "worker",
+            eventType: "outbox.deferred.ghost_mode",
+            threadId: item.threadId,
+            outboxId: item._id,
+            detail: `Deferred send until temporary ghost window ends (${new Date(ghostUntil).toISOString()}).`,
+            createdAt: now,
+          });
+          continue;
+        }
+
         const reason = `Blocked by eligibility: ${eligibility.reason} (${eligibilityReasonLabel(eligibility.reason)}).`;
         await ctx.db.patch(item._id, {
           status: "failed",
@@ -165,6 +292,160 @@ export const markTyping = mutation({
     });
 
     return outbox._id;
+  },
+});
+
+export const getSendDisposition = query({
+  args: {
+    outboxId: v.id("outbox"),
+  },
+  handler: async (ctx, args) => {
+    const outbox = await ctx.db.get(args.outboxId);
+    if (!outbox) {
+      return {
+        canSend: false,
+        reason: "outbox_missing",
+      };
+    }
+    if (outbox.status !== "claimed") {
+      return {
+        canSend: false,
+        reason: `outbox_not_claimed:${outbox.status}`,
+      };
+    }
+
+    return {
+      canSend: true,
+    };
+  },
+});
+
+export const suppressForManualIntervention = mutation({
+  args: {
+    threadJid: v.string(),
+    whatsappMessageId: v.optional(v.string()),
+    text: v.optional(v.string()),
+    messageType: v.optional(v.union(v.literal("text"), v.literal("reaction"), v.literal("sticker"), v.literal("meme"))),
+    reactionEmoji: v.optional(v.string()),
+    reactionTargetWhatsAppMessageId: v.optional(v.string()),
+    mediaCaption: v.optional(v.string()),
+    messageAt: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    const messageAt = normalizeTimestampMs(args.messageAt, now);
+    const thread = await ctx.db
+      .query("threads")
+      .withIndex("by_jid", (q) => q.eq("jid", args.threadJid))
+      .first();
+
+    if (!thread) {
+      return {
+        threadFound: false,
+        suppressedOutbox: 0,
+      };
+    }
+
+    await ctx.db.patch(thread._id, {
+      lastMessageAt: Math.max(thread.lastMessageAt, messageAt),
+      updatedAt: now,
+    });
+
+    let recordedMessageId: string | undefined;
+    if (args.whatsappMessageId) {
+      const existing = await ctx.db
+        .query("messages")
+        .withIndex("by_thread_whatsappMessageId", (q) =>
+          q.eq("threadId", thread._id).eq("whatsappMessageId", args.whatsappMessageId),
+        )
+        .first();
+      if (existing) {
+        recordedMessageId = existing._id;
+      }
+    }
+
+    if (!recordedMessageId) {
+      const messageText = (args.text || "").trim() || "[Manual outbound message]";
+      const inserted = await ctx.db.insert("messages", {
+        threadId: thread._id,
+        direction: "outbound",
+        whatsappMessageId: args.whatsappMessageId,
+        senderJid: "me",
+        text: messageText,
+        messageType: args.messageType || "text",
+        reactionEmoji: args.reactionEmoji,
+        reactionTargetWhatsAppMessageId: args.reactionTargetWhatsAppMessageId,
+        mediaAssetId: undefined,
+        mediaCaption: args.mediaCaption,
+        messageAt,
+        createdAt: now,
+      });
+      recordedMessageId = inserted;
+    }
+
+    const pending = await ctx.db
+      .query("outbox")
+      .withIndex("by_thread_and_status", (q) => q.eq("threadId", thread._id).eq("status", "pending"))
+      .take(60);
+    const claimed = await ctx.db
+      .query("outbox")
+      .withIndex("by_thread_and_status", (q) => q.eq("threadId", thread._id).eq("status", "claimed"))
+      .take(60);
+    const activeOutbox = [...pending, ...claimed];
+
+    let suppressedOutbox = 0;
+    for (const item of activeOutbox) {
+      if (item.createdAt > messageAt + 5_000) {
+        continue;
+      }
+
+      await ctx.db.patch(item._id, {
+        status: "failed",
+        workerId: undefined,
+        leaseExpiresAt: undefined,
+        error: "Suppressed: manual WhatsApp reply was sent before automated send.",
+        updatedAt: now,
+      });
+      suppressedOutbox += 1;
+
+      const draft = await ctx.db.get(item.draftId);
+      if (draft && draft.status !== "sent" && draft.status !== "rejected") {
+        await ctx.db.patch(draft._id, {
+          status: "rejected",
+          updatedAt: now,
+        });
+      }
+
+      if (item.followUpId) {
+        const followUp = await ctx.db.get(item.followUpId);
+        if (followUp && followUp.status !== "sent" && followUp.status !== "failed" && followUp.status !== "cancelled") {
+          await ctx.db.patch(followUp._id, {
+            status: "cancelled",
+            updatedAt: now,
+          });
+        }
+      }
+    }
+
+    if (suppressedOutbox > 0) {
+      await ctx.db.insert("systemEvents", {
+        source: "worker",
+        eventType: "outbox.suppressed.manual",
+        threadId: thread._id,
+        detail: `Suppressed ${suppressedOutbox} active outbox item(s) after manual intervention.`,
+        createdAt: now,
+      });
+
+      await ctx.scheduler.runAfter(0, internal.backlog.refreshThread, {
+        threadId: thread._id,
+      });
+    }
+
+    return {
+      threadFound: true,
+      recordedMessageId,
+      suppressedOutbox,
+    };
   },
 });
 
