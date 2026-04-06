@@ -43,6 +43,11 @@ function QueueContent() {
         }>;
       }
     | undefined;
+  const queueLoading = queue === undefined;
+  const needsReply = queue?.needsReply || [];
+  const followupConfirmations = queue?.followupConfirmations || [];
+  const todoCandidates = queue?.todoCandidates || [];
+  const guardrailFlags = queue?.guardrailFlags || [];
 
   const onSend = (draftId: string) => {
     const key = `send:${draftId}`;
@@ -108,7 +113,8 @@ function QueueContent() {
         <article className="panel-card">
           <h3>Needs Reply</h3>
           <div className="stack">
-            {(queue?.needsReply || []).map((item) => {
+            {queueLoading ? <p className="empty-line">Loading reply queue…</p> : null}
+            {needsReply.map((item) => {
               const sendKey = `send:${item._id}`;
               const snoozeKey = `snooze:${item._id}`;
               const rowPending = isPending(sendKey) || isPending(snoozeKey);
@@ -155,14 +161,15 @@ function QueueContent() {
                 </div>
               );
             })}
-            {(queue?.needsReply || []).length === 0 ? <p className="empty-line">No pending replies.</p> : null}
+            {!queueLoading && needsReply.length === 0 ? <p className="empty-line">No pending replies.</p> : null}
           </div>
         </article>
 
         <article className="panel-card">
           <h3>Follow-up Confirmations</h3>
           <div className="stack">
-            {(queue?.followupConfirmations || []).map((item) => {
+            {queueLoading ? <p className="empty-line">Loading follow-up confirmations…</p> : null}
+            {followupConfirmations.map((item) => {
               const key = `followup:${item._id}`;
               const record = getRecord(key);
 
@@ -187,7 +194,7 @@ function QueueContent() {
                 </div>
               );
             })}
-            {(queue?.followupConfirmations || []).length === 0 ? (
+            {!queueLoading && followupConfirmations.length === 0 ? (
               <p className="empty-line">No follow-up confirmations pending.</p>
             ) : null}
           </div>
@@ -198,7 +205,8 @@ function QueueContent() {
         <article className="panel-card">
           <h3>TODO Candidates</h3>
           <div className="stack">
-            {(queue?.todoCandidates || []).map((item) => {
+            {queueLoading ? <p className="empty-line">Loading TODO candidates…</p> : null}
+            {todoCandidates.map((item) => {
               const key = `todo:${item._id}`;
               const record = getRecord(key);
 
@@ -223,20 +231,21 @@ function QueueContent() {
                 </div>
               );
             })}
-            {(queue?.todoCandidates || []).length === 0 ? <p className="empty-line">No todo candidates.</p> : null}
+            {!queueLoading && todoCandidates.length === 0 ? <p className="empty-line">No todo candidates.</p> : null}
           </div>
         </article>
 
         <article className="panel-card">
           <h3>Guardrail Flags</h3>
           <div className="stack">
-            {(queue?.guardrailFlags || []).map((item) => (
+            {queueLoading ? <p className="empty-line">Loading guardrail flags…</p> : null}
+            {guardrailFlags.map((item) => (
               <div key={item._id} className="queue-item">
                 <p className="queue-title">Severity: {item.severity}</p>
                 <p className="queue-body">{item.reason}</p>
               </div>
             ))}
-            {(queue?.guardrailFlags || []).length === 0 ? <p className="empty-line">No active safety flags.</p> : null}
+            {!queueLoading && guardrailFlags.length === 0 ? <p className="empty-line">No active safety flags.</p> : null}
           </div>
         </article>
       </section>

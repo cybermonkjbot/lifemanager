@@ -38,6 +38,17 @@ function statusLabel(status: SetupStatus) {
   return "Error";
 }
 
+function simplifySetupMessage(message?: string) {
+  if (!message) {
+    return "Loading status...";
+  }
+
+  let next = message.replace(/\s+\(PID\s+\d+\)\.?/gi, ".").trim();
+  next = next.replace(/run\s+`bun run worker`\s+manually\.?/gi, "Please try again.");
+  next = next.replace(/worker listener is offline\.?/gi, "Connection is idle.");
+  return next;
+}
+
 function getRetryGuidance(state: SetupState | null) {
   if (!state || state.status !== "starting") {
     return null;
@@ -61,6 +72,18 @@ function getRevokedGuidance(state: SetupState | null) {
     return null;
   }
 
+  if (state.status === "starting" || state.status === "qr_ready" || state.status === "code_ready" || state.status === "syncing") {
+    return null;
+  }
+
+  const statusMessage = state.message.toLowerCase();
+  const manualStopOrReset =
+    statusMessage.includes("setup session stopped") ||
+    statusMessage.includes("credentials reset");
+  if (manualStopOrReset) {
+    return null;
+  }
+
   const text = `${state.message} ${state.listenerMessage || ""}`.toLowerCase();
   const revokedByMessage =
     text.includes("signed this device out") ||
@@ -68,7 +91,7 @@ function getRevokedGuidance(state: SetupState | null) {
     text.includes("credentials were cleared") ||
     text.includes("credentials were invalidated");
 
-  if (!revokedByMessage) {
+  if (!revokedByMessage || state.hasAuth) {
     return null;
   }
 
@@ -108,6 +131,7 @@ function SetupWizardContent({
 
   const { runAction, isPending, anyPending, notices, dismissNotice } = useActionStateRegistry();
 
+  const liveStateLoading = realtimeEnabled && liveState === undefined && !localState;
   const state = useMemo(() => {
     if (!liveState) {
       return localState;
@@ -124,11 +148,13 @@ function SetupWizardContent({
   const showQrCode = state?.mode === "qr" && status === "qr_ready" && Boolean(state?.qrDataUrl);
   const retryGuidance = getRetryGuidance(state);
   const revokedGuidance = getRevokedGuidance(state);
+  const uiStatusMessage = simplifySetupMessage(state?.message);
 
   const pendingStartQr = isPending("setup:start_qr");
   const pendingStartCode = isPending("setup:start_code");
   const pendingRefresh = isPending("setup:refresh");
   const pendingStop = isPending("setup:stop");
+  const pendingRestart = isPending("setup:restart_worker");
   const pendingReset = isPending("setup:reset");
 
   const normalizedPhone = phoneNumber.replace(/[^\d]/g, "");
@@ -139,6 +165,7 @@ function SetupWizardContent({
     const isStarting = status === "starting";
     const isSyncing = status === "syncing";
     const isReady = status === "qr_ready" || status === "code_ready";
+    const isSetupSessionActive = isStarting || isSyncing || isReady;
     const hasActiveQrSession = state?.mode === "qr" && status === "qr_ready";
     const hasActiveSetupState =
       isStarting ||
@@ -149,13 +176,14 @@ function SetupWizardContent({
       pendingStartQr ||
       pendingStartCode;
 
-    const allowStart = !anyPending && (isIdleOrError || isReady);
+    const allowStart = !liveStateLoading && !anyPending && (isIdleOrError || isReady);
 
     return {
       canStartQr: allowStart && !isConnected && !hasActiveQrSession,
       canStartCode: allowStart && !isConnected,
       canRefresh: !anyPending,
       canStop: !pendingStop && !pendingReset && hasActiveSetupState,
+      canRestartWorker: !anyPending && !liveStateLoading && Boolean(state?.hasAuth) && !isSetupSessionActive,
       canReset: !anyPending && (isIdleOrError || isConnected),
       canEditPhone: !anyPending,
     };
@@ -166,6 +194,8 @@ function SetupWizardContent({
     pendingStartCode,
     pendingStartQr,
     pendingStop,
+    liveStateLoading,
+    state?.hasAuth,
     state?.listenerActive,
     state?.mode,
     status,
@@ -176,9 +206,10 @@ function SetupWizardContent({
     if (pendingStartCode) return "Starting pairing-code session...";
     if (pendingRefresh) return "Refreshing status...";
     if (pendingStop) return "Stopping setup session...";
+    if (pendingRestart) return "Restarting worker...";
     if (pendingReset) return "Resetting credentials...";
     return "";
-  }, [pendingRefresh, pendingReset, pendingStartCode, pendingStartQr, pendingStop]);
+  }, [pendingRefresh, pendingReset, pendingRestart, pendingStartCode, pendingStartQr, pendingStop]);
 
   const refresh = () => {
     void runAction(
@@ -234,6 +265,23 @@ function SetupWizardContent({
       },
       {
         pendingLabel: "Stopping...",
+      },
+    );
+  };
+
+  const restartWorker = () => {
+    void runAction(
+      "setup:restart_worker",
+      async () => {
+        const response = await fetch("/api/setup/whatsapp/restart-worker", {
+          method: "POST",
+        });
+
+        const next = await readSetupResponse(response);
+        setLocalState(next);
+      },
+      {
+        pendingLabel: "Restarting worker...",
       },
     );
   };
@@ -318,14 +366,9 @@ function SetupWizardContent({
           >
             {state?.listenerActive ? "Connected" : statusLabel(status)}
           </span>
-          <span className="queue-meta">{state?.message || "Loading status..."}</span>
+          <span className="queue-meta">{uiStatusMessage}</span>
         </div>
-
-        <p className="queue-meta">
-          Listener: {state?.listenerActive ? "Active" : "Offline"}
-          {state?.listenerWorkerId ? ` (${state.listenerWorkerId})` : ""}
-        </p>
-        {state?.listenerMessage ? <p className="queue-meta">{state.listenerMessage}</p> : null}
+        {liveStateLoading ? <p className="empty-line">Connecting to live setup state…</p> : null}
 
         {retryGuidance ? (
           <p className="setup-retry-notice" role="status" aria-live="polite">
@@ -385,6 +428,15 @@ function SetupWizardContent({
           <button
             className="btn btn-ghost"
             type="button"
+            onClick={restartWorker}
+            disabled={!controls.canRestartWorker}
+            aria-disabled={!controls.canRestartWorker}
+          >
+            {pendingRestart ? "Restarting..." : "Restart Worker"}
+          </button>
+          <button
+            className="btn btn-ghost"
+            type="button"
             onClick={resetSetup}
             disabled={!controls.canReset}
             aria-disabled={!controls.canReset}
@@ -406,13 +458,6 @@ function SetupWizardContent({
           />
         </label>
 
-        {state?.status === "error" ? (
-          <p className="queue-meta">
-            If this keeps failing, stop <code>bun run worker</code>, click <strong>Reset Credentials</strong>, then retry with
-            <strong> Get Pairing Code</strong>.
-          </p>
-        ) : null}
-
         <div className="wizard-steps">
           <article className="wizard-step">
             <p className="queue-title">Step 1</p>
@@ -429,7 +474,7 @@ function SetupWizardContent({
           <article className="wizard-step">
             <p className="queue-title">Step 3</p>
             <p className="queue-body">
-              After <strong>Connected</strong>, worker auto-starts. If not, run <code>bun run worker</code>.
+              After <strong>Connected</strong>, worker starts automatically.
             </p>
           </article>
         </div>
@@ -457,8 +502,6 @@ function SetupWizardContent({
               : "QR code will appear here after starting setup."}
           </p>
         )}
-
-        <p className="queue-meta">Credentials found: {state?.hasAuth ? "Yes" : "No"}</p>
       </div>
     </section>
   );

@@ -5,6 +5,7 @@ const crons = cronJobs();
 
 crons.interval("process-confirmed-followups", { minutes: 1 }, internal.followupsPromoter.run, {});
 crons.interval("recover-stuck-outbox-claims", { minutes: 2 }, internal.outbox.recoverExpiredClaims, {});
+crons.interval("proactive-outreach", { minutes: 30 }, internal.outreach.run, {});
 crons.interval("nightly-memory-summary", { hours: 24 }, internal.memoryBatch.run, {});
 crons.interval("retention-cleanup", { hours: 24 }, internal.retention.run, {});
 

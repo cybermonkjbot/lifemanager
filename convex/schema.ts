@@ -27,6 +27,11 @@ export default defineSchema({
     whatsappMessageId: v.optional(v.string()),
     senderJid: v.string(),
     text: v.string(),
+    messageType: v.optional(v.union(v.literal("text"), v.literal("reaction"), v.literal("sticker"), v.literal("meme"))),
+    reactionEmoji: v.optional(v.string()),
+    reactionTargetWhatsAppMessageId: v.optional(v.string()),
+    mediaAssetId: v.optional(v.id("mediaAssets")),
+    mediaCaption: v.optional(v.string()),
     messageAt: v.number(),
     createdAt: v.number(),
   })
@@ -46,6 +51,11 @@ export default defineSchema({
     threadId: v.id("threads"),
     sourceMessageId: v.id("messages"),
     text: v.string(),
+    sendKind: v.optional(v.union(v.literal("text"), v.literal("reaction"), v.literal("sticker"), v.literal("meme"))),
+    reactionEmoji: v.optional(v.string()),
+    reactionTargetMessageId: v.optional(v.id("messages")),
+    mediaAssetId: v.optional(v.id("mediaAssets")),
+    mediaCaption: v.optional(v.string()),
     status: v.union(
       v.literal("pending"),
       v.literal("approved"),
@@ -70,6 +80,12 @@ export default defineSchema({
     draftId: v.id("replyDrafts"),
     followUpId: v.optional(v.id("followUps")),
     messageText: v.string(),
+    sendKind: v.optional(v.union(v.literal("text"), v.literal("reaction"), v.literal("sticker"), v.literal("meme"))),
+    reactionEmoji: v.optional(v.string()),
+    reactionTargetWhatsAppMessageId: v.optional(v.string()),
+    preReactionEmoji: v.optional(v.string()),
+    mediaAssetId: v.optional(v.id("mediaAssets")),
+    mediaCaption: v.optional(v.string()),
     sendAt: v.number(),
     status: v.union(
       v.literal("pending"),
@@ -88,6 +104,7 @@ export default defineSchema({
   })
     .index("by_status_sendAt", ["status", "sendAt"])
     .index("by_status_leaseExpiresAt", ["status", "leaseExpiresAt"])
+    .index("by_thread_and_status", ["threadId", "status"])
     .index("by_worker", ["workerId"])
     .index("by_draft", ["draftId"]),
 
@@ -236,4 +253,41 @@ export default defineSchema({
     listenerLastSeenAt: v.optional(v.number()),
     updatedAt: v.number(),
   }).index("by_key", ["key"]),
+
+  messageReactions: defineTable({
+    threadId: v.id("threads"),
+    messageId: v.id("messages"),
+    actorJid: v.string(),
+    direction: v.union(v.literal("inbound"), v.literal("outbound")),
+    emoji: v.string(),
+    whatsappMessageId: v.optional(v.string()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_messageId_and_actorJid", ["messageId", "actorJid"])
+    .index("by_threadId_and_messageId", ["threadId", "messageId"])
+    .index("by_threadId", ["threadId"]),
+
+  mediaAssets: defineTable({
+    kind: v.union(v.literal("sticker"), v.literal("meme")),
+    label: v.string(),
+    tags: v.array(v.string()),
+    enabled: v.boolean(),
+    fileId: v.id("_storage"),
+    mimeType: v.string(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_kind_and_enabled", ["kind", "enabled"])
+    .index("by_kind", ["kind"]),
+
+  threadGrounding: defineTable({
+    threadId: v.id("threads"),
+    myName: v.optional(v.string()),
+    theirName: v.optional(v.string()),
+    autoAliases: v.array(v.string()),
+    vibeNotes: v.optional(v.string()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  }).index("by_threadId", ["threadId"]),
 });

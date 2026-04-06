@@ -1,8 +1,78 @@
 import { v } from "convex/values";
+import type { Id } from "./_generated/dataModel";
+import type { MutationCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { mutation } from "./_generated/server";
 import { getConfig } from "./lib/config";
 import { detectPromiseOrPlan, detectTodoCandidate } from "./lib/heuristics";
+
+const INBOUND_STALE_GRACE_MS = 2 * 60 * 1000;
+
+function normalizeTimestampMs(raw: number | undefined, fallbackMs: number) {
+  if (!Number.isFinite(raw) || (raw ?? 0) <= 0) {
+    return fallbackMs;
+  }
+  const value = Number(raw);
+  if (value < 10_000_000_000) {
+    return value * 1000;
+  }
+  return value;
+}
+
+export function extractAliasesFromText(text: string) {
+  const aliases: string[] = [];
+  const patterns = [/\b(?:call me|i(?:'|’)m|im|it(?:'|’)s|its)\s+([a-z][a-z0-9_-]{1,24})\b/gi];
+  for (const pattern of patterns) {
+    const matches = text.matchAll(pattern);
+    for (const match of matches) {
+      const alias = match[1]?.trim();
+      if (alias) {
+        aliases.push(alias);
+      }
+    }
+  }
+  return aliases;
+}
+
+async function updateAutoAliases(args: {
+  ctx: MutationCtx;
+  threadId: Id<"threads">;
+  senderTitle?: string;
+  text: string;
+}) {
+  const titleAlias = args.senderTitle?.trim().split(/\s+/).find(Boolean);
+  const extracted = extractAliasesFromText(args.text);
+  const candidates = [...new Set([titleAlias, ...extracted].filter(Boolean).map((item) => (item || "").slice(0, 50)))];
+
+  if (candidates.length === 0) {
+    return;
+  }
+
+  const existing = await args.ctx.db
+    .query("threadGrounding")
+    .withIndex("by_threadId", (q) => q.eq("threadId", args.threadId))
+    .first();
+
+  const mergedAliases = [...new Set([...(existing?.autoAliases || []), ...candidates])].slice(0, 20);
+  const now = Date.now();
+  if (existing) {
+    await args.ctx.db.patch(existing._id, {
+      autoAliases: mergedAliases,
+      updatedAt: now,
+    });
+    return;
+  }
+
+  await args.ctx.db.insert("threadGrounding", {
+    threadId: args.threadId,
+    myName: undefined,
+    theirName: undefined,
+    autoAliases: mergedAliases,
+    vibeNotes: undefined,
+    createdAt: now,
+    updatedAt: now,
+  });
+}
 
 export const ingest = mutation({
   args: {
@@ -10,6 +80,11 @@ export const ingest = mutation({
     senderJid: v.string(),
     senderTitle: v.optional(v.string()),
     text: v.string(),
+    messageType: v.optional(v.union(v.literal("text"), v.literal("reaction"), v.literal("sticker"), v.literal("meme"))),
+    reactionEmoji: v.optional(v.string()),
+    reactionTargetWhatsAppMessageId: v.optional(v.string()),
+    mediaAssetId: v.optional(v.id("mediaAssets")),
+    mediaCaption: v.optional(v.string()),
     isGroup: v.boolean(),
     whatsappMessageId: v.optional(v.string()),
     messageAt: v.optional(v.number()),
@@ -17,7 +92,9 @@ export const ingest = mutation({
   },
   handler: async (ctx, args) => {
     const now = Date.now();
-    const messageAt = args.messageAt ?? now;
+    const messageAt = normalizeTimestampMs(args.messageAt, now);
+    const messageType = args.messageType || "text";
+    const normalizedText = args.text.trim();
 
     let thread = await ctx.db
       .query("threads")
@@ -46,7 +123,7 @@ export const ingest = mutation({
       await ctx.db.patch(thread._id, {
         title: args.senderTitle ?? thread.title,
         isGroup: args.isGroup,
-        lastMessageAt: messageAt,
+        lastMessageAt: Math.max(thread.lastMessageAt, messageAt),
         updatedAt: now,
       });
     }
@@ -71,7 +148,7 @@ export const ingest = mutation({
           source: "worker",
           eventType: "inbound.duplicate",
           threadId: thread._id,
-          detail: args.text.slice(0, 300),
+          detail: (normalizedText || args.reactionEmoji || "[Non-text inbound]").slice(0, 300),
           createdAt: now,
         });
 
@@ -80,10 +157,29 @@ export const ingest = mutation({
           messageId: existing._id,
           ignored: true,
           duplicate: true,
+          stale: false,
           promiseDetected: false,
           todoDetected: false,
         };
       }
+    }
+
+    const latestMessage = await ctx.db
+      .query("messages")
+      .withIndex("by_thread_messageAt", (q) => q.eq("threadId", thread._id))
+      .order("desc")
+      .first();
+    const stale = Boolean(latestMessage && messageAt + INBOUND_STALE_GRACE_MS < latestMessage.messageAt);
+
+    let reactionTargetMessageId: Id<"messages"> | undefined;
+    if (messageType === "reaction" && args.reactionTargetWhatsAppMessageId) {
+      const targetMessage = await ctx.db
+        .query("messages")
+        .withIndex("by_thread_whatsappMessageId", (q) =>
+          q.eq("threadId", thread._id).eq("whatsappMessageId", args.reactionTargetWhatsAppMessageId),
+        )
+        .first();
+      reactionTargetMessageId = targetMessage?._id;
     }
 
     const messageId = await ctx.db.insert("messages", {
@@ -91,64 +187,130 @@ export const ingest = mutation({
       direction: "inbound",
       whatsappMessageId: args.whatsappMessageId,
       senderJid: args.senderJid,
-      text: args.text,
+      text: normalizedText,
+      messageType,
+      reactionEmoji: args.reactionEmoji,
+      reactionTargetWhatsAppMessageId: args.reactionTargetWhatsAppMessageId,
+      mediaAssetId: args.mediaAssetId,
+      mediaCaption: args.mediaCaption,
       messageAt,
       createdAt: now,
     });
 
+    if (messageType === "reaction" && reactionTargetMessageId) {
+      const actorJid = args.senderJid;
+      const existingReaction = await ctx.db
+        .query("messageReactions")
+        .withIndex("by_messageId_and_actorJid", (q) => q.eq("messageId", reactionTargetMessageId).eq("actorJid", actorJid))
+        .first();
+
+      const emoji = args.reactionEmoji?.trim() || "";
+      if (!emoji) {
+        if (existingReaction) {
+          await ctx.db.delete(existingReaction._id);
+        }
+      } else if (existingReaction) {
+        await ctx.db.patch(existingReaction._id, {
+          emoji,
+          direction: "inbound",
+          whatsappMessageId: args.whatsappMessageId,
+          updatedAt: now,
+        });
+      } else {
+        await ctx.db.insert("messageReactions", {
+          threadId: thread._id,
+          messageId: reactionTargetMessageId,
+          actorJid,
+          direction: "inbound",
+          emoji,
+          whatsappMessageId: args.whatsappMessageId,
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+    }
+
+    if (messageType === "text") {
+      await updateAutoAliases({
+        ctx,
+        threadId: thread._id,
+        senderTitle: args.senderTitle,
+        text: normalizedText,
+      });
+    }
+
     await ctx.db.insert("systemEvents", {
       source: "worker",
-      eventType: ignored ? "inbound.ignored" : "inbound.received",
+      eventType:
+        messageType === "reaction"
+          ? "inbound.reaction"
+          : stale
+            ? "inbound.stale"
+            : ignored
+              ? "inbound.ignored"
+              : "inbound.received",
       threadId: thread._id,
-      detail: args.text.slice(0, 300),
+      detail: (normalizedText || args.reactionEmoji || "[Non-text inbound]").slice(0, 300),
       createdAt: now,
     });
 
-    const promise = detectPromiseOrPlan(args.text);
-    if (promise) {
-      await ctx.db.insert("followUps", {
-        threadId: thread._id,
-        sourceMessageId: messageId,
-        reason: promise.reason,
-        draftText: "Following up on this so we stay aligned.",
-        dueAt: promise.dueAt,
-        status: "suggested",
-        createdAt: now,
-        updatedAt: now,
-      });
+    let promiseDetected = false;
+    let todoDetected = false;
+
+    if (!stale && messageType === "text") {
+      const promise = detectPromiseOrPlan(normalizedText);
+      if (promise) {
+        promiseDetected = true;
+        await ctx.db.insert("followUps", {
+          threadId: thread._id,
+          sourceMessageId: messageId,
+          reason: promise.reason,
+          draftText: "Following up on this so we stay aligned.",
+          dueAt: promise.dueAt,
+          status: "suggested",
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+
+      const todo = detectTodoCandidate(normalizedText);
+      if (todo) {
+        todoDetected = true;
+        await ctx.db.insert("todoCandidates", {
+          threadId: thread._id,
+          sourceMessageId: messageId,
+          title: todo.title,
+          suggestedDueAt: todo.suggestedDueAt,
+          status: "suggested",
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
     }
 
-    const todo = detectTodoCandidate(args.text);
-    if (todo) {
-      await ctx.db.insert("todoCandidates", {
-        threadId: thread._id,
-        sourceMessageId: messageId,
-        title: todo.title,
-        suggestedDueAt: todo.suggestedDueAt,
-        status: "suggested",
-        createdAt: now,
-        updatedAt: now,
-      });
-    }
-
-    if (!ignored && !args.skipDraftGeneration) {
+    if (!ignored && !stale && messageType !== "reaction" && !args.skipDraftGeneration) {
       await ctx.scheduler.runAfter(0, internal.draft.generate, {
         threadId: thread._id,
         sourceMessageId: messageId,
       });
     }
 
-    await ctx.scheduler.runAfter(0, internal.memory.summarize, {
-      threadId: thread._id,
-    });
+    if (!stale) {
+      await ctx.scheduler.runAfter(0, internal.memory.summarize, {
+        threadId: thread._id,
+      });
+    }
 
     return {
       threadId: thread._id,
       messageId,
       ignored,
       duplicate: false,
-      promiseDetected: Boolean(promise),
-      todoDetected: Boolean(todo),
+      stale,
+      messageType,
+      reactionTargetMessageId,
+      promiseDetected,
+      todoDetected,
     };
   },
 });

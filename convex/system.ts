@@ -26,6 +26,52 @@ export const health = query({
   },
 });
 
+export const logFeed = query({
+  args: {
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const limit = Math.min(args.limit ?? 60, 200);
+    const providerLimit = Math.max(10, Math.ceil(limit / 2));
+
+    const latestEvents = await ctx.db
+      .query("systemEvents")
+      .withIndex("by_createdAt")
+      .order("desc")
+      .take(limit);
+
+    const latestProviderRuns = await ctx.db
+      .query("providerRuns")
+      .withIndex("by_createdAt")
+      .order("desc")
+      .take(providerLimit);
+
+    const eventItems = latestEvents.map((event) => ({
+      id: event._id,
+      source: event.source,
+      eventType: event.eventType,
+      detail: event.detail,
+      createdAt: event.createdAt,
+      kind: "event" as const,
+    }));
+
+    const providerItems = latestProviderRuns.map((run) => ({
+      id: run._id,
+      source: "ai" as const,
+      eventType: `provider.${run.provider}.${run.status}`,
+      detail: run.error
+        ? `${run.model} · ${run.latencyMs}ms · ${run.error.slice(0, 180)}`
+        : `${run.model} · ${run.latencyMs}ms`,
+      createdAt: run.createdAt,
+      kind: "provider" as const,
+    }));
+
+    return [...eventItems, ...providerItems]
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .slice(0, limit);
+  },
+});
+
 export const recordEvent = mutation({
   args: {
     source: v.union(v.literal("worker"), v.literal("convex"), v.literal("dashboard"), v.literal("ai")),

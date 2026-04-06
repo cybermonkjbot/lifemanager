@@ -19,6 +19,7 @@ function StyleLabContent() {
         humorNotes: string[];
       }
     | undefined;
+  const profileLoading = profile === undefined;
 
   const currentLevel = profile?.mimicryLevel ?? 0.72;
   const [mimicryLevel, setMimicryLevel] = useState(currentLevel);
@@ -56,7 +57,9 @@ function StyleLabContent() {
       <article className="panel-card">
         <ActionNotices notices={notices} onDismiss={dismissNotice} />
         <h3>Mimicry Control</h3>
-        <p className="queue-meta">Current mimicry: {Math.round(currentLevel * 100)}%</p>
+        <p className="queue-meta">
+          {profileLoading ? "Loading style profile..." : `Current mimicry: ${Math.round(currentLevel * 100)}%`}
+        </p>
         <form onSubmit={onSubmit} className="stack compact" aria-busy={record.pending}>
           <input
             type="range"
@@ -66,15 +69,15 @@ function StyleLabContent() {
             name="mimicryLevel"
             value={mimicryLevel}
             onChange={(event) => setMimicryLevel(Number(event.target.value))}
-            disabled={record.pending}
-            aria-disabled={record.pending}
+            disabled={record.pending || profileLoading}
+            aria-disabled={record.pending || profileLoading}
           />
           <p className="queue-meta">Draft value: {Math.round(mimicryLevel * 100)}%</p>
           <button
             type="submit"
             className="btn btn-primary"
-            disabled={!hasChanged || record.pending}
-            aria-disabled={!hasChanged || record.pending}
+            disabled={!hasChanged || record.pending || profileLoading}
+            aria-disabled={!hasChanged || record.pending || profileLoading}
           >
             {record.pending ? "Saving..." : "Save Mimicry"}
           </button>
@@ -89,14 +92,20 @@ function StyleLabContent() {
       <article className="panel-card">
         <h3>Learned Traits</h3>
         <div className="stack">
-          <p className="queue-meta">Common phrases</p>
-          <p>{(profile?.commonPhrases || []).join(", ") || "Not enough data yet."}</p>
+          {profileLoading ? (
+            <p className="empty-line">Loading learned traits…</p>
+          ) : (
+            <>
+              <p className="queue-meta">Common phrases</p>
+              <p>{(profile?.commonPhrases || []).join(", ") || "Not enough data yet."}</p>
 
-          <p className="queue-meta">Spelling style</p>
-          <p>{(profile?.spellingNotes || []).join(", ") || "No spelling profile yet."}</p>
+              <p className="queue-meta">Spelling style</p>
+              <p>{(profile?.spellingNotes || []).join(", ") || "No spelling profile yet."}</p>
 
-          <p className="queue-meta">Humor markers</p>
-          <p>{(profile?.humorNotes || []).join(", ") || "No humor markers yet."}</p>
+              <p className="queue-meta">Humor markers</p>
+              <p>{(profile?.humorNotes || []).join(", ") || "No humor markers yet."}</p>
+            </>
+          )}
         </div>
       </article>
     </section>

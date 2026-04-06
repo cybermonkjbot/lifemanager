@@ -237,6 +237,25 @@ class WhatsAppSetupManager {
     }
   }
 
+  private async reportListenerRuntimeState(listenerActive: boolean, listenerMessage: string, hasAuth?: boolean) {
+    const client = this.getConvexClient();
+    if (!client) {
+      return;
+    }
+
+    const authState = hasAuth ?? (await this.hasRegisteredCreds());
+
+    try {
+      await client.mutation(convexRefs.systemReportSetupListener, {
+        listenerActive,
+        listenerMessage,
+        hasAuth: authState,
+      });
+    } catch {
+      // best effort runtime sync for setup UI
+    }
+  }
+
   private async waitForRegisteredCreds(maxWaitMs = 3500) {
     const startedAt = Date.now();
     while (Date.now() - startedAt < maxWaitMs) {
@@ -430,6 +449,7 @@ class WhatsAppSetupManager {
     }
 
     const sock = baileys.default(socketConfig);
+    let connectionOpened = false;
 
     this.socket = sock;
     sock.ev.on("creds.update", async () => {
@@ -444,6 +464,11 @@ class WhatsAppSetupManager {
       }
 
       if (this.state.status === "connected") {
+        return;
+      }
+
+      // Avoid closing setup early; wait until WhatsApp reports the socket as open.
+      if (!connectionOpened) {
         return;
       }
 
@@ -495,6 +520,7 @@ class WhatsAppSetupManager {
       }
 
       if (update.connection === "open") {
+        connectionOpened = true;
         try {
           await saveCreds();
         } catch {
@@ -502,7 +528,7 @@ class WhatsAppSetupManager {
         }
 
         const mode = this.setupMode;
-        const persistedAuth = await this.waitForRegisteredCreds(1250);
+        const persistedAuth = await this.waitForRegisteredCreds(5000);
         if (persistedAuth) {
           this.markConnectedAndStopSetupSocket(mode);
           return;
@@ -612,6 +638,7 @@ class WhatsAppSetupManager {
   async getState(): Promise<SetupState> {
     const hasAuth = await this.hasRegisteredCreds();
     const hasExplicitInvalidation = this.hasExplicitInvalidationMessage(this.state.message);
+    const setupSessionActive = Boolean(this.socket) && !this.manuallyStopped;
 
     if (!hasAuth && this.state.status === "syncing") {
       const syncAgeMs = Date.now() - this.state.updatedAt;
@@ -656,6 +683,15 @@ class WhatsAppSetupManager {
     }
 
     if (hasAuth && this.state.status === "idle") {
+      if (setupSessionActive) {
+        return {
+          ...this.state,
+          status: "syncing",
+          message: "Pairing succeeded. Finalizing credentials before starting worker...",
+          hasAuth,
+        };
+      }
+
       const worker = await getWorkerRuntimeStatus();
       if (worker.running) {
         const snapshot: SetupState = {
@@ -688,6 +724,19 @@ class WhatsAppSetupManager {
     }
 
     if (hasAuth && (this.state.status === "syncing" || this.state.status === "connected")) {
+      if (setupSessionActive) {
+        const snapshot: SetupState = {
+          ...this.state,
+          status: "syncing",
+          message: "Pairing succeeded. Finalizing credentials before starting worker...",
+          hasAuth,
+        };
+        this.state = {
+          ...snapshot,
+        };
+        return snapshot;
+      }
+
       const worker = await getWorkerRuntimeStatus();
       if (worker.running) {
         const snapshot: SetupState = {
@@ -770,6 +819,7 @@ class WhatsAppSetupManager {
     const workerStoppedAutomatically = workerStop.action === "terminated" || workerStop.action === "killed";
 
     const hasAuth = await this.hasRegisteredCreds();
+    await this.reportListenerRuntimeState(false, "Setup session in progress.", hasAuth);
     if (hasAuth) {
       this.clearRetryTimer();
       this.retryCount = 0;
@@ -853,6 +903,7 @@ class WhatsAppSetupManager {
       qrDataUrl: undefined,
       pairingCode: undefined,
     });
+    await this.reportListenerRuntimeState(false, "Worker listener is offline.", hasAuth);
 
     return this.getState();
   }
@@ -889,6 +940,7 @@ class WhatsAppSetupManager {
         qrDataUrl: undefined,
         pairingCode: undefined,
       });
+      await this.reportListenerRuntimeState(false, "Worker listener is offline.", false);
     } catch (error) {
       this.setState({
         status: "error",
@@ -901,16 +953,72 @@ class WhatsAppSetupManager {
 
     return this.getState();
   }
+
+  async restartWorker(): Promise<SetupState> {
+    const hasAuth = await this.hasRegisteredCreds();
+    if (!hasAuth) {
+      this.setState({
+        status: "idle",
+        mode: this.setupMode,
+        message: "No paired credentials found. Start setup first before restarting the worker.",
+        qrDataUrl: undefined,
+        pairingCode: undefined,
+      });
+      await this.reportListenerRuntimeState(false, "Worker listener is offline.", false);
+      return this.getState();
+    }
+
+    const setupSessionActive = Boolean(this.socket) && !this.manuallyStopped;
+    if (setupSessionActive) {
+      this.setState({
+        status: this.state.status,
+        mode: this.setupMode,
+        message: "Setup session is active. Stop setup session before restarting the worker.",
+      });
+      return this.getState();
+    }
+
+    const workerStop = await ensureWorkerStopped();
+    if (workerStop.action === "failed") {
+      this.setState({
+        status: "error",
+        mode: this.setupMode,
+        message: "Could not stop the running worker automatically. Stop `bun run worker`, then retry Restart Worker.",
+        qrDataUrl: undefined,
+        pairingCode: undefined,
+      });
+      return this.getState();
+    }
+
+    const workerWasRunning = workerStop.action === "terminated" || workerStop.action === "killed";
+    this.setState({
+      status: "connected",
+      mode: this.setupMode,
+      message: workerWasRunning
+        ? "Worker stopped. Restarting without resetting credentials..."
+        : "Starting worker without resetting credentials...",
+      qrDataUrl: undefined,
+      pairingCode: undefined,
+    });
+    await this.reportListenerRuntimeState(false, "Restarting worker...", hasAuth);
+
+    await this.autoStartWorker();
+    return this.getState();
+  }
 }
 
 declare global {
   var __slmWhatsAppSetupManager: WhatsAppSetupManager | undefined;
 }
 
-export function getWhatsAppSetupManager() {
-  if (!globalThis.__slmWhatsAppSetupManager) {
+export function getWhatsAppSetupManager(): WhatsAppSetupManager {
+  const existing = globalThis.__slmWhatsAppSetupManager as
+    | (WhatsAppSetupManager & { restartWorker?: () => Promise<SetupState> })
+    | undefined;
+
+  if (!existing || typeof existing.restartWorker !== "function") {
     globalThis.__slmWhatsAppSetupManager = new WhatsAppSetupManager();
   }
 
-  return globalThis.__slmWhatsAppSetupManager;
+  return globalThis.__slmWhatsAppSetupManager as WhatsAppSetupManager;
 }

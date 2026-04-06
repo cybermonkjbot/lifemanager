@@ -20,6 +20,8 @@ function FollowupsContent() {
         thread?: { title?: string; jid?: string } | null;
       }>
     | undefined;
+  const followupsLoading = followups === undefined;
+  const followupItems = followups || [];
 
   const onConfirm = (followUpId: string) => {
     const key = `followup:${followUpId}`;
@@ -40,7 +42,8 @@ function FollowupsContent() {
       <ActionNotices notices={notices} onDismiss={dismissNotice} />
       <h3>Follow-up Timeline</h3>
       <div className="stack">
-        {(followups || []).map((item) => {
+        {followupsLoading ? <p className="empty-line">Loading follow-ups…</p> : null}
+        {followupItems.map((item) => {
           const key = `followup:${item._id}`;
           const record = getRecord(key);
 
@@ -70,7 +73,7 @@ function FollowupsContent() {
             </div>
           );
         })}
-        {(followups || []).length === 0 ? <p className="empty-line">No follow-ups yet.</p> : null}
+        {!followupsLoading && followupItems.length === 0 ? <p className="empty-line">No follow-ups yet.</p> : null}
       </div>
     </section>
   );

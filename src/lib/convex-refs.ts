@@ -7,6 +7,7 @@ export const convexRefs = {
   followupsList: makeFunctionReference<"query">("followups:list"),
   todosList: makeFunctionReference<"query">("todos:list"),
   rulesList: makeFunctionReference<"query">("rules:list"),
+  settingsGet: makeFunctionReference<"query">("settings:get"),
   systemHealth: makeFunctionReference<"query">("system:health"),
   systemSetupStatus: makeFunctionReference<"query">("system:setupStatus"),
 
@@ -21,6 +22,7 @@ export const convexRefs = {
 
   outboxClaimDue: makeFunctionReference<"mutation">("outbox:claimDue"),
   outboxMarkTyping: makeFunctionReference<"mutation">("outbox:markTyping"),
+  outboxHydrateAiOutreach: makeFunctionReference<"mutation">("outbox:hydrateAiOutreach"),
   outboxMarkSent: makeFunctionReference<"mutation">("outbox:markSent"),
   outboxMarkFailed: makeFunctionReference<"mutation">("outbox:markFailed"),
 
@@ -37,6 +39,17 @@ export const convexRefs = {
   personalityGetThreadSetting: makeFunctionReference<"query">("personality:getThreadSetting"),
   personalitySetThreadSetting: makeFunctionReference<"mutation">("personality:setThreadSetting"),
   personalityUpsertProfile: makeFunctionReference<"mutation">("personality:upsertProfile"),
+
+  mediaGenerateUploadUrl: makeFunctionReference<"mutation">("media:generateUploadUrl"),
+  mediaRegisterAsset: makeFunctionReference<"mutation">("media:registerAsset"),
+  mediaListAssets: makeFunctionReference<"query">("media:listAssets"),
+  mediaGetEnabledByKind: makeFunctionReference<"query">("media:getEnabledByKind"),
+  mediaGetAssetDownloadUrl: makeFunctionReference<"query">("media:getAssetDownloadUrl"),
+  mediaToggleAsset: makeFunctionReference<"mutation">("media:toggleAsset"),
+  mediaDeleteAsset: makeFunctionReference<"mutation">("media:deleteAsset"),
+
+  groundingGetThreadGrounding: makeFunctionReference<"query">("grounding:getThreadGrounding"),
+  groundingSaveThreadGrounding: makeFunctionReference<"mutation">("grounding:saveThreadGrounding"),
 };
 
 export type ConvexRefs = typeof convexRefs;

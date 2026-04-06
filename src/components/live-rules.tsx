@@ -6,6 +6,13 @@ import { api } from "../../convex/_generated/api";
 import { useMutation, useQuery } from "convex/react";
 import { FormEvent, useMemo, useState } from "react";
 
+type KnownContact = {
+  _id: string;
+  jid: string;
+  title?: string;
+  isIgnored?: boolean;
+};
+
 function RulesContent() {
   const upsertIgnoreRule = useMutation(api.rules.upsertIgnoreRule);
   const { runAction, getRecord, notices, dismissNotice } = useActionStateRegistry();
@@ -23,6 +30,11 @@ function RulesContent() {
         }>;
       }
     | undefined;
+  const contacts = useQuery(api.threads.listContacts, { limit: 250 }) as KnownContact[] | undefined;
+  const rulesLoading = rules === undefined;
+  const contactsLoading = contacts === undefined;
+  const ignoreRules = useMemo(() => rules?.ignoreRules || [], [rules]);
+  const knownContacts = useMemo(() => contacts || [], [contacts]);
 
   const normalizedTarget = targetValue.trim();
 
@@ -31,10 +43,10 @@ function RulesContent() {
       return false;
     }
 
-    return (rules?.ignoreRules || []).some(
+    return ignoreRules.some(
       (rule) => rule.targetType === "contact" && rule.enabled && rule.targetValue === normalizedTarget,
     );
-  }, [normalizedTarget, rules?.ignoreRules]);
+  }, [ignoreRules, normalizedTarget]);
 
   const record = getRecord(key);
 
@@ -68,6 +80,28 @@ function RulesContent() {
         <ActionNotices notices={notices} onDismiss={dismissNotice} />
         <h3>Add Ignore Contact</h3>
         <form onSubmit={onSubmit} className="stack compact" aria-busy={record.pending}>
+          <label className="stack compact">
+            <span className="queue-meta">Select from previous contacts</span>
+            <select
+              value=""
+              onChange={(event) => {
+                if (!event.target.value) {
+                  return;
+                }
+                setTargetValue(event.target.value);
+              }}
+              disabled={record.pending || contactsLoading}
+              aria-disabled={record.pending || contactsLoading}
+            >
+              <option value="">{contactsLoading ? "Loading contacts..." : "Choose a contact"}</option>
+              {knownContacts.map((contact) => (
+                <option key={contact._id} value={contact.jid}>
+                  {contact.title ? `${contact.title} (${contact.jid})` : contact.jid}
+                </option>
+              ))}
+            </select>
+          </label>
+
           <input
             type="text"
             name="targetValue"
@@ -75,18 +109,20 @@ function RulesContent() {
             value={targetValue}
             onChange={(event) => setTargetValue(event.target.value)}
             required
-            aria-disabled={record.pending}
-            disabled={record.pending}
+            aria-disabled={record.pending || rulesLoading || contactsLoading}
+            disabled={record.pending || rulesLoading || contactsLoading}
           />
           <button
             type="submit"
             className="btn btn-primary"
-            disabled={!normalizedTarget || duplicateActiveRule || record.pending}
-            aria-disabled={!normalizedTarget || duplicateActiveRule || record.pending}
+            disabled={!normalizedTarget || duplicateActiveRule || record.pending || rulesLoading || contactsLoading}
+            aria-disabled={!normalizedTarget || duplicateActiveRule || record.pending || rulesLoading || contactsLoading}
           >
             {record.pending ? "Adding..." : "Add Ignore Rule"}
           </button>
         </form>
+        {rulesLoading ? <p className="empty-line">Loading rules…</p> : null}
+        {contactsLoading ? <p className="empty-line">Loading previous contacts…</p> : null}
 
         {duplicateActiveRule ? (
           <p className="queue-meta action-inline-error" role="status">
@@ -104,14 +140,15 @@ function RulesContent() {
       <article className="panel-card">
         <h3>Active Ignore Rules</h3>
         <div className="stack">
-          {(rules?.ignoreRules || []).map((rule) => (
+          {rulesLoading ? <p className="empty-line">Loading active ignore rules…</p> : null}
+          {ignoreRules.map((rule) => (
             <div key={rule._id} className="queue-item">
               <p className="queue-title">{rule.targetType}</p>
               <p className="queue-body">{rule.targetValue}</p>
               <p className="queue-meta">Enabled: {rule.enabled ? "Yes" : "No"}</p>
             </div>
           ))}
-          {(rules?.ignoreRules || []).length === 0 ? <p className="empty-line">No ignore rules yet.</p> : null}
+          {!rulesLoading && ignoreRules.length === 0 ? <p className="empty-line">No ignore rules yet.</p> : null}
         </div>
       </article>
     </section>

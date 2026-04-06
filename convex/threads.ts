@@ -30,6 +30,30 @@ export const list = query({
   },
 });
 
+export const listContacts = query({
+  args: {
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const limit = Math.min(args.limit ?? 200, 500);
+    const threads = await ctx.db
+      .query("threads")
+      .withIndex("by_lastMessageAt")
+      .order("desc")
+      .take(limit);
+
+    return threads
+      .filter((thread) => !thread.isGroup)
+      .map((thread) => ({
+        _id: thread._id,
+        jid: thread.jid,
+        title: thread.title,
+        lastMessageAt: thread.lastMessageAt,
+        isIgnored: thread.isIgnored,
+      }));
+  },
+});
+
 export const get = query({
   args: {
     threadId: v.id("threads"),
@@ -46,15 +70,45 @@ export const get = query({
       .order("desc")
       .take(80);
 
+    const messageIds = messages.map((message) => message._id);
+    let reactions: Array<{
+      messageId: string;
+      actorJid: string;
+      emoji: string;
+      direction: "inbound" | "outbound";
+    }> = [];
+
+    if (messageIds.length > 0) {
+      const reactionRows = await ctx.db
+        .query("messageReactions")
+        .withIndex("by_threadId", (q) => q.eq("threadId", args.threadId))
+        .take(300);
+      reactions = reactionRows
+        .filter((reaction) => messageIds.includes(reaction.messageId))
+        .map((reaction) => ({
+          messageId: reaction.messageId,
+          actorJid: reaction.actorJid,
+          emoji: reaction.emoji,
+          direction: reaction.direction,
+        }));
+    }
+
     const memory = await ctx.db
       .query("threadMemory")
       .withIndex("by_thread", (q) => q.eq("threadId", args.threadId))
       .first();
 
+    const grounding = await ctx.db
+      .query("threadGrounding")
+      .withIndex("by_threadId", (q) => q.eq("threadId", args.threadId))
+      .first();
+
     return {
       thread,
       messages: messages.reverse(),
+      reactions,
       memory,
+      grounding: grounding || null,
     };
   },
 });
@@ -83,11 +137,17 @@ export const getGenerationContext = internalQuery({
       .withIndex("by_scope", (q) => q.eq("scope", "global"))
       .first();
 
+    const grounding = await ctx.db
+      .query("threadGrounding")
+      .withIndex("by_threadId", (q) => q.eq("threadId", args.threadId))
+      .first();
+
     return {
       thread,
       sourceMessage,
       recentMessages: messages.reverse(),
       styleProfile: profile,
+      grounding: grounding || null,
     };
   },
 });

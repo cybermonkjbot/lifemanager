@@ -36,6 +36,7 @@ export const generate = internalAction({
 
     const sourceText = context.sourceMessage.text;
     const guardrail = evaluateGuardrail(sourceText);
+    const config = await ctx.runQuery(refGetAutonomyConfig, {});
 
     if (guardrail.severity !== "low") {
       await ctx.runMutation(refSystemRecordEvent, {
@@ -57,6 +58,24 @@ export const generate = internalAction({
       };
     }
 
+    if (config.aiFallbackMode === "azure_only") {
+      const reason = "Azure-only mode enabled. Scheduled non-Azure draft generation is blocked.";
+      await ctx.runMutation(refCreateGuardrailHold, {
+        threadId: args.threadId,
+        sourceMessageId: args.sourceMessageId,
+        reason,
+      });
+      await ctx.runMutation(refSystemRecordEvent, {
+        source: "convex",
+        eventType: "draft.azureOnly.blocked",
+        detail: reason,
+        threadId: args.threadId,
+      });
+      return {
+        blocked: true,
+      };
+    }
+
     const text = heuristicReply(sourceText);
     const timing = estimateHumanTiming(text);
 
@@ -70,8 +89,6 @@ export const generate = internalAction({
       typingMs: timing.typingMs,
       reason: "Heuristic fallback draft",
     });
-
-    const config = await ctx.runQuery(refGetAutonomyConfig, {});
 
     if (!config.autonomyPaused && guardrail.severity !== "high") {
       await ctx.runMutation(refApproveDraft, { draftId });
@@ -112,11 +129,17 @@ export const saveGenerated = mutation({
     delayMs: v.number(),
     typingMs: v.number(),
     reason: v.optional(v.string()),
+    sendKind: v.optional(v.union(v.literal("text"), v.literal("reaction"), v.literal("sticker"), v.literal("meme"))),
+    reactionEmoji: v.optional(v.string()),
+    reactionTargetMessageId: v.optional(v.id("messages")),
+    mediaAssetId: v.optional(v.id("mediaAssets")),
+    mediaCaption: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const now = Date.now();
     const draftId = await ctx.db.insert("replyDrafts", {
       ...args,
+      sendKind: args.sendKind || "text",
       status: "pending",
       createdAt: now,
       updatedAt: now,
@@ -138,6 +161,7 @@ export const createGuardrailHold = mutation({
       threadId: args.threadId,
       sourceMessageId: args.sourceMessageId,
       text: "Manual review required before sending.",
+      sendKind: "text",
       status: "pending",
       confidence: 0,
       provider: "heuristic",
@@ -177,6 +201,10 @@ export const approve = mutation({
       .withIndex("by_draft", (q) => q.eq("draftId", draft._id))
       .order("desc")
       .take(20);
+    const sendKind = draft.sendKind || "text";
+    const reactionTargetWhatsAppMessageId = draft.reactionTargetMessageId
+      ? (await ctx.db.get(draft.reactionTargetMessageId))?.whatsappMessageId
+      : undefined;
 
     const sentOutbox = existingOutbox.find((item) => item.status === "sent");
     if (sentOutbox) {
@@ -205,6 +233,12 @@ export const approve = mutation({
 
       await ctx.db.patch(pendingOutbox._id, {
         sendAt: now + draft.delayMs,
+        messageText: draft.text,
+        sendKind,
+        reactionEmoji: draft.reactionEmoji,
+        reactionTargetWhatsAppMessageId,
+        mediaAssetId: draft.mediaAssetId,
+        mediaCaption: draft.mediaCaption,
         status: "pending",
         workerId: undefined,
         leaseExpiresAt: undefined,
@@ -224,6 +258,11 @@ export const approve = mutation({
       threadId: draft.threadId,
       draftId: draft._id,
       messageText: draft.text,
+      sendKind,
+      reactionEmoji: draft.reactionEmoji,
+      reactionTargetWhatsAppMessageId,
+      mediaAssetId: draft.mediaAssetId,
+      mediaCaption: draft.mediaCaption,
       sendAt: now + draft.delayMs,
       status: "pending",
       attempts: 0,
@@ -293,6 +332,13 @@ export const snooze = mutation({
     if (activeOutbox) {
       await ctx.db.patch(activeOutbox._id, {
         messageText: draft.text,
+        sendKind: draft.sendKind || "text",
+        reactionEmoji: draft.reactionEmoji,
+        reactionTargetWhatsAppMessageId: draft.reactionTargetMessageId
+          ? (await ctx.db.get(draft.reactionTargetMessageId))?.whatsappMessageId
+          : undefined,
+        mediaAssetId: draft.mediaAssetId,
+        mediaCaption: draft.mediaCaption,
         sendAt,
         status: "pending",
         workerId: undefined,
@@ -308,6 +354,13 @@ export const snooze = mutation({
       threadId: draft.threadId,
       draftId: draft._id,
       messageText: draft.text,
+      sendKind: draft.sendKind || "text",
+      reactionEmoji: draft.reactionEmoji,
+      reactionTargetWhatsAppMessageId: draft.reactionTargetMessageId
+        ? (await ctx.db.get(draft.reactionTargetMessageId))?.whatsappMessageId
+        : undefined,
+      mediaAssetId: draft.mediaAssetId,
+      mediaCaption: draft.mediaCaption,
       sendAt,
       status: "pending",
       attempts: 0,

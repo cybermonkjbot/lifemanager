@@ -38,6 +38,9 @@ cp .env.example .env.local
 - `CONVEX_URL` (or `NEXT_PUBLIC_CONVEX_URL`)
 - `AZURE_AI_ENDPOINT`
 - `AZURE_AI_API_KEY`
+- `AZURE_AI_MODEL` (for example `gpt-5.4`)
+
+If you use an Azure AI Foundry `.../responses` URI, set `AZURE_AI_API_STYLE=responses` (or keep `auto` and it will be inferred).
 
 4. Start all services:
 

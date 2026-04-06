@@ -9,6 +9,7 @@ export default async function SystemPage() {
       title="System"
       subtitle="Watch runtime health, provider traces, and message lifecycle events."
       convexUrl={convexUrl}
+      showLogWatcher
     >
       <LiveSystem />
     </DashboardShell>

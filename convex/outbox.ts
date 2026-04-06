@@ -41,6 +41,13 @@ export const claimDue = mutation({
       typingMs: number;
       jid: string;
       idempotencyKey: string;
+      provider: "azure" | "codex" | "heuristic";
+      sendKind: "text" | "reaction" | "sticker" | "meme";
+      reactionEmoji?: string;
+      reactionTargetWhatsAppMessageId?: string;
+      preReactionEmoji?: string;
+      mediaAssetId?: string;
+      mediaCaption?: string;
     }>;
 
     for (const item of due) {
@@ -66,6 +73,13 @@ export const claimDue = mutation({
         typingMs: draft.typingMs,
         jid: thread.jid,
         idempotencyKey: item.idempotencyKey,
+        provider: item.provider,
+        sendKind: item.sendKind || "text",
+        reactionEmoji: item.reactionEmoji,
+        reactionTargetWhatsAppMessageId: item.reactionTargetWhatsAppMessageId,
+        preReactionEmoji: item.preReactionEmoji,
+        mediaAssetId: item.mediaAssetId,
+        mediaCaption: item.mediaCaption,
       });
     }
 
@@ -90,6 +104,51 @@ export const markTyping = mutation({
       outboxId: outbox._id,
       detail: "Typing indicator emitted.",
       createdAt: Date.now(),
+    });
+
+    return outbox._id;
+  },
+});
+
+export const hydrateAiOutreach = mutation({
+  args: {
+    outboxId: v.id("outbox"),
+    text: v.string(),
+    provider: v.union(v.literal("azure"), v.literal("codex"), v.literal("heuristic")),
+    confidence: v.number(),
+    typingMs: v.number(),
+  },
+  handler: async (ctx, args) => {
+    const outbox = await ctx.db.get(args.outboxId);
+    if (!outbox) {
+      return null;
+    }
+
+    const now = Date.now();
+    await ctx.db.patch(outbox._id, {
+      messageText: args.text,
+      provider: args.provider,
+      updatedAt: now,
+    });
+
+    const draft = await ctx.db.get(outbox.draftId);
+    if (draft) {
+      await ctx.db.patch(draft._id, {
+        text: args.text,
+        provider: args.provider,
+        confidence: args.confidence,
+        typingMs: args.typingMs,
+        updatedAt: now,
+      });
+    }
+
+    await ctx.db.insert("systemEvents", {
+      source: "worker",
+      eventType: "outbox.aiOutreachHydrated",
+      threadId: outbox.threadId,
+      outboxId: outbox._id,
+      detail: args.text.slice(0, 240),
+      createdAt: now,
     });
 
     return outbox._id;
@@ -144,9 +203,54 @@ export const markSent = mutation({
       senderJid: "me",
       whatsappMessageId: args.whatsappMessageId,
       text: item.messageText,
+      messageType: item.sendKind || "text",
+      reactionEmoji: item.reactionEmoji,
+      reactionTargetWhatsAppMessageId: item.reactionTargetWhatsAppMessageId,
+      mediaAssetId: item.mediaAssetId,
+      mediaCaption: item.mediaCaption,
       messageAt: now,
       createdAt: now,
     });
+
+    if (
+      ((item.sendKind || "text") === "reaction" || (item.sendKind || "text") === "text") &&
+      item.reactionTargetWhatsAppMessageId &&
+      item.reactionEmoji
+    ) {
+      const targetMessage = await ctx.db
+        .query("messages")
+        .withIndex("by_thread_whatsappMessageId", (q) =>
+          q.eq("threadId", item.threadId).eq("whatsappMessageId", item.reactionTargetWhatsAppMessageId),
+        )
+        .first();
+
+      if (targetMessage) {
+        const existingReaction = await ctx.db
+          .query("messageReactions")
+          .withIndex("by_messageId_and_actorJid", (q) => q.eq("messageId", targetMessage._id).eq("actorJid", "me"))
+          .first();
+
+        if (existingReaction) {
+          await ctx.db.patch(existingReaction._id, {
+            emoji: item.reactionEmoji,
+            direction: "outbound",
+            whatsappMessageId: args.whatsappMessageId,
+            updatedAt: now,
+          });
+        } else {
+          await ctx.db.insert("messageReactions", {
+            threadId: item.threadId,
+            messageId: targetMessage._id,
+            actorJid: "me",
+            direction: "outbound",
+            emoji: item.reactionEmoji,
+            whatsappMessageId: args.whatsappMessageId,
+            createdAt: now,
+            updatedAt: now,
+          });
+        }
+      }
+    }
 
     await ctx.db.insert("systemEvents", {
       source: "worker",

@@ -1,5 +1,7 @@
 import { AutonomyControls } from "@/components/autonomy-controls";
 import { ConvexAppProvider } from "@/components/convex-app-provider";
+import { LogWatcher } from "@/components/log-watcher";
+import { SetupNotice } from "@/components/setup-notice";
 import Link from "next/link";
 import { ReactNode } from "react";
 
@@ -9,6 +11,7 @@ type DashboardShellProps = {
   children: ReactNode;
   convexUrl?: string;
   autonomyPaused?: boolean;
+  showLogWatcher?: boolean;
 };
 
 const navItems = [
@@ -18,10 +21,20 @@ const navItems = [
   { href: "/followups", label: "Follow-ups" },
   { href: "/style-lab", label: "Style Lab" },
   { href: "/rules", label: "Rules" },
+  { href: "/settings", label: "Settings" },
   { href: "/system", label: "System" },
 ];
 
-export function DashboardShell({ title, subtitle, children, convexUrl, autonomyPaused }: DashboardShellProps) {
+export function DashboardShell({
+  title,
+  subtitle,
+  children,
+  convexUrl,
+  autonomyPaused,
+  showLogWatcher = false,
+}: DashboardShellProps) {
+  const realtimeEnabled = Boolean(convexUrl);
+
   return (
     <div className="shell-root">
       <aside className="shell-nav">
@@ -49,10 +62,14 @@ export function DashboardShell({ title, subtitle, children, convexUrl, autonomyP
               <p className="panel-subtitle">{subtitle}</p>
             </div>
 
-            <AutonomyControls realtimeEnabled={Boolean(convexUrl)} fallbackPaused={autonomyPaused} />
+            <AutonomyControls realtimeEnabled={realtimeEnabled} fallbackPaused={autonomyPaused} />
           </header>
 
-          <main className="shell-main">{children}</main>
+          <main className="shell-main">
+            {!realtimeEnabled ? <SetupNotice error={null} /> : null}
+            {children}
+          </main>
+          {showLogWatcher ? <LogWatcher /> : null}
         </div>
       </ConvexAppProvider>
     </div>
