@@ -9,8 +9,6 @@ import {
   resolveThreadEligibility,
 } from "./lib/threadEligibility";
 
-const MANUAL_INTERVENTION_COOLDOWN_MS = 30 * 60 * 1000;
-
 function isWithinQuietHours(hour: number, startHour: number, endHour: number) {
   if (startHour === endHour) {
     return false;
@@ -335,6 +333,7 @@ export const suppressForManualIntervention = mutation({
   },
   handler: async (ctx, args) => {
     const now = Date.now();
+    const config = await getConfig(ctx);
     const messageAt = normalizeTimestampMs(args.messageAt, now);
     const thread = await ctx.db
       .query("threads")
@@ -351,7 +350,7 @@ export const suppressForManualIntervention = mutation({
     const threadKind = thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup });
     const cooldownUntil =
       threadKind === "direct"
-        ? Math.max(thread.ghostedUntil ?? 0, Math.max(now, messageAt) + MANUAL_INTERVENTION_COOLDOWN_MS)
+        ? Math.max(thread.ghostedUntil ?? 0, Math.max(now, messageAt) + config.manualInterventionCooldownMs)
         : thread.ghostedUntil;
 
     await ctx.db.patch(thread._id, {

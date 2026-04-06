@@ -1,7 +1,7 @@
 {
   "intervalMinutes": 240,
   "codexPath": "codex",
-  "codexModel": "gpt-5.2",
+  "codexModel": "gpt-5.4",
   "timeoutMs": 300000,
   "outputDir": ".slm/self-improvement",
   "maxContextChars": 120000,

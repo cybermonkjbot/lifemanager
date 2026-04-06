@@ -29,6 +29,7 @@ export type AppConfig = {
   outboxClaimLimit: number;
   outboxPollMs: number;
   inboundMergeWindowMs: number;
+  manualInterventionCooldownMs: number;
   inboundConcurrency: number;
   outboxSendConcurrency: number;
   quietHoursEnabled: boolean;
@@ -72,6 +73,7 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
   outboxClaimLimit: 8,
   outboxPollMs: 3_000,
   inboundMergeWindowMs: 45_000,
+  manualInterventionCooldownMs: 2 * 60 * 1000,
   inboundConcurrency: 4,
   outboxSendConcurrency: 4,
   quietHoursEnabled: false,
@@ -168,6 +170,13 @@ export async function getConfig(ctx: QueryCtx | MutationCtx): Promise<AppConfig>
     outboxPollMs: Math.round(clamp(parseNumber(map.get("outboxPollMs"), DEFAULT_APP_CONFIG.outboxPollMs), 500, 60_000)),
     inboundMergeWindowMs: Math.round(
       clamp(parseNumber(map.get("inboundMergeWindowMs"), DEFAULT_APP_CONFIG.inboundMergeWindowMs), 2_000, 180_000),
+    ),
+    manualInterventionCooldownMs: Math.round(
+      clamp(
+        parseNumber(map.get("manualInterventionCooldownMs"), DEFAULT_APP_CONFIG.manualInterventionCooldownMs),
+        0,
+        7_200_000,
+      ),
     ),
     inboundConcurrency: Math.round(clamp(parseNumber(map.get("inboundConcurrency"), DEFAULT_APP_CONFIG.inboundConcurrency), 1, 16)),
     outboxSendConcurrency: Math.round(

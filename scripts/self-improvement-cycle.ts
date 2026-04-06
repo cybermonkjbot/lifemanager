@@ -65,7 +65,7 @@ const DEFAULT_CONFIG_PATH = "self-improvement.config.json";
 const DEFAULT_CONFIG: SelfImprovementConfig = {
   intervalMinutes: 240,
   codexPath: process.env.CODEX_CLI_PATH || "codex",
-  codexModel: process.env.CODEX_SELF_IMPROVE_MODEL || process.env.CODEX_FALLBACK_MODEL || "gpt-5.2",
+  codexModel: process.env.CODEX_SELF_IMPROVE_MODEL || process.env.CODEX_FALLBACK_MODEL || "gpt-5.4",
   timeoutMs: 300_000,
   outputDir: ".slm/self-improvement",
   maxContextChars: 120_000,

@@ -45,6 +45,7 @@ export const save = mutation({
     outboxClaimLimit: v.number(),
     outboxPollMs: v.number(),
     inboundMergeWindowMs: v.number(),
+    manualInterventionCooldownMs: v.optional(v.number()),
     inboundConcurrency: v.optional(v.number()),
     outboxSendConcurrency: v.optional(v.number()),
     quietHoursEnabled: v.optional(v.boolean()),
@@ -93,6 +94,11 @@ export const save = mutation({
       outboxClaimLimit: clampInt(args.outboxClaimLimit, 1, 20),
       outboxPollMs: clampInt(args.outboxPollMs, 500, 60_000),
       inboundMergeWindowMs: clampInt(args.inboundMergeWindowMs, 2_000, 180_000),
+      manualInterventionCooldownMs: clampInt(
+        args.manualInterventionCooldownMs ?? DEFAULT_APP_CONFIG.manualInterventionCooldownMs,
+        0,
+        7_200_000,
+      ),
       inboundConcurrency: clampInt(args.inboundConcurrency ?? DEFAULT_APP_CONFIG.inboundConcurrency, 1, 16),
       outboxSendConcurrency: clampInt(args.outboxSendConcurrency ?? DEFAULT_APP_CONFIG.outboxSendConcurrency, 1, 16),
       quietHoursEnabled: args.quietHoursEnabled ?? DEFAULT_APP_CONFIG.quietHoursEnabled,
@@ -150,6 +156,7 @@ export const save = mutation({
     await setConfigValue(ctx, "outboxClaimLimit", String(normalized.outboxClaimLimit));
     await setConfigValue(ctx, "outboxPollMs", String(normalized.outboxPollMs));
     await setConfigValue(ctx, "inboundMergeWindowMs", String(normalized.inboundMergeWindowMs));
+    await setConfigValue(ctx, "manualInterventionCooldownMs", String(normalized.manualInterventionCooldownMs));
     await setConfigValue(ctx, "inboundConcurrency", String(normalized.inboundConcurrency));
     await setConfigValue(ctx, "outboxSendConcurrency", String(normalized.outboxSendConcurrency));
     await setConfigValue(ctx, "quietHoursEnabled", normalized.quietHoursEnabled ? "true" : "false");

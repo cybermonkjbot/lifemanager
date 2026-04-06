@@ -33,6 +33,7 @@ type SettingsState = {
   outboxClaimLimit: number;
   outboxPollMs: number;
   inboundMergeWindowMs: number;
+  manualInterventionCooldownMs: number;
   quietHoursEnabled: boolean;
   quietHoursStartHour: number;
   quietHoursEndHour: number;
@@ -81,6 +82,7 @@ function toState(source: Partial<SettingsState> | undefined): SettingsState {
     outboxClaimLimit: source?.outboxClaimLimit ?? 8,
     outboxPollMs: source?.outboxPollMs ?? 3000,
     inboundMergeWindowMs: source?.inboundMergeWindowMs ?? 45000,
+    manualInterventionCooldownMs: source?.manualInterventionCooldownMs ?? 120000,
     quietHoursEnabled: source?.quietHoursEnabled ?? false,
     quietHoursStartHour: source?.quietHoursStartHour ?? 23,
     quietHoursEndHour: source?.quietHoursEndHour ?? 7,
@@ -127,6 +129,7 @@ function stateEquals(a: SettingsState, b: SettingsState) {
     nearlyEqual(a.outboxClaimLimit, b.outboxClaimLimit) &&
     nearlyEqual(a.outboxPollMs, b.outboxPollMs) &&
     nearlyEqual(a.inboundMergeWindowMs, b.inboundMergeWindowMs) &&
+    nearlyEqual(a.manualInterventionCooldownMs, b.manualInterventionCooldownMs) &&
     a.quietHoursEnabled === b.quietHoursEnabled &&
     nearlyEqual(a.quietHoursStartHour, b.quietHoursStartHour) &&
     nearlyEqual(a.quietHoursEndHour, b.quietHoursEndHour) &&
@@ -216,6 +219,7 @@ export function LiveSettings() {
           outboxClaimLimit: Math.round(draft.outboxClaimLimit),
           outboxPollMs: Math.round(draft.outboxPollMs),
           inboundMergeWindowMs: Math.round(draft.inboundMergeWindowMs),
+          manualInterventionCooldownMs: Math.round(draft.manualInterventionCooldownMs),
           quietHoursEnabled: draft.quietHoursEnabled,
           quietHoursStartHour: Math.round(draft.quietHoursStartHour),
           quietHoursEndHour: Math.round(draft.quietHoursEndHour),
@@ -717,6 +721,28 @@ export function LiveSettings() {
             />
             <span className="queue-meta">
               New inbound messages in the same chat within this window update the pending unsent reply instead of creating another one.
+            </span>
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Manual interruption cooldown (ms)</span>
+            <input
+              type="number"
+              min={0}
+              max={7200000}
+              step={1000}
+              value={draft.manualInterventionCooldownMs}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  manualInterventionCooldownMs: parseNumber(event.target.value, prev.manualInterventionCooldownMs),
+                }))
+              }
+              disabled={record.pending}
+              aria-disabled={record.pending}
+            />
+            <span className="queue-meta">
+              After you manually reply in WhatsApp, auto-replies stay paused for this long in that chat.
             </span>
           </label>
 
