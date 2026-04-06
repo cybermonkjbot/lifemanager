@@ -1,5 +1,5 @@
 import { v } from "convex/values";
-import { mutation } from "./_generated/server";
+import { internalMutation, mutation } from "./_generated/server";
 import { DEFAULT_LEASE_MS, DEFAULT_RETRY_LIMIT } from "./lib/constants";
 
 export const claimDue = mutation({
@@ -12,6 +12,21 @@ export const claimDue = mutation({
     const now = Date.now();
     const leaseMs = args.leaseMs ?? DEFAULT_LEASE_MS;
     const max = Math.min(args.limit ?? 5, 20);
+
+    const expiredClaims = await ctx.db
+      .query("outbox")
+      .withIndex("by_status_leaseExpiresAt", (q) => q.eq("status", "claimed").lte("leaseExpiresAt", now))
+      .take(max);
+
+    for (const item of expiredClaims) {
+      await ctx.db.patch(item._id, {
+        status: "pending",
+        workerId: undefined,
+        leaseExpiresAt: undefined,
+        sendAt: Math.min(item.sendAt, now),
+        updatedAt: now,
+      });
+    }
 
     const due = await ctx.db
       .query("outbox")
@@ -101,6 +116,8 @@ export const markSent = mutation({
       status: "sent",
       updatedAt: now,
       leaseExpiresAt: undefined,
+      workerId: undefined,
+      error: undefined,
     });
 
     const draft = await ctx.db.get(item.draftId);
@@ -109,6 +126,16 @@ export const markSent = mutation({
         status: "sent",
         updatedAt: now,
       });
+    }
+
+    if (item.followUpId) {
+      const followUp = await ctx.db.get(item.followUpId);
+      if (followUp && followUp.status === "queued") {
+        await ctx.db.patch(followUp._id, {
+          status: "sent",
+          updatedAt: now,
+        });
+      }
     }
 
     await ctx.db.insert("messages", {
@@ -157,6 +184,16 @@ export const markFailed = mutation({
       sendAt: exhausted ? item.sendAt : now + Math.min(item.attempts * 15_000, 120_000),
     });
 
+    if (item.followUpId && exhausted) {
+      const followUp = await ctx.db.get(item.followUpId);
+      if (followUp && followUp.status === "queued") {
+        await ctx.db.patch(followUp._id, {
+          status: "failed",
+          updatedAt: now,
+        });
+      }
+    }
+
     await ctx.db.insert("systemEvents", {
       source: "worker",
       eventType: exhausted ? "outbox.failed.final" : "outbox.failed.retry",
@@ -167,5 +204,42 @@ export const markFailed = mutation({
     });
 
     return item._id;
+  },
+});
+
+export const recoverExpiredClaims = internalMutation({
+  args: {
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    const limit = Math.min(args.limit ?? 100, 250);
+    const expiredClaims = await ctx.db
+      .query("outbox")
+      .withIndex("by_status_leaseExpiresAt", (q) => q.eq("status", "claimed").lte("leaseExpiresAt", now))
+      .take(limit);
+
+    for (const item of expiredClaims) {
+      await ctx.db.patch(item._id, {
+        status: "pending",
+        workerId: undefined,
+        leaseExpiresAt: undefined,
+        sendAt: Math.min(item.sendAt, now),
+        updatedAt: now,
+      });
+    }
+
+    if (expiredClaims.length > 0) {
+      await ctx.db.insert("systemEvents", {
+        source: "convex",
+        eventType: "outbox.recoveredExpiredClaims",
+        detail: `Recovered ${expiredClaims.length} stuck outbox items.`,
+        createdAt: now,
+      });
+    }
+
+    return {
+      recovered: expiredClaims.length,
+    };
   },
 });

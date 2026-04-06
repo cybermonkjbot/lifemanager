@@ -2,10 +2,15 @@ import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 
 export const list = query({
-  args: {},
-  handler: async (ctx) => {
-    const ignoreRules = await ctx.db.query("ignoreRules").collect();
-    const appConfig = await ctx.db.query("appConfig").collect();
+  args: {
+    ignoreRuleLimit: v.optional(v.number()),
+    configLimit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const ignoreRuleLimit = Math.min(args.ignoreRuleLimit ?? 200, 500);
+    const configLimit = Math.min(args.configLimit ?? 20, 50);
+    const ignoreRules = await ctx.db.query("ignoreRules").take(ignoreRuleLimit);
+    const appConfig = await ctx.db.query("appConfig").take(configLimit);
     return {
       ignoreRules,
       appConfig,

@@ -2,13 +2,23 @@ import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 
 export const list = query({
-  args: {},
-  handler: async (ctx) => {
-    const todos = await ctx.db.query("todos").withIndex("by_status", (q) => q.eq("status", "open")).collect();
+  args: {
+    todoLimit: v.optional(v.number()),
+    candidateLimit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const todoLimit = Math.min(args.todoLimit ?? 100, 250);
+    const candidateLimit = Math.min(args.candidateLimit ?? 80, 200);
+    const todos = await ctx.db
+      .query("todos")
+      .withIndex("by_status", (q) => q.eq("status", "open"))
+      .order("desc")
+      .take(todoLimit);
     const candidates = await ctx.db
       .query("todoCandidates")
       .withIndex("by_status", (q) => q.eq("status", "suggested"))
-      .collect();
+      .order("desc")
+      .take(candidateLimit);
 
     return {
       todos,

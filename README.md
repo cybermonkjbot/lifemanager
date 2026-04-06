@@ -58,6 +58,8 @@ This runs:
 4. Wait for `Connected` status.
 5. Start the worker (`bun run worker`) if it is not already running.
 
+If QR pairing keeps disconnecting, use `Get Pairing Code` in the wizard and enter your phone number in international format (for example `2348012345678`).
+
 The setup wizard uses API routes:
 - `POST /api/setup/whatsapp/start`
 - `GET /api/setup/whatsapp/status`

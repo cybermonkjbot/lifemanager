@@ -31,7 +31,8 @@ export default defineSchema({
     createdAt: v.number(),
   })
     .index("by_thread", ["threadId"])
-    .index("by_thread_messageAt", ["threadId", "messageAt"]),
+    .index("by_thread_messageAt", ["threadId", "messageAt"])
+    .index("by_createdAt", ["createdAt"]),
 
   threadMemory: defineTable({
     threadId: v.id("threads"),
@@ -66,6 +67,7 @@ export default defineSchema({
   outbox: defineTable({
     threadId: v.id("threads"),
     draftId: v.id("replyDrafts"),
+    followUpId: v.optional(v.id("followUps")),
     messageText: v.string(),
     sendAt: v.number(),
     status: v.union(
@@ -84,6 +86,7 @@ export default defineSchema({
     updatedAt: v.number(),
   })
     .index("by_status_sendAt", ["status", "sendAt"])
+    .index("by_status_leaseExpiresAt", ["status", "leaseExpiresAt"])
     .index("by_worker", ["workerId"])
     .index("by_draft", ["draftId"]),
 
@@ -98,12 +101,14 @@ export default defineSchema({
       v.literal("confirmed"),
       v.literal("queued"),
       v.literal("sent"),
+      v.literal("failed"),
       v.literal("cancelled"),
     ),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
     .index("by_status_dueAt", ["status", "dueAt"])
+    .index("by_dueAt", ["dueAt"])
     .index("by_thread", ["threadId"]),
 
   todoCandidates: defineTable({
@@ -186,4 +191,26 @@ export default defineSchema({
   })
     .index("by_createdAt", ["createdAt"])
     .index("by_type", ["eventType"]),
+
+  setupRuntime: defineTable({
+    key: v.string(),
+    status: v.union(
+      v.literal("idle"),
+      v.literal("starting"),
+      v.literal("qr_ready"),
+      v.literal("code_ready"),
+      v.literal("connected"),
+      v.literal("error"),
+    ),
+    mode: v.union(v.literal("qr"), v.literal("pairing_code")),
+    message: v.string(),
+    qrDataUrl: v.optional(v.string()),
+    pairingCode: v.optional(v.string()),
+    hasAuth: v.boolean(),
+    listenerActive: v.optional(v.boolean()),
+    listenerWorkerId: v.optional(v.string()),
+    listenerMessage: v.optional(v.string()),
+    listenerLastSeenAt: v.optional(v.number()),
+    updatedAt: v.number(),
+  }).index("by_key", ["key"]),
 });

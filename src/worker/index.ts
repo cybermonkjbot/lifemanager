@@ -1,7 +1,8 @@
-import makeWASocket, { DisconnectReason, useMultiFileAuthState } from "baileys";
+import makeWASocket, { Browsers, DisconnectReason, fetchLatestWaWebVersion, useMultiFileAuthState, type UserFacingSocketConfig } from "baileys";
 import pino from "pino";
 import { ConvexHttpClient } from "convex/browser";
 import { convexRefs } from "../lib/convex-refs";
+import { acquireWorkerLock, releaseWorkerLockSync } from "../lib/runtime/worker-lock";
 import { generateReplyWithFallback, estimateDelayAndTyping } from "./ai";
 import { extractTextFromMessage, getSenderJid, getThreadJid } from "./whatsapp";
 
@@ -22,50 +23,172 @@ function createConvexClient() {
   return new ConvexHttpClient(url);
 }
 
+async function createSocket(auth: Awaited<ReturnType<typeof useMultiFileAuthState>>["state"]) {
+  let version: [number, number, number] | undefined;
+  try {
+    version = (await fetchLatestWaWebVersion()).version;
+  } catch {
+    // ignore version fetch failures and let Baileys defaults apply
+  }
+
+  const config: UserFacingSocketConfig = {
+    auth,
+    printQRInTerminal: true,
+    browser: Browsers.macOS("Desktop"),
+    markOnlineOnConnect: false,
+    syncFullHistory: false,
+    fireInitQueries: false,
+    shouldSyncHistoryMessage: () => false,
+    emitOwnEvents: false,
+    connectTimeoutMs: 60_000,
+    defaultQueryTimeoutMs: 60_000,
+    keepAliveIntervalMs: 20_000,
+  };
+
+  if (version) {
+    config.version = version;
+  }
+
+  return makeWASocket(config);
+}
+
 async function run() {
+  await acquireWorkerLock();
   const convex = createConvexClient();
   const workerId = process.env.SLM_WORKER_ID || `worker-${process.pid}`;
   const authPath = process.env.WHATSAPP_AUTH_PATH || ".wa_auth";
+  let isShuttingDown = false;
+  let reconnectAttempts = 0;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   // `useMultiFileAuthState` is a Baileys API, not a React hook.
   // eslint-disable-next-line react-hooks/rules-of-hooks
   const { state, saveCreds } = await useMultiFileAuthState(authPath);
 
+  const isAuthLinked = () => Boolean((state as { creds?: { registered?: boolean } }).creds?.registered);
+
+  const reportListener = async (listenerActive: boolean, listenerMessage: string) => {
+    try {
+      await convex.mutation(convexRefs.systemReportSetupListener, {
+        listenerActive,
+        listenerWorkerId: workerId,
+        listenerMessage,
+        listenerLastSeenAt: Date.now(),
+        hasAuth: isAuthLinked(),
+      });
+    } catch {
+      // best effort status sync for setup UI
+    }
+  };
+
+  const clearReconnectTimer = () => {
+    if (!reconnectTimer) {
+      return;
+    }
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  };
+
+  const getStatusCode = (errorLike: unknown) => {
+    if (!errorLike || typeof errorLike !== "object") {
+      return undefined;
+    }
+    const parsed = errorLike as {
+      output?: { statusCode?: number };
+      data?: { statusCode?: number };
+      statusCode?: number;
+    };
+    return parsed.output?.statusCode ?? parsed.data?.statusCode ?? parsed.statusCode;
+  };
+
   let processingOutbox = false;
-  let sock = makeWASocket({
-    auth: state,
-    printQRInTerminal: true,
-    browser: ["Social Life Manager", "Chrome", "1.0.0"],
+  let sock = await createSocket(state);
+
+  const reconnectDelay = (attempt: number) => {
+    const base = Math.min(1000 * 2 ** Math.max(0, attempt - 1), 15_000);
+    const jitter = Math.floor(Math.random() * 350);
+    return base + jitter;
+  };
+
+  const scheduleReconnect = async (statusCode: number | undefined) => {
+    if (isShuttingDown || reconnectTimer) {
+      return;
+    }
+
+    reconnectAttempts += 1;
+    const delayMs = reconnectDelay(reconnectAttempts);
+    const codeText = statusCode ? `code ${statusCode}` : "unknown code";
+    await reportListener(
+      false,
+      `Connection closed (${codeText}). Reconnecting in ${Math.ceil(delayMs / 1000)}s (attempt ${reconnectAttempts}).`,
+    );
+
+    reconnectTimer = setTimeout(async () => {
+      reconnectTimer = null;
+      if (isShuttingDown) {
+        return;
+      }
+
+      try {
+        const next = await createSocket(state);
+        sock = next;
+        attachListeners(next);
+      } catch (error) {
+        const err = error instanceof Error ? error.message : String(error);
+        logger.error({ err }, "Failed to recreate WhatsApp socket");
+        await scheduleReconnect(undefined);
+      }
+    }, delayMs);
+  };
+
+  const shutdown = async (code = 0) => {
+    isShuttingDown = true;
+    clearReconnectTimer();
+    await reportListener(false, "Worker stopped.");
+    releaseWorkerLockSync();
+    process.exit(code);
+  };
+
+  process.once("SIGINT", () => {
+    void shutdown(0);
+  });
+  process.once("SIGTERM", () => {
+    void shutdown(0);
   });
 
-  const attachListeners = () => {
-    sock.ev.on("creds.update", saveCreds);
+  const attachListeners = (socket: typeof sock) => {
+    socket.ev.on("creds.update", saveCreds);
 
-    sock.ev.on("connection.update", async (update) => {
+    socket.ev.on("connection.update", async (update) => {
+      if (socket !== sock || isShuttingDown) {
+        return;
+      }
+
       if (update.connection === "close") {
-        const statusCode = (update.lastDisconnect?.error as { output?: { statusCode?: number } } | undefined)
-          ?.output?.statusCode;
-
+        const statusCode = getStatusCode(update.lastDisconnect?.error);
         const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
         logger.warn({ statusCode, shouldReconnect }, "WhatsApp connection closed");
 
-        if (shouldReconnect) {
-          sock = makeWASocket({
-            auth: state,
-            printQRInTerminal: true,
-            browser: ["Social Life Manager", "Chrome", "1.0.0"],
-          });
-          attachListeners();
+        if (!shouldReconnect) {
+          clearReconnectTimer();
+          reconnectAttempts = 0;
+          await reportListener(false, "WhatsApp logged out. Re-link credentials from setup.");
+          return;
         }
+
+        await scheduleReconnect(statusCode);
       }
 
       if (update.connection === "open") {
+        clearReconnectTimer();
+        reconnectAttempts = 0;
         logger.info("WhatsApp connection established");
+        await reportListener(true, "Worker listener is active.");
       }
     });
 
-    sock.ev.on("messages.upsert", async (event) => {
-      if (event.type !== "notify") {
+    socket.ev.on("messages.upsert", async (event) => {
+      if (socket !== sock || event.type !== "notify") {
         return;
       }
 
@@ -166,7 +289,8 @@ async function run() {
     });
   };
 
-  attachListeners();
+  await reportListener(false, "Worker starting WhatsApp listener...");
+  attachListeners(sock);
 
   const pollOutbox = async () => {
     if (processingOutbox) {
@@ -219,6 +343,7 @@ async function run() {
 }
 
 void run().catch((error) => {
+  releaseWorkerLockSync();
   logger.error({ err: error }, "Worker crashed");
   process.exit(1);
 });

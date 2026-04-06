@@ -1,4 +1,4 @@
-import { getWhatsAppSetupManager } from "@/lib/whatsapp-setup/session";
+import { getWhatsAppSetupManager } from "../../../../../lib/whatsapp-setup/session";
 import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";

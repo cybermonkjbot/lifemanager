@@ -1,3 +1,5 @@
+import { AutonomyControls } from "@/components/autonomy-controls";
+import { ConvexAppProvider } from "@/components/convex-app-provider";
 import Link from "next/link";
 import { ReactNode } from "react";
 
@@ -5,6 +7,7 @@ type DashboardShellProps = {
   title: string;
   subtitle: string;
   children: ReactNode;
+  convexUrl?: string;
   autonomyPaused?: boolean;
 };
 
@@ -18,7 +21,7 @@ const navItems = [
   { href: "/system", label: "System" },
 ];
 
-export function DashboardShell({ title, subtitle, children, autonomyPaused }: DashboardShellProps) {
+export function DashboardShell({ title, subtitle, children, convexUrl, autonomyPaused }: DashboardShellProps) {
   return (
     <div className="shell-root">
       <aside className="shell-nav">
@@ -37,28 +40,21 @@ export function DashboardShell({ title, subtitle, children, autonomyPaused }: Da
         </nav>
       </aside>
 
-      <div className="shell-main-wrap">
-        <header className="shell-topbar">
-          <div>
-            <p className="panel-kicker">Action Studio</p>
-            <h2 className="panel-title">{title}</h2>
-            <p className="panel-subtitle">{subtitle}</p>
-          </div>
+      <ConvexAppProvider convexUrl={convexUrl}>
+        <div className="shell-main-wrap">
+          <header className="shell-topbar">
+            <div>
+              <p className="panel-kicker">Action Studio</p>
+              <h2 className="panel-title">{title}</h2>
+              <p className="panel-subtitle">{subtitle}</p>
+            </div>
 
-          <div className="topbar-controls">
-            <span className={`status-pill ${autonomyPaused ? "status-paused" : "status-active"}`}>
-              {autonomyPaused ? "Autonomy Paused" : "Autonomy Active"}
-            </span>
-            <form action={autonomyPaused ? "/api/actions/resume-autonomy" : "/api/actions/pause-autonomy"} method="post">
-              <button type="submit" className="btn btn-primary">
-                {autonomyPaused ? "Resume" : "Pause"}
-              </button>
-            </form>
-          </div>
-        </header>
+            <AutonomyControls realtimeEnabled={Boolean(convexUrl)} fallbackPaused={autonomyPaused} />
+          </header>
 
-        <main className="shell-main">{children}</main>
-      </div>
+          <main className="shell-main">{children}</main>
+        </div>
+      </ConvexAppProvider>
     </div>
   );
 }

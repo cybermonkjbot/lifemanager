@@ -1,41 +1,38 @@
-import { makeFunctionReference } from "convex/server";
-import { action } from "./_generated/server";
+import { internal } from "./_generated/api";
+import { internalAction } from "./_generated/server";
 
-const refFollowupsList = makeFunctionReference<"query">("followups:list");
-const refSaveGenerated = makeFunctionReference<"mutation">("draft:saveGenerated");
-const refApproveDraft = makeFunctionReference<"mutation">("draft:approve");
-const refMarkQueued = makeFunctionReference<"mutation">("followupsMarkQueued:run");
+const BATCH_SIZE = 20;
+const MAX_BATCHES_PER_RUN = 5;
 
-export const run = action({
+export const run = internalAction({
   args: {},
   handler: async (ctx) => {
     const now = Date.now();
-    const due = await ctx.runQuery(refFollowupsList, { limit: 100 });
-    const confirmed = due.filter((f: { status: string; dueAt: number }) => f.status === "confirmed" && f.dueAt <= now);
+    let promoted = 0;
+    let lastBatchCount = 0;
 
-    for (const followup of confirmed) {
-      const draftId = await ctx.runMutation(refSaveGenerated, {
-        threadId: followup.threadId,
-        sourceMessageId: followup.sourceMessageId,
-        text: followup.draftText,
-        provider: "heuristic",
-        confidence: 0.55,
-        delayMs: 5_000,
-        typingMs: 2_000,
-        reason: `Follow-up: ${followup.reason}`,
-      });
+    for (let i = 0; i < MAX_BATCHES_PER_RUN; i += 1) {
+      const result = (await ctx.runMutation(internal.followups.promoteDueConfirmed, {
+        now,
+        limit: BATCH_SIZE,
+      })) as { promoted: number };
 
-      await ctx.runMutation(refApproveDraft, {
-        draftId,
-      });
+      promoted += result.promoted;
+      lastBatchCount = result.promoted;
 
-      await ctx.runMutation(refMarkQueued, {
-        followUpId: followup._id,
-      });
+      if (result.promoted < BATCH_SIZE) {
+        break;
+      }
+    }
+
+    const continuationScheduled = lastBatchCount === BATCH_SIZE;
+    if (continuationScheduled) {
+      await ctx.scheduler.runAfter(0, internal.followupsPromoter.run, {});
     }
 
     return {
-      promoted: confirmed.length,
+      promoted,
+      continuationScheduled,
     };
   },
 });

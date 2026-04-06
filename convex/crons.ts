@@ -1,9 +1,11 @@
-import { anyApi, cronJobs } from "convex/server";
+import { cronJobs } from "convex/server";
+import { internal } from "./_generated/api";
 
 const crons = cronJobs();
 
-crons.interval("process-confirmed-followups", { minutes: 1 }, anyApi.followupsPromoter.run, {});
-crons.interval("nightly-memory-summary", { hours: 24 }, anyApi.memoryBatch.run, {});
-crons.interval("retention-cleanup", { hours: 24 }, anyApi.retention.run, {});
+crons.interval("process-confirmed-followups", { minutes: 1 }, internal.followupsPromoter.run, {});
+crons.interval("recover-stuck-outbox-claims", { minutes: 2 }, internal.outbox.recoverExpiredClaims, {});
+crons.interval("nightly-memory-summary", { hours: 24 }, internal.memoryBatch.run, {});
+crons.interval("retention-cleanup", { hours: 24 }, internal.retention.run, {});
 
 export default crons;

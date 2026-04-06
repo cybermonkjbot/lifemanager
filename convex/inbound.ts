@@ -1,5 +1,5 @@
 import { v } from "convex/values";
-import { internal, api } from "./_generated/api";
+import { internal } from "./_generated/api";
 import { mutation } from "./_generated/server";
 import { getConfig } from "./lib/config";
 import { detectPromiseOrPlan, detectTodoCandidate } from "./lib/heuristics";
@@ -110,7 +110,7 @@ export const ingest = mutation({
       });
     }
 
-    await ctx.scheduler.runAfter(0, api.memory.summarize, {
+    await ctx.scheduler.runAfter(0, internal.memory.summarize, {
       threadId: thread._id,
     });
 

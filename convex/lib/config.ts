@@ -7,7 +7,7 @@ export type AppConfig = {
 };
 
 export async function getConfig(ctx: QueryCtx | MutationCtx): Promise<AppConfig> {
-  const rows = await ctx.db.query("appConfig").collect();
+  const rows = await ctx.db.query("appConfig").take(50);
   const map = new Map(rows.map((row) => [row.key, row.value]));
 
   return {

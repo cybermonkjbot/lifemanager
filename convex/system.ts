@@ -97,3 +97,90 @@ export const setIgnoreGroupsByDefault = mutation({
     return args.enabled;
   },
 });
+
+export const setupStatus = query({
+  args: {},
+  handler: async (ctx) => {
+    const record = await ctx.db
+      .query("setupRuntime")
+      .withIndex("by_key", (q) => q.eq("key", "whatsapp"))
+      .first();
+
+    return record || null;
+  },
+});
+
+export const upsertSetupStatus = mutation({
+  args: {
+    status: v.union(
+      v.literal("idle"),
+      v.literal("starting"),
+      v.literal("qr_ready"),
+      v.literal("code_ready"),
+      v.literal("connected"),
+      v.literal("error"),
+    ),
+    mode: v.union(v.literal("qr"), v.literal("pairing_code")),
+    message: v.string(),
+    qrDataUrl: v.optional(v.string()),
+    pairingCode: v.optional(v.string()),
+    hasAuth: v.boolean(),
+    updatedAt: v.number(),
+  },
+  handler: async (ctx, args) => {
+    const existing = await ctx.db
+      .query("setupRuntime")
+      .withIndex("by_key", (q) => q.eq("key", "whatsapp"))
+      .first();
+
+    if (existing) {
+      await ctx.db.patch(existing._id, args);
+      return existing._id;
+    }
+
+    return await ctx.db.insert("setupRuntime", {
+      key: "whatsapp",
+      ...args,
+    });
+  },
+});
+
+export const reportSetupListener = mutation({
+  args: {
+    listenerActive: v.boolean(),
+    listenerWorkerId: v.optional(v.string()),
+    listenerMessage: v.optional(v.string()),
+    listenerLastSeenAt: v.optional(v.number()),
+    hasAuth: v.optional(v.boolean()),
+  },
+  handler: async (ctx, args) => {
+    const existing = await ctx.db
+      .query("setupRuntime")
+      .withIndex("by_key", (q) => q.eq("key", "whatsapp"))
+      .first();
+
+    const now = Date.now();
+    const patch = {
+      listenerActive: args.listenerActive,
+      listenerWorkerId: args.listenerWorkerId,
+      listenerMessage: args.listenerMessage,
+      listenerLastSeenAt: args.listenerLastSeenAt ?? now,
+      updatedAt: now,
+      ...(args.hasAuth === undefined ? {} : { hasAuth: args.hasAuth }),
+    };
+
+    if (existing) {
+      await ctx.db.patch(existing._id, patch);
+      return existing._id;
+    }
+
+    return await ctx.db.insert("setupRuntime", {
+      key: "whatsapp",
+      status: "idle",
+      mode: "qr",
+      message: args.listenerActive ? "Worker connected to WhatsApp." : "Setup not started.",
+      hasAuth: args.hasAuth ?? false,
+      ...patch,
+    });
+  },
+});

@@ -1,24 +1,38 @@
+import { v } from "convex/values";
 import { query } from "./_generated/server";
 
 export const list = query({
-  args: {},
-  handler: async (ctx) => {
+  args: {
+    draftLimit: v.optional(v.number()),
+    followupLimit: v.optional(v.number()),
+    todoLimit: v.optional(v.number()),
+    guardrailLimit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const draftLimit = Math.min(args.draftLimit ?? 40, 100);
+    const followupLimit = Math.min(args.followupLimit ?? 40, 100);
+    const todoLimit = Math.min(args.todoLimit ?? 40, 100);
+    const guardrailLimit = Math.min(args.guardrailLimit ?? 20, 100);
+
     const pendingDrafts = await ctx.db
       .query("replyDrafts")
       .withIndex("by_status", (q) => q.eq("status", "pending"))
-      .collect();
+      .order("desc")
+      .take(draftLimit);
 
     const followupConfirmations = await ctx.db
       .query("followUps")
       .withIndex("by_status_dueAt", (q) => q.eq("status", "suggested"))
-      .collect();
+      .order("asc")
+      .take(followupLimit);
 
     const todoCandidates = await ctx.db
       .query("todoCandidates")
       .withIndex("by_status", (q) => q.eq("status", "suggested"))
-      .collect();
+      .order("desc")
+      .take(todoLimit);
 
-    const guardrailFlags = await ctx.db.query("guardrailEvents").withIndex("by_createdAt").order("desc").take(20);
+    const guardrailFlags = await ctx.db.query("guardrailEvents").withIndex("by_createdAt").order("desc").take(guardrailLimit);
 
     const enrichedDrafts = await Promise.all(
       pendingDrafts.map(async (draft) => {

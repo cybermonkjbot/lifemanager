@@ -8,6 +8,7 @@ export const convexRefs = {
   todosList: makeFunctionReference<"query">("todos:list"),
   rulesList: makeFunctionReference<"query">("rules:list"),
   systemHealth: makeFunctionReference<"query">("system:health"),
+  systemSetupStatus: makeFunctionReference<"query">("system:setupStatus"),
 
   inboundIngest: makeFunctionReference<"mutation">("inbound:ingest"),
   draftSaveGenerated: makeFunctionReference<"mutation">("draft:saveGenerated"),
@@ -27,6 +28,8 @@ export const convexRefs = {
   systemResumeAutonomy: makeFunctionReference<"mutation">("system:resumeAutonomy"),
   systemRecordEvent: makeFunctionReference<"mutation">("system:recordEvent"),
   systemRecordProviderRun: makeFunctionReference<"mutation">("system:recordProviderRun"),
+  systemUpsertSetupStatus: makeFunctionReference<"mutation">("system:upsertSetupStatus"),
+  systemReportSetupListener: makeFunctionReference<"mutation">("system:reportSetupListener"),
 
   styleGetProfile: makeFunctionReference<"query">("style:getProfile"),
   styleSetMimicry: makeFunctionReference<"mutation">("style:setMimicry"),

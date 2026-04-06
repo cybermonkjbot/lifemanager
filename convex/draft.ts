@@ -172,6 +172,49 @@ export const approve = mutation({
     }
 
     const now = Date.now();
+    const existingOutbox = await ctx.db
+      .query("outbox")
+      .withIndex("by_draft", (q) => q.eq("draftId", draft._id))
+      .order("desc")
+      .take(20);
+
+    const sentOutbox = existingOutbox.find((item) => item.status === "sent");
+    if (sentOutbox) {
+      await ctx.db.patch(draft._id, {
+        status: "sent",
+        updatedAt: now,
+      });
+      return sentOutbox._id;
+    }
+
+    const claimedOutbox = existingOutbox.find((item) => item.status === "claimed");
+    if (claimedOutbox) {
+      await ctx.db.patch(draft._id, {
+        status: "approved",
+        updatedAt: now,
+      });
+      return claimedOutbox._id;
+    }
+
+    const pendingOutbox = existingOutbox.find((item) => item.status === "pending");
+    if (pendingOutbox) {
+      await ctx.db.patch(draft._id, {
+        status: "approved",
+        updatedAt: now,
+      });
+
+      await ctx.db.patch(pendingOutbox._id, {
+        sendAt: now + draft.delayMs,
+        status: "pending",
+        workerId: undefined,
+        leaseExpiresAt: undefined,
+        error: undefined,
+        updatedAt: now,
+      });
+
+      return pendingOutbox._id;
+    }
+
     await ctx.db.patch(draft._id, {
       status: "approved",
       updatedAt: now,
@@ -233,17 +276,39 @@ export const snooze = mutation({
       return null;
     }
 
+    const now = Date.now();
     await ctx.db.patch(draft._id, {
       status: "snoozed",
-      updatedAt: Date.now(),
+      updatedAt: now,
     });
 
-    const now = Date.now();
+    const sendAt = now + args.minutes * 60 * 1000;
+    const existingOutbox = await ctx.db
+      .query("outbox")
+      .withIndex("by_draft", (q) => q.eq("draftId", draft._id))
+      .order("desc")
+      .take(20);
+
+    const activeOutbox = existingOutbox.find((item) => item.status === "pending" || item.status === "claimed");
+    if (activeOutbox) {
+      await ctx.db.patch(activeOutbox._id, {
+        messageText: draft.text,
+        sendAt,
+        status: "pending",
+        workerId: undefined,
+        leaseExpiresAt: undefined,
+        error: undefined,
+        updatedAt: now,
+      });
+
+      return activeOutbox._id;
+    }
+
     return await ctx.db.insert("outbox", {
       threadId: draft.threadId,
       draftId: draft._id,
       messageText: draft.text,
-      sendAt: now + args.minutes * 60 * 1000,
+      sendAt,
       status: "pending",
       attempts: 0,
       idempotencyKey: `${draft._id}-snooze-${now}`,
