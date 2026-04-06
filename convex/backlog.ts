@@ -344,7 +344,6 @@ async function upsertThreadState(
     signals: LiveSignals;
   },
 ) {
-  const now = Date.now();
   const payload = {
     unresolvedCount: args.signals.unresolvedCount,
     pendingSince: args.signals.pendingSince,
@@ -357,18 +356,41 @@ async function upsertThreadState(
     importance: args.signals.importance,
     recommendation: args.signals.recommendation,
     score: args.signals.score,
-    lastEvaluatedAt: now,
-    updatedAt: now,
   };
 
   if (args.existing) {
-    await ctx.db.patch(args.existing._id, payload);
+    const hasSignalChanges =
+      args.existing.unresolvedCount !== payload.unresolvedCount ||
+      args.existing.pendingSince !== payload.pendingSince ||
+      args.existing.latestUnresolvedAt !== payload.latestUnresolvedAt ||
+      args.existing.latestUnresolvedMessageId !== payload.latestUnresolvedMessageId ||
+      args.existing.latestUnresolvedText !== payload.latestUnresolvedText ||
+      args.existing.lastInboundAt !== payload.lastInboundAt ||
+      args.existing.lastOutboundAt !== payload.lastOutboundAt ||
+      args.existing.relationship !== payload.relationship ||
+      args.existing.importance !== payload.importance ||
+      args.existing.recommendation !== payload.recommendation ||
+      args.existing.score !== payload.score;
+
+    if (!hasSignalChanges) {
+      return args.existing;
+    }
+
+    const now = Date.now();
+    await ctx.db.patch(args.existing._id, {
+      ...payload,
+      lastEvaluatedAt: now,
+      updatedAt: now,
+    });
     return {
       ...args.existing,
       ...payload,
+      lastEvaluatedAt: now,
+      updatedAt: now,
     };
   }
 
+  const now = Date.now();
   const id = await ctx.db.insert("backlogThreadState", {
     threadId: args.thread._id,
     importanceOverride: undefined,

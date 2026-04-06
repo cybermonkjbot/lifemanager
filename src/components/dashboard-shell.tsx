@@ -40,6 +40,12 @@ const navItems = [
     primary: true,
   },
   {
+    href: "/activity-core",
+    label: "Activity Core",
+    description: "Visual activity sphere with glowing runtime status.",
+    primary: true,
+  },
+  {
     href: "/setup",
     label: "Setup",
     description: "Pair WhatsApp and run environment checks.",

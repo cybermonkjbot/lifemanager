@@ -1,7 +1,7 @@
 import { v } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
-import { internal } from "./_generated/api";
+import { api, internal } from "./_generated/api";
 import { mutation } from "./_generated/server";
 import { getConfig } from "./lib/config";
 import { detectPromiseOrPlan, detectTodoCandidate } from "./lib/heuristics";
@@ -20,6 +20,7 @@ const GHOST_ACTIVITY_MIN_INBOUND_MESSAGES = 3;
 const GHOST_ACTIVITY_MIN_OUTBOUND_MESSAGES = 3;
 const GHOST_ACTIVITY_MIN_TURNS = 4;
 const GHOST_TRIGGER_PROBABILITY = 0.2;
+type IngestMode = "live" | "history_sync" | "history_fetch";
 
 function normalizeTimestampMs(raw: number | undefined, fallbackMs: number) {
   if (!Number.isFinite(raw) || (raw ?? 0) <= 0) {
@@ -148,9 +149,12 @@ export const ingest = mutation({
     whatsappMessageId: v.optional(v.string()),
     messageAt: v.optional(v.number()),
     skipDraftGeneration: v.optional(v.boolean()),
+    ingestMode: v.optional(v.union(v.literal("live"), v.literal("history_sync"), v.literal("history_fetch"))),
   },
   handler: async (ctx, args) => {
     const now = Date.now();
+    const ingestMode: IngestMode = args.ingestMode || "live";
+    const isHistoryIngest = ingestMode !== "live";
     const messageAt = normalizeTimestampMs(args.messageAt, now);
     const messageType = args.messageType || "text";
     const normalizedText = args.text.trim();
@@ -245,18 +249,21 @@ export const ingest = mutation({
       }
     }
 
-    const recentWindowMessages = await ctx.db
-      .query("messages")
-      .withIndex("by_thread_messageAt", (q) =>
-        q.eq("threadId", thread._id).gte("messageAt", now - GHOST_ACTIVITY_WINDOW_MS),
-      )
-      .order("desc")
-      .take(GHOST_ACTIVITY_WINDOW_MESSAGE_LIMIT);
+    const recentWindowMessages = isHistoryIngest
+      ? []
+      : await ctx.db
+          .query("messages")
+          .withIndex("by_thread_messageAt", (q) =>
+            q.eq("threadId", thread._id).gte("messageAt", now - GHOST_ACTIVITY_WINDOW_MS),
+          )
+          .order("desc")
+          .take(GHOST_ACTIVITY_WINDOW_MESSAGE_LIMIT);
 
     const latestMessage = recentWindowMessages[0];
-    const stale = Boolean(latestMessage && messageAt + INBOUND_STALE_GRACE_MS < latestMessage.messageAt);
+    const stale = isHistoryIngest ? false : Boolean(latestMessage && messageAt + INBOUND_STALE_GRACE_MS < latestMessage.messageAt);
 
     const eligibleForGhostStart =
+      !isHistoryIngest &&
       threadKind === "direct" &&
       !isArchived &&
       !stale &&
@@ -294,7 +301,7 @@ export const ingest = mutation({
       explicitIgnoreEnabled: Boolean(explicitIgnore?.enabled),
       nowMs: now,
     });
-    const ignored = !eligibility.allowed;
+    const ignored = isHistoryIngest ? false : !eligibility.allowed;
 
     let reactionTargetMessageId: Id<"messages"> | undefined;
     if (messageType === "reaction" && args.reactionTargetWhatsAppMessageId) {
@@ -310,6 +317,7 @@ export const ingest = mutation({
     const messageId = await ctx.db.insert("messages", {
       threadId: thread._id,
       direction: "inbound",
+      origin: ingestMode,
       whatsappMessageId: args.whatsappMessageId,
       senderJid: args.senderJid,
       text: normalizedText,
@@ -355,7 +363,7 @@ export const ingest = mutation({
       }
     }
 
-    if (messageType === "text") {
+    if (!isHistoryIngest && messageType === "text") {
       await updateAutoAliases({
         ctx,
         threadId: thread._id,
@@ -367,16 +375,20 @@ export const ingest = mutation({
     await ctx.db.insert("systemEvents", {
       source: "worker",
       eventType:
-        messageType === "reaction"
-          ? "inbound.reaction"
-          : stale
-            ? "inbound.stale"
-            : ignored
-              ? "inbound.ignored"
-              : "inbound.received",
+        isHistoryIngest
+          ? ingestMode === "history_fetch"
+            ? "inbound.history_fetch.received"
+            : "inbound.history_sync.received"
+          : messageType === "reaction"
+            ? "inbound.reaction"
+            : stale
+              ? "inbound.stale"
+              : ignored
+                ? "inbound.ignored"
+                : "inbound.received",
       threadId: thread._id,
       detail:
-        ignored && !eligibility.allowed
+        !isHistoryIngest && ignored && !eligibility.allowed
           ? `${eligibility.reason}: ${eligibilityReasonLabel(eligibility.reason)}`
           : (normalizedText || args.reactionEmoji || "[Non-text inbound]").slice(0, 300),
       createdAt: now,
@@ -385,7 +397,7 @@ export const ingest = mutation({
     let promiseDetected = false;
     let todoDetected = false;
 
-    if (!stale && messageType === "text") {
+    if (!isHistoryIngest && !stale && messageType === "text") {
       const promise = detectPromiseOrPlan(normalizedText);
       if (promise) {
         promiseDetected = true;
@@ -416,22 +428,24 @@ export const ingest = mutation({
       }
     }
 
-    if (!ignored && !stale && messageType !== "reaction" && !args.skipDraftGeneration) {
+    if (!isHistoryIngest && !ignored && !stale && messageType !== "reaction" && !args.skipDraftGeneration) {
       await ctx.scheduler.runAfter(0, internal.draft.generate, {
         threadId: thread._id,
         sourceMessageId: messageId,
       });
     }
 
-    if (!stale) {
+    if (!isHistoryIngest && !stale) {
       await ctx.scheduler.runAfter(0, internal.memory.summarize, {
         threadId: thread._id,
       });
     }
 
-    await ctx.scheduler.runAfter(0, internal.backlog.refreshThread, {
-      threadId: thread._id,
-    });
+    if (!isHistoryIngest) {
+      await ctx.scheduler.runAfter(0, internal.backlog.refreshThread, {
+        threadId: thread._id,
+      });
+    }
 
     return {
       threadId: thread._id,
@@ -444,6 +458,146 @@ export const ingest = mutation({
       reactionTargetMessageId,
       promiseDetected,
       todoDetected,
+      ingestMode,
+    };
+  },
+});
+
+export const ingestHistorical = mutation({
+  args: {
+    ingestMode: v.union(v.literal("history_sync"), v.literal("history_fetch")),
+    direction: v.union(v.literal("inbound"), v.literal("outbound")),
+    threadJid: v.string(),
+    senderJid: v.string(),
+    senderTitle: v.optional(v.string()),
+    text: v.string(),
+    messageType: v.optional(v.union(v.literal("text"), v.literal("reaction"), v.literal("sticker"), v.literal("meme"))),
+    reactionEmoji: v.optional(v.string()),
+    reactionTargetWhatsAppMessageId: v.optional(v.string()),
+    mediaAssetId: v.optional(v.id("mediaAssets")),
+    mediaCaption: v.optional(v.string()),
+    isGroup: v.boolean(),
+    threadKind: v.optional(v.union(v.literal("direct"), v.literal("group"), v.literal("broadcast_or_system"))),
+    isArchived: v.optional(v.boolean()),
+    archivedAt: v.optional(v.number()),
+    whatsappMessageId: v.optional(v.string()),
+    messageAt: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    if (args.direction === "inbound") {
+      return await ctx.runMutation(api.inbound.ingest, {
+        threadJid: args.threadJid,
+        senderJid: args.senderJid,
+        senderTitle: args.senderTitle,
+        text: args.text,
+        messageType: args.messageType,
+        reactionEmoji: args.reactionEmoji,
+        reactionTargetWhatsAppMessageId: args.reactionTargetWhatsAppMessageId,
+        mediaAssetId: args.mediaAssetId,
+        mediaCaption: args.mediaCaption,
+        isGroup: args.isGroup,
+        threadKind: args.threadKind,
+        isArchived: args.isArchived,
+        archivedAt: args.archivedAt,
+        whatsappMessageId: args.whatsappMessageId,
+        messageAt: args.messageAt,
+        skipDraftGeneration: true,
+        ingestMode: args.ingestMode,
+      });
+    }
+
+    const now = Date.now();
+    const messageAt = normalizeTimestampMs(args.messageAt, now);
+    const threadKind = args.threadKind || classifyThreadKind({ jid: args.threadJid, isGroupHint: args.isGroup });
+    const normalizedArchivedAt = normalizeTimestampMs(args.archivedAt, messageAt);
+    const normalizedText = args.text.trim() || "[Historical outbound message]";
+    let thread = await ctx.db
+      .query("threads")
+      .withIndex("by_jid", (q) => q.eq("jid", args.threadJid))
+      .first();
+
+    if (!thread) {
+      const config = await getConfig(ctx);
+      const threadId = await ctx.db.insert("threads", {
+        jid: args.threadJid,
+        title: args.senderTitle,
+        isGroup: threadKind === "group",
+        isIgnored: threadKind === "group" ? config.ignoreGroupsByDefault : false,
+        threadKind,
+        isArchived: args.isArchived || false,
+        archivedAt: args.isArchived ? normalizedArchivedAt : undefined,
+        ghostedUntil: undefined,
+        lastMessageAt: messageAt,
+        createdAt: now,
+        updatedAt: now,
+      });
+      thread = await ctx.db.get(threadId);
+      if (!thread) {
+        throw new Error("Unable to create thread");
+      }
+    } else {
+      await ctx.db.patch(thread._id, {
+        title: args.senderTitle ?? thread.title,
+        isGroup: threadKind === "group",
+        threadKind,
+        isArchived: args.isArchived === undefined ? thread.isArchived : args.isArchived,
+        archivedAt:
+          args.isArchived === undefined
+            ? thread.archivedAt
+            : args.isArchived
+              ? normalizedArchivedAt
+              : undefined,
+        lastMessageAt: Math.max(thread.lastMessageAt, messageAt),
+        updatedAt: now,
+      });
+    }
+
+    if (args.whatsappMessageId) {
+      const existing = await ctx.db
+        .query("messages")
+        .withIndex("by_thread_whatsappMessageId", (q) =>
+          q.eq("threadId", thread._id).eq("whatsappMessageId", args.whatsappMessageId),
+        )
+        .first();
+      if (existing) {
+        return {
+          threadId: thread._id,
+          messageId: existing._id,
+          duplicate: true,
+          ingestMode: args.ingestMode,
+        };
+      }
+    }
+
+    const messageId = await ctx.db.insert("messages", {
+      threadId: thread._id,
+      direction: "outbound",
+      origin: args.ingestMode,
+      whatsappMessageId: args.whatsappMessageId,
+      senderJid: args.senderJid,
+      text: normalizedText,
+      messageType: args.messageType || "text",
+      reactionEmoji: args.reactionEmoji,
+      reactionTargetWhatsAppMessageId: args.reactionTargetWhatsAppMessageId,
+      mediaAssetId: args.mediaAssetId,
+      mediaCaption: args.mediaCaption,
+      messageAt,
+      createdAt: now,
+    });
+
+    await ctx.db.insert("systemEvents", {
+      source: "worker",
+      eventType: args.ingestMode === "history_fetch" ? "outbound.history_fetch.received" : "outbound.history_sync.received",
+      threadId: thread._id,
+      detail: normalizedText.slice(0, 300),
+      createdAt: now,
+    });
+
+    return {
+      threadId: thread._id,
+      messageId,
+      duplicate: false,
+      ingestMode: args.ingestMode,
     };
   },
 });

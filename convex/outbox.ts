@@ -9,6 +9,8 @@ import {
   resolveThreadEligibility,
 } from "./lib/threadEligibility";
 
+const MANUAL_INTERVENTION_COOLDOWN_MS = 30 * 60 * 1000;
+
 function isWithinQuietHours(hour: number, startHour: number, endHour: number) {
   if (startHour === endHour) {
     return false;
@@ -346,10 +348,27 @@ export const suppressForManualIntervention = mutation({
       };
     }
 
+    const threadKind = thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup });
+    const cooldownUntil =
+      threadKind === "direct"
+        ? Math.max(thread.ghostedUntil ?? 0, Math.max(now, messageAt) + MANUAL_INTERVENTION_COOLDOWN_MS)
+        : thread.ghostedUntil;
+
     await ctx.db.patch(thread._id, {
       lastMessageAt: Math.max(thread.lastMessageAt, messageAt),
+      ghostedUntil: cooldownUntil,
       updatedAt: now,
     });
+
+    if (threadKind === "direct") {
+      await ctx.db.insert("systemEvents", {
+        source: "worker",
+        eventType: "thread.ghost_mode.manual_intervention",
+        threadId: thread._id,
+        detail: `Manual intervention cooldown active until ${new Date(cooldownUntil ?? now).toISOString()}.`,
+        createdAt: now,
+      });
+    }
 
     let recordedMessageId: string | undefined;
     if (args.whatsappMessageId) {
@@ -369,6 +388,7 @@ export const suppressForManualIntervention = mutation({
       const inserted = await ctx.db.insert("messages", {
         threadId: thread._id,
         direction: "outbound",
+        origin: "live",
         whatsappMessageId: args.whatsappMessageId,
         senderJid: "me",
         text: messageText,
@@ -539,6 +559,7 @@ export const markSent = mutation({
     await ctx.db.insert("messages", {
       threadId: item.threadId,
       direction: "outbound",
+      origin: "live",
       senderJid: "me",
       whatsappMessageId: args.whatsappMessageId,
       text: item.messageText,

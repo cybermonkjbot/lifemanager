@@ -42,14 +42,50 @@ export const listContacts = query({
   },
   handler: async (ctx, args) => {
     const limit = Math.min(args.limit ?? 200, 500);
-    const threads = await ctx.db
+    const directThreads = await ctx.db
       .query("threads")
-      .withIndex("by_lastMessageAt")
+      .withIndex("by_threadKind_and_lastMessageAt", (q) => q.eq("threadKind", "direct"))
       .order("desc")
       .take(limit);
 
-    return threads
-      .filter((thread) => (thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup })) === "direct")
+    if (directThreads.length >= limit) {
+      return directThreads.map((thread) => ({
+        _id: thread._id,
+        jid: thread.jid,
+        title: thread.title,
+        lastMessageAt: thread.lastMessageAt,
+        isIgnored: thread.isIgnored,
+        isArchived: thread.isArchived || false,
+      }));
+    }
+
+    const legacyScanLimit = Math.min(limit * 4, 2000);
+    const legacyThreads = await ctx.db
+      .query("threads")
+      .withIndex("by_lastMessageAt")
+      .order("desc")
+      .take(legacyScanLimit);
+
+    const seen = new Set(directThreads.map((thread) => thread._id));
+    const merged = [...directThreads];
+
+    for (const thread of legacyThreads) {
+      if (seen.has(thread._id)) {
+        continue;
+      }
+      const kind = thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup });
+      if (kind !== "direct") {
+        continue;
+      }
+      merged.push(thread);
+      seen.add(thread._id);
+      if (merged.length >= limit) {
+        break;
+      }
+    }
+
+    return merged
+      .slice(0, limit)
       .map((thread) => ({
         _id: thread._id,
         jid: thread.jid,
@@ -233,6 +269,36 @@ export const get = query({
       .order("desc")
       .take(80);
 
+    const mediaAssetIds = [
+      ...new Set(messages.map((message) => message.mediaAssetId).filter((assetId): assetId is NonNullable<typeof assetId> => Boolean(assetId))),
+    ];
+    const mediaById = new Map<
+      string,
+      {
+        assetId: string;
+        kind: "sticker" | "meme";
+        mimeType: string;
+        label: string;
+        url: string | null;
+      }
+    >();
+    await Promise.all(
+      mediaAssetIds.map(async (assetId) => {
+        const asset = await ctx.db.get(assetId);
+        if (!asset) {
+          return;
+        }
+        const url = await ctx.storage.getUrl(asset.fileId);
+        mediaById.set(assetId, {
+          assetId,
+          kind: asset.kind,
+          mimeType: asset.mimeType,
+          label: asset.label,
+          url,
+        });
+      }),
+    );
+
     const messageIds = messages.map((message) => message._id);
     let reactions: Array<{
       messageId: string;
@@ -268,7 +334,12 @@ export const get = query({
 
     return {
       thread,
-      messages: messages.reverse(),
+      messages: messages
+        .reverse()
+        .map((message) => ({
+          ...message,
+          mediaPreview: message.mediaAssetId ? mediaById.get(message.mediaAssetId) || null : null,
+        })),
       reactions,
       memory,
       grounding: grounding || null,

@@ -23,11 +23,13 @@ export default defineSchema({
   })
     .index("by_jid", ["jid"])
     .index("by_lastMessageAt", ["lastMessageAt"])
+    .index("by_threadKind_and_lastMessageAt", ["threadKind", "lastMessageAt"])
     .index("by_ignored", ["isIgnored"]),
 
   messages: defineTable({
     threadId: v.id("threads"),
     direction: v.union(v.literal("inbound"), v.literal("outbound")),
+    origin: v.optional(v.union(v.literal("live"), v.literal("history_sync"), v.literal("history_fetch"))),
     whatsappMessageId: v.optional(v.string()),
     senderJid: v.string(),
     text: v.string(),
@@ -42,7 +44,24 @@ export default defineSchema({
     .index("by_thread", ["threadId"])
     .index("by_thread_messageAt", ["threadId", "messageAt"])
     .index("by_thread_whatsappMessageId", ["threadId", "whatsappMessageId"])
-    .index("by_createdAt", ["createdAt"]),
+    .index("by_createdAt", ["createdAt"])
+    .searchIndex("search_text", {
+      searchField: "text",
+      filterFields: ["threadId", "direction", "origin"],
+    }),
+
+  messageEmbeddings: defineTable({
+    threadId: v.id("threads"),
+    messageId: v.id("messages"),
+    modelVersion: v.string(),
+    contentHash: v.string(),
+    vector: v.array(v.number()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_message_and_modelVersion", ["messageId", "modelVersion"])
+    .index("by_thread_and_updatedAt", ["threadId", "updatedAt"])
+    .index("by_thread_and_modelVersion_and_updatedAt", ["threadId", "modelVersion", "updatedAt"]),
 
   threadMemory: defineTable({
     threadId: v.id("threads"),
@@ -219,7 +238,9 @@ export default defineSchema({
     threadPromptProfileUpdatedAt: v.optional(v.number()),
     createdAt: v.number(),
     updatedAt: v.number(),
-  }).index("by_thread", ["threadId"]),
+  })
+    .index("by_thread", ["threadId"])
+    .index("by_profileSlug", ["profileSlug"]),
 
   ignoreRules: defineTable({
     targetType: v.union(v.literal("contact"), v.literal("group"), v.literal("keyword")),

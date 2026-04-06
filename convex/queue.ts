@@ -1,4 +1,5 @@
 import { v } from "convex/values";
+import type { Id } from "./_generated/dataModel";
 import { mutation, query } from "./_generated/server";
 
 export const list = query({
@@ -34,23 +35,70 @@ export const list = query({
       .order("desc")
       .take(todoLimit);
 
-    const guardrailRows = await ctx.db
-      .query("guardrailEvents")
-      .withIndex("by_createdAt")
-      .order("desc")
-      .take(Math.min(guardrailLimit * 4, 400));
-    const guardrailFlags = guardrailRows
-      .filter((row) => includeResolvedGuardrails || !row.resolvedAt)
-      .slice(0, guardrailLimit);
+    const guardrailFlags = includeResolvedGuardrails
+      ? await ctx.db
+          .query("guardrailEvents")
+          .withIndex("by_createdAt")
+          .order("desc")
+          .take(guardrailLimit)
+      : await ctx.db
+          .query("guardrailEvents")
+          .withIndex("by_resolvedAt_and_createdAt", (q) => q.eq("resolvedAt", undefined))
+          .order("desc")
+          .take(guardrailLimit);
+
+    const mediaPreviewCache = new Map<
+      Id<"mediaAssets">,
+      Promise<{
+        assetId: Id<"mediaAssets">;
+        kind: "sticker" | "meme";
+        mimeType: string;
+        label: string;
+        url: string | null;
+      } | null>
+    >();
+
+    const loadMediaPreview = async (assetId?: Id<"mediaAssets">) => {
+      if (!assetId) {
+        return null;
+      }
+      let previewPromise = mediaPreviewCache.get(assetId);
+      if (!previewPromise) {
+        previewPromise = (async () => {
+          const asset = await ctx.db.get(assetId);
+          if (!asset) {
+            return null;
+          }
+          const url = await ctx.storage.getUrl(asset.fileId);
+          return {
+            assetId,
+            kind: asset.kind,
+            mimeType: asset.mimeType,
+            label: asset.label,
+            url,
+          };
+        })();
+        mediaPreviewCache.set(assetId, previewPromise);
+      }
+      return await previewPromise;
+    };
 
     const enrichedDrafts = await Promise.all(
       pendingDrafts.map(async (draft) => {
         const thread = await ctx.db.get(draft.threadId);
         const sourceMessage = await ctx.db.get(draft.sourceMessageId);
+        const draftMediaPreview = await loadMediaPreview(draft.mediaAssetId);
+        const sourceMediaPreview = await loadMediaPreview(sourceMessage?.mediaAssetId);
         return {
           ...draft,
           thread,
-          sourceMessage,
+          mediaPreview: draftMediaPreview,
+          sourceMessage: sourceMessage
+            ? {
+                ...sourceMessage,
+                mediaPreview: sourceMediaPreview,
+              }
+            : null,
         };
       }),
     );

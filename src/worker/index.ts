@@ -20,6 +20,11 @@ import {
   type AiAttempt,
 } from "./ai";
 import {
+  buildHistorySearchOverride,
+  maybeFetchOlderHistoryForThread,
+  readHistoryFetchConfigFromEnv,
+} from "./history-context";
+import {
   classifyThreadKindFromJid,
   getSenderJid,
   getThreadJid,
@@ -62,6 +67,47 @@ type RuntimeSettings = {
   inboundConcurrency: number;
   outboxSendConcurrency: number;
 };
+
+type StyleProfileSnapshot = {
+  mimicryLevel?: number;
+  commonPhrases?: string[];
+  punctuationStyle?: string[];
+  humorNotes?: string[];
+  spellingNotes?: string[];
+} | null;
+
+type PersonalityThreadSetting = {
+  profileSlug?: string;
+  intensity?: number;
+  customPrompt?: string;
+  threadPromptProfile?: string;
+  threadPromptProfileSource?: "manual" | "auto";
+  profile?: {
+    slug?: string;
+    name?: string;
+    description?: string;
+    prompt?: string;
+  } | null;
+} | null;
+
+type ThreadContextSnapshot = {
+  messages: Array<{
+    _id: string;
+    direction: "inbound" | "outbound";
+    text: string;
+    messageType?: string;
+    whatsappMessageId?: string;
+    senderJid?: string;
+    messageAt?: number;
+    origin?: "live" | "history_sync" | "history_fetch";
+  }>;
+  grounding?: { myName?: string; theirName?: string; autoAliases?: string[]; vibeNotes?: string } | null;
+  memory?: { styleNotes?: string[] } | null;
+} | null;
+
+type SystemHealthSnapshot = {
+  config?: { autonomyPaused?: boolean };
+} | null;
 
 const AI_OUTREACH_PLACEHOLDER = "__SLM_AI_OUTREACH__";
 
@@ -155,6 +201,11 @@ function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(value, max));
 }
 
+function historySyncEnabled() {
+  const raw = (process.env.SLM_HISTORY_SYNC_ENABLED || "true").trim().toLowerCase();
+  return raw !== "false" && raw !== "0" && raw !== "off";
+}
+
 function createDynamicLimiter(getMax: () => number) {
   let active = 0;
   const queue: Array<() => void> = [];
@@ -231,6 +282,14 @@ function attemptEventType(attempt: AiAttempt) {
   return attempt.status === "success" ? `ai.attempt.${attempt.stage}.success` : `ai.attempt.${attempt.stage}.error`;
 }
 
+function compactLogText(value: string, maxChars: number) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxChars) {
+    return normalized;
+  }
+  return `${normalized.slice(0, Math.max(0, maxChars - 3))}...`;
+}
+
 function createConvexClient() {
   const url = process.env.CONVEX_URL || process.env.NEXT_PUBLIC_CONVEX_URL;
   if (!url) {
@@ -246,15 +305,16 @@ async function createSocket(auth: Awaited<ReturnType<typeof useMultiFileAuthStat
   } catch {
     // ignore version fetch failures and let Baileys defaults apply
   }
+  const syncHistory = historySyncEnabled();
 
   const config: UserFacingSocketConfig = {
     auth,
     printQRInTerminal: true,
     browser: Browsers.macOS("Desktop"),
     markOnlineOnConnect: false,
-    syncFullHistory: false,
+    syncFullHistory: syncHistory,
     fireInitQueries: false,
-    shouldSyncHistoryMessage: () => false,
+    shouldSyncHistoryMessage: () => syncHistory,
     emitOwnEvents: false,
     connectTimeoutMs: 60_000,
     defaultQueryTimeoutMs: 60_000,
@@ -390,9 +450,114 @@ async function run() {
     void shutdown(0, "Worker stopped.");
   });
 
+  type CacheState<T> = {
+    value: T;
+    hasValue: boolean;
+    expiresAt: number;
+    inFlight: Promise<T> | null;
+  };
+
+  const resolveTtlCache = async <T>(cache: CacheState<T>, ttlMs: number, loader: () => Promise<T>): Promise<T> => {
+    const now = Date.now();
+    if (cache.hasValue && cache.expiresAt > now) {
+      return cache.value;
+    }
+    if (cache.inFlight) {
+      return cache.inFlight;
+    }
+    cache.inFlight = (async () => {
+      try {
+        const value = await loader();
+        cache.value = value;
+        cache.hasValue = true;
+        cache.expiresAt = Date.now() + ttlMs;
+        return value;
+      } finally {
+        cache.inFlight = null;
+      }
+    })();
+    return cache.inFlight;
+  };
+
+  const runtimeSettingsCache: CacheState<RuntimeSettings | null> = {
+    value: null,
+    hasValue: false,
+    expiresAt: 0,
+    inFlight: null,
+  };
+  const styleProfileCache: CacheState<StyleProfileSnapshot> = {
+    value: null,
+    hasValue: false,
+    expiresAt: 0,
+    inFlight: null,
+  };
+  const systemHealthCache: CacheState<SystemHealthSnapshot> = {
+    value: null,
+    hasValue: false,
+    expiresAt: 0,
+    inFlight: null,
+  };
+  const enabledAssetCache = new Map<"sticker" | "meme", CacheState<string | undefined>>();
+  const mediaAssetBufferCache = new Map<string, { buffer: Buffer; cachedAt: number; expiresAt: number }>();
+  const mediaAssetBufferInFlight = new Map<string, Promise<Buffer>>();
+  const historyFetchConfig = readHistoryFetchConfigFromEnv();
+  const historyFetchStateByThread = new Map<string, { roundsUsed: number; lastFetchedAt: number; blockedUntil: number }>();
+
+  const SETTINGS_CACHE_TTL_MS = 1500;
+  const STYLE_PROFILE_CACHE_TTL_MS = 20_000;
+  const HEALTH_CACHE_TTL_MS = 1500;
+  const ENABLED_ASSET_CACHE_TTL_MS = 12_000;
+  const MEDIA_ASSET_BUFFER_CACHE_TTL_MS = 5 * 60 * 1000;
+  const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
+
+  const getRuntimeSettings = async () => {
+    const settings = await resolveTtlCache(runtimeSettingsCache, SETTINGS_CACHE_TTL_MS, async () => {
+      return (await convex.query(convexRefs.settingsGet, {})) as RuntimeSettings | null;
+    });
+    applyRuntimeConcurrency(settings);
+    return settings;
+  };
+
+  const getStyleProfile = async () => {
+    return await resolveTtlCache(styleProfileCache, STYLE_PROFILE_CACHE_TTL_MS, async () => {
+      return (await convex.query(convexRefs.styleGetProfile, {})) as StyleProfileSnapshot;
+    });
+  };
+
+  const getSystemHealth = async () => {
+    return await resolveTtlCache(systemHealthCache, HEALTH_CACHE_TTL_MS, async () => {
+      return (await convex.query(convexRefs.systemHealth, {})) as SystemHealthSnapshot;
+    });
+  };
+
   const pickEnabledAsset = async (kind: "sticker" | "meme") => {
-    const assets = (await convex.query(convexRefs.mediaGetEnabledByKind, { kind }).catch(() => [])) as Array<{ _id: string }> | [];
-    return assets[0]?._id;
+    const cache = enabledAssetCache.get(kind) ?? { value: undefined, hasValue: false, expiresAt: 0, inFlight: null };
+    enabledAssetCache.set(kind, cache);
+    return await resolveTtlCache(cache, ENABLED_ASSET_CACHE_TTL_MS, async () => {
+      const assets = (await convex.query(convexRefs.mediaGetEnabledByKind, { kind }).catch(() => [])) as Array<{ _id: string }> | [];
+      return assets[0]?._id;
+    });
+  };
+
+  const pruneMediaAssetBufferCache = () => {
+    const now = Date.now();
+    for (const [assetId, entry] of mediaAssetBufferCache.entries()) {
+      if (entry.expiresAt <= now) {
+        mediaAssetBufferCache.delete(assetId);
+      }
+    }
+    if (mediaAssetBufferCache.size <= MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS) {
+      return;
+    }
+    const byOldest = [...mediaAssetBufferCache.entries()].sort((a, b) => a[1].cachedAt - b[1].cachedAt);
+    const removeCount = mediaAssetBufferCache.size - MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS;
+    for (let index = 0; index < removeCount; index += 1) {
+      const entry = byOldest[index];
+      if (!entry) {
+        break;
+      }
+      mediaAssetBufferCache.delete(entry[0]);
+    }
   };
 
   const decideOutboundPolicy = async (args: {
@@ -649,6 +814,63 @@ async function run() {
     }
   };
 
+  const processHistoricalMessage = async (
+    message: {
+      key: { id?: string | null; fromMe?: boolean | null; remoteJid?: string | null; participant?: string | null };
+      pushName?: string | null;
+      message?: unknown;
+      messageTimestamp?: unknown;
+    },
+    ingestMode: "history_sync" | "history_fetch",
+  ) => {
+    try {
+      const parsed = parseInboundMessage(message.message as Parameters<typeof parseInboundMessage>[0]);
+      if (parsed.kind === "unsupported") {
+        return;
+      }
+
+      const rawThreadJid = getThreadJid(message.key as Parameters<typeof getThreadJid>[0]);
+      const senderJidFromKey = getSenderJid(message.key as Parameters<typeof getSenderJid>[0]);
+      const isStatusBroadcast = rawThreadJid === "status@broadcast";
+      const threadJid = isStatusBroadcast ? senderJidFromKey : rawThreadJid;
+      if (!threadJid) {
+        return;
+      }
+
+      const direction = message.key.fromMe ? "outbound" : "inbound";
+      const senderJid = direction === "outbound" ? "me" : senderJidFromKey;
+      const messageType: "text" | "reaction" | "sticker" | "meme" =
+        parsed.kind === "reaction" ? "reaction" : parsed.kind === "sticker" ? "sticker" : "text";
+      const messageAt = normalizeIncomingMessageTimestamp(message.messageTimestamp, Date.now());
+
+      await convex.mutation(convexRefs.inboundIngestHistorical, {
+        ingestMode,
+        direction,
+        threadJid,
+        senderJid,
+        senderTitle: message.pushName || undefined,
+        text: parsed.text,
+        messageType,
+        reactionEmoji: parsed.kind === "reaction" ? parsed.emoji : undefined,
+        reactionTargetWhatsAppMessageId: parsed.kind === "reaction" ? parsed.targetWhatsAppMessageId : undefined,
+        mediaCaption: parsed.kind === "sticker" || parsed.kind === "image" ? parsed.caption : undefined,
+        isGroup: isGroupJid(threadJid),
+        threadKind: classifyThreadKindFromJid(threadJid),
+        whatsappMessageId: message.key.id || undefined,
+        messageAt,
+      });
+    } catch (error) {
+      const err = error instanceof Error ? error.message : String(error);
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: "inbound.history.ingest_error",
+          detail: compactLogText(err, 280),
+        })
+        .catch(() => undefined);
+    }
+  };
+
   const processInboundMessage = async (message: {
     key: { id?: string | null; fromMe?: boolean | null; remoteJid?: string | null; participant?: string | null };
     pushName?: string | null;
@@ -769,13 +991,16 @@ async function run() {
       }
 
       if (parsed.kind === "audio" && audioTranscription) {
+        const audioKind = parsed.isVoiceNote ? "voice_note" : "audio";
+        const duration = parsed.durationSeconds ? `${parsed.durationSeconds}s` : "unknown";
         if (audioTranscription.status === "success") {
+          const transcriptPreview = compactLogText(audioTranscription.text, 280);
           await convex
             .mutation(convexRefs.systemRecordEvent, {
               source: "worker",
               eventType: "inbound.audio.transcribed",
               threadId: ingest.threadId as Id<"threads">,
-              detail: `${audioTranscription.latencyMs}ms · ${audioTranscription.modelPath} · source=${audioTranscription.usedSource}`,
+              detail: `${audioKind} · ${duration} · ${audioTranscription.latencyMs}ms · ${audioTranscription.modelPath} · source=${audioTranscription.usedSource} · transcript="${transcriptPreview}"`,
             })
             .catch(() => undefined);
         } else if (audioTranscription.status === "not_configured") {
@@ -784,7 +1009,7 @@ async function run() {
               source: "worker",
               eventType: "inbound.audio.transcription_unavailable",
               threadId: ingest.threadId as Id<"threads">,
-              detail: audioTranscription.reason.slice(0, 260),
+              detail: `${audioKind} · ${duration} · ${compactLogText(audioTranscription.reason, 260)}`,
             })
             .catch(() => undefined);
         } else {
@@ -793,14 +1018,13 @@ async function run() {
               source: "worker",
               eventType: "inbound.audio.transcription_error",
               threadId: ingest.threadId as Id<"threads">,
-              detail: audioTranscription.error.slice(0, 260),
+              detail: `${audioKind} · ${duration} · ${compactLogText(audioTranscription.error, 260)}`,
             })
             .catch(() => undefined);
         }
       }
 
-      const runtimeSettings = (await convex.query(convexRefs.settingsGet, {})) as RuntimeSettings | null;
-      applyRuntimeConcurrency(runtimeSettings);
+      const runtimeSettings = await getRuntimeSettings();
       const funnyKeywords = runtimeSettings?.funnyStatusKeywords || [];
       const funnyEmojis = runtimeSettings?.funnyStatusEmojis || [];
       const runtimeAiConfig = {
@@ -945,49 +1169,6 @@ async function run() {
         }
       }
 
-      const threadContext = (await convex.query(convexRefs.threadGet, {
-        threadId: ingest.threadId,
-      })) as
-        | {
-            messages: Array<{ direction: "inbound" | "outbound"; text: string; messageType?: string }>;
-            grounding?: { myName?: string; theirName?: string; autoAliases?: string[]; vibeNotes?: string } | null;
-            memory?: { styleNotes?: string[] } | null;
-          }
-        | null;
-
-      const historyLimit = Math.round(clamp(runtimeSettings?.aiHistoryLineLimit ?? 12, 4, 40));
-      const historyLines = (threadContext?.messages || []).slice(-historyLimit).map((m) => {
-        return `${m.direction === "inbound" ? "Them" : "Me"}: ${m.text}`;
-      });
-
-      const styleHints = threadContext?.memory?.styleNotes || [];
-      const styleProfile = (await convex.query(convexRefs.styleGetProfile, {})) as
-        | {
-            mimicryLevel?: number;
-            commonPhrases?: string[];
-            punctuationStyle?: string[];
-            humorNotes?: string[];
-            spellingNotes?: string[];
-          }
-        | null;
-      const personalitySetting = (await convex.query(convexRefs.personalityGetThreadSetting, {
-        threadId: ingest.threadId,
-      })) as
-        | {
-            profileSlug?: string;
-            intensity?: number;
-            customPrompt?: string;
-            threadPromptProfile?: string;
-            threadPromptProfileSource?: "manual" | "auto";
-            profile?: {
-              slug?: string;
-              name?: string;
-              description?: string;
-              prompt?: string;
-            } | null;
-          }
-        | null;
-
       let inboundForPolicy: ParsedInboundMessage = effectiveParsed;
       if (effectiveParsed.kind === "image" || effectiveParsed.kind === "sticker") {
         const visualAnalysis = await getVisualAnalysis();
@@ -999,13 +1180,49 @@ async function run() {
         }
       }
 
-      const outboundPolicy = await decideOutboundPolicy({
-        inbound: inboundForPolicy,
-        runtimeSettings,
-        personalityIntensity: personalitySetting?.intensity,
-      });
+      let personalitySetting: PersonalityThreadSetting = null;
+      let outboundPolicy: OutboundPolicy;
+      if ((runtimeSettings?.reactionsEnabled ?? true) && looksLikeAckOnly(inboundForPolicy.text || "")) {
+        outboundPolicy = {
+          mode: "reaction_only",
+          emoji: chooseReactionEmoji(inboundForPolicy.text || ""),
+        };
+      } else {
+        personalitySetting = (await convex.query(convexRefs.personalityGetThreadSetting, {
+          threadId: ingest.threadId,
+        })) as PersonalityThreadSetting;
+        outboundPolicy = await decideOutboundPolicy({
+          inbound: inboundForPolicy,
+          runtimeSettings,
+          personalityIntensity: personalitySetting?.intensity,
+        });
+      }
 
       const shouldGenerateAiText = outboundPolicy.mode === "text" || outboundPolicy.mode === "reaction_plus_text" || outboundPolicy.mode === "meme";
+      let threadContext: ThreadContextSnapshot = null;
+      let historyLines: string[] = [];
+      let styleHints: string[] = [];
+      let styleProfile: StyleProfileSnapshot = null;
+      if (shouldGenerateAiText) {
+        threadContext = (await convex.query(convexRefs.threadGet, {
+          threadId: ingest.threadId,
+        })) as ThreadContextSnapshot;
+        historyLines = (threadContext?.messages || []).map((m) => {
+          return `${m.direction === "inbound" ? "Them" : "Me"}: ${m.text}`;
+        });
+        styleHints = threadContext?.memory?.styleNotes || [];
+        styleProfile = await getStyleProfile();
+      }
+      let historySearchOverride:
+        | {
+            lines: string[];
+            candidateCount: number;
+            semanticRerankCount: number;
+            confidence: number;
+            retrievalStage?: "lexical" | "semantic" | "semantic_fallback";
+          }
+        | undefined;
+
       let inboundTextForAi =
         effectiveParsed.kind === "sticker"
           ? `${effectiveParsed.text}${effectiveParsed.caption ? ` (${effectiveParsed.caption})` : ""}`
@@ -1022,10 +1239,60 @@ async function run() {
         }
       }
 
+      if (shouldGenerateAiText && threadContext) {
+        const initialSearch = await buildHistorySearchOverride({
+          convex,
+          threadId: ingest.threadId,
+          query: inboundTextForAi,
+          limit: Math.max(8, Math.min(runtimeSettings?.aiHistoryLineLimit ?? 12, 20)),
+        });
+        historySearchOverride = initialSearch.override;
+        const needsHistoryFetch =
+          historyFetchConfig.enabled &&
+          (historySearchOverride.lines.length < 3 || historySearchOverride.confidence < 0.38);
+        if (needsHistoryFetch) {
+          const fetchResult = await maybeFetchOlderHistoryForThread({
+            socket: sock,
+            convex,
+            threadId: ingest.threadId,
+            threadJid,
+            threadMessages: threadContext.messages,
+            stateByThread: historyFetchStateByThread,
+            config: historyFetchConfig,
+          });
+          await convex
+            .mutation(convexRefs.systemRecordEvent, {
+              source: "ai",
+              eventType: fetchResult.requested ? "ai.context.history_fetch.requested" : "ai.context.history_fetch.skipped",
+              threadId: ingest.threadId,
+              detail: compactLogText(JSON.stringify(fetchResult), 280),
+            })
+            .catch(() => undefined);
+
+          if (fetchResult.requested) {
+            threadContext = (await convex.query(convexRefs.threadGet, {
+              threadId: ingest.threadId,
+            })) as ThreadContextSnapshot;
+            historyLines = (threadContext?.messages || []).map((m) => {
+              return `${m.direction === "inbound" ? "Them" : "Me"}: ${m.text}`;
+            });
+
+            const refreshedSearch = await buildHistorySearchOverride({
+              convex,
+              threadId: ingest.threadId,
+              query: inboundTextForAi,
+              limit: Math.max(8, Math.min(runtimeSettings?.aiHistoryLineLimit ?? 12, 20)),
+            });
+            historySearchOverride = refreshedSearch.override;
+          }
+        }
+      }
+
       const ai = shouldGenerateAiText
         ? await generateReplyWithFallback({
             inboundText: inboundTextForAi,
             historyLines,
+            historySearchOverride,
             styleHints,
             styleProfile: styleProfile || undefined,
             personality: personalitySetting
@@ -1087,6 +1354,33 @@ async function run() {
               detail,
             })
             .catch(() => undefined);
+        }
+
+        if (ai.contextWindow) {
+          await convex
+            .mutation(convexRefs.systemRecordEvent, {
+              source: "ai",
+              eventType: "ai.context.window",
+              threadId: ingest.threadId,
+              detail: `Prompt tokens ${ai.contextWindow.estimatedPromptTokens}/${Math.max(128, ai.contextWindow.maxContextTokens - ai.contextWindow.reserveOutputTokens)}; overflow ${ai.contextWindow.overflowTokens}; history ${ai.contextWindow.usedHistoryLines}; relevant ${ai.contextWindow.relevantHistoryLines}.`,
+            })
+            .catch(() => undefined);
+        }
+
+        if (Array.isArray(ai.contextToolCalls) && ai.contextToolCalls.length > 0) {
+          for (const toolCall of ai.contextToolCalls) {
+            await convex
+              .mutation(convexRefs.systemRecordEvent, {
+                source: "ai",
+                eventType: `ai.context.tool.${toolCall.name}`,
+                threadId: ingest.threadId,
+                detail: compactLogText(
+                  `${toolCall.name} ${toolCall.latencyMs}ms input=${JSON.stringify(toolCall.input)} output=${JSON.stringify(toolCall.output)}`,
+                  300,
+                ),
+              })
+              .catch(() => undefined);
+          }
         }
 
         if (ai.guardrailBlocked) {
@@ -1164,9 +1458,7 @@ async function run() {
         })
         .catch(() => undefined);
 
-      const health = (await convex.query(convexRefs.systemHealth, {})) as {
-        config?: { autonomyPaused?: boolean };
-      };
+      const health = await getSystemHealth();
 
       if (health?.config?.autonomyPaused) {
         await convex.mutation(convexRefs.draftSaveGenerated, draftPayload);
@@ -1241,13 +1533,47 @@ async function run() {
       }
     });
 
+    socket.ev.on("messaging-history.set", async (event) => {
+      if (socket !== sock || !event) {
+        return;
+      }
+      const ingestMode: "history_sync" | "history_fetch" = event.peerDataRequestSessionId ? "history_fetch" : "history_sync";
+      if (Array.isArray(event.chats)) {
+        for (const chat of event.chats) {
+          await syncThreadMetadata(chat);
+        }
+      }
+      if (!Array.isArray(event.messages)) {
+        return;
+      }
+      for (const message of event.messages) {
+        const laneKey = getThreadJid(message.key) || `unknown:${message.key?.id || Date.now()}`;
+        void enqueueByThreadLane(inboundThreadLanes, laneKey, () =>
+          runInboundWithLimit(async () => {
+            await processHistoricalMessage(message, ingestMode);
+          }),
+        );
+      }
+    });
+
     socket.ev.on("messages.upsert", async (event) => {
-      if (socket !== sock || event.type !== "notify") {
+      if (socket !== sock || !event || !Array.isArray(event.messages)) {
         return;
       }
 
+      const ingestMode: "history_sync" | "history_fetch" | null =
+        event.type === "notify" ? null : event.requestId ? "history_fetch" : "history_sync";
+
       for (const message of event.messages) {
         const laneKey = getThreadJid(message.key) || `unknown:${message.key.id || Date.now()}`;
+        if (ingestMode) {
+          void enqueueByThreadLane(inboundThreadLanes, laneKey, () =>
+            runInboundWithLimit(async () => {
+              await processHistoricalMessage(message, ingestMode);
+            }),
+          );
+          continue;
+        }
         if (message.key.fromMe) {
           void enqueueByThreadLane(inboundThreadLanes, laneKey, () =>
             runInboundWithLimit(async () => {
@@ -1304,39 +1630,16 @@ async function run() {
         }
       | null;
 
-    const historyLimit = Math.round(clamp(runtimeSettings?.aiHistoryLineLimit ?? 12, 4, 40));
-    const historyLines = (threadContext?.messages || []).slice(-historyLimit).map((m) => {
+    const historyLines = (threadContext?.messages || []).map((m) => {
       return `${m.direction === "inbound" ? "Them" : "Me"}: ${m.text}`;
     });
 
     const styleHints = threadContext?.memory?.styleNotes || [];
-    const styleProfile = (await convex.query(convexRefs.styleGetProfile, {})) as
-      | {
-          mimicryLevel?: number;
-          commonPhrases?: string[];
-          punctuationStyle?: string[];
-          humorNotes?: string[];
-          spellingNotes?: string[];
-        }
-      | null;
+    const styleProfile = await getStyleProfile();
 
     const personalitySetting = (await convex.query(convexRefs.personalityGetThreadSetting, {
       threadId: item.threadId,
-    })) as
-      | {
-          profileSlug?: string;
-          intensity?: number;
-          customPrompt?: string;
-          threadPromptProfile?: string;
-          threadPromptProfileSource?: "manual" | "auto";
-          profile?: {
-            slug?: string;
-            name?: string;
-            description?: string;
-            prompt?: string;
-          } | null;
-        }
-      | null;
+    })) as PersonalityThreadSetting;
 
     const memorySummary = threadContext?.memory?.summary ? `Memory summary: ${threadContext.memory.summary}` : "";
     const contactName = threadContext?.thread?.title?.split(/\s+/)[0] || "there";
@@ -1353,6 +1656,14 @@ async function run() {
     const ai = await generateReplyWithFallback({
       inboundText: promptSeed,
       historyLines,
+      historySearchOverride: (
+        await buildHistorySearchOverride({
+          convex,
+          threadId: item.threadId,
+          query: promptSeed,
+          limit: Math.max(8, Math.min(runtimeSettings?.aiHistoryLineLimit ?? 12, 20)),
+        })
+      ).override,
       styleHints,
       styleProfile: styleProfile || undefined,
       personality: personalitySetting
@@ -1421,6 +1732,33 @@ async function run() {
         .catch(() => undefined);
     }
 
+    if (ai.contextWindow) {
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "ai",
+          eventType: "outreach.ai.context.window",
+          threadId: item.threadId,
+          detail: `Prompt tokens ${ai.contextWindow.estimatedPromptTokens}/${Math.max(128, ai.contextWindow.maxContextTokens - ai.contextWindow.reserveOutputTokens)}; overflow ${ai.contextWindow.overflowTokens}; history ${ai.contextWindow.usedHistoryLines}; relevant ${ai.contextWindow.relevantHistoryLines}.`,
+        })
+        .catch(() => undefined);
+    }
+
+    if (Array.isArray(ai.contextToolCalls) && ai.contextToolCalls.length > 0) {
+      for (const toolCall of ai.contextToolCalls) {
+        await convex
+          .mutation(convexRefs.systemRecordEvent, {
+            source: "ai",
+            eventType: `outreach.ai.context.tool.${toolCall.name}`,
+            threadId: item.threadId,
+            detail: compactLogText(
+              `${toolCall.name} ${toolCall.latencyMs}ms input=${JSON.stringify(toolCall.input)} output=${JSON.stringify(toolCall.output)}`,
+              300,
+            ),
+          })
+          .catch(() => undefined);
+      }
+    }
+
     if (ai.guardrailBlocked && runtimeSettings?.aiFallbackMode === "azure_only") {
       throw new Error(ai.guardrailReason || "Azure-only mode blocked outreach fallback.");
     }
@@ -1455,21 +1793,50 @@ async function run() {
   };
 
   const fetchMediaAssetBuffer = async (assetId: string) => {
-    const asset = (await convex.query(convexRefs.mediaGetAssetDownloadUrl, {
-      assetId,
-    })) as null | { url: string };
-    if (!asset?.url) {
-      throw new Error(`Media asset unavailable: ${assetId}`);
+    pruneMediaAssetBufferCache();
+    const cached = mediaAssetBufferCache.get(assetId);
+    const now = Date.now();
+    if (cached && cached.expiresAt > now) {
+      return Buffer.from(cached.buffer);
     }
-    const response = await fetch(asset.url);
-    if (!response.ok) {
-      throw new Error(`Failed to download media asset ${assetId}: ${response.status}`);
+
+    const inFlight = mediaAssetBufferInFlight.get(assetId);
+    if (inFlight) {
+      const shared = await inFlight;
+      return Buffer.from(shared);
     }
-    const buffer = Buffer.from(await response.arrayBuffer());
-    if (buffer.length === 0) {
-      throw new Error(`Media asset ${assetId} is empty.`);
+
+    const loadPromise = (async () => {
+      const asset = (await convex.query(convexRefs.mediaGetAssetDownloadUrl, {
+        assetId,
+      })) as null | { url: string };
+      if (!asset?.url) {
+        throw new Error(`Media asset unavailable: ${assetId}`);
+      }
+      const response = await fetch(asset.url);
+      if (!response.ok) {
+        throw new Error(`Failed to download media asset ${assetId}: ${response.status}`);
+      }
+      const buffer = Buffer.from(await response.arrayBuffer());
+      if (buffer.length === 0) {
+        throw new Error(`Media asset ${assetId} is empty.`);
+      }
+      mediaAssetBufferCache.set(assetId, {
+        buffer,
+        cachedAt: Date.now(),
+        expiresAt: Date.now() + MEDIA_ASSET_BUFFER_CACHE_TTL_MS,
+      });
+      pruneMediaAssetBufferCache();
+      return buffer;
+    })();
+
+    mediaAssetBufferInFlight.set(assetId, loadPromise);
+    try {
+      const loaded = await loadPromise;
+      return Buffer.from(loaded);
+    } finally {
+      mediaAssetBufferInFlight.delete(assetId);
     }
-    return buffer;
   };
 
   const pollOutbox = async () => {
@@ -1479,7 +1846,7 @@ async function run() {
 
     processingOutbox = true;
     try {
-      const runtimeSettings = (await convex.query(convexRefs.settingsGet, {})) as RuntimeSettings | null;
+      const runtimeSettings = await getRuntimeSettings();
       const claimLimit = Math.round(clamp(runtimeSettings?.outboxClaimLimit ?? 8, 1, 20));
       const claimed = (await convex.mutation(convexRefs.outboxClaimDue, {
         workerId,
@@ -1498,8 +1865,6 @@ async function run() {
         mediaAssetId?: string;
         mediaCaption?: string;
       }>;
-      applyRuntimeConcurrency(runtimeSettings);
-
       const tasks = claimed.map((item) =>
         enqueueByThreadLane(outboxThreadLanes, item.threadId, () =>
           runOutboxWithLimit(async () => {
@@ -1640,8 +2005,7 @@ async function run() {
     }
   };
 
-  const startupSettings = (await convex.query(convexRefs.settingsGet, {})) as RuntimeSettings | null;
-  applyRuntimeConcurrency(startupSettings);
+  const startupSettings = await getRuntimeSettings();
   const intervalMs = Math.round(
     clamp(startupSettings?.outboxPollMs ?? Number(process.env.SLM_OUTBOX_POLL_MS || 3000), 500, 60_000),
   );

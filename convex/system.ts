@@ -5,12 +5,16 @@ import { getConfig, setConfigValue } from "./lib/config";
 export const health = query({
   args: {},
   handler: async (ctx) => {
+    const now = Date.now();
     const config = await getConfig(ctx);
     const latestEvents = await ctx.db
       .query("systemEvents")
       .withIndex("by_createdAt")
       .order("desc")
       .take(30);
+    const latestTranscriptions = (await ctx.db.query("systemEvents").withIndex("by_createdAt").order("desc").take(220))
+      .filter((event) => event.eventType.startsWith("inbound.audio.transcription") || event.eventType === "inbound.audio.transcribed")
+      .slice(0, 40);
 
     const latestProviderRuns = await ctx.db
       .query("providerRuns")
@@ -32,15 +36,23 @@ export const health = query({
     const latencies = providerWindow.map((row) => row.latencyMs).sort((a, b) => a - b);
     const p95LatencyMs = latencies.length > 0 ? latencies[Math.floor((latencies.length - 1) * 0.95)] : 0;
 
-    const openGuardrails = (await ctx.db.query("guardrailEvents").withIndex("by_createdAt").order("desc").take(300)).filter(
-      (row) => !row.resolvedAt,
-    ).length;
+    const openGuardrails = await ctx.db
+      .query("guardrailEvents")
+      .withIndex("by_resolvedAt_and_createdAt", (q) => q.eq("resolvedAt", undefined))
+      .order("desc")
+      .take(300);
     const pendingOutbox = await ctx.db
       .query("outbox")
       .withIndex("by_status_sendAt", (q) => q.eq("status", "pending"))
       .order("asc")
       .take(250);
-    const dueNow = pendingOutbox.filter((row) => row.sendAt <= Date.now()).length;
+    let dueNow = 0;
+    for (const row of pendingOutbox) {
+      if (row.sendAt > now) {
+        break;
+      }
+      dueNow += 1;
+    }
     const failedOutbox = await ctx.db
       .query("outbox")
       .withIndex("by_status_sendAt", (q) => q.eq("status", "failed"))
@@ -54,8 +66,8 @@ export const health = query({
     if (fallbackRate > 0.45 && successCount >= 20) {
       alerts.push(`Fallback dependency elevated: ${(fallbackRate * 100).toFixed(1)}% of successful runs are non-Azure.`);
     }
-    if (openGuardrails >= 8) {
-      alerts.push(`Guardrail queue is growing (${openGuardrails} unresolved flags).`);
+    if (openGuardrails.length >= 8) {
+      alerts.push(`Guardrail queue is growing (${openGuardrails.length} unresolved flags).`);
     }
     if (dueNow >= 25) {
       alerts.push(`Outbox due queue is elevated (${dueNow} pending sends due now).`);
@@ -64,6 +76,7 @@ export const health = query({
     return {
       config,
       latestEvents,
+      latestTranscriptions,
       latestProviderRuns,
       metrics: {
         providerRunsWindow: totalProviderRuns,
@@ -72,7 +85,7 @@ export const health = query({
         providerErrorRate: errorRate,
         providerFallbackRate: fallbackRate,
         providerP95LatencyMs: p95LatencyMs,
-        openGuardrails,
+        openGuardrails: openGuardrails.length,
         pendingOutbox: pendingOutbox.length,
         dueOutbox: dueNow,
         failedOutboxRecent: failedOutbox.length,

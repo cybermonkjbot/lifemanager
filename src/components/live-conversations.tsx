@@ -106,6 +106,27 @@ type MediaAsset = {
   fileUrl?: string | null;
 };
 
+type MessageMediaPreview = {
+  assetId: string;
+  kind: "sticker" | "meme";
+  mimeType: string;
+  label: string;
+  url: string | null;
+};
+
+type ThreadMessage = {
+  _id: string;
+  direction: "inbound" | "outbound";
+  text: string;
+  messageType?: "text" | "reaction" | "sticker" | "meme";
+  reactionEmoji?: string;
+  reactionTargetWhatsAppMessageId?: string;
+  mediaAssetId?: string;
+  mediaCaption?: string;
+  mediaPreview?: MessageMediaPreview | null;
+  messageAt: number;
+};
+
 function messageKindLabel(kind?: string) {
   if (kind === "reaction") {
     return "Reaction";
@@ -138,6 +159,32 @@ function messageDisplayText(message: {
     return "Sent a meme";
   }
   return "Sent a message";
+}
+
+function renderMessageMediaPreview(message: ThreadMessage) {
+  const preview = message.mediaPreview;
+  if (!preview?.url) {
+    return message.mediaAssetId ? <p className="queue-meta">Media preview unavailable.</p> : null;
+  }
+
+  const mimeType = preview.mimeType.toLowerCase();
+  const altText = preview.label || (preview.kind === "meme" ? "Meme" : "Sticker");
+  if (mimeType.startsWith("image/") || preview.kind === "meme" || preview.kind === "sticker") {
+    // eslint-disable-next-line @next/next/no-img-element
+    return <img src={preview.url} alt={altText} className="message-media-image" loading="lazy" />;
+  }
+  if (mimeType.startsWith("video/")) {
+    return <video src={preview.url} controls preload="metadata" className="message-media-video" />;
+  }
+  if (mimeType.startsWith("audio/")) {
+    return <audio src={preview.url} controls preload="none" className="message-media-audio" />;
+  }
+
+  return (
+    <a href={preview.url} target="_blank" rel="noreferrer" className="message-media-link">
+      Open media attachment
+    </a>
+  );
 }
 
 function parseTagInput(input: string) {
@@ -511,15 +558,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
           isArchived?: boolean;
           isIgnored?: boolean;
         };
-        messages: Array<{
-          _id: string;
-          direction: "inbound" | "outbound";
-          text: string;
-          messageType?: "text" | "reaction" | "sticker" | "meme";
-          reactionEmoji?: string;
-          reactionTargetWhatsAppMessageId?: string;
-          messageAt: number;
-        }>;
+        messages: ThreadMessage[];
         reactions: Array<{
           messageId: string;
           actorJid: string;
@@ -968,6 +1007,9 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
                   ? threadGrounding?.myName?.trim() || "You"
                   : threadGrounding?.theirName?.trim() || thread.thread.title || "Contact";
                 const senderBadge = senderName.charAt(0).toUpperCase();
+                const displayText = messageDisplayText(message);
+                const mediaCaption = message.mediaCaption?.trim();
+                const showMediaCaption = Boolean(mediaCaption && mediaCaption !== displayText);
 
                 return (
                   <div key={message._id} className={`chat-row ${outbound ? "outbound" : "inbound"}`}>
@@ -976,7 +1018,9 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
                     </span>
                     <div className={`message-bubble ${outbound ? "outbound" : "inbound"}`}>
                       <p className="message-sender">{senderName}</p>
-                      <p className="message-text">{messageDisplayText(message)}</p>
+                      <p className="message-text">{displayText}</p>
+                      {renderMessageMediaPreview(message)}
+                      {showMediaCaption ? <p className="message-media-caption">{mediaCaption}</p> : null}
                       <p className="queue-meta">{messageKindLabel(message.messageType)}</p>
                       {(reactionsByMessage.get(message._id) || []).length > 0 ? (
                         <div className="queue-actions">

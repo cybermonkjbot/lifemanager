@@ -579,11 +579,11 @@ export const deleteProfile = mutation({
 
     const fallback = getFallbackProfile(await getMergedProfiles(ctx));
     const now = Date.now();
-    const settings = await ctx.db.query("threadPersonalitySettings").take(4000);
+    const settings = await ctx.db
+      .query("threadPersonalitySettings")
+      .withIndex("by_profileSlug", (q) => q.eq("profileSlug", slug))
+      .take(4000);
     for (const setting of settings) {
-      if (setting.profileSlug !== slug) {
-        continue;
-      }
       await ctx.db.patch(setting._id, {
         profileSlug: fallback?.slug || "casual",
         intensity: clamp01(fallback?.defaultIntensity ?? 0.58),

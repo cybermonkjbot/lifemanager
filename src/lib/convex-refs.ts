@@ -12,6 +12,11 @@ export const convexRefs = {
   settingsGet: makeFunctionReference<"query">("settings:get"),
   systemHealth: makeFunctionReference<"query">("system:health"),
   systemSetupStatus: makeFunctionReference<"query">("system:setupStatus"),
+  contextConversationHistorySearch: makeFunctionReference<"query">("contextTools:conversationHistorySearch"),
+  contextGetMessageEmbeddings: makeFunctionReference<"query">("contextTools:getMessageEmbeddings"),
+  contextWindowDetection: makeFunctionReference<"query">("contextTools:contextWindowDetection"),
+  contextWindowCleaning: makeFunctionReference<"query">("contextTools:contextWindowCleaning"),
+  contextGetThreadOldestMessageForFetch: makeFunctionReference<"query">("contextTools:getThreadOldestMessageForFetch"),
 
   inboundIngest: makeFunctionReference<"mutation">("inbound:ingest"),
   draftSaveGenerated: makeFunctionReference<"mutation">("draft:saveGenerated"),
@@ -45,6 +50,7 @@ export const convexRefs = {
   systemRecordProviderRun: makeFunctionReference<"mutation">("system:recordProviderRun"),
   systemUpsertSetupStatus: makeFunctionReference<"mutation">("system:upsertSetupStatus"),
   systemReportSetupListener: makeFunctionReference<"mutation">("system:reportSetupListener"),
+  contextUpsertMessageEmbeddings: makeFunctionReference<"mutation">("contextTools:upsertMessageEmbeddings"),
 
   styleGetProfile: makeFunctionReference<"query">("style:getProfile"),
   styleSetMimicry: makeFunctionReference<"mutation">("style:setMimicry"),
@@ -64,6 +70,7 @@ export const convexRefs = {
 
   groundingGetThreadGrounding: makeFunctionReference<"query">("grounding:getThreadGrounding"),
   groundingSaveThreadGrounding: makeFunctionReference<"mutation">("grounding:saveThreadGrounding"),
+  inboundIngestHistorical: makeFunctionReference<"mutation">("inbound:ingestHistorical"),
 };
 
 export type ConvexRefs = typeof convexRefs;

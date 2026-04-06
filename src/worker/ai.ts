@@ -16,6 +16,8 @@ type AiResult = {
   guardrailBlocked: boolean;
   guardrailReason?: string;
   attempts: AiAttempt[];
+  contextToolCalls?: ContextToolCall[];
+  contextWindow?: ContextWindowStats;
 };
 
 export type AiAttempt = {
@@ -69,6 +71,23 @@ type GroundingContext = {
 type AzureApiStyle = "auto" | "chat_completions" | "responses";
 type FallbackMode = "all" | "azure_only";
 export type ConversationSteeringMode = "none" | "hard_stop" | "pause" | "wrap_up" | "loop";
+export type ContextToolName = "context_window_detection" | "context_window_cleaning" | "conversation_history_search";
+
+export type ContextToolCall = {
+  name: ContextToolName;
+  latencyMs: number;
+  input: Record<string, unknown>;
+  output: Record<string, unknown>;
+};
+
+export type ContextWindowStats = {
+  estimatedPromptTokens: number;
+  maxContextTokens: number;
+  reserveOutputTokens: number;
+  overflowTokens: number;
+  usedHistoryLines: number;
+  relevantHistoryLines: number;
+};
 
 type RuntimeAiTuning = {
   model?: string;
@@ -83,6 +102,10 @@ type RuntimeAiTuning = {
   maxOutputTokens?: number;
   maxReplyChars?: number;
   historyLineLimit?: number;
+  maxContextTokens?: number;
+  contextReserveTokens?: number;
+  contextSearchLineLimit?: number;
+  contextOverflowLineDropStep?: number;
   codexTimeoutMs?: number;
   delayMinMs?: number;
   delayMaxMs?: number;
@@ -138,6 +161,23 @@ const LOW_VALUE_GENERIC_PHRASE_PATTERNS = [
   /\b(?:update|details?) (?:soon|shortly)\b/i,
   /\blet me (?:sort|check|look into|get back)\b/i,
 ];
+const JOKE_INTENT_PATTERNS = [
+  /\b(joke|banter|roast|pun|punchline)\b/i,
+  /\b(lol|lmao|haha|hehe|lmfao)\b/i,
+  /[😂🤣😹😆😅😄😁😜🤪🙃🔥💀]/,
+  /\bwhy did\b/i,
+  /\bknock knock\b/i,
+];
+const CRINGE_JOKE_PATTERNS = [
+  /\bknock knock\b/i,
+  /\bwhy did the\b/i,
+  /\bdad joke\b/i,
+  /\bpun intended\b/i,
+  /\b(?:i(?:'|’)m|im) (?:so )?funny\b/i,
+  /\btrust me[, ]+it(?:'|’)s funny\b/i,
+  /\b(?:no cap|skibidi|gyatt|sigma|rizz)\b/i,
+];
+const JOKE_SIMILARITY_THRESHOLD = 0.62;
 
 const STOPWORDS = new Set([
   "a",
@@ -390,21 +430,370 @@ function heuristicReply(input: string, historyLines: string[] = []) {
   return pickVariant(input, ["I got your message. Give me a moment and I'll reply clearly.", "Thanks for the nudge. I'll respond properly now."]);
 }
 
+const HISTORY_ACK_ONLY_PATTERNS = [
+  /^(ok|okay|sure|cool|great|perfect|nice|done|noted|got it|understood|alright)[.!]*$/i,
+  /^(thanks|thank you|thx|appreciate it)[.!]*$/i,
+  /^[🙏👍❤️😂🤣😅🔥💀]+$/,
+];
+const DEFAULT_MAX_CONTEXT_TOKENS = 8192;
+const DEFAULT_CONTEXT_SEARCH_LIMIT = 4;
+const DEFAULT_CONTEXT_LINE_CHAR_LIMIT = 220;
+
+type IndexedHistoryLine = {
+  index: number;
+  line: string;
+  body: string;
+  normalized: string;
+};
+
+type PromptBuildResult = {
+  prompt: string;
+  contextToolCalls: ContextToolCall[];
+  contextWindow: ContextWindowStats;
+};
+
+type HistorySearchOverride = {
+  lines: string[];
+  candidateCount: number;
+  semanticRerankCount: number;
+  confidence: number;
+  retrievalStage?: "lexical" | "semantic" | "semantic_fallback";
+};
+
+type ContextWindowDetectionInput = {
+  prompt: string;
+  maxContextTokens: number;
+  reserveOutputTokens: number;
+  usedHistoryLines: number;
+  relevantHistoryLines: number;
+};
+
+type ContextWindowCleaningInput = {
+  historyLines: string[];
+  historyLineLimit: number;
+  maxLineChars: number;
+};
+
+type ConversationSearchInput = {
+  historyLines: IndexedHistoryLine[];
+  query: string;
+  limit: number;
+};
+
+function parseBoundedNumber(value: string | undefined, fallback: number, min: number, max: number) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.round(Math.max(min, Math.min(parsed, max)));
+}
+
+function estimateTokenCount(text: string) {
+  const compact = text.replace(/\s+/g, " ").trim();
+  if (!compact) {
+    return 0;
+  }
+  return Math.ceil(compact.length / 4);
+}
+
+function parseHistoryLine(rawLine: string) {
+  const normalized = rawLine.replace(/\s+/g, " ").trim();
+  const meMatch = normalized.match(/^Me:\s*(.*)$/i);
+  if (meMatch) {
+    return {
+      label: "Me",
+      body: meMatch[1].trim(),
+    };
+  }
+  const themMatch = normalized.match(/^Them:\s*(.*)$/i);
+  if (themMatch) {
+    return {
+      label: "Them",
+      body: themMatch[1].trim(),
+    };
+  }
+  return {
+    label: "Them",
+    body: normalized,
+  };
+}
+
+function compactHistoryLine(line: string, maxChars: number) {
+  if (line.length <= maxChars) {
+    return line;
+  }
+  return `${line.slice(0, Math.max(0, maxChars - 3)).trim()}...`;
+}
+
+function isLowSignalHistoryBody(body: string) {
+  const trimmed = body.trim();
+  if (!trimmed) {
+    return true;
+  }
+  if (trimmed.length > 42) {
+    return false;
+  }
+  return HISTORY_ACK_ONLY_PATTERNS.some((pattern) => pattern.test(trimmed));
+}
+
+function runContextWindowCleaningTool(args: ContextWindowCleaningInput) {
+  const startedAt = Date.now();
+  const cappedLimit = Math.round(Math.max(4, Math.min(args.historyLineLimit * 3, 120)));
+  const maxLineChars = Math.round(Math.max(80, Math.min(args.maxLineChars, 800)));
+  const dedupe = new Set<string>();
+  const cleanedReversed: IndexedHistoryLine[] = [];
+
+  for (let index = args.historyLines.length - 1; index >= 0; index -= 1) {
+    const rawLine = args.historyLines[index] || "";
+    const { label, body } = parseHistoryLine(rawLine);
+    const compactBody = compactHistoryLine(body.replace(/\s+/g, " ").trim(), maxLineChars);
+    if (!compactBody) {
+      continue;
+    }
+    const normalized = `${label.toLowerCase()}:${compactBody.toLowerCase()}`;
+    if (dedupe.has(normalized)) {
+      continue;
+    }
+    dedupe.add(normalized);
+    cleanedReversed.push({
+      index,
+      line: `${label}: ${compactBody}`,
+      body: compactBody,
+      normalized,
+    });
+    if (cleanedReversed.length >= cappedLimit) {
+      break;
+    }
+  }
+
+  const deduped = cleanedReversed.reverse();
+  const keepLowSignalFromIndex = Math.max(0, deduped.length - 6);
+  const filtered = deduped.filter((line, idx) => idx >= keepLowSignalFromIndex || !isLowSignalHistoryBody(line.body));
+
+  const bounded = filtered.slice(-cappedLimit);
+  const removedCount = args.historyLines.length - bounded.length;
+  const latencyMs = Date.now() - startedAt;
+
+  return {
+    cleaned: bounded,
+    call: {
+      name: "context_window_cleaning" as const,
+      latencyMs,
+      input: {
+        inputHistoryLines: args.historyLines.length,
+        historyLineLimit: args.historyLineLimit,
+        maxLineChars,
+      },
+      output: {
+        cleanedHistoryLines: bounded.length,
+        removedCount: Math.max(0, removedCount),
+      },
+    },
+  };
+}
+
+function runConversationHistorySearchTool(args: ConversationSearchInput) {
+  const startedAt = Date.now();
+  const limit = Math.round(Math.max(1, Math.min(args.limit, 8)));
+  const queryKeywords = Array.from(new Set(extractKeywords(args.query))).slice(0, 24);
+  const maxIndex = Math.max(1, args.historyLines[args.historyLines.length - 1]?.index ?? 1);
+
+  const scored = args.historyLines
+    .map((entry) => {
+      const bodyKeywords = new Set(extractKeywords(entry.body));
+      let overlap = 0;
+      for (const keyword of queryKeywords) {
+        if (bodyKeywords.has(keyword)) {
+          overlap += 1;
+        }
+      }
+      const overlapScore = overlap * 2;
+      const recencyScore = (Math.min(entry.index, maxIndex) / maxIndex) * 0.8;
+      const lowSignalPenalty = isLowSignalHistoryBody(entry.body) ? 0.6 : 0;
+      const score = overlapScore + recencyScore - lowSignalPenalty;
+      return {
+        index: entry.index,
+        score,
+      };
+    })
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score || b.index - a.index)
+    .slice(0, limit)
+    .sort((a, b) => a.index - b.index);
+
+  const hitIndexSet = new Set(scored.map((item) => item.index));
+  const hits = args.historyLines.filter((entry) => hitIndexSet.has(entry.index));
+  const latencyMs = Date.now() - startedAt;
+
+  return {
+    hits,
+    call: {
+      name: "conversation_history_search" as const,
+      latencyMs,
+      input: {
+        queryKeywords: queryKeywords.slice(0, 12),
+        searchedHistoryLines: args.historyLines.length,
+        limit,
+      },
+      output: {
+        hits: hits.length,
+      },
+    },
+  };
+}
+
+function runContextWindowDetectionTool(args: ContextWindowDetectionInput) {
+  const startedAt = Date.now();
+  const maxContextTokens = Math.max(512, Math.min(args.maxContextTokens, 200_000));
+  const reserveOutputTokens = Math.max(64, Math.min(args.reserveOutputTokens, Math.floor(maxContextTokens * 0.5)));
+  const availablePromptTokens = Math.max(128, maxContextTokens - reserveOutputTokens);
+  const estimatedPromptTokens = estimateTokenCount(args.prompt);
+  const overflowTokens = Math.max(0, estimatedPromptTokens - availablePromptTokens);
+  const latencyMs = Date.now() - startedAt;
+
+  const stats: ContextWindowStats = {
+    estimatedPromptTokens,
+    maxContextTokens,
+    reserveOutputTokens,
+    overflowTokens,
+    usedHistoryLines: args.usedHistoryLines,
+    relevantHistoryLines: args.relevantHistoryLines,
+  };
+
+  return {
+    stats,
+    call: {
+      name: "context_window_detection" as const,
+      latencyMs,
+      input: {
+        maxContextTokens,
+        reserveOutputTokens,
+        usedHistoryLines: args.usedHistoryLines,
+        relevantHistoryLines: args.relevantHistoryLines,
+      },
+      output: {
+        estimatedPromptTokens,
+        availablePromptTokens,
+        overflowTokens,
+      },
+    },
+  };
+}
+
 function buildPrompt(args: {
   inboundText: string;
   historyLines: string[];
+  historySearchOverride?: HistorySearchOverride;
   styleHints: string[];
   styleProfile?: StyleProfileContext;
   personality?: PersonalityContext;
   grounding?: GroundingContext;
   runtime?: RuntimeAiTuning;
-}) {
+}): PromptBuildResult {
   const historyLineLimit = Math.round(Math.max(4, Math.min(args.runtime?.historyLineLimit ?? 14, 40)));
-  const history = args.historyLines.slice(-historyLineLimit).join("\n");
-  const outboundSamples = args.historyLines
-    .filter((line) => line.startsWith("Me:"))
+  const contextSearchLineLimit = Math.round(
+    Math.max(1, Math.min(args.runtime?.contextSearchLineLimit ?? DEFAULT_CONTEXT_SEARCH_LIMIT, 8)),
+  );
+  const maxContextTokens = Math.round(
+    Math.max(
+      512,
+      Math.min(
+        args.runtime?.maxContextTokens ??
+          parseBoundedNumber(process.env.SLM_AI_MAX_CONTEXT_TOKENS, DEFAULT_MAX_CONTEXT_TOKENS, 512, 200_000),
+        200_000,
+      ),
+    ),
+  );
+  const reserveOutputTokens = Math.round(
+    Math.max(
+      64,
+      Math.min(
+        args.runtime?.contextReserveTokens ??
+          args.runtime?.maxOutputTokens ??
+          parseBoundedNumber(process.env.SLM_AI_CONTEXT_RESERVE_TOKENS, 220, 64, 40_000),
+        Math.floor(maxContextTokens * 0.5),
+      ),
+    ),
+  );
+  const toolCalls: ContextToolCall[] = [];
+
+  const cleanedHistory = runContextWindowCleaningTool({
+    historyLines: args.historyLines,
+    historyLineLimit,
+    maxLineChars: DEFAULT_CONTEXT_LINE_CHAR_LIMIT,
+  });
+  toolCalls.push(cleanedHistory.call);
+
+  const historySearch = args.historySearchOverride
+    ? (() => {
+        const searchedLines = (args.historySearchOverride.lines || [])
+          .map((raw, index) => {
+            const { label, body } = parseHistoryLine(raw);
+            const line = `${label}: ${body}`.trim();
+            if (!body) {
+              return null;
+            }
+            return {
+              index: cleanedHistory.cleaned.length + index,
+              line,
+              body,
+              normalized: `${label.toLowerCase()}:${body.toLowerCase()}`,
+            } as IndexedHistoryLine;
+          })
+          .filter((line): line is IndexedHistoryLine => Boolean(line))
+          .slice(0, contextSearchLineLimit);
+        return {
+          hits: searchedLines,
+          call: {
+            name: "conversation_history_search" as const,
+            latencyMs: 0,
+            input: {
+              queryKeywords: Array.from(new Set(extractKeywords(args.inboundText))).slice(0, 12),
+              searchedHistoryLines: cleanedHistory.cleaned.length,
+              limit: contextSearchLineLimit,
+              source: "external",
+            },
+            output: {
+              hits: searchedLines.length,
+              candidateCount: Math.max(0, Math.round(args.historySearchOverride.candidateCount || 0)),
+              semanticRerankCount: Math.max(0, Math.round(args.historySearchOverride.semanticRerankCount || 0)),
+              confidence: Math.max(0, Math.min(args.historySearchOverride.confidence || 0, 1)),
+              retrievalStage: args.historySearchOverride.retrievalStage || "semantic",
+            },
+          },
+        };
+      })()
+    : (() => {
+        const localSearch = runConversationHistorySearchTool({
+          historyLines: cleanedHistory.cleaned,
+          query: args.inboundText,
+          limit: contextSearchLineLimit,
+        });
+        return {
+          ...localSearch,
+          call: {
+            ...localSearch.call,
+            output: {
+              ...localSearch.call.output,
+              candidateCount: cleanedHistory.cleaned.length,
+              semanticRerankCount: 0,
+              confidence: Math.max(0, Math.min(localSearch.hits.length / Math.max(contextSearchLineLimit, 1), 1)),
+              retrievalStage: "lexical",
+            },
+          },
+        };
+      })();
+  toolCalls.push(historySearch.call);
+
+  let recentHistory = cleanedHistory.cleaned.slice(-historyLineLimit);
+  let relevantHistory = historySearch.hits
+    .filter((hit) => !recentHistory.some((recent) => recent.index === hit.index))
+    .slice(-contextSearchLineLimit);
+
+  const outboundSamples = cleanedHistory.cleaned
+    .filter((line) => line.line.startsWith("Me:"))
     .slice(-4)
-    .map((line) => line.replace(/^Me:\s*/, "").trim())
+    .map((line) => line.line.replace(/^Me:\s*/, "").trim())
     .filter(Boolean)
     .join(" | ");
   const mimicryLevel = clamp01(args.styleProfile?.mimicryLevel ?? 0.72);
@@ -451,49 +840,101 @@ function buildPrompt(args: {
     soulModeEnabled && playfulMoment
       ? "The latest message is playful. A short, tasteful joke or witty line is allowed if it helps the conversation."
       : "";
+  const jokeSafetyInstruction =
+    soulModeEnabled && playfulMoment
+      ? "Before using humor, silently confirm you have not already made a similar joke earlier in this chat. If a similar joke exists, do not reuse it. Also avoid cringe humor: no forced meme slang, no dad-joke setups, and no try-hard punchlines."
+      : "";
   const steeringMode = detectConversationSteeringMode({
     inboundText: args.inboundText,
-    historyLines: args.historyLines,
+    historyLines: recentHistory.map((line) => line.line),
   });
   const steeringInstruction = steeringInstructionForMode(steeringMode);
 
-  return [
-    "You are writing one WhatsApp reply as the account owner.",
-    "Write like a real person: warm, calm, confident, and practical.",
-    "Default to 1-2 short sentences unless the message clearly needs more detail.",
-    "Sound conversational and specific, never stiff or corporate.",
-    "Directly react to something concrete in the latest inbound message (topic, emotion, or request).",
-    "Do not mention AI, policies, prompt rules, or internal reasoning.",
-    "Do not overpromise. If timing is uncertain, say you'll confirm shortly.",
-    "Do not prolong the conversation unnecessarily. If the intent is complete, close gracefully in one short line.",
-    "Avoid generic fillers like 'Noted', 'As an AI', 'I hope this message finds you well', or repetitive templates.",
-    "Never send placeholder lines like 'Sounds good, I'll handle it and update you soon' or 'Got it, I'm on it.'",
-    soulInstruction,
-    playfulInstruction,
-    steeringInstruction,
-    replyPolicyInstruction ? `Additional reply policy: ${replyPolicyInstruction}` : "",
-    mimicryInstruction,
-    personalityLevelInstruction,
-    personalityLabel ? `Selected relationship/personality mode: ${personalityLabel}` : "",
-    args.personality?.profileDescription ? `Personality description: ${args.personality.profileDescription}` : "",
-    args.personality?.profilePrompt ? `Personality behavior instruction: ${args.personality.profilePrompt}` : "",
-    args.personality?.customPrompt ? `Thread-specific personality note: ${args.personality.customPrompt}` : "",
-    args.personality?.threadPromptProfile
-      ? `Conversation-specific prompt profile (${args.personality.threadPromptProfileSource || "manual"}): ${args.personality.threadPromptProfile}`
-      : "",
-    args.grounding?.myName ? `My preferred name in this thread: ${args.grounding.myName}` : "",
-    args.grounding?.theirName ? `Contact preferred name in this thread: ${args.grounding.theirName}` : "",
-    args.grounding?.autoAliases?.length ? `Known contact aliases: ${args.grounding.autoAliases.slice(0, 8).join(", ")}` : "",
-    args.grounding?.vibeNotes ? `Conversation vibe notes: ${args.grounding.vibeNotes}` : "",
-    hints ? `Style hints: ${hints}` : "",
-    phrases ? `Frequent personal phrases to reuse naturally: ${phrases}` : "",
-    outboundSamples ? `Recent sent-message examples: ${outboundSamples}` : "",
-    history ? `Recent chat:\n${history}` : "",
-    `Latest inbound message: ${args.inboundText}`,
-    "Return only the final reply text.",
-  ]
-    .filter(Boolean)
-    .join("\n\n");
+  const buildPromptText = () =>
+    [
+      "You are writing one WhatsApp reply as the account owner.",
+      "Write like a real person: warm, calm, confident, and practical.",
+      "Default to 1-2 short sentences unless the message clearly needs more detail.",
+      "Sound conversational and specific, never stiff or corporate.",
+      "Directly react to something concrete in the latest inbound message (topic, emotion, or request).",
+      "Do not mention AI, policies, prompt rules, or internal reasoning.",
+      "Do not overpromise. If timing is uncertain, say you'll confirm shortly.",
+      "Do not prolong the conversation unnecessarily. If the intent is complete, close gracefully in one short line.",
+      "Avoid generic fillers like 'Noted', 'As an AI', 'I hope this message finds you well', or repetitive templates.",
+      "Never send placeholder lines like 'Sounds good, I'll handle it and update you soon' or 'Got it, I'm on it.'",
+      soulInstruction,
+      playfulInstruction,
+      jokeSafetyInstruction,
+      steeringInstruction,
+      replyPolicyInstruction ? `Additional reply policy: ${replyPolicyInstruction}` : "",
+      mimicryInstruction,
+      personalityLevelInstruction,
+      personalityLabel ? `Selected relationship/personality mode: ${personalityLabel}` : "",
+      args.personality?.profileDescription ? `Personality description: ${args.personality.profileDescription}` : "",
+      args.personality?.profilePrompt ? `Personality behavior instruction: ${args.personality.profilePrompt}` : "",
+      args.personality?.customPrompt ? `Thread-specific personality note: ${args.personality.customPrompt}` : "",
+      args.personality?.threadPromptProfile
+        ? `Conversation-specific prompt profile (${args.personality.threadPromptProfileSource || "manual"}): ${args.personality.threadPromptProfile}`
+        : "",
+      args.grounding?.myName ? `My preferred name in this thread: ${args.grounding.myName}` : "",
+      args.grounding?.theirName ? `Contact preferred name in this thread: ${args.grounding.theirName}` : "",
+      args.grounding?.autoAliases?.length ? `Known contact aliases: ${args.grounding.autoAliases.slice(0, 8).join(", ")}` : "",
+      args.grounding?.vibeNotes ? `Conversation vibe notes: ${args.grounding.vibeNotes}` : "",
+      hints ? `Style hints: ${hints}` : "",
+      phrases ? `Frequent personal phrases to reuse naturally: ${phrases}` : "",
+      outboundSamples ? `Recent sent-message examples: ${outboundSamples}` : "",
+      relevantHistory.length > 0
+        ? `Relevant earlier context matches:\n${relevantHistory.map((line) => line.line).join("\n")}`
+        : "",
+      recentHistory.length > 0 ? `Recent chat:\n${recentHistory.map((line) => line.line).join("\n")}` : "",
+      `Latest inbound message: ${args.inboundText}`,
+      "Return only the final reply text.",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+
+  let prompt = buildPromptText();
+  let detection = runContextWindowDetectionTool({
+    prompt,
+    maxContextTokens,
+    reserveOutputTokens,
+    usedHistoryLines: recentHistory.length,
+    relevantHistoryLines: relevantHistory.length,
+  });
+  toolCalls.push(detection.call);
+
+  if (detection.stats.overflowTokens > 0) {
+    const lineDropStep = Math.round(Math.max(1, Math.min(args.runtime?.contextOverflowLineDropStep ?? 2, 8)));
+    const minHistoryLines = 1;
+    while (detection.stats.overflowTokens > 0 && (recentHistory.length > minHistoryLines || relevantHistory.length > 0)) {
+      if (recentHistory.length > minHistoryLines) {
+        recentHistory = recentHistory.slice(Math.min(lineDropStep, recentHistory.length - minHistoryLines));
+      } else {
+        relevantHistory = relevantHistory.slice(0, -1);
+      }
+      prompt = buildPromptText();
+      detection = runContextWindowDetectionTool({
+        prompt,
+        maxContextTokens,
+        reserveOutputTokens,
+        usedHistoryLines: recentHistory.length,
+        relevantHistoryLines: relevantHistory.length,
+      });
+    }
+    toolCalls.push({
+      ...detection.call,
+      input: {
+        ...detection.call.input,
+        mode: "post_trim",
+      },
+    });
+  }
+
+  return {
+    prompt,
+    contextToolCalls: toolCalls,
+    contextWindow: detection.stats,
+  };
 }
 
 function sanitizeReplyText(raw: string, maxChars = 320) {
@@ -628,7 +1069,110 @@ function extractKeywords(text: string) {
     .filter((word) => word.length > 2 && !STOPWORDS.has(word));
 }
 
-function isLowValueReply(text: string, inboundText?: string) {
+function isJokeLike(text: string) {
+  const trimmed = text.trim();
+  if (!trimmed || trimmed.length < 8) {
+    return false;
+  }
+  return JOKE_INTENT_PATTERNS.some((pattern) => pattern.test(trimmed));
+}
+
+function normalizeLineForComparison(text: string) {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function keywordJaccardSimilarity(left: string, right: string) {
+  const leftKeywords = new Set(extractKeywords(left));
+  const rightKeywords = new Set(extractKeywords(right));
+  if (leftKeywords.size === 0 || rightKeywords.size === 0) {
+    return 0;
+  }
+
+  let intersection = 0;
+  for (const keyword of leftKeywords) {
+    if (rightKeywords.has(keyword)) {
+      intersection += 1;
+    }
+  }
+  const union = leftKeywords.size + rightKeywords.size - intersection;
+  if (union <= 0) {
+    return 0;
+  }
+  return intersection / union;
+}
+
+function hasSimilarPriorOutboundJoke(text: string, historyLines: string[]) {
+  const normalizedCandidate = normalizeLineForComparison(text);
+  if (!normalizedCandidate) {
+    return false;
+  }
+
+  for (const rawLine of historyLines) {
+    const parsed = parseHistoryLine(rawLine);
+    if (parsed.label !== "Me" || !isJokeLike(parsed.body)) {
+      continue;
+    }
+    const normalizedPrior = normalizeLineForComparison(parsed.body);
+    if (!normalizedPrior) {
+      continue;
+    }
+
+    if (normalizedPrior === normalizedCandidate) {
+      return true;
+    }
+    if (
+      Math.min(normalizedPrior.length, normalizedCandidate.length) >= 24 &&
+      (normalizedPrior.includes(normalizedCandidate) || normalizedCandidate.includes(normalizedPrior))
+    ) {
+      return true;
+    }
+    if (keywordJaccardSimilarity(normalizedCandidate, normalizedPrior) >= JOKE_SIMILARITY_THRESHOLD) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function isCringeJoke(text: string) {
+  return CRINGE_JOKE_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+export function evaluateJokeGuardrail(text: string, historyLines: string[] = []) {
+  if (!isJokeLike(text)) {
+    return {
+      blocked: false,
+      reason: "",
+    };
+  }
+  if (isCringeJoke(text)) {
+    return {
+      blocked: true,
+      reason: "Cringe joke pattern detected.",
+    };
+  }
+  if (hasSimilarPriorOutboundJoke(text, historyLines)) {
+    return {
+      blocked: true,
+      reason: "Similar joke already used in this chat.",
+    };
+  }
+  return {
+    blocked: false,
+    reason: "",
+  };
+}
+
+function isLowValueReply(text: string, inboundText?: string, historyLines: string[] = []) {
+  const jokeGuardrail = evaluateJokeGuardrail(text, historyLines);
+  if (jokeGuardrail.blocked) {
+    return true;
+  }
+
   const normalized = text.toLowerCase().replace(/\s+/g, " ").trim();
   if (LOW_VALUE_REPLY_PATTERNS.some((pattern) => pattern.test(normalized))) {
     return true;
@@ -771,7 +1315,12 @@ function toErrorMessage(error: unknown) {
   return String(error).slice(0, 300);
 }
 
-async function runAzure(prompt: string, inboundText: string, runtime?: RuntimeAiTuning): Promise<AttemptOutcome> {
+async function runAzure(
+  prompt: string,
+  inboundText: string,
+  historyLines: string[],
+  runtime?: RuntimeAiTuning,
+): Promise<AttemptOutcome> {
   const cfg = getAzureConfig(runtime);
   const attempts: AiAttempt[] = [];
   const missingConfigStage: AiAttempt["stage"] = cfg.apiStyle === "responses" ? "azure_responses" : "azure_sdk";
@@ -829,7 +1378,7 @@ async function runAzure(prompt: string, inboundText: string, runtime?: RuntimeAi
       if (!cleaned) {
         throw new Error("Azure Responses returned empty response.");
       }
-      if (isLowValueReply(cleaned, inboundText)) {
+      if (isLowValueReply(cleaned, inboundText, historyLines)) {
         throw new Error("Azure Responses returned low-value canned text.");
       }
 
@@ -899,7 +1448,7 @@ async function runAzure(prompt: string, inboundText: string, runtime?: RuntimeAi
     if (!cleaned) {
       throw new Error("Azure AI returned empty response.");
     }
-    if (isLowValueReply(cleaned, inboundText)) {
+    if (isLowValueReply(cleaned, inboundText, historyLines)) {
       throw new Error("Azure AI returned low-value canned text.");
     }
 
@@ -970,7 +1519,7 @@ async function runAzure(prompt: string, inboundText: string, runtime?: RuntimeAi
     if (!cleaned) {
       throw new Error("Azure AI returned empty response.");
     }
-    if (isLowValueReply(cleaned, inboundText)) {
+    if (isLowValueReply(cleaned, inboundText, historyLines)) {
       throw new Error("Azure AI returned low-value canned text.");
     }
 
@@ -1186,7 +1735,12 @@ export async function describeInboundImageWithFallback(args: {
   }
 }
 
-async function runCodex(prompt: string, inboundText: string, runtime?: RuntimeAiTuning): Promise<AttemptOutcome> {
+async function runCodex(
+  prompt: string,
+  inboundText: string,
+  historyLines: string[],
+  runtime?: RuntimeAiTuning,
+): Promise<AttemptOutcome> {
   const codexPath = process.env.CODEX_CLI_PATH || "codex";
   const model = process.env.CODEX_FALLBACK_MODEL || "gpt-5.2";
   const outFile = join(tmpdir(), `slm-codex-${Date.now()}-${Math.random().toString(16).slice(2)}.txt`);
@@ -1203,7 +1757,7 @@ async function runCodex(prompt: string, inboundText: string, runtime?: RuntimeAi
     if (!text) {
       throw new Error("Codex fallback returned empty output.");
     }
-    if (isLowValueReply(text, inboundText)) {
+    if (isLowValueReply(text, inboundText, historyLines)) {
       throw new Error("Codex fallback returned low-value canned text.");
     }
 
@@ -1246,6 +1800,7 @@ async function runCodex(prompt: string, inboundText: string, runtime?: RuntimeAi
 export async function generateReplyWithFallback(args: {
   inboundText: string;
   historyLines: string[];
+  historySearchOverride?: HistorySearchOverride;
   styleHints: string[];
   styleProfile?: StyleProfileContext;
   personality?: PersonalityContext;
@@ -1254,13 +1809,16 @@ export async function generateReplyWithFallback(args: {
 }): Promise<AiResult> {
   const blocked = HIGH_RISK_PATTERNS.find((pattern) => pattern.test(args.inboundText));
   if (blocked) {
+    const builtPrompt = buildPrompt(args);
     return {
-    text: "Manual review required.",
+      text: "Manual review required.",
       provider: "heuristic",
       model: "guardrail",
       latencyMs: 0,
       guardrailBlocked: true,
       guardrailReason: "High-risk topic detected in inbound message.",
+      contextToolCalls: builtPrompt.contextToolCalls,
+      contextWindow: builtPrompt.contextWindow,
       attempts: [
         {
           provider: "heuristic",
@@ -1273,16 +1831,43 @@ export async function generateReplyWithFallback(args: {
     };
   }
 
-  const prompt = buildPrompt(args);
+  const steeringMode = detectConversationSteeringMode({
+    inboundText: args.inboundText,
+    historyLines: args.historyLines,
+  });
+  const shouldUseHeuristicOnly =
+    steeringMode === "hard_stop" || steeringMode === "pause" || steeringMode === "loop" || steeringMode === "wrap_up";
+  if (shouldUseHeuristicOnly) {
+    return {
+      text: normalizeOutboundText(heuristicReply(args.inboundText, args.historyLines)),
+      provider: "heuristic",
+      model: `heuristic-local-${steeringMode}`,
+      latencyMs: 0,
+      guardrailBlocked: false,
+      attempts: [
+        {
+          provider: "heuristic",
+          stage: "heuristic_fallback",
+          model: `heuristic-local-${steeringMode}`,
+          status: "success",
+          latencyMs: 0,
+        },
+      ],
+    };
+  }
+
+  const builtPrompt = buildPrompt(args);
   const attempts: AiAttempt[] = [];
   const fallbackMode = resolveFallbackMode(args.runtime);
 
-  const azureOutcome = await runAzure(prompt, args.inboundText, args.runtime);
+  const azureOutcome = await runAzure(builtPrompt.prompt, args.inboundText, args.historyLines, args.runtime);
   attempts.push(...azureOutcome.attempts);
   if (azureOutcome.result) {
     return {
       ...azureOutcome.result,
       attempts,
+      contextToolCalls: builtPrompt.contextToolCalls,
+      contextWindow: builtPrompt.contextWindow,
     };
   }
 
@@ -1296,15 +1881,19 @@ export async function generateReplyWithFallback(args: {
       guardrailBlocked: true,
       guardrailReason: "Azure-only mode enabled and Azure generation failed. Manual review required.",
       attempts,
+      contextToolCalls: builtPrompt.contextToolCalls,
+      contextWindow: builtPrompt.contextWindow,
     };
   }
 
-  const codexOutcome = await runCodex(prompt, args.inboundText, args.runtime);
+  const codexOutcome = await runCodex(builtPrompt.prompt, args.inboundText, args.historyLines, args.runtime);
   attempts.push(...codexOutcome.attempts);
   if (codexOutcome.result) {
     return {
       ...codexOutcome.result,
       attempts,
+      contextToolCalls: builtPrompt.contextToolCalls,
+      contextWindow: builtPrompt.contextWindow,
     };
   }
 
@@ -1322,6 +1911,8 @@ export async function generateReplyWithFallback(args: {
     latencyMs: 0,
     guardrailBlocked: false,
     attempts,
+    contextToolCalls: builtPrompt.contextToolCalls,
+    contextWindow: builtPrompt.contextWindow,
   };
 }
 

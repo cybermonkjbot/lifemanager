@@ -430,14 +430,18 @@ class WhatsAppSetupManager {
     const { state, saveCreds } = await baileys.useMultiFileAuthState(this.authPath);
     const version = await this.getLatestVersion(baileys);
     const browser = baileys.Browsers.macOS("Desktop");
+    const historySyncEnabled = (() => {
+      const raw = (process.env.SLM_HISTORY_SYNC_ENABLED || "true").trim().toLowerCase();
+      return raw !== "false" && raw !== "0" && raw !== "off";
+    })();
     const socketConfig: Parameters<BaileysModule["default"]>[0] = {
       auth: state,
       printQRInTerminal: false,
       browser,
       markOnlineOnConnect: false,
-      syncFullHistory: false,
+      syncFullHistory: historySyncEnabled,
       fireInitQueries: false,
-      shouldSyncHistoryMessage: () => false,
+      shouldSyncHistoryMessage: () => historySyncEnabled,
       emitOwnEvents: false,
       connectTimeoutMs: 60_000,
       defaultQueryTimeoutMs: 60_000,

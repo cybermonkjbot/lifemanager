@@ -8,6 +8,7 @@ Local-first WhatsApp brain built with Bun, Next.js, TypeScript, Convex, and Bail
 - Stores backend state in Convex (threads, messages, drafts, outbox, follow-ups, todos, style memory, logs).
 - Keeps a persistent Baileys worker for WhatsApp socket handling.
 - Uses Azure AI Foundry for reply generation with local `codex exec` fallback.
+- Ingests historical WhatsApp messages (when available) for context search.
 - Simulates human behavior with delay + typing windows before outbound messages.
 - Detects future commitments and creates follow-up candidates and TODO candidates.
 
@@ -39,8 +40,17 @@ cp .env.example .env.local
 - `AZURE_AI_ENDPOINT`
 - `AZURE_AI_API_KEY`
 - `AZURE_AI_MODEL` (for example `gpt-5.4`)
+- `SLM_HISTORY_SYNC_ENABLED=true` (recommended for history/context enrichment)
+- `SLM_EMBEDDINGS_LOCAL_ENABLED=true` (semantic context rerank)
 
 If you use an Azure AI Foundry `.../responses` URI, set `AZURE_AI_API_STYLE=responses` (or keep `auto` and it will be inferred).
+
+Optional history/context tuning:
+- `SLM_HISTORY_FETCH_ON_DEMAND=true`
+- `SLM_HISTORY_FETCH_MAX_BATCH=50`
+- `SLM_HISTORY_FETCH_MAX_ROUNDS=3`
+- `SLM_EMBEDDINGS_MODEL=all-MiniLM-L6-v2`
+- `SLM_EMBEDDINGS_CACHE_DIR=/path/to/cache`
 
 4. Start all services:
 

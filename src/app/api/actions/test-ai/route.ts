@@ -112,8 +112,7 @@ export async function POST(request: Request) {
     if (threadId) {
       const threadContext = (await convex.query(convexRefs.threadGet, { threadId }).catch(() => null)) as ThreadContext | null;
       if (threadContext) {
-        const historyLimit = Math.max(4, Math.min(Math.round(runtimeSettings?.aiHistoryLineLimit ?? 12), 40));
-        historyLines = threadContext.messages.slice(-historyLimit).map((messageItem) => {
+        historyLines = threadContext.messages.map((messageItem) => {
           return `${messageItem.direction === "inbound" ? "Them" : "Me"}: ${messageItem.text}`;
         });
         styleHints = threadContext.memory?.styleNotes || [];
@@ -205,6 +204,8 @@ export async function POST(request: Request) {
       guardrailBlocked: aiResult.guardrailBlocked,
       guardrailReason: aiResult.guardrailReason,
       attempts: aiResult.attempts,
+      contextToolCalls: aiResult.contextToolCalls || [],
+      contextWindow: aiResult.contextWindow || null,
       createdAt: Date.now(),
       usedThreadContext: historyLines.length > 0,
       threadId: threadId || null,

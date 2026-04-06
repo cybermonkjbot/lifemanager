@@ -9,6 +9,7 @@
  */
 
 import type * as backlog from "../backlog.js";
+import type * as contextTools from "../contextTools.js";
 import type * as crons from "../crons.js";
 import type * as draft from "../draft.js";
 import type * as followups from "../followups.js";
@@ -45,6 +46,7 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   backlog: typeof backlog;
+  contextTools: typeof contextTools;
   crons: typeof crons;
   draft: typeof draft;
   followups: typeof followups;

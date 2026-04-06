@@ -215,11 +215,19 @@ function SystemContent() {
           detail: string;
           createdAt: number;
         }>;
+        latestTranscriptions?: Array<{
+          _id: string;
+          source: string;
+          eventType: string;
+          detail: string;
+          createdAt: number;
+        }>;
       }
     | undefined;
   const healthLoading = health === undefined;
   const providerRuns = health?.latestProviderRuns || [];
   const latestEvents = health?.latestEvents || [];
+  const latestTranscriptions = health?.latestTranscriptions || [];
   const metrics = health?.metrics;
   const alerts = health?.alerts || [];
   const runbooks = health?.runbooks || [];
@@ -278,6 +286,23 @@ function SystemContent() {
             </div>
           ))}
           {!healthLoading && providerRuns.length === 0 ? <p className="empty-line">No provider runs logged yet.</p> : null}
+        </div>
+      </article>
+
+      <article className="panel-card">
+        <h3>Transcription Runs</h3>
+        <div className="stack">
+          {healthLoading ? <p className="empty-line">Loading transcription runs…</p> : null}
+          {latestTranscriptions.map((event) => (
+            <div key={event._id} className="queue-item">
+              <p className="queue-title">{event.eventType}</p>
+              <p className="queue-body">{trim(event.detail, 520)}</p>
+              <p className="queue-meta">{formatDateTime(event.createdAt)}</p>
+            </div>
+          ))}
+          {!healthLoading && latestTranscriptions.length === 0 ? (
+            <p className="empty-line">No transcription runs captured yet.</p>
+          ) : null}
         </div>
       </article>
 

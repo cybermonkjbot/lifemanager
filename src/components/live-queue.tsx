@@ -16,7 +16,30 @@ type NeedsReplyItem = {
   delayMs: number;
   typingMs: number;
   text: string;
-  sourceMessage?: { text?: string } | null;
+  sendKind?: "text" | "reaction" | "sticker" | "meme";
+  mediaAssetId?: string;
+  mediaCaption?: string;
+  mediaPreview?: {
+    assetId: string;
+    kind: "sticker" | "meme";
+    mimeType: string;
+    label: string;
+    url: string | null;
+  } | null;
+  sourceMessage?:
+    | {
+        text?: string;
+        mediaAssetId?: string;
+        mediaCaption?: string;
+        mediaPreview?: {
+          assetId: string;
+          kind: "sticker" | "meme";
+          mimeType: string;
+          label: string;
+          url: string | null;
+        } | null;
+      }
+    | null;
   thread?: { _id?: string; title?: string; jid?: string } | null;
 };
 
@@ -54,6 +77,41 @@ type QueueReviewState =
   | { kind: "todos"; item: TodoCandidateItem }
   | { kind: "guardrails"; item: GuardrailFlagItem }
   | null;
+
+function renderQueueMediaPreview(args: {
+  mediaPreview?: {
+    assetId: string;
+    kind: "sticker" | "meme";
+    mimeType: string;
+    label: string;
+    url: string | null;
+  } | null;
+  mediaAssetId?: string;
+}) {
+  const preview = args.mediaPreview;
+  if (!preview?.url) {
+    return args.mediaAssetId ? <p className="queue-meta">Media preview unavailable.</p> : null;
+  }
+
+  const mimeType = preview.mimeType.toLowerCase();
+  const altText = preview.label || (preview.kind === "meme" ? "Meme" : "Sticker");
+  if (mimeType.startsWith("image/") || preview.kind === "meme" || preview.kind === "sticker") {
+    // eslint-disable-next-line @next/next/no-img-element
+    return <img src={preview.url} alt={altText} className="message-media-image" loading="lazy" />;
+  }
+  if (mimeType.startsWith("video/")) {
+    return <video src={preview.url} controls preload="metadata" className="message-media-video" />;
+  }
+  if (mimeType.startsWith("audio/")) {
+    return <audio src={preview.url} controls preload="none" className="message-media-audio" />;
+  }
+
+  return (
+    <a href={preview.url} target="_blank" rel="noreferrer" className="message-media-link">
+      Open media attachment
+    </a>
+  );
+}
 
 function QueueContent() {
   const approveDraft = useMutation(api.draft.approve);
@@ -394,6 +452,19 @@ function QueueContent() {
           <div className="stack compact">
             <p className="queue-title">{reviewState.item.thread?.title || reviewState.item.thread?.jid || "Unknown contact"}</p>
             <p className="queue-body">{trim(reviewState.item.sourceMessage?.text || reviewState.item.text || "")}</p>
+            {renderQueueMediaPreview({
+              mediaPreview: reviewState.item.sourceMessage?.mediaPreview,
+              mediaAssetId: reviewState.item.sourceMessage?.mediaAssetId,
+            })}
+            <p className="queue-meta">Draft mode: {reviewState.item.sendKind || "text"}</p>
+            {reviewState.item.text ? <p className="queue-body">{trim(reviewState.item.text, 240)}</p> : null}
+            {renderQueueMediaPreview({
+              mediaPreview: reviewState.item.mediaPreview,
+              mediaAssetId: reviewState.item.mediaAssetId,
+            })}
+            {reviewState.item.mediaCaption?.trim() ? (
+              <p className="queue-meta">Media caption: {trim(reviewState.item.mediaCaption.trim(), 240)}</p>
+            ) : null}
             <p className="queue-meta">
               Provider: {reviewState.item.provider} · Delay: {Math.round(reviewState.item.delayMs / 1000)}s · Typing: {Math.round(reviewState.item.typingMs / 1000)}s
             </p>
