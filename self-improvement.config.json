@@ -2,6 +2,7 @@
   "intervalMinutes": 240,
   "codexPath": "codex",
   "codexModel": "gpt-5.4",
+  "codexSandbox": "workspace-write",
   "timeoutMs": 300000,
   "outputDir": ".slm/self-improvement",
   "maxContextChars": 120000,

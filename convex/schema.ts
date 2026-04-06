@@ -17,6 +17,7 @@ export default defineSchema({
     isArchived: v.optional(v.boolean()),
     archivedAt: v.optional(v.number()),
     ghostedUntil: v.optional(v.number()),
+    nightPausedUntil: v.optional(v.number()),
     lastMessageAt: v.number(),
     createdAt: v.number(),
     updatedAt: v.number(),

@@ -58,6 +58,7 @@ Edit `self-improvement.config.json`:
 - `intervalMinutes`: frequency for daemon mode.
 - `codexPath`: Codex binary path (`codex` by default).
 - `codexModel`: model used for improvement cycles.
+- `codexSandbox`: Codex command sandbox (`workspace-write` recommended for local runs).
 - `timeoutMs`: per-run Codex timeout.
 - `maxContextChars`: max total context passed to Codex.
 - `latestReportChars`: how much of the previous report to include as memory.

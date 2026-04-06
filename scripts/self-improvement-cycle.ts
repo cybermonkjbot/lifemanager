@@ -35,6 +35,7 @@ type SelfImprovementConfig = {
   intervalMinutes: number;
   codexPath: string;
   codexModel: string;
+  codexSandbox: "read-only" | "workspace-write" | "danger-full-access";
   timeoutMs: number;
   outputDir: string;
   maxContextChars: number;
@@ -66,6 +67,7 @@ const DEFAULT_CONFIG: SelfImprovementConfig = {
   intervalMinutes: 240,
   codexPath: process.env.CODEX_CLI_PATH || "codex",
   codexModel: process.env.CODEX_SELF_IMPROVE_MODEL || process.env.CODEX_FALLBACK_MODEL || "gpt-5.4",
+  codexSandbox: "workspace-write",
   timeoutMs: 300_000,
   outputDir: ".slm/self-improvement",
   maxContextChars: 120_000,
@@ -211,6 +213,9 @@ function mergeConfig(raw: Partial<SelfImprovementConfig>): SelfImprovementConfig
   }
   if (!merged.codexModel.trim()) {
     throw new Error("config.codexModel must not be empty");
+  }
+  if (!["read-only", "workspace-write", "danger-full-access"].includes(merged.codexSandbox)) {
+    throw new Error("config.codexSandbox must be one of: read-only, workspace-write, danger-full-access");
   }
   if (!merged.outputDir.trim()) {
     throw new Error("config.outputDir must not be empty");
@@ -561,6 +566,8 @@ async function runSingleCycle(params: {
     await fs.writeFile(join(runDir, "context.md"), contextMarkdown, "utf8");
 
     let report = "";
+    let codexExitCode: number | null = null;
+    let codexErrorMessage: string | null = null;
     if (dryRun) {
       report = [
         "# Dry Run",
@@ -570,20 +577,32 @@ async function runSingleCycle(params: {
       ].join("\n");
     } else {
       const tmpOut = join(tmpdir(), `self-improve-${runId}.md`);
-      await execFileAsync(
-        config.codexPath,
-        ["exec", "--model", config.codexModel, "--output-last-message", tmpOut, fullPrompt],
-        {
-          cwd: projectRoot,
-          timeout: config.timeoutMs,
-          maxBuffer: 10 * 1024 * 1024,
-        },
-      );
+      try {
+        await execFileAsync(
+          config.codexPath,
+          ["exec", "--model", config.codexModel, "--sandbox", config.codexSandbox, "--output-last-message", tmpOut, fullPrompt],
+          {
+            cwd: projectRoot,
+            timeout: config.timeoutMs,
+            maxBuffer: 10 * 1024 * 1024,
+          },
+        );
+      } catch (error) {
+        const err = error as Error & { code?: number | string };
+        codexExitCode = typeof err.code === "number" ? err.code : null;
+        codexErrorMessage = err.message;
+      }
 
-      report = await fs.readFile(tmpOut, "utf8");
+      report = await fs.readFile(tmpOut, "utf8").catch(() => "");
       await fs.unlink(tmpOut).catch(() => undefined);
       if (!report.trim()) {
+        if (codexErrorMessage) {
+          throw new Error(`Codex failed and produced no report: ${codexErrorMessage}`);
+        }
         throw new Error("Codex returned an empty report.");
+      }
+      if (codexErrorMessage) {
+        log(`warning: codex exited non-zero but report was captured (${codexErrorMessage})`);
       }
     }
 
@@ -595,6 +614,9 @@ async function runSingleCycle(params: {
       dryRun,
       codexPath: config.codexPath,
       codexModel: config.codexModel,
+      codexSandbox: config.codexSandbox,
+      codexExitCode,
+      codexErrorMessage,
       stats,
     };
 

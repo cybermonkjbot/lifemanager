@@ -15,6 +15,16 @@ const OUTREACH_ICEBREAKERS = [
   "Anything fun on your mind today?",
 ];
 
+function isWithinHourWindow(hour: number, startHour: number, endHour: number) {
+  if (startHour === endHour) {
+    return false;
+  }
+  if (startHour < endHour) {
+    return hour >= startHour && hour < endHour;
+  }
+  return hour >= startHour || hour < endHour;
+}
+
 function pickVariant(seed: string, options: string[]) {
   if (options.length === 0) {
     return "";
@@ -52,6 +62,7 @@ export const run = internalMutation({
   handler: async (ctx) => {
     const now = Date.now();
     const config = await getConfig(ctx);
+    const nowHour = new Date(now).getHours();
 
     if (!config.outreachEnabled) {
       return { queued: 0, reason: "outreach_disabled" as const };
@@ -59,6 +70,10 @@ export const run = internalMutation({
 
     if (config.autonomyPaused) {
       return { queued: 0, reason: "autonomy_paused" as const };
+    }
+
+    if (isWithinHourWindow(nowHour, config.quietHoursStartHour, config.quietHoursEndHour)) {
+      return { queued: 0, reason: "night_wind_down" as const };
     }
 
     const configuredContacts = config.outreachContactJids.slice(0, MAX_CONFIGURED_CONTACTS);
@@ -85,6 +100,10 @@ export const run = internalMutation({
         .first();
 
       if (!thread || thread.isGroup || thread.isIgnored) {
+        continue;
+      }
+
+      if ((thread.nightPausedUntil || 0) > now) {
         continue;
       }
 

@@ -35,6 +35,7 @@ type IngestHistoricalResult = {
   reactionTargetMessageId?: Id<"messages">;
   promiseDetected?: boolean;
   todoDetected?: boolean;
+  nightPausedUntil?: number;
 };
 
 function normalizeTimestampMs(raw: number | undefined, fallbackMs: number) {
@@ -227,6 +228,10 @@ export const ingest = mutation({
     if ((ghostedUntil || 0) <= now) {
       ghostedUntil = undefined;
     }
+    let nightPausedUntil = thread.nightPausedUntil;
+    if ((nightPausedUntil || 0) <= now) {
+      nightPausedUntil = undefined;
+    }
 
     const explicitIgnore = await ctx.db
       .query("ignoreRules")
@@ -260,6 +265,7 @@ export const ingest = mutation({
           stale: false,
           promiseDetected: false,
           todoDetected: false,
+          nightPausedUntil,
         };
       }
     }
@@ -474,6 +480,7 @@ export const ingest = mutation({
       promiseDetected,
       todoDetected,
       ingestMode,
+      nightPausedUntil,
     };
   },
 });

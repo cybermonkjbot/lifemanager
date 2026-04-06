@@ -66,6 +66,8 @@ type RuntimeSettings = {
   outboxPollMs: number;
   inboundConcurrency: number;
   outboxSendConcurrency: number;
+  quietHoursStartHour: number;
+  quietHoursEndHour: number;
 };
 
 type StyleProfileSnapshot = {
@@ -110,6 +112,8 @@ type SystemHealthSnapshot = {
 } | null;
 
 const AI_OUTREACH_PLACEHOLDER = "__SLM_AI_OUTREACH__";
+const DEFAULT_NIGHT_WIND_DOWN_START_HOUR = 23;
+const DEFAULT_NIGHT_WIND_DOWN_END_HOUR = 7;
 
 type OutboundPolicy =
   | {
@@ -199,6 +203,58 @@ function clamp(value: number, min: number, max: number) {
     return min;
   }
   return Math.max(min, Math.min(value, max));
+}
+
+function normalizeHour(raw: number | undefined, fallback: number) {
+  if (!Number.isFinite(raw)) {
+    return fallback;
+  }
+  const hour = Math.round(raw as number);
+  return Math.max(0, Math.min(hour, 23));
+}
+
+function isWithinHourWindow(hour: number, startHour: number, endHour: number) {
+  if (startHour === endHour) {
+    return false;
+  }
+  if (startHour < endHour) {
+    return hour >= startHour && hour < endHour;
+  }
+  return hour >= startHour || hour < endHour;
+}
+
+function computeNextWindowEnd(nowMs: number, startHour: number, endHour: number) {
+  const next = new Date(nowMs);
+  const hour = next.getHours();
+
+  if (startHour === endHour) {
+    return nowMs;
+  }
+  if (startHour < endHour) {
+    if (hour >= startHour && hour < endHour) {
+      next.setHours(endHour, 0, 0, 0);
+      return next.getTime();
+    }
+    return nowMs;
+  }
+  if (hour >= startHour) {
+    next.setDate(next.getDate() + 1);
+    next.setHours(endHour, 0, 0, 0);
+    return next.getTime();
+  }
+  if (hour < endHour) {
+    next.setHours(endHour, 0, 0, 0);
+    return next.getTime();
+  }
+  return nowMs;
+}
+
+function buildNightWindDownInstruction(resumeAtMs: number) {
+  const resumeLabel = new Date(resumeAtMs).toLocaleTimeString(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+  return `It's late night. Gently close this chat in 1 short line and do not start new topics. Prefer phrasing like "I'll get back to you tomorrow", "I'm famished and need some rest", or "Let's continue after ${resumeLabel}". Do not ask follow-up questions.`;
 }
 
 function historySyncEnabled() {
@@ -970,6 +1026,7 @@ async function run() {
         duplicate?: boolean;
         stale?: boolean;
         reactionTargetMessageId?: string;
+        nightPausedUntil?: number;
       };
 
       if (ingest.duplicate) {
@@ -1025,15 +1082,43 @@ async function run() {
       }
 
       const runtimeSettings = await getRuntimeSettings();
+      const now = Date.now();
+      const nightStartHour = normalizeHour(runtimeSettings?.quietHoursStartHour, DEFAULT_NIGHT_WIND_DOWN_START_HOUR);
+      const nightEndHour = normalizeHour(runtimeSettings?.quietHoursEndHour, DEFAULT_NIGHT_WIND_DOWN_END_HOUR);
+      const nightWindDownActive =
+        !isStatusBroadcast &&
+        threadKind === "direct" &&
+        isWithinHourWindow(new Date(now).getHours(), nightStartHour, nightEndHour);
+      const nightWindDownUntil = nightWindDownActive
+        ? computeNextWindowEnd(now, nightStartHour, nightEndHour)
+        : undefined;
+      const activeNightPauseUntil =
+        !isStatusBroadcast && (ingest.nightPausedUntil || 0) > now ? ingest.nightPausedUntil : undefined;
+
+      if (activeNightPauseUntil) {
+        await convex
+          .mutation(convexRefs.systemRecordEvent, {
+            source: "worker",
+            eventType: "inbound.night_pause.skipped",
+            threadId: ingest.threadId as Id<"threads">,
+            detail: `Night pause active until ${new Date(activeNightPauseUntil).toISOString()}.`,
+          })
+          .catch(() => undefined);
+        return;
+      }
+
       const funnyKeywords = runtimeSettings?.funnyStatusKeywords || [];
       const funnyEmojis = runtimeSettings?.funnyStatusEmojis || [];
+      const effectiveReplyPolicyInstruction = nightWindDownUntil
+        ? [runtimeSettings?.aiReplyPolicy || "", buildNightWindDownInstruction(nightWindDownUntil)].filter(Boolean).join("\n")
+        : runtimeSettings?.aiReplyPolicy || "";
       const runtimeAiConfig = {
         temperature: runtimeSettings?.aiTemperature,
         maxOutputTokens: runtimeSettings?.aiMaxOutputTokens,
         maxReplyChars: runtimeSettings?.aiMaxReplyChars,
         historyLineLimit: runtimeSettings?.aiHistoryLineLimit,
         fallbackMode: runtimeSettings?.aiFallbackMode,
-        replyPolicyInstruction: runtimeSettings?.aiReplyPolicy || "",
+        replyPolicyInstruction: effectiveReplyPolicyInstruction,
         systemInstruction: runtimeSettings?.aiSystemInstruction || "",
         soulModeEnabled: runtimeSettings?.soulModeEnabled,
         funnyStatusKeywords: runtimeSettings?.funnyStatusKeywords,
@@ -1180,9 +1265,17 @@ async function run() {
         }
       }
 
+      const forceNightWindDownReply = Boolean(nightWindDownUntil);
       let personalitySetting: PersonalityThreadSetting = null;
       let outboundPolicy: OutboundPolicy;
-      if ((runtimeSettings?.reactionsEnabled ?? true) && looksLikeAckOnly(inboundForPolicy.text || "")) {
+      if (forceNightWindDownReply) {
+        personalitySetting = (await convex.query(convexRefs.personalityGetThreadSetting, {
+          threadId: ingest.threadId,
+        })) as PersonalityThreadSetting;
+        outboundPolicy = {
+          mode: "text",
+        };
+      } else if ((runtimeSettings?.reactionsEnabled ?? true) && looksLikeAckOnly(inboundForPolicy.text || "")) {
         outboundPolicy = {
           mode: "reaction_only",
           emoji: chooseReactionEmoji(inboundForPolicy.text || ""),
@@ -1464,6 +1557,15 @@ async function run() {
         await convex.mutation(convexRefs.draftSaveGenerated, draftPayload);
       } else {
         await convex.mutation(convexRefs.draftSaveOrReplacePending, draftPayload);
+      }
+
+      if (nightWindDownUntil) {
+        await convex
+          .mutation(convexRefs.threadsSetNightPause, {
+            threadId: ingest.threadId as Id<"threads">,
+            pauseUntil: nightWindDownUntil,
+          })
+          .catch(() => undefined);
       }
     } catch (error) {
       const err = error instanceof Error ? error.message : String(error);

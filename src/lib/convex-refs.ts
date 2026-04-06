@@ -35,6 +35,7 @@ export const convexRefs = {
   todosFromCandidate: makeFunctionReference<"mutation">("todos:fromCandidate"),
   rulesUpsertIgnoreRule: makeFunctionReference<"mutation">("rules:upsertIgnoreRule"),
   threadsUpsertMetadata: makeFunctionReference<"mutation">("threads:upsertMetadata"),
+  threadsSetNightPause: makeFunctionReference<"mutation">("threads:setNightPause"),
 
   outboxClaimDue: makeFunctionReference<"mutation">("outbox:claimDue"),
   outboxMarkTyping: makeFunctionReference<"mutation">("outbox:markTyping"),

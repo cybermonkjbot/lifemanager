@@ -201,6 +201,44 @@ export const upsertMetadata = mutation({
   },
 });
 
+export const setNightPause = mutation({
+  args: {
+    threadId: v.id("threads"),
+    pauseUntil: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const thread = await ctx.db.get(args.threadId);
+    if (!thread) {
+      return null;
+    }
+
+    const now = Date.now();
+    const nextPauseUntil = args.pauseUntil && args.pauseUntil > now ? args.pauseUntil : undefined;
+    const previousPauseUntil = thread.nightPausedUntil && thread.nightPausedUntil > now ? thread.nightPausedUntil : undefined;
+
+    if ((previousPauseUntil || 0) === (nextPauseUntil || 0)) {
+      return thread._id;
+    }
+
+    await ctx.db.patch(thread._id, {
+      nightPausedUntil: nextPauseUntil,
+      updatedAt: now,
+    });
+
+    await ctx.db.insert("systemEvents", {
+      source: "worker",
+      eventType: nextPauseUntil ? "thread.night_pause.set" : "thread.night_pause.cleared",
+      threadId: thread._id,
+      detail: nextPauseUntil
+        ? `Night pause active until ${new Date(nextPauseUntil).toISOString()}.`
+        : "Night pause cleared.",
+      createdAt: now,
+    });
+
+    return thread._id;
+  },
+});
+
 export const backfillEligibilityFields = mutation({
   args: {
     cursorJid: v.optional(v.string()),
