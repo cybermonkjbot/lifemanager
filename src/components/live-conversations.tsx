@@ -27,6 +27,11 @@ type ThreadPersonalitySetting = {
   profileSlug: string;
   intensity: number;
   customPrompt?: string;
+  threadPromptProfile?: string;
+  threadPromptProfileSource?: "manual" | "auto";
+  threadPromptProfileLookbackDays?: number;
+  threadPromptProfileMessageCount?: number;
+  threadPromptProfileUpdatedAt?: number;
 };
 
 type ThreadPersonalityFormProps = {
@@ -36,6 +41,17 @@ type ThreadPersonalityFormProps = {
   initialCustomPrompt: string;
   pending: boolean;
   onSave: (values: { profileSlug: string; intensity: number; customPrompt: string }) => void;
+};
+
+type PromptProfileFormProps = {
+  initialPromptProfile: string;
+  initialLookbackDays: number;
+  source?: "manual" | "auto";
+  messageCount?: number;
+  updatedAt?: number;
+  pending: boolean;
+  onAutoBuild: (lookbackDays: number) => void;
+  onSaveManual: (promptProfile: string) => void;
 };
 
 type ProfileEditorFormProps = {
@@ -90,6 +106,27 @@ function messageKindLabel(kind?: string) {
   return "Text";
 }
 
+function messageDisplayText(message: {
+  text: string;
+  messageType?: "text" | "reaction" | "sticker" | "meme";
+  reactionEmoji?: string;
+}) {
+  const normalized = message.text.trim();
+  if (normalized) {
+    return normalized;
+  }
+  if (message.messageType === "reaction") {
+    return message.reactionEmoji ? `Reacted with ${message.reactionEmoji}` : "Sent a reaction";
+  }
+  if (message.messageType === "sticker") {
+    return "Sent a sticker";
+  }
+  if (message.messageType === "meme") {
+    return "Sent a meme";
+  }
+  return "Sent a message";
+}
+
 function parseTagInput(input: string) {
   const tags = input
     .split(",")
@@ -103,6 +140,13 @@ function clamp01(value: number) {
     return 0.7;
   }
   return Math.max(0, Math.min(value, 1));
+}
+
+function clampLookbackDays(value: number) {
+  if (!Number.isFinite(value)) {
+    return 365;
+  }
+  return Math.round(Math.max(7, Math.min(value, 365)));
 }
 
 function ThreadPersonalityForm({
@@ -180,6 +224,99 @@ function ThreadPersonalityForm({
       >
         {pending ? "Saving..." : "Save Conversation Personality"}
       </button>
+    </div>
+  );
+}
+
+function PromptProfileForm({
+  initialPromptProfile,
+  initialLookbackDays,
+  source,
+  messageCount,
+  updatedAt,
+  pending,
+  onAutoBuild,
+  onSaveManual,
+}: PromptProfileFormProps) {
+  const [promptProfile, setPromptProfile] = useState(initialPromptProfile);
+  const [lookbackDays, setLookbackDays] = useState(clampLookbackDays(initialLookbackDays));
+
+  const promptChanged = useMemo(() => promptProfile.trim() !== initialPromptProfile.trim(), [initialPromptProfile, promptProfile]);
+  const normalizedLookback = clampLookbackDays(lookbackDays);
+
+  return (
+    <div className="personality-config-block">
+      <h3>Prompt Profile Builder</h3>
+      <p className="queue-meta">Auto-build this conversation profile from up to 1 year of history, then edit manually if needed.</p>
+
+      <label className="setup-input-group">
+        <span className="queue-meta">Auto-build lookback window (days)</span>
+        <input
+          type="number"
+          min={7}
+          max={365}
+          step={1}
+          value={lookbackDays}
+          onChange={(event) => {
+            const parsed = Number(event.target.value);
+            if (!Number.isFinite(parsed)) {
+              setLookbackDays(365);
+              return;
+            }
+            setLookbackDays(parsed);
+          }}
+          disabled={pending}
+          aria-disabled={pending}
+        />
+      </label>
+
+      <button
+        type="button"
+        className="btn btn-primary"
+        onClick={() => onAutoBuild(normalizedLookback)}
+        disabled={pending}
+        aria-disabled={pending}
+      >
+        {pending ? "Building..." : `Auto-Build From ${normalizedLookback} Days`}
+      </button>
+
+      <label className="setup-input-group">
+        <span className="queue-meta">Conversation prompt profile</span>
+        <textarea
+          rows={8}
+          value={promptProfile}
+          onChange={(event) => setPromptProfile(event.target.value)}
+          placeholder="Example: Keep this chat casual and playful, use short replies, and mirror their emoji style."
+          disabled={pending}
+          aria-disabled={pending}
+        />
+      </label>
+
+      <div className="queue-actions">
+        <button
+          type="button"
+          className="btn btn-primary"
+          onClick={() => onSaveManual(promptProfile)}
+          disabled={pending || !promptChanged}
+          aria-disabled={pending || !promptChanged}
+        >
+          {pending ? "Saving..." : "Save Manual Edit"}
+        </button>
+        <button
+          type="button"
+          className="btn btn-ghost"
+          onClick={() => onSaveManual("")}
+          disabled={pending || !promptProfile.trim()}
+          aria-disabled={pending || !promptProfile.trim()}
+        >
+          Clear Profile
+        </button>
+      </div>
+
+      <p className="queue-meta">
+        Source: {source || "none"} {typeof messageCount === "number" ? `· ${messageCount} messages` : ""}
+        {typeof updatedAt === "number" && updatedAt > 0 ? ` · Updated ${formatDateTime(updatedAt)}` : ""}
+      </p>
     </div>
   );
 }
@@ -311,17 +448,21 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
         _id: string;
         title?: string;
         jid: string;
+        threadKind?: "direct" | "group" | "broadcast_or_system";
+        isArchived?: boolean;
         lastMessageAt: number;
         latestDraft?: { text?: string } | null;
       }>
     | undefined;
   const threadsLoading = threads === undefined;
-  const threadList = threads || [];
+  const threadList = (threads || []).filter((thread) => thread.threadKind !== "group");
 
   const profilesQuery = useQuery(api.personality.listProfiles, {}) as PersonalityProfile[] | undefined;
   const profilesLoading = profilesQuery === undefined;
   const profiles = profilesQuery || [];
   const setThreadPersonality = useMutation(api.personality.setThreadSetting);
+  const setThreadPromptProfile = useMutation(api.personality.setThreadPromptProfile);
+  const autoBuildThreadPromptProfile = useMutation(api.personality.autoBuildThreadPromptProfile);
   const upsertPersonalityProfile = useMutation(api.personality.upsertProfile);
   const saveGroundingMutation = useMutation(api.grounding.saveThreadGrounding);
   const generateUploadUrl = useMutation(api.media.generateUploadUrl);
@@ -331,13 +472,19 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
   const recordEvent = useMutation(api.system.recordEvent);
   const { runAction, getRecord, notices, dismissNotice } = useActionStateRegistry();
 
-  const selectedThreadId = initialThreadId || threadList[0]?._id;
+  const selectedThreadId =
+    (initialThreadId && threadList.some((thread) => thread._id === initialThreadId) ? initialThreadId : undefined) || threadList[0]?._id;
   const thread = useQuery(
     api.threads.get,
     selectedThreadId ? { threadId: selectedThreadId as Id<"threads"> } : "skip",
   ) as
     | {
-        thread: { title?: string; jid: string };
+        thread: {
+          title?: string;
+          jid: string;
+          threadKind?: "direct" | "group" | "broadcast_or_system";
+          isArchived?: boolean;
+        };
         messages: Array<{
           _id: string;
           direction: "inbound" | "outbound";
@@ -380,11 +527,13 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
   const selectedEditorProfile = profiles.find((profile) => profile.slug === selectedEditorSlug) || null;
 
   const settingsKey = selectedThreadId ? `personality:thread:${selectedThreadId}` : "personality:thread:none";
+  const promptProfileKey = selectedThreadId ? `personality:promptprofile:${selectedThreadId}` : "personality:promptprofile:none";
   const profileKey = "personality:profile";
   const groundingKey = selectedThreadId ? `grounding:thread:${selectedThreadId}` : "grounding:thread:none";
   const mediaKey = "media:library";
 
   const settingsRecord = getRecord(settingsKey);
+  const promptProfileRecord = getRecord(promptProfileKey);
   const profileRecord = getRecord(profileKey);
   const groundingRecord = getRecord(groundingKey);
   const mediaRecord = getRecord(mediaKey);
@@ -437,6 +586,48 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
       {
         pendingLabel: "Saving conversation personality...",
         successMessage: "Conversation personality updated.",
+      },
+    );
+  };
+
+  const savePromptProfile = (promptProfile: string) => {
+    if (!selectedThreadId) {
+      return;
+    }
+
+    void runAction(
+      promptProfileKey,
+      async () => {
+        await setThreadPromptProfile({
+          threadId: selectedThreadId as Id<"threads">,
+          promptProfile,
+        });
+      },
+      {
+        pendingLabel: promptProfile.trim() ? "Saving conversation prompt profile..." : "Clearing conversation prompt profile...",
+        successMessage: promptProfile.trim()
+          ? "Conversation prompt profile saved."
+          : "Conversation prompt profile cleared.",
+      },
+    );
+  };
+
+  const autoBuildPromptProfile = (lookbackDays: number) => {
+    if (!selectedThreadId) {
+      return;
+    }
+
+    void runAction(
+      promptProfileKey,
+      async () => {
+        await autoBuildThreadPromptProfile({
+          threadId: selectedThreadId as Id<"threads">,
+          lookbackDays: clampLookbackDays(lookbackDays),
+        });
+      },
+      {
+        pendingLabel: "Building prompt profile from conversation history...",
+        successMessage: "Conversation prompt profile auto-built.",
       },
     );
   };
@@ -549,17 +740,27 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
   }, [thread?.reactions]);
 
   const threadSettingKey = `${selectedThreadId || "none"}:${threadPersonality?.profileSlug || "casual"}:${threadPersonality?.intensity || 0.6}:${threadPersonality?.customPrompt || ""}`;
+  const promptProfileFormKey = `${selectedThreadId || "none"}:${threadPersonality?.threadPromptProfile || ""}:${threadPersonality?.threadPromptProfileLookbackDays || 365}:${threadPersonality?.threadPromptProfileSource || "none"}:${threadPersonality?.threadPromptProfileUpdatedAt || 0}`;
   const editorFormKey = `${selectedEditorProfile?.slug || "none"}:${selectedEditorProfile?.updatedAt || 0}`;
 
   return (
     <section className="panel-grid split-view">
       <article className="panel-card">
         <h3>Threads</h3>
-        <div className="stack">
+        <div className="stack thread-list">
           {threadsLoading ? <p className="empty-line">Loading threads…</p> : null}
           {threadList.map((item) => (
-            <Link key={item._id} href={`/conversations?threadId=${item._id}`} className="thread-row">
+            <Link
+              key={item._id}
+              href={`/conversations?threadId=${item._id}`}
+              className={`thread-row${item._id === selectedThreadId ? " active" : ""}`}
+              aria-current={item._id === selectedThreadId ? "page" : undefined}
+            >
               <p className="queue-title">{item.title || item.jid}</p>
+              <p className="queue-meta">
+                {item.threadKind === "broadcast_or_system" ? "Broadcast/System" : item.threadKind === "group" ? "Group" : "Direct"}
+                {item.isArchived ? " · Archived" : ""}
+              </p>
               <p className="queue-body">{trim(item.latestDraft?.text || "No draft yet")}</p>
               <p className="queue-meta">Last activity: {formatDateTime(item.lastMessageAt)}</p>
             </Link>
@@ -574,24 +775,54 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
         {threadLoading ? (
           <p className="empty-line">Loading timeline...</p>
         ) : thread ? (
-          <div className="stack">
-            <p className="queue-meta">Thread: {thread.thread.title || thread.thread.jid}</p>
-            {(thread.messages || []).map((message) => (
-              <div key={message._id} className={`message-bubble ${message.direction === "outbound" ? "outbound" : "inbound"}`}>
-                <p>{message.text}</p>
-                <p className="queue-meta">{messageKindLabel(message.messageType)}</p>
-                {(reactionsByMessage.get(message._id) || []).length > 0 ? (
-                  <div className="queue-actions">
-                    {(reactionsByMessage.get(message._id) || []).map((reaction, index) => (
-                      <span key={`${reaction.actorJid}:${index}`} className="queue-meta">
-                        {reaction.emoji} {reaction.direction === "outbound" ? "me" : "them"}
-                      </span>
-                    ))}
+          <div className="conversation-chat">
+            <header className="conversation-chat-header">
+              <p className="queue-title">{thread.thread.title || thread.thread.jid}</p>
+              <p className="queue-meta">
+                {thread.thread.threadKind === "broadcast_or_system"
+                  ? "Broadcast/System thread (automation blocked)"
+                  : thread.thread.threadKind === "group"
+                    ? "Group thread"
+                    : "Direct thread"}
+                {thread.thread.isArchived ? " · Archived (read-only automation)" : ""}
+              </p>
+              <p className="queue-meta">{thread.thread.jid}</p>
+            </header>
+            <div className="conversation-chat-window" role="log" aria-live="polite">
+              {(thread.messages || []).length === 0 ? (
+                <p className="empty-line">No messages in this thread yet.</p>
+              ) : null}
+              {(thread.messages || []).map((message) => {
+                const outbound = message.direction === "outbound";
+                const senderName = outbound
+                  ? threadGrounding?.myName?.trim() || "You"
+                  : threadGrounding?.theirName?.trim() || thread.thread.title || "Contact";
+                const senderBadge = senderName.charAt(0).toUpperCase();
+
+                return (
+                  <div key={message._id} className={`chat-row ${outbound ? "outbound" : "inbound"}`}>
+                    <span className={`chat-avatar ${outbound ? "outbound" : "inbound"}`} aria-hidden="true">
+                      {senderBadge || (outbound ? "Y" : "C")}
+                    </span>
+                    <div className={`message-bubble ${outbound ? "outbound" : "inbound"}`}>
+                      <p className="message-sender">{senderName}</p>
+                      <p className="message-text">{messageDisplayText(message)}</p>
+                      <p className="queue-meta">{messageKindLabel(message.messageType)}</p>
+                      {(reactionsByMessage.get(message._id) || []).length > 0 ? (
+                        <div className="queue-actions">
+                          {(reactionsByMessage.get(message._id) || []).map((reaction, index) => (
+                            <span key={`${reaction.actorJid}:${index}`} className="queue-meta">
+                              {reaction.emoji} {reaction.direction === "outbound" ? "me" : "them"}
+                            </span>
+                          ))}
+                        </div>
+                      ) : null}
+                      <span>{formatDateTime(message.messageAt)}</span>
+                    </div>
                   </div>
-                ) : null}
-                <span>{formatDateTime(message.messageAt)}</span>
-              </div>
-            ))}
+                );
+              })}
+            </div>
           </div>
         ) : threadMissing ? (
           <p className="empty-line">This thread is no longer available.</p>
@@ -599,174 +830,190 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
           <p className="empty-line">{threadsLoading ? "Loading threads..." : "Choose a thread from the left."}</p>
         )}
 
-        {selectedThreadId && (threadPersonalityLoading || profilesLoading) ? (
-          <p className="empty-line">Loading personality settings…</p>
-        ) : null}
+        <div className="conversation-controls">
+          {selectedThreadId && (threadPersonalityLoading || profilesLoading) ? (
+            <p className="empty-line">Loading personality settings…</p>
+          ) : null}
 
-        {selectedThreadId && !threadLoading && !threadMissing && !threadPersonalityLoading && profiles.length > 0 ? (
-          <ThreadPersonalityForm
-            key={threadSettingKey}
-            profiles={profiles}
-            initialProfileSlug={threadPersonality?.profileSlug || "casual"}
-            initialIntensity={threadPersonality?.intensity ?? 0.6}
-            initialCustomPrompt={threadPersonality?.customPrompt || ""}
-            pending={settingsRecord.pending}
-            onSave={saveThreadSetting}
-          />
-        ) : null}
+          {selectedThreadId && !threadLoading && !threadMissing && !threadPersonalityLoading && profiles.length > 0 ? (
+            <ThreadPersonalityForm
+              key={threadSettingKey}
+              profiles={profiles}
+              initialProfileSlug={threadPersonality?.profileSlug || "casual"}
+              initialIntensity={threadPersonality?.intensity ?? 0.6}
+              initialCustomPrompt={threadPersonality?.customPrompt || ""}
+              pending={settingsRecord.pending}
+              onSave={saveThreadSetting}
+            />
+          ) : null}
 
-        {selectedThreadId && !threadLoading && !threadMissing ? (
-          <GroundingForm
-            key={`${selectedThreadId}:${threadGrounding?.myName || ""}:${threadGrounding?.theirName || ""}:${threadGrounding?.vibeNotes || ""}`}
-            initialMyName={threadGrounding?.myName || ""}
-            initialTheirName={threadGrounding?.theirName || ""}
-            initialVibeNotes={threadGrounding?.vibeNotes || ""}
-            autoAliases={threadGrounding?.autoAliases || []}
-            pending={groundingRecord.pending}
-            onSave={saveGrounding}
-          />
-        ) : null}
+          {selectedThreadId && !threadLoading && !threadMissing && !threadPersonalityLoading ? (
+            <PromptProfileForm
+              key={promptProfileFormKey}
+              initialPromptProfile={threadPersonality?.threadPromptProfile || ""}
+              initialLookbackDays={threadPersonality?.threadPromptProfileLookbackDays || 365}
+              source={threadPersonality?.threadPromptProfileSource}
+              messageCount={threadPersonality?.threadPromptProfileMessageCount}
+              updatedAt={threadPersonality?.threadPromptProfileUpdatedAt}
+              pending={promptProfileRecord.pending}
+              onAutoBuild={autoBuildPromptProfile}
+              onSaveManual={savePromptProfile}
+            />
+          ) : null}
 
-        {profilesLoading ? <p className="empty-line">Loading personality profiles…</p> : null}
+          {selectedThreadId && !threadLoading && !threadMissing ? (
+            <GroundingForm
+              key={`${selectedThreadId}:${threadGrounding?.myName || ""}:${threadGrounding?.theirName || ""}:${threadGrounding?.vibeNotes || ""}`}
+              initialMyName={threadGrounding?.myName || ""}
+              initialTheirName={threadGrounding?.theirName || ""}
+              initialVibeNotes={threadGrounding?.vibeNotes || ""}
+              autoAliases={threadGrounding?.autoAliases || []}
+              pending={groundingRecord.pending}
+              onSave={saveGrounding}
+            />
+          ) : null}
 
-        {profiles.length > 0 ? (
+          {profilesLoading ? <p className="empty-line">Loading personality profiles…</p> : null}
+
+          {profiles.length > 0 ? (
+            <div className="personality-config-block">
+              <h3>Profile Studio</h3>
+              <p className="queue-meta">Pick a profile and edit how it behaves across all conversations.</p>
+              <label className="setup-input-group">
+                <span className="queue-meta">Profile to Edit</span>
+                <select value={selectedEditorSlug} onChange={(event) => setEditorSlug(event.target.value)}>
+                  {profiles.map((profile) => (
+                    <option key={profile.slug} value={profile.slug}>
+                      {profile.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              {selectedEditorProfile ? (
+                <ProfileEditorForm
+                  key={editorFormKey}
+                  profile={selectedEditorProfile}
+                  pending={profileRecord.pending}
+                  error={profileRecord.error}
+                  onSave={saveProfile}
+                />
+              ) : null}
+            </div>
+          ) : !profilesLoading ? (
+            <p className="empty-line">No personality profiles configured yet.</p>
+          ) : null}
+
           <div className="personality-config-block">
-            <h3>Profile Studio</h3>
-            <p className="queue-meta">Pick a profile and edit how it behaves across all conversations.</p>
+            <h3>Media Library</h3>
+            <p className="queue-meta">Upload curated sticker and meme assets for outbound policy use.</p>
             <label className="setup-input-group">
-              <span className="queue-meta">Profile to Edit</span>
-              <select value={selectedEditorSlug} onChange={(event) => setEditorSlug(event.target.value)}>
-                {profiles.map((profile) => (
-                  <option key={profile.slug} value={profile.slug}>
-                    {profile.name}
-                  </option>
-                ))}
+              <span className="queue-meta">Kind</span>
+              <select
+                value={assetKind}
+                onChange={(event) => setAssetKind(event.target.value === "meme" ? "meme" : "sticker")}
+                disabled={mediaRecord.pending}
+                aria-disabled={mediaRecord.pending}
+              >
+                <option value="sticker">Sticker</option>
+                <option value="meme">Meme</option>
               </select>
             </label>
-
-            {selectedEditorProfile ? (
-              <ProfileEditorForm
-                key={editorFormKey}
-                profile={selectedEditorProfile}
-                pending={profileRecord.pending}
-                error={profileRecord.error}
-                onSave={saveProfile}
+            <label className="setup-input-group">
+              <span className="queue-meta">Label</span>
+              <input
+                type="text"
+                value={assetLabel}
+                onChange={(event) => setAssetLabel(event.target.value)}
+                disabled={mediaRecord.pending}
+                aria-disabled={mediaRecord.pending}
               />
-            ) : null}
-          </div>
-        ) : !profilesLoading ? (
-          <p className="empty-line">No personality profiles configured yet.</p>
-        ) : null}
-
-        <div className="personality-config-block">
-          <h3>Media Library</h3>
-          <p className="queue-meta">Upload curated sticker and meme assets for outbound policy use.</p>
-          <label className="setup-input-group">
-            <span className="queue-meta">Kind</span>
-            <select
-              value={assetKind}
-              onChange={(event) => setAssetKind(event.target.value === "meme" ? "meme" : "sticker")}
-              disabled={mediaRecord.pending}
-              aria-disabled={mediaRecord.pending}
+            </label>
+            <label className="setup-input-group">
+              <span className="queue-meta">Tags (comma separated)</span>
+              <input
+                type="text"
+                value={assetTags}
+                onChange={(event) => setAssetTags(event.target.value)}
+                disabled={mediaRecord.pending}
+                aria-disabled={mediaRecord.pending}
+              />
+            </label>
+            <label className="setup-input-group">
+              <span className="queue-meta">File</span>
+              <input
+                type="file"
+                accept="image/*,.webp"
+                onChange={(event: ChangeEvent<HTMLInputElement>) => setAssetFile(event.target.files?.[0] || null)}
+                disabled={mediaRecord.pending}
+                aria-disabled={mediaRecord.pending}
+              />
+            </label>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={uploadAsset}
+              disabled={mediaRecord.pending || !assetFile}
+              aria-disabled={mediaRecord.pending || !assetFile}
             >
-              <option value="sticker">Sticker</option>
-              <option value="meme">Meme</option>
-            </select>
-          </label>
-          <label className="setup-input-group">
-            <span className="queue-meta">Label</span>
-            <input
-              type="text"
-              value={assetLabel}
-              onChange={(event) => setAssetLabel(event.target.value)}
-              disabled={mediaRecord.pending}
-              aria-disabled={mediaRecord.pending}
-            />
-          </label>
-          <label className="setup-input-group">
-            <span className="queue-meta">Tags (comma separated)</span>
-            <input
-              type="text"
-              value={assetTags}
-              onChange={(event) => setAssetTags(event.target.value)}
-              disabled={mediaRecord.pending}
-              aria-disabled={mediaRecord.pending}
-            />
-          </label>
-          <label className="setup-input-group">
-            <span className="queue-meta">File</span>
-            <input
-              type="file"
-              accept="image/*,.webp"
-              onChange={(event: ChangeEvent<HTMLInputElement>) => setAssetFile(event.target.files?.[0] || null)}
-              disabled={mediaRecord.pending}
-              aria-disabled={mediaRecord.pending}
-            />
-          </label>
-          <button
-            type="button"
-            className="btn btn-primary"
-            onClick={uploadAsset}
-            disabled={mediaRecord.pending || !assetFile}
-            aria-disabled={mediaRecord.pending || !assetFile}
-          >
-            {mediaRecord.pending ? "Uploading..." : "Upload Asset"}
-          </button>
-          <div className="stack">
-            {(mediaAssets || []).map((asset) => (
-              <div key={asset._id} className="queue-item">
-                <p className="queue-title">
-                  {asset.label} ({asset.kind})
-                </p>
-                <p className="queue-meta">
-                  {asset.enabled ? "Enabled" : "Disabled"} · {asset.tags.join(", ") || "No tags"}
-                </p>
-                <div className="queue-actions">
-                  <button
-                    type="button"
-                    className="btn btn-ghost"
-                    onClick={() =>
-                      void runAction(
-                        mediaKey,
-                        async () => {
-                          await toggleAsset({
-                            assetId: asset._id as Id<"mediaAssets">,
-                            enabled: !asset.enabled,
-                          });
-                        },
-                        {
-                          pendingLabel: "Updating asset...",
-                          successMessage: "Asset updated.",
-                        },
-                      )
-                    }
-                  >
-                    {asset.enabled ? "Disable" : "Enable"}
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-ghost"
-                    onClick={() =>
-                      void runAction(
-                        mediaKey,
-                        async () => {
-                          await deleteAsset({
-                            assetId: asset._id as Id<"mediaAssets">,
-                          });
-                        },
-                        {
-                          pendingLabel: "Deleting asset...",
-                          successMessage: "Asset deleted.",
-                        },
-                      )
-                    }
-                  >
-                    Delete
-                  </button>
+              {mediaRecord.pending ? "Uploading..." : "Upload Asset"}
+            </button>
+            <div className="stack">
+              {(mediaAssets || []).map((asset) => (
+                <div key={asset._id} className="queue-item">
+                  <p className="queue-title">
+                    {asset.label} ({asset.kind})
+                  </p>
+                  <p className="queue-meta">
+                    {asset.enabled ? "Enabled" : "Disabled"} · {asset.tags.join(", ") || "No tags"}
+                  </p>
+                  <div className="queue-actions">
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      onClick={() =>
+                        void runAction(
+                          mediaKey,
+                          async () => {
+                            await toggleAsset({
+                              assetId: asset._id as Id<"mediaAssets">,
+                              enabled: !asset.enabled,
+                            });
+                          },
+                          {
+                            pendingLabel: "Updating asset...",
+                            successMessage: "Asset updated.",
+                          },
+                        )
+                      }
+                    >
+                      {asset.enabled ? "Disable" : "Enable"}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      onClick={() =>
+                        void runAction(
+                          mediaKey,
+                          async () => {
+                            await deleteAsset({
+                              assetId: asset._id as Id<"mediaAssets">,
+                            });
+                          },
+                          {
+                            pendingLabel: "Deleting asset...",
+                            successMessage: "Asset deleted.",
+                          },
+                        )
+                      }
+                    >
+                      Delete
+                    </button>
+                  </div>
                 </div>
-              </div>
-            ))}
-            {(mediaAssets || []).length === 0 ? <p className="empty-line">No media assets yet.</p> : null}
+              ))}
+              {(mediaAssets || []).length === 0 ? <p className="empty-line">No media assets yet.</p> : null}
+            </div>
           </div>
         </div>
       </article>

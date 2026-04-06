@@ -5,6 +5,11 @@ import { internal } from "./_generated/api";
 import { mutation } from "./_generated/server";
 import { getConfig } from "./lib/config";
 import { detectPromiseOrPlan, detectTodoCandidate } from "./lib/heuristics";
+import {
+  classifyThreadKind,
+  eligibilityReasonLabel,
+  resolveThreadEligibility,
+} from "./lib/threadEligibility";
 
 const INBOUND_STALE_GRACE_MS = 2 * 60 * 1000;
 
@@ -86,6 +91,9 @@ export const ingest = mutation({
     mediaAssetId: v.optional(v.id("mediaAssets")),
     mediaCaption: v.optional(v.string()),
     isGroup: v.boolean(),
+    threadKind: v.optional(v.union(v.literal("direct"), v.literal("group"), v.literal("broadcast_or_system"))),
+    isArchived: v.optional(v.boolean()),
+    archivedAt: v.optional(v.number()),
     whatsappMessageId: v.optional(v.string()),
     messageAt: v.optional(v.number()),
     skipDraftGeneration: v.optional(v.boolean()),
@@ -102,14 +110,19 @@ export const ingest = mutation({
       .first();
 
     const config = await getConfig(ctx);
-    const shouldIgnoreGroup = args.isGroup && config.ignoreGroupsByDefault;
+    const inputThreadKind = args.threadKind || classifyThreadKind({ jid: args.threadJid, isGroupHint: args.isGroup });
+    const shouldIgnoreGroup = inputThreadKind === "group" && config.ignoreGroupsByDefault;
+    const normalizedArchivedAt = normalizeTimestampMs(args.archivedAt, messageAt);
 
     if (!thread) {
       const threadId = await ctx.db.insert("threads", {
         jid: args.threadJid,
         title: args.senderTitle,
-        isGroup: args.isGroup,
+        isGroup: inputThreadKind === "group",
         isIgnored: shouldIgnoreGroup,
+        threadKind: inputThreadKind,
+        isArchived: args.isArchived || false,
+        archivedAt: args.isArchived ? normalizedArchivedAt : undefined,
         lastMessageAt: messageAt,
         createdAt: now,
         updatedAt: now,
@@ -122,18 +135,40 @@ export const ingest = mutation({
     } else {
       await ctx.db.patch(thread._id, {
         title: args.senderTitle ?? thread.title,
-        isGroup: args.isGroup,
+        isGroup: inputThreadKind === "group",
+        threadKind: inputThreadKind,
+        isArchived: args.isArchived === undefined ? thread.isArchived : args.isArchived,
+        archivedAt:
+          args.isArchived === undefined
+            ? thread.archivedAt
+            : args.isArchived
+              ? normalizedArchivedAt
+              : undefined,
         lastMessageAt: Math.max(thread.lastMessageAt, messageAt),
         updatedAt: now,
       });
     }
 
+    const threadKind = args.threadKind || thread.threadKind || inputThreadKind;
+    const isArchived = args.isArchived === undefined ? thread.isArchived || false : args.isArchived;
     const explicitIgnore = await ctx.db
       .query("ignoreRules")
-      .withIndex("by_target", (q) => q.eq("targetType", args.isGroup ? "group" : "contact").eq("targetValue", args.threadJid))
+      .withIndex("by_target", (q) =>
+        q.eq("targetType", threadKind === "group" ? "group" : "contact").eq("targetValue", args.threadJid),
+      )
       .first();
 
-    const ignored = thread.isIgnored || Boolean(explicitIgnore?.enabled);
+    const eligibility = resolveThreadEligibility({
+      thread: {
+        jid: thread.jid,
+        isIgnored: thread.isIgnored,
+        isArchived,
+        threadKind,
+      },
+      ignoreGroupsByDefault: config.ignoreGroupsByDefault,
+      explicitIgnoreEnabled: Boolean(explicitIgnore?.enabled),
+    });
+    const ignored = !eligibility.allowed;
 
     if (args.whatsappMessageId) {
       const existing = await ctx.db
@@ -250,7 +285,10 @@ export const ingest = mutation({
               ? "inbound.ignored"
               : "inbound.received",
       threadId: thread._id,
-      detail: (normalizedText || args.reactionEmoji || "[Non-text inbound]").slice(0, 300),
+      detail:
+        ignored && !eligibility.allowed
+          ? `${eligibility.reason}: ${eligibilityReasonLabel(eligibility.reason)}`
+          : (normalizedText || args.reactionEmoji || "[Non-text inbound]").slice(0, 300),
       createdAt: now,
     });
 
@@ -301,10 +339,15 @@ export const ingest = mutation({
       });
     }
 
+    await ctx.scheduler.runAfter(0, internal.backlog.refreshThread, {
+      threadId: thread._id,
+    });
+
     return {
       threadId: thread._id,
       messageId,
       ignored,
+      blockedReason: eligibility.allowed ? undefined : eligibility.reason,
       duplicate: false,
       stale,
       messageType,

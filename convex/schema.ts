@@ -13,6 +13,9 @@ export default defineSchema({
     title: v.optional(v.string()),
     isGroup: v.boolean(),
     isIgnored: v.boolean(),
+    threadKind: v.optional(v.union(v.literal("direct"), v.literal("group"), v.literal("broadcast_or_system"))),
+    isArchived: v.optional(v.boolean()),
+    archivedAt: v.optional(v.number()),
     lastMessageAt: v.number(),
     createdAt: v.number(),
     updatedAt: v.number(),
@@ -164,6 +167,20 @@ export default defineSchema({
     .index("by_scope", ["scope"])
     .index("by_thread", ["threadId"]),
 
+  styleProfileHistory: defineTable({
+    scope: v.union(v.literal("global"), v.literal("thread")),
+    threadId: v.optional(v.id("threads")),
+    mimicryLevel: v.number(),
+    commonPhrases: v.array(v.string()),
+    punctuationStyle: v.array(v.string()),
+    humorNotes: v.array(v.string()),
+    spellingNotes: v.array(v.string()),
+    reason: v.optional(v.string()),
+    createdAt: v.number(),
+  })
+    .index("by_scope_and_createdAt", ["scope", "createdAt"])
+    .index("by_createdAt", ["createdAt"]),
+
   personalityProfiles: defineTable({
     slug: v.string(),
     name: v.string(),
@@ -176,11 +193,29 @@ export default defineSchema({
     .index("by_slug", ["slug"])
     .index("by_updatedAt", ["updatedAt"]),
 
+  personalityProfileVersions: defineTable({
+    profileSlug: v.string(),
+    versionNumber: v.number(),
+    name: v.string(),
+    description: v.string(),
+    prompt: v.string(),
+    defaultIntensity: v.number(),
+    reason: v.optional(v.string()),
+    createdAt: v.number(),
+  })
+    .index("by_profileSlug_and_versionNumber", ["profileSlug", "versionNumber"])
+    .index("by_profileSlug_and_createdAt", ["profileSlug", "createdAt"]),
+
   threadPersonalitySettings: defineTable({
     threadId: v.id("threads"),
     profileSlug: v.string(),
     intensity: v.number(),
     customPrompt: v.optional(v.string()),
+    threadPromptProfile: v.optional(v.string()),
+    threadPromptProfileSource: v.optional(v.union(v.literal("manual"), v.literal("auto"))),
+    threadPromptProfileLookbackDays: v.optional(v.number()),
+    threadPromptProfileMessageCount: v.optional(v.number()),
+    threadPromptProfileUpdatedAt: v.optional(v.number()),
     createdAt: v.number(),
     updatedAt: v.number(),
   }).index("by_thread", ["threadId"]),
@@ -201,8 +236,13 @@ export default defineSchema({
     severity: v.union(v.literal("low"), v.literal("medium"), v.literal("high")),
     reason: v.string(),
     blocked: v.boolean(),
+    resolvedAt: v.optional(v.number()),
+    resolutionNote: v.optional(v.string()),
+    resolvedBy: v.optional(v.string()),
     createdAt: v.number(),
-  }).index("by_createdAt", ["createdAt"]),
+  })
+    .index("by_createdAt", ["createdAt"])
+    .index("by_resolvedAt_and_createdAt", ["resolvedAt", "createdAt"]),
 
   providerRuns: defineTable({
     threadId: v.optional(v.id("threads")),
@@ -290,4 +330,64 @@ export default defineSchema({
     createdAt: v.number(),
     updatedAt: v.number(),
   }).index("by_threadId", ["threadId"]),
+
+  backlogThreadState: defineTable({
+    threadId: v.id("threads"),
+    importanceOverride: v.optional(
+      v.union(v.literal("critical"), v.literal("high"), v.literal("medium"), v.literal("low")),
+    ),
+    relationshipOverride: v.optional(
+      v.union(
+        v.literal("girlfriend"),
+        v.literal("relationship"),
+        v.literal("friendship"),
+        v.literal("casual"),
+        v.literal("family"),
+        v.literal("business"),
+      ),
+    ),
+    snoozedUntil: v.optional(v.number()),
+    snoozeReason: v.optional(v.string()),
+    unresolvedCount: v.number(),
+    pendingSince: v.optional(v.number()),
+    latestUnresolvedAt: v.optional(v.number()),
+    latestUnresolvedMessageId: v.optional(v.id("messages")),
+    latestUnresolvedText: v.optional(v.string()),
+    lastInboundAt: v.optional(v.number()),
+    lastOutboundAt: v.optional(v.number()),
+    relationship: v.union(
+      v.literal("girlfriend"),
+      v.literal("relationship"),
+      v.literal("friendship"),
+      v.literal("casual"),
+      v.literal("family"),
+      v.literal("business"),
+    ),
+    importance: v.union(v.literal("critical"), v.literal("high"), v.literal("medium"), v.literal("low")),
+    recommendation: v.union(
+      v.literal("answer"),
+      v.literal("answer_with_ack"),
+      v.literal("restart"),
+      v.literal("already_queued"),
+    ),
+    score: v.number(),
+    lastActionAt: v.optional(v.number()),
+    lastActionType: v.optional(
+      v.union(
+        v.literal("answer_draft"),
+        v.literal("restart_draft"),
+        v.literal("ignored"),
+        v.literal("snoozed"),
+        v.literal("unsnoozed"),
+      ),
+    ),
+    lastEvaluatedAt: v.number(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_threadId", ["threadId"])
+    .index("by_unresolvedCount_and_updatedAt", ["unresolvedCount", "updatedAt"])
+    .index("by_importance_and_updatedAt", ["importance", "updatedAt"])
+    .index("by_snoozedUntil", ["snoozedUntil"])
+    .index("by_updatedAt", ["updatedAt"]),
 });

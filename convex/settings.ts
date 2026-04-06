@@ -23,6 +23,12 @@ export const save = mutation({
     reactionsEnabled: v.boolean(),
     stickersEnabled: v.boolean(),
     memesEnabled: v.boolean(),
+    soulModeEnabled: v.boolean(),
+    humorLearningEnabled: v.boolean(),
+    statusAutoReplyEnabled: v.boolean(),
+    statusReplyRequireFunny: v.boolean(),
+    funnyStatusKeywords: v.optional(v.array(v.string())),
+    funnyStatusEmojis: v.optional(v.array(v.string())),
     aiFallbackMode: v.union(v.literal("all"), v.literal("azure_only")),
     aiTemperature: v.number(),
     aiMaxOutputTokens: v.number(),
@@ -38,6 +44,9 @@ export const save = mutation({
     humanTypingMaxMs: v.number(),
     outboxClaimLimit: v.number(),
     outboxPollMs: v.number(),
+    inboundMergeWindowMs: v.number(),
+    inboundConcurrency: v.optional(v.number()),
+    outboxSendConcurrency: v.optional(v.number()),
     outreachEnabled: v.boolean(),
     outreachCadenceHours: v.number(),
     outreachMaxContactsPerRun: v.number(),
@@ -46,11 +55,22 @@ export const save = mutation({
   },
   handler: async (ctx, args) => {
     const outreachContactJids = [...new Set(args.outreachContactJids.map((item) => item.trim()).filter(Boolean))];
+    const funnyStatusKeywords = [...new Set((args.funnyStatusKeywords || []).map((item) => item.trim().toLowerCase()).filter(Boolean))].slice(
+      0,
+      40,
+    );
+    const funnyStatusEmojis = [...new Set((args.funnyStatusEmojis || []).map((item) => item.trim()).filter(Boolean))].slice(0, 40);
     const normalized = {
       ignoreGroupsByDefault: args.ignoreGroupsByDefault,
       reactionsEnabled: args.reactionsEnabled,
       stickersEnabled: args.stickersEnabled,
       memesEnabled: args.memesEnabled,
+      soulModeEnabled: args.soulModeEnabled,
+      humorLearningEnabled: args.humorLearningEnabled,
+      statusAutoReplyEnabled: args.statusAutoReplyEnabled,
+      statusReplyRequireFunny: args.statusReplyRequireFunny,
+      funnyStatusKeywords: funnyStatusKeywords.length ? funnyStatusKeywords : DEFAULT_APP_CONFIG.funnyStatusKeywords,
+      funnyStatusEmojis: funnyStatusEmojis.length ? funnyStatusEmojis : DEFAULT_APP_CONFIG.funnyStatusEmojis,
       aiFallbackMode: args.aiFallbackMode,
       aiTemperature: clamp(args.aiTemperature, 0, 1.3),
       aiMaxOutputTokens: clampInt(args.aiMaxOutputTokens, 40, 1000),
@@ -66,6 +86,9 @@ export const save = mutation({
       humanTypingMaxMs: clampInt(args.humanTypingMaxMs, 200, 120_000),
       outboxClaimLimit: clampInt(args.outboxClaimLimit, 1, 20),
       outboxPollMs: clampInt(args.outboxPollMs, 500, 60_000),
+      inboundMergeWindowMs: clampInt(args.inboundMergeWindowMs, 2_000, 180_000),
+      inboundConcurrency: clampInt(args.inboundConcurrency ?? DEFAULT_APP_CONFIG.inboundConcurrency, 1, 16),
+      outboxSendConcurrency: clampInt(args.outboxSendConcurrency ?? DEFAULT_APP_CONFIG.outboxSendConcurrency, 1, 16),
       outreachEnabled: args.outreachEnabled,
       outreachCadenceHours: clampInt(args.outreachCadenceHours, 6, 24 * 14),
       outreachMaxContactsPerRun: clampInt(args.outreachMaxContactsPerRun, 1, 25),
@@ -89,6 +112,12 @@ export const save = mutation({
     await setConfigValue(ctx, "reactionsEnabled", normalized.reactionsEnabled ? "true" : "false");
     await setConfigValue(ctx, "stickersEnabled", normalized.stickersEnabled ? "true" : "false");
     await setConfigValue(ctx, "memesEnabled", normalized.memesEnabled ? "true" : "false");
+    await setConfigValue(ctx, "soulModeEnabled", normalized.soulModeEnabled ? "true" : "false");
+    await setConfigValue(ctx, "humorLearningEnabled", normalized.humorLearningEnabled ? "true" : "false");
+    await setConfigValue(ctx, "statusAutoReplyEnabled", normalized.statusAutoReplyEnabled ? "true" : "false");
+    await setConfigValue(ctx, "statusReplyRequireFunny", normalized.statusReplyRequireFunny ? "true" : "false");
+    await setConfigValue(ctx, "funnyStatusKeywords", normalized.funnyStatusKeywords.join("\n"));
+    await setConfigValue(ctx, "funnyStatusEmojis", normalized.funnyStatusEmojis.join("\n"));
     await setConfigValue(ctx, "aiFallbackMode", normalized.aiFallbackMode);
     await setConfigValue(ctx, "aiTemperature", String(normalized.aiTemperature));
     await setConfigValue(ctx, "aiMaxOutputTokens", String(normalized.aiMaxOutputTokens));
@@ -104,6 +133,9 @@ export const save = mutation({
     await setConfigValue(ctx, "humanTypingMaxMs", String(normalized.humanTypingMaxMs));
     await setConfigValue(ctx, "outboxClaimLimit", String(normalized.outboxClaimLimit));
     await setConfigValue(ctx, "outboxPollMs", String(normalized.outboxPollMs));
+    await setConfigValue(ctx, "inboundMergeWindowMs", String(normalized.inboundMergeWindowMs));
+    await setConfigValue(ctx, "inboundConcurrency", String(normalized.inboundConcurrency));
+    await setConfigValue(ctx, "outboxSendConcurrency", String(normalized.outboxSendConcurrency));
     await setConfigValue(ctx, "outreachEnabled", normalized.outreachEnabled ? "true" : "false");
     await setConfigValue(ctx, "outreachCadenceHours", String(normalized.outreachCadenceHours));
     await setConfigValue(ctx, "outreachMaxContactsPerRun", String(normalized.outreachMaxContactsPerRun));

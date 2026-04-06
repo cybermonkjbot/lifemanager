@@ -32,6 +32,14 @@ type AttemptOutcome = {
   attempts: AiAttempt[];
 };
 
+export type ImageAnalysisResult = {
+  description: string;
+  provider: "azure" | "heuristic";
+  model: string;
+  latencyMs: number;
+  error?: string;
+};
+
 type StyleProfileContext = {
   mimicryLevel?: number;
   commonPhrases?: string[];
@@ -47,6 +55,8 @@ type PersonalityContext = {
   profilePrompt?: string;
   intensity?: number;
   customPrompt?: string;
+  threadPromptProfile?: string;
+  threadPromptProfileSource?: "manual" | "auto";
 };
 
 type GroundingContext = {
@@ -58,6 +68,7 @@ type GroundingContext = {
 
 type AzureApiStyle = "auto" | "chat_completions" | "responses";
 type FallbackMode = "all" | "azure_only";
+export type ConversationSteeringMode = "none" | "hard_stop" | "pause" | "wrap_up" | "loop";
 
 type RuntimeAiTuning = {
   model?: string;
@@ -65,6 +76,9 @@ type RuntimeAiTuning = {
   fallbackMode?: FallbackMode;
   systemInstruction?: string;
   replyPolicyInstruction?: string;
+  soulModeEnabled?: boolean;
+  funnyStatusKeywords?: string[];
+  funnyStatusEmojis?: string[];
   temperature?: number;
   maxOutputTokens?: number;
   maxReplyChars?: number;
@@ -165,6 +179,39 @@ const STOPWORDS = new Set([
 
 const DEFAULT_SYSTEM_INSTRUCTION =
   "You write human WhatsApp replies that sound like the user, preserve context, and avoid generic boilerplate.";
+const DEFAULT_FUNNY_STATUS_KEYWORDS = [
+  "lol",
+  "lmao",
+  "haha",
+  "funny",
+  "joke",
+  "banter",
+  "meme",
+  "wild",
+  "roast",
+  "status",
+  "story",
+  "dead",
+];
+const DEFAULT_FUNNY_STATUS_EMOJIS = ["😂", "🤣", "😹", "😆", "😅", "😄", "😁", "😜", "🤪", "🙃", "🔥", "💀"];
+const HARD_STOP_PATTERNS = [
+  /\b(stop texting|stop messaging|do not text|don't text|do not message|don't message)\b/i,
+  /\b(leave me alone|back off|no contact|don't contact me)\b/i,
+  /\b(not interested|don't want to talk|do not want to talk|let'?s end this)\b/i,
+];
+const PAUSE_PATTERNS = [
+  /\b(talk later|catch up later|we can continue later|pick this up later)\b/i,
+  /\b(i have to run|gotta run|gtg|brb|bbl|ttyl)\b/i,
+  /\b(i('|’)m busy|in a meeting|driving right now|about to sleep|heading out)\b/i,
+];
+const WRAP_UP_PATTERNS = [
+  /^(ok|okay|cool|great|nice|perfect|all good|sounds good|done|resolved)[.!]*$/i,
+  /^(thanks|thank you|that helps|got it|noted|understood)[.!]*$/i,
+];
+const ACK_ONLY_PATTERNS = [
+  /\b(ok|okay|sure|cool|great|perfect|nice|done|noted|got it|understood)\b/i,
+  /\b(thanks|thank you|appreciate it)\b/i,
+];
 
 function clamp01(value: number) {
   if (!Number.isFinite(value)) {
@@ -181,7 +228,124 @@ function pickVariant(input: string, options: string[]) {
   return options[sum % options.length];
 }
 
-function heuristicReply(input: string) {
+function hasKeyword(text: string, keywords: string[]) {
+  for (const keyword of keywords) {
+    const token = keyword.trim();
+    if (!token) {
+      continue;
+    }
+    const pattern = new RegExp(`\\b${token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
+    if (pattern.test(text)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function hasEmoji(text: string, emojis: string[]) {
+  return emojis.some((emoji) => emoji && text.includes(emoji));
+}
+
+function isAckLike(text: string) {
+  const trimmed = text.trim();
+  if (!trimmed || trimmed.length > 48) {
+    return false;
+  }
+  if (/\?/.test(trimmed)) {
+    return false;
+  }
+  return ACK_ONLY_PATTERNS.some((pattern) => pattern.test(trimmed));
+}
+
+function looksLoopingConversation(historyLines: string[]) {
+  const recent = historyLines.slice(-10);
+  if (recent.length < 4) {
+    return false;
+  }
+
+  let outboundQuestions = 0;
+  let inboundAckStreak = 0;
+  let maxInboundAckStreak = 0;
+
+  for (const line of recent) {
+    if (line.startsWith("Me:") && /\?/.test(line)) {
+      outboundQuestions += 1;
+    }
+    if (line.startsWith("Them:")) {
+      const inbound = line.replace(/^Them:\s*/, "");
+      if (isAckLike(inbound)) {
+        inboundAckStreak += 1;
+        maxInboundAckStreak = Math.max(maxInboundAckStreak, inboundAckStreak);
+      } else {
+        inboundAckStreak = 0;
+      }
+    }
+  }
+
+  return outboundQuestions >= 2 && maxInboundAckStreak >= 2;
+}
+
+export function detectConversationSteeringMode(args: {
+  inboundText: string;
+  historyLines: string[];
+}): ConversationSteeringMode {
+  const inbound = args.inboundText.trim();
+  if (!inbound) {
+    return "none";
+  }
+
+  if (HARD_STOP_PATTERNS.some((pattern) => pattern.test(inbound))) {
+    return "hard_stop";
+  }
+
+  if (PAUSE_PATTERNS.some((pattern) => pattern.test(inbound))) {
+    return "pause";
+  }
+
+  if (isAckLike(inbound) && looksLoopingConversation(args.historyLines)) {
+    return "loop";
+  }
+
+  if (WRAP_UP_PATTERNS.some((pattern) => pattern.test(inbound)) || isAckLike(inbound)) {
+    return "wrap_up";
+  }
+
+  return "none";
+}
+
+function steeringInstructionForMode(mode: ConversationSteeringMode) {
+  if (mode === "hard_stop") {
+    return "The latest message asks to end contact. Reply with one short, respectful acknowledgment and end the conversation. Do not ask follow-up questions.";
+  }
+  if (mode === "pause") {
+    return "The latest message signals they are busy or want to continue later. Send a short sign-off that confirms the pause. Do not introduce new topics.";
+  }
+  if (mode === "loop") {
+    return "The recent exchange is looping with low-signal acknowledgments. Give one concise closure line and stop extending the thread.";
+  }
+  if (mode === "wrap_up") {
+    return "This exchange appears complete. Give a brief closing response and avoid adding new asks or follow-up questions.";
+  }
+  return "";
+}
+
+function heuristicReply(input: string, historyLines: string[] = []) {
+  const steeringMode = detectConversationSteeringMode({
+    inboundText: input,
+    historyLines,
+  });
+  if (steeringMode === "hard_stop") {
+    return pickVariant(input, ["Understood. I'll leave it here.", "Got it, I'll step back now.", "Understood. I won't push this further."]);
+  }
+
+  if (steeringMode === "pause") {
+    return pickVariant(input, ["No worries, we can pick this up later.", "All good, let's continue later.", "Got you, we'll talk later."]);
+  }
+
+  if (steeringMode === "loop" || steeringMode === "wrap_up") {
+    return pickVariant(input, ["Perfect, we're good here.", "Sounds good, talk soon.", "Great, thanks for the update."]);
+  }
+
   const focus = input
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, " ")
@@ -273,6 +437,25 @@ function buildPrompt(args: {
     process.env.SLM_AI_REPLY_POLICY ||
     HARD_CODED_AZURE_DEFAULTS.replyPolicyInstruction ||
     "";
+  const soulModeEnabled = args.runtime?.soulModeEnabled ?? true;
+  const funnyKeywords = (args.runtime?.funnyStatusKeywords || DEFAULT_FUNNY_STATUS_KEYWORDS).slice(0, 30);
+  const funnyEmojis = (args.runtime?.funnyStatusEmojis || DEFAULT_FUNNY_STATUS_EMOJIS).slice(0, 30);
+  const playfulMoment =
+    /\b(lol|haha|lmao|funny|meme|banter|joke|status|story|update)\b/i.test(args.inboundText) ||
+    hasKeyword(args.inboundText, funnyKeywords) ||
+    hasEmoji(args.inboundText, funnyEmojis);
+  const soulInstruction = soulModeEnabled
+    ? "Keep a grounded, emotionally-aware human tone. Show warmth and personality without sounding scripted."
+    : "Use a neutral, practical tone and avoid playful language.";
+  const playfulInstruction =
+    soulModeEnabled && playfulMoment
+      ? "The latest message is playful. A short, tasteful joke or witty line is allowed if it helps the conversation."
+      : "";
+  const steeringMode = detectConversationSteeringMode({
+    inboundText: args.inboundText,
+    historyLines: args.historyLines,
+  });
+  const steeringInstruction = steeringInstructionForMode(steeringMode);
 
   return [
     "You are writing one WhatsApp reply as the account owner.",
@@ -282,8 +465,12 @@ function buildPrompt(args: {
     "Directly react to something concrete in the latest inbound message (topic, emotion, or request).",
     "Do not mention AI, policies, prompt rules, or internal reasoning.",
     "Do not overpromise. If timing is uncertain, say you'll confirm shortly.",
+    "Do not prolong the conversation unnecessarily. If the intent is complete, close gracefully in one short line.",
     "Avoid generic fillers like 'Noted', 'As an AI', 'I hope this message finds you well', or repetitive templates.",
     "Never send placeholder lines like 'Sounds good, I'll handle it and update you soon' or 'Got it, I'm on it.'",
+    soulInstruction,
+    playfulInstruction,
+    steeringInstruction,
     replyPolicyInstruction ? `Additional reply policy: ${replyPolicyInstruction}` : "",
     mimicryInstruction,
     personalityLevelInstruction,
@@ -291,6 +478,9 @@ function buildPrompt(args: {
     args.personality?.profileDescription ? `Personality description: ${args.personality.profileDescription}` : "",
     args.personality?.profilePrompt ? `Personality behavior instruction: ${args.personality.profilePrompt}` : "",
     args.personality?.customPrompt ? `Thread-specific personality note: ${args.personality.customPrompt}` : "",
+    args.personality?.threadPromptProfile
+      ? `Conversation-specific prompt profile (${args.personality.threadPromptProfileSource || "manual"}): ${args.personality.threadPromptProfile}`
+      : "",
     args.grounding?.myName ? `My preferred name in this thread: ${args.grounding.myName}` : "",
     args.grounding?.theirName ? `Contact preferred name in this thread: ${args.grounding.theirName}` : "",
     args.grounding?.autoAliases?.length ? `Known contact aliases: ${args.grounding.autoAliases.slice(0, 8).join(", ")}` : "",
@@ -379,6 +569,22 @@ function buildAzureResponsesEndpoint(endpoint: string) {
     }
     if (/\/openai\/v1\/?$/i.test(parsed.pathname)) {
       parsed.pathname = `${parsed.pathname.replace(/\/+$/, "")}/responses`;
+      return parsed.toString();
+    }
+  } catch {
+    // Keep original endpoint when URL parsing fails.
+  }
+  return endpoint;
+}
+
+function buildAzureChatCompletionsEndpoint(endpoint: string) {
+  try {
+    const parsed = new URL(endpoint);
+    if (/\/chat\/completions\/?$/i.test(parsed.pathname)) {
+      return parsed.toString();
+    }
+    if (/\/openai\/v1\/?$/i.test(parsed.pathname)) {
+      parsed.pathname = `${parsed.pathname.replace(/\/+$/, "")}/chat/completions`;
       return parsed.toString();
     }
   } catch {
@@ -490,6 +696,42 @@ function extractAzureResponsesText(data: unknown) {
     })
     .filter(Boolean)
     .join("\n");
+}
+
+function extractAzureChatCompletionText(data: unknown) {
+  if (!data || typeof data !== "object") {
+    return "";
+  }
+  const choices = (data as { choices?: unknown }).choices;
+  if (!Array.isArray(choices) || choices.length === 0) {
+    return "";
+  }
+  const firstChoice = choices[0];
+  if (!firstChoice || typeof firstChoice !== "object") {
+    return "";
+  }
+  const message = (firstChoice as { message?: unknown }).message;
+  if (!message || typeof message !== "object") {
+    return "";
+  }
+
+  const content = (message as { content?: unknown }).content;
+  if (typeof content === "string") {
+    return content;
+  }
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (!part || typeof part !== "object") {
+          return "";
+        }
+        const text = (part as { text?: unknown }).text;
+        return typeof text === "string" ? text : "";
+      })
+      .join("\n");
+  }
+
+  return "";
 }
 
 function getAzureConfig(runtime?: RuntimeAiTuning): AzureConfig {
@@ -763,6 +1005,187 @@ async function runAzure(prompt: string, inboundText: string, runtime?: RuntimeAi
   }
 }
 
+function sanitizeImageAnalysisText(raw: string) {
+  const cleaned = normalizeOutboundText(raw.replace(/^image analysis\s*[:\-]\s*/i, "").trim());
+  if (!cleaned) {
+    return "";
+  }
+  if (cleaned.length <= 640) {
+    return cleaned;
+  }
+  return `${cleaned.slice(0, 637).trim()}...`;
+}
+
+function heuristicImageAnalysis(caption?: string) {
+  const safeCaption = (caption || "").trim();
+  if (safeCaption) {
+    return `Image received. Caption says "${safeCaption}", but I could not analyze visual details right now.`;
+  }
+  return "Image received, but I could not analyze visual details right now.";
+}
+
+function buildImageAnalysisPrompt(caption?: string) {
+  const captionLine = caption?.trim() ? `Sender caption: ${caption.trim()}` : "Sender caption: none";
+  return [
+    "Analyze this inbound WhatsApp image or screenshot.",
+    "Return 2-4 short lines with: what is visible, any readable text, and the likely intent/context.",
+    "If uncertain, say so briefly.",
+    captionLine,
+  ].join("\n");
+}
+
+export async function describeInboundImageWithFallback(args: {
+  imageBytes: Buffer;
+  mimeType?: string;
+  caption?: string;
+  runtime?: RuntimeAiTuning;
+}): Promise<ImageAnalysisResult> {
+  const cfg = getAzureConfig(args.runtime);
+  const heuristic = (): ImageAnalysisResult => ({
+    description: heuristicImageAnalysis(args.caption),
+    provider: "heuristic",
+    model: "heuristic-image-fallback",
+    latencyMs: 0,
+  });
+
+  if (!cfg.endpoint || !cfg.apiKey) {
+    return {
+      ...heuristic(),
+      error: "Azure AI endpoint/key missing.",
+    };
+  }
+
+  if (!args.imageBytes || args.imageBytes.length === 0) {
+    return {
+      ...heuristic(),
+      error: "Image payload is empty.",
+    };
+  }
+
+  if (args.imageBytes.length > 6_000_000) {
+    return {
+      ...heuristic(),
+      error: `Image too large for analysis (${args.imageBytes.length} bytes).`,
+    };
+  }
+
+  const mimeType = (args.mimeType || "image/jpeg").trim().toLowerCase();
+  const safeMimeType = /^image\/[a-z0-9.+-]+$/.test(mimeType) ? mimeType : "image/jpeg";
+  const dataUrl = `data:${safeMimeType};base64,${args.imageBytes.toString("base64")}`;
+  const prompt = buildImageAnalysisPrompt(args.caption);
+  const start = Date.now();
+
+  try {
+    if (cfg.apiStyle === "responses") {
+      const responsesEndpoint = buildAzureResponsesEndpoint(cfg.endpoint);
+      const response = await fetch(responsesEndpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "api-key": cfg.apiKey,
+          Authorization: `Bearer ${cfg.apiKey}`,
+        },
+        body: JSON.stringify({
+          model: cfg.model,
+          instructions: "You are a concise visual assistant for inbound WhatsApp images.",
+          input: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "input_text",
+                  text: prompt,
+                },
+                {
+                  type: "input_image",
+                  image_url: dataUrl,
+                },
+              ],
+            },
+          ],
+          temperature: Math.min(cfg.temperature, 0.4),
+          max_output_tokens: Math.min(cfg.maxOutputTokens, 280),
+        }),
+      });
+      if (!response.ok) {
+        const body = await response.text();
+        throw new Error(`Azure image analysis failed (${response.status}): ${body.slice(0, 240)}`);
+      }
+      const data = await response.json();
+      const description = sanitizeImageAnalysisText(extractAzureResponsesText(data));
+      if (!description) {
+        throw new Error("Azure image analysis returned empty text.");
+      }
+      return {
+        description,
+        provider: "azure",
+        model: cfg.model,
+        latencyMs: Date.now() - start,
+      };
+    }
+
+    const chatEndpoint = buildAzureChatCompletionsEndpoint(cfg.endpoint);
+    const response = await fetch(chatEndpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "api-key": cfg.apiKey,
+        Authorization: `Bearer ${cfg.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: cfg.model,
+        messages: [
+          {
+            role: "system",
+            content: "You are a concise visual assistant for inbound WhatsApp images.",
+          },
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: prompt,
+              },
+              {
+                type: "image_url",
+                image_url: {
+                  url: dataUrl,
+                },
+              },
+            ],
+          },
+        ],
+        temperature: Math.min(cfg.temperature, 0.4),
+        max_tokens: Math.min(cfg.maxOutputTokens, 280),
+      }),
+    });
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`Azure image analysis failed (${response.status}): ${body.slice(0, 240)}`);
+    }
+
+    const data = await response.json();
+    const description = sanitizeImageAnalysisText(extractAzureChatCompletionText(data));
+    if (!description) {
+      throw new Error("Azure image analysis returned empty text.");
+    }
+
+    return {
+      description,
+      provider: "azure",
+      model: cfg.model,
+      latencyMs: Date.now() - start,
+    };
+  } catch (error) {
+    return {
+      ...heuristic(),
+      latencyMs: Date.now() - start,
+      error: toErrorMessage(error),
+    };
+  }
+}
+
 async function runCodex(prompt: string, inboundText: string, runtime?: RuntimeAiTuning): Promise<AttemptOutcome> {
   const codexPath = process.env.CODEX_CLI_PATH || "codex";
   const model = process.env.CODEX_FALLBACK_MODEL || "gpt-5.2";
@@ -893,7 +1316,7 @@ export async function generateReplyWithFallback(args: {
     latencyMs: 0,
   });
   return {
-    text: normalizeOutboundText(heuristicReply(args.inboundText)),
+    text: normalizeOutboundText(heuristicReply(args.inboundText, args.historyLines)),
     provider: "heuristic",
     model: "heuristic-fallback",
     latencyMs: 0,

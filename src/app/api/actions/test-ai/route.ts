@@ -6,6 +6,9 @@ import { NextResponse } from "next/server";
 export const runtime = "nodejs";
 
 type RuntimeSettings = {
+  soulModeEnabled?: boolean;
+  funnyStatusKeywords?: string[];
+  funnyStatusEmojis?: string[];
   aiTemperature?: number;
   aiMaxOutputTokens?: number;
   aiMaxReplyChars?: number;
@@ -146,6 +149,9 @@ export async function POST(request: Request) {
         fallbackMode: runtimeSettings?.aiFallbackMode,
         replyPolicyInstruction: runtimeSettings?.aiReplyPolicy || "",
         systemInstruction: runtimeSettings?.aiSystemInstruction || "",
+        soulModeEnabled: runtimeSettings?.soulModeEnabled,
+        funnyStatusKeywords: runtimeSettings?.funnyStatusKeywords,
+        funnyStatusEmojis: runtimeSettings?.funnyStatusEmojis,
         delayMinMs: runtimeSettings?.humanDelayMinMs,
         delayMaxMs: runtimeSettings?.humanDelayMaxMs,
         typingMinMs: runtimeSettings?.humanTypingMinMs,

@@ -1,6 +1,13 @@
 import { v } from "convex/values";
+import { internal } from "./_generated/api";
 import { internalMutation, mutation } from "./_generated/server";
 import { DEFAULT_LEASE_MS, DEFAULT_RETRY_LIMIT } from "./lib/constants";
+import { getConfig } from "./lib/config";
+import {
+  classifyThreadKind,
+  eligibilityReasonLabel,
+  resolveThreadEligibility,
+} from "./lib/threadEligibility";
 
 export const claimDue = mutation({
   args: {
@@ -12,6 +19,7 @@ export const claimDue = mutation({
     const now = Date.now();
     const leaseMs = args.leaseMs ?? DEFAULT_LEASE_MS;
     const max = Math.min(args.limit ?? 5, 20);
+    const config = await getConfig(ctx);
 
     const expiredClaims = await ctx.db
       .query("outbox")
@@ -54,6 +62,56 @@ export const claimDue = mutation({
       const draft = await ctx.db.get(item.draftId);
       const thread = await ctx.db.get(item.threadId);
       if (!draft || !thread) {
+        continue;
+      }
+
+      const threadKind = thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup });
+      const explicitIgnore = await ctx.db
+        .query("ignoreRules")
+        .withIndex("by_target", (q) =>
+          q.eq("targetType", threadKind === "group" ? "group" : "contact").eq("targetValue", thread.jid),
+        )
+        .first();
+      const eligibility = resolveThreadEligibility({
+        thread: {
+          jid: thread.jid,
+          isIgnored: thread.isIgnored,
+          isArchived: thread.isArchived,
+          threadKind,
+        },
+        ignoreGroupsByDefault: config.ignoreGroupsByDefault,
+        explicitIgnoreEnabled: Boolean(explicitIgnore?.enabled),
+      });
+      if (!eligibility.allowed) {
+        const reason = `Blocked by eligibility: ${eligibility.reason} (${eligibilityReasonLabel(eligibility.reason)}).`;
+        await ctx.db.patch(item._id, {
+          status: "failed",
+          workerId: undefined,
+          leaseExpiresAt: undefined,
+          error: reason,
+          updatedAt: now,
+        });
+        await ctx.db.patch(draft._id, {
+          status: "rejected",
+          updatedAt: now,
+        });
+        if (item.followUpId) {
+          const followUp = await ctx.db.get(item.followUpId);
+          if (followUp && followUp.status === "queued") {
+            await ctx.db.patch(followUp._id, {
+              status: "failed",
+              updatedAt: now,
+            });
+          }
+        }
+        await ctx.db.insert("systemEvents", {
+          source: "worker",
+          eventType: "outbox.blocked.eligibility",
+          threadId: item.threadId,
+          outboxId: item._id,
+          detail: reason,
+          createdAt: now,
+        });
         continue;
       }
 
@@ -261,6 +319,10 @@ export const markSent = mutation({
       createdAt: now,
     });
 
+    await ctx.scheduler.runAfter(0, internal.backlog.refreshThread, {
+      threadId: item.threadId,
+    });
+
     return item._id;
   },
 });
@@ -269,6 +331,7 @@ export const markFailed = mutation({
   args: {
     outboxId: v.id("outbox"),
     error: v.string(),
+    forceFinal: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const item = await ctx.db.get(args.outboxId);
@@ -277,7 +340,7 @@ export const markFailed = mutation({
     }
 
     const now = Date.now();
-    const exhausted = item.attempts >= DEFAULT_RETRY_LIMIT;
+    const exhausted = Boolean(args.forceFinal) || item.attempts >= DEFAULT_RETRY_LIMIT;
 
     await ctx.db.patch(item._id, {
       status: exhausted ? "failed" : "pending",
@@ -305,6 +368,10 @@ export const markFailed = mutation({
       outboxId: item._id,
       detail: args.error.slice(0, 400),
       createdAt: now,
+    });
+
+    await ctx.scheduler.runAfter(0, internal.backlog.refreshThread, {
+      threadId: item.threadId,
     });
 
     return item._id;

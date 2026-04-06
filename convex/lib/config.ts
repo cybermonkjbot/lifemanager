@@ -7,6 +7,12 @@ export type AppConfig = {
   reactionsEnabled: boolean;
   stickersEnabled: boolean;
   memesEnabled: boolean;
+  soulModeEnabled: boolean;
+  humorLearningEnabled: boolean;
+  statusAutoReplyEnabled: boolean;
+  statusReplyRequireFunny: boolean;
+  funnyStatusKeywords: string[];
+  funnyStatusEmojis: string[];
   aiFallbackMode: "all" | "azure_only";
   aiTemperature: number;
   aiMaxOutputTokens: number;
@@ -22,6 +28,9 @@ export type AppConfig = {
   humanTypingMaxMs: number;
   outboxClaimLimit: number;
   outboxPollMs: number;
+  inboundMergeWindowMs: number;
+  inboundConcurrency: number;
+  outboxSendConcurrency: number;
   outreachEnabled: boolean;
   outreachCadenceHours: number;
   outreachMaxContactsPerRun: number;
@@ -35,6 +44,12 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
   reactionsEnabled: true,
   stickersEnabled: true,
   memesEnabled: true,
+  soulModeEnabled: true,
+  humorLearningEnabled: true,
+  statusAutoReplyEnabled: true,
+  statusReplyRequireFunny: true,
+  funnyStatusKeywords: ["lol", "lmao", "haha", "funny", "joke", "banter", "meme", "wild", "roast", "status", "story", "dead"],
+  funnyStatusEmojis: ["😂", "🤣", "😹", "😆", "😅", "😄", "😁", "😜", "🤪", "🙃", "🔥", "💀"],
   aiFallbackMode: "all",
   aiTemperature: 0.7,
   aiMaxOutputTokens: 140,
@@ -50,6 +65,9 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
   humanTypingMaxMs: 9_000,
   outboxClaimLimit: 8,
   outboxPollMs: 3_000,
+  inboundMergeWindowMs: 45_000,
+  inboundConcurrency: 4,
+  outboxSendConcurrency: 4,
   outreachEnabled: false,
   outreachCadenceHours: 36,
   outreachMaxContactsPerRun: 3,
@@ -111,6 +129,16 @@ export async function getConfig(ctx: QueryCtx | MutationCtx): Promise<AppConfig>
     reactionsEnabled: parseBoolean(map.get("reactionsEnabled"), DEFAULT_APP_CONFIG.reactionsEnabled),
     stickersEnabled: parseBoolean(map.get("stickersEnabled"), DEFAULT_APP_CONFIG.stickersEnabled),
     memesEnabled: parseBoolean(map.get("memesEnabled"), DEFAULT_APP_CONFIG.memesEnabled),
+    soulModeEnabled: parseBoolean(map.get("soulModeEnabled"), DEFAULT_APP_CONFIG.soulModeEnabled),
+    humorLearningEnabled: parseBoolean(map.get("humorLearningEnabled"), DEFAULT_APP_CONFIG.humorLearningEnabled),
+    statusAutoReplyEnabled: parseBoolean(map.get("statusAutoReplyEnabled"), DEFAULT_APP_CONFIG.statusAutoReplyEnabled),
+    statusReplyRequireFunny: parseBoolean(map.get("statusReplyRequireFunny"), DEFAULT_APP_CONFIG.statusReplyRequireFunny),
+    funnyStatusKeywords: parseList(map.get("funnyStatusKeywords")).length
+      ? parseList(map.get("funnyStatusKeywords"))
+      : DEFAULT_APP_CONFIG.funnyStatusKeywords,
+    funnyStatusEmojis: parseList(map.get("funnyStatusEmojis")).length
+      ? parseList(map.get("funnyStatusEmojis"))
+      : DEFAULT_APP_CONFIG.funnyStatusEmojis,
     aiFallbackMode: parseFallbackMode(map.get("aiFallbackMode"), DEFAULT_APP_CONFIG.aiFallbackMode),
     aiTemperature: clamp(parseNumber(map.get("aiTemperature"), DEFAULT_APP_CONFIG.aiTemperature), 0, 1.3),
     aiMaxOutputTokens: Math.round(clamp(parseNumber(map.get("aiMaxOutputTokens"), DEFAULT_APP_CONFIG.aiMaxOutputTokens), 40, 1000)),
@@ -126,6 +154,13 @@ export async function getConfig(ctx: QueryCtx | MutationCtx): Promise<AppConfig>
     humanTypingMaxMs: Math.round(clamp(parseNumber(map.get("humanTypingMaxMs"), DEFAULT_APP_CONFIG.humanTypingMaxMs), 200, 120_000)),
     outboxClaimLimit: Math.round(clamp(parseNumber(map.get("outboxClaimLimit"), DEFAULT_APP_CONFIG.outboxClaimLimit), 1, 20)),
     outboxPollMs: Math.round(clamp(parseNumber(map.get("outboxPollMs"), DEFAULT_APP_CONFIG.outboxPollMs), 500, 60_000)),
+    inboundMergeWindowMs: Math.round(
+      clamp(parseNumber(map.get("inboundMergeWindowMs"), DEFAULT_APP_CONFIG.inboundMergeWindowMs), 2_000, 180_000),
+    ),
+    inboundConcurrency: Math.round(clamp(parseNumber(map.get("inboundConcurrency"), DEFAULT_APP_CONFIG.inboundConcurrency), 1, 16)),
+    outboxSendConcurrency: Math.round(
+      clamp(parseNumber(map.get("outboxSendConcurrency"), DEFAULT_APP_CONFIG.outboxSendConcurrency), 1, 16),
+    ),
     outreachEnabled: parseBoolean(map.get("outreachEnabled"), DEFAULT_APP_CONFIG.outreachEnabled),
     outreachCadenceHours: Math.round(
       clamp(parseNumber(map.get("outreachCadenceHours"), DEFAULT_APP_CONFIG.outreachCadenceHours), 6, 24 * 14),

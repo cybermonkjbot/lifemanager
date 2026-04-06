@@ -11,6 +11,12 @@ type SettingsState = {
   reactionsEnabled: boolean;
   stickersEnabled: boolean;
   memesEnabled: boolean;
+  soulModeEnabled: boolean;
+  humorLearningEnabled: boolean;
+  statusAutoReplyEnabled: boolean;
+  statusReplyRequireFunny: boolean;
+  funnyStatusKeywords: string[];
+  funnyStatusEmojis: string[];
   aiFallbackMode: "all" | "azure_only";
   aiTemperature: number;
   aiMaxOutputTokens: number;
@@ -26,6 +32,7 @@ type SettingsState = {
   humanTypingMaxMs: number;
   outboxClaimLimit: number;
   outboxPollMs: number;
+  inboundMergeWindowMs: number;
   outreachEnabled: boolean;
   outreachCadenceHours: number;
   outreachMaxContactsPerRun: number;
@@ -45,6 +52,13 @@ function toState(source: Partial<SettingsState> | undefined): SettingsState {
     reactionsEnabled: source?.reactionsEnabled ?? true,
     stickersEnabled: source?.stickersEnabled ?? true,
     memesEnabled: source?.memesEnabled ?? true,
+    soulModeEnabled: source?.soulModeEnabled ?? true,
+    humorLearningEnabled: source?.humorLearningEnabled ?? true,
+    statusAutoReplyEnabled: source?.statusAutoReplyEnabled ?? true,
+    statusReplyRequireFunny: source?.statusReplyRequireFunny ?? true,
+    funnyStatusKeywords:
+      source?.funnyStatusKeywords ?? ["lol", "lmao", "haha", "funny", "joke", "banter", "meme", "wild", "roast", "status", "story", "dead"],
+    funnyStatusEmojis: source?.funnyStatusEmojis ?? ["😂", "🤣", "😹", "😆", "😅", "😄", "😁", "😜", "🤪", "🙃", "🔥", "💀"],
     aiFallbackMode: source?.aiFallbackMode ?? "all",
     aiTemperature: source?.aiTemperature ?? 0.7,
     aiMaxOutputTokens: source?.aiMaxOutputTokens ?? 140,
@@ -60,6 +74,7 @@ function toState(source: Partial<SettingsState> | undefined): SettingsState {
     humanTypingMaxMs: source?.humanTypingMaxMs ?? 9000,
     outboxClaimLimit: source?.outboxClaimLimit ?? 8,
     outboxPollMs: source?.outboxPollMs ?? 3000,
+    inboundMergeWindowMs: source?.inboundMergeWindowMs ?? 45000,
     outreachEnabled: source?.outreachEnabled ?? false,
     outreachCadenceHours: source?.outreachCadenceHours ?? 36,
     outreachMaxContactsPerRun: source?.outreachMaxContactsPerRun ?? 3,
@@ -78,6 +93,12 @@ function stateEquals(a: SettingsState, b: SettingsState) {
     a.reactionsEnabled === b.reactionsEnabled &&
     a.stickersEnabled === b.stickersEnabled &&
     a.memesEnabled === b.memesEnabled &&
+    a.soulModeEnabled === b.soulModeEnabled &&
+    a.humorLearningEnabled === b.humorLearningEnabled &&
+    a.statusAutoReplyEnabled === b.statusAutoReplyEnabled &&
+    a.statusReplyRequireFunny === b.statusReplyRequireFunny &&
+    a.funnyStatusKeywords.join("\n") === b.funnyStatusKeywords.join("\n") &&
+    a.funnyStatusEmojis.join("\n") === b.funnyStatusEmojis.join("\n") &&
     a.aiFallbackMode === b.aiFallbackMode &&
     nearlyEqual(a.aiTemperature, b.aiTemperature) &&
     nearlyEqual(a.aiMaxOutputTokens, b.aiMaxOutputTokens) &&
@@ -93,6 +114,7 @@ function stateEquals(a: SettingsState, b: SettingsState) {
     nearlyEqual(a.humanTypingMaxMs, b.humanTypingMaxMs) &&
     nearlyEqual(a.outboxClaimLimit, b.outboxClaimLimit) &&
     nearlyEqual(a.outboxPollMs, b.outboxPollMs) &&
+    nearlyEqual(a.inboundMergeWindowMs, b.inboundMergeWindowMs) &&
     a.outreachEnabled === b.outreachEnabled &&
     nearlyEqual(a.outreachCadenceHours, b.outreachCadenceHours) &&
     nearlyEqual(a.outreachMaxContactsPerRun, b.outreachMaxContactsPerRun) &&
@@ -108,6 +130,14 @@ function parseNumber(value: string, fallback: number) {
 
 function parseContactJids(value: string) {
   return [...new Set(value.split("\n").map((item) => item.trim()).filter(Boolean))];
+}
+
+function parseSimpleList(value: string, lowercase = false) {
+  const normalized = value
+    .split(/[\n,]/)
+    .map((item) => (lowercase ? item.trim().toLowerCase() : item.trim()))
+    .filter(Boolean);
+  return [...new Set(normalized)];
 }
 
 export function LiveSettings() {
@@ -146,6 +176,12 @@ export function LiveSettings() {
           reactionsEnabled: draft.reactionsEnabled,
           stickersEnabled: draft.stickersEnabled,
           memesEnabled: draft.memesEnabled,
+          soulModeEnabled: draft.soulModeEnabled,
+          humorLearningEnabled: draft.humorLearningEnabled,
+          statusAutoReplyEnabled: draft.statusAutoReplyEnabled,
+          statusReplyRequireFunny: draft.statusReplyRequireFunny,
+          funnyStatusKeywords: draft.funnyStatusKeywords,
+          funnyStatusEmojis: draft.funnyStatusEmojis,
           aiFallbackMode: draft.aiFallbackMode,
           aiTemperature: draft.aiTemperature,
           aiMaxOutputTokens: Math.round(draft.aiMaxOutputTokens),
@@ -161,6 +197,7 @@ export function LiveSettings() {
           humanTypingMaxMs: Math.round(draft.humanTypingMaxMs),
           outboxClaimLimit: Math.round(draft.outboxClaimLimit),
           outboxPollMs: Math.round(draft.outboxPollMs),
+          inboundMergeWindowMs: Math.round(draft.inboundMergeWindowMs),
           outreachEnabled: draft.outreachEnabled,
           outreachCadenceHours: Math.round(draft.outreachCadenceHours),
           outreachMaxContactsPerRun: Math.round(draft.outreachMaxContactsPerRun),
@@ -452,6 +489,111 @@ export function LiveSettings() {
           </label>
 
           <label className="stack compact">
+            <span className="queue-meta">Soul mode</span>
+            <select
+              value={draft.soulModeEnabled ? "true" : "false"}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  soulModeEnabled: event.target.value === "true",
+                }))
+              }
+              disabled={record.pending}
+              aria-disabled={record.pending}
+            >
+              <option value="true">On (human warmth + playful tone)</option>
+              <option value="false">Off (neutral tone)</option>
+            </select>
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Humor learning</span>
+            <select
+              value={draft.humorLearningEnabled ? "true" : "false"}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  humorLearningEnabled: event.target.value === "true",
+                }))
+              }
+              disabled={record.pending}
+              aria-disabled={record.pending}
+            >
+              <option value="true">On (learn from positive funny signals)</option>
+              <option value="false">Off</option>
+            </select>
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Status auto-replies</span>
+            <select
+              value={draft.statusAutoReplyEnabled ? "true" : "false"}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  statusAutoReplyEnabled: event.target.value === "true",
+                }))
+              }
+              disabled={record.pending}
+              aria-disabled={record.pending}
+            >
+              <option value="true">On</option>
+              <option value="false">Off</option>
+            </select>
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Status reply mode</span>
+            <select
+              value={draft.statusReplyRequireFunny ? "true" : "false"}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  statusReplyRequireFunny: event.target.value === "true",
+                }))
+              }
+              disabled={record.pending || !draft.statusAutoReplyEnabled}
+              aria-disabled={record.pending || !draft.statusAutoReplyEnabled}
+            >
+              <option value="true">Only funny/playful statuses</option>
+              <option value="false">Any status text</option>
+            </select>
+            {!draft.statusAutoReplyEnabled ? <span className="queue-meta">Enable status auto-replies to use this.</span> : null}
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Funny status keywords (comma or new line)</span>
+            <textarea
+              rows={3}
+              value={draft.funnyStatusKeywords.join("\n")}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  funnyStatusKeywords: parseSimpleList(event.target.value, true),
+                }))
+              }
+              disabled={record.pending}
+              aria-disabled={record.pending}
+            />
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Funny status emojis (comma or new line)</span>
+            <textarea
+              rows={2}
+              value={draft.funnyStatusEmojis.join("\n")}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  funnyStatusEmojis: parseSimpleList(event.target.value, false),
+                }))
+              }
+              disabled={record.pending}
+              aria-disabled={record.pending}
+            />
+          </label>
+
+          <label className="stack compact">
             <span className="queue-meta">Delay min (ms)</span>
             <input
               type="number"
@@ -533,6 +675,25 @@ export function LiveSettings() {
               disabled={record.pending}
               aria-disabled={record.pending}
             />
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Inbound merge window (ms)</span>
+            <input
+              type="number"
+              min={2000}
+              max={180000}
+              step={500}
+              value={draft.inboundMergeWindowMs}
+              onChange={(event) =>
+                setDraft((prev) => ({ ...prev, inboundMergeWindowMs: parseNumber(event.target.value, prev.inboundMergeWindowMs) }))
+              }
+              disabled={record.pending}
+              aria-disabled={record.pending}
+            />
+            <span className="queue-meta">
+              New inbound messages in the same chat within this window update the pending unsent reply instead of creating another one.
+            </span>
           </label>
 
           <p className="queue-meta">

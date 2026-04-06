@@ -47,3 +47,35 @@ export const upsertIgnoreRule = mutation({
     });
   },
 });
+
+export const setIgnoreRuleEnabled = mutation({
+  args: {
+    ruleId: v.id("ignoreRules"),
+    enabled: v.boolean(),
+  },
+  handler: async (ctx, args) => {
+    const row = await ctx.db.get(args.ruleId);
+    if (!row) {
+      throw new Error("Rule not found.");
+    }
+    await ctx.db.patch(row._id, {
+      enabled: args.enabled,
+      updatedAt: Date.now(),
+    });
+    return row._id;
+  },
+});
+
+export const deleteIgnoreRule = mutation({
+  args: {
+    ruleId: v.id("ignoreRules"),
+  },
+  handler: async (ctx, args) => {
+    const row = await ctx.db.get(args.ruleId);
+    if (!row) {
+      return null;
+    }
+    await ctx.db.delete(row._id);
+    return row._id;
+  },
+});

@@ -18,6 +18,7 @@ const navItems = [
   { href: "/setup", label: "Setup" },
   { href: "/", label: "Queue" },
   { href: "/conversations", label: "Conversations" },
+  { href: "/backlog", label: "Unread Backlog" },
   { href: "/followups", label: "Follow-ups" },
   { href: "/style-lab", label: "Style Lab" },
   { href: "/rules", label: "Rules" },

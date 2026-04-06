@@ -8,6 +8,7 @@
  * @module
  */
 
+import type * as backlog from "../backlog.js";
 import type * as crons from "../crons.js";
 import type * as draft from "../draft.js";
 import type * as followups from "../followups.js";
@@ -18,6 +19,7 @@ import type * as inbound from "../inbound.js";
 import type * as lib_config from "../lib/config.js";
 import type * as lib_constants from "../lib/constants.js";
 import type * as lib_heuristics from "../lib/heuristics.js";
+import type * as lib_threadEligibility from "../lib/threadEligibility.js";
 import type * as lib_time from "../lib/time.js";
 import type * as lib_types from "../lib/types.js";
 import type * as media from "../media.js";
@@ -42,6 +44,7 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  backlog: typeof backlog;
   crons: typeof crons;
   draft: typeof draft;
   followups: typeof followups;
@@ -52,6 +55,7 @@ declare const fullApi: ApiFromModules<{
   "lib/config": typeof lib_config;
   "lib/constants": typeof lib_constants;
   "lib/heuristics": typeof lib_heuristics;
+  "lib/threadEligibility": typeof lib_threadEligibility;
   "lib/time": typeof lib_time;
   "lib/types": typeof lib_types;
   media: typeof media;
