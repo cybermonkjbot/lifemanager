@@ -513,6 +513,37 @@ export const hydrateAiOutreach = mutation({
   },
 });
 
+export const rewriteClaimedMessage = mutation({
+  args: {
+    outboxId: v.id("outbox"),
+    messageText: v.string(),
+    mediaCaption: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const outbox = await ctx.db.get(args.outboxId);
+    if (!outbox) {
+      return null;
+    }
+
+    const now = Date.now();
+    await ctx.db.patch(outbox._id, {
+      messageText: args.messageText,
+      mediaCaption: args.mediaCaption,
+      updatedAt: now,
+    });
+
+    const draft = await ctx.db.get(outbox.draftId);
+    if (draft) {
+      await ctx.db.patch(draft._id, {
+        text: args.messageText,
+        updatedAt: now,
+      });
+    }
+
+    return outbox._id;
+  },
+});
+
 export const markSent = mutation({
   args: {
     outboxId: v.id("outbox"),

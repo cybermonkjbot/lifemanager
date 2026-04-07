@@ -1,5 +1,6 @@
 import type { MutationCtx, QueryCtx } from "./types";
 import { DEFAULT_AUTONOMY_PAUSED, DEFAULT_IGNORE_GROUPS } from "./constants";
+import { type QualityGateMode } from "./personaPacks";
 
 export type AppConfig = {
   autonomyPaused: boolean;
@@ -22,6 +23,9 @@ export type AppConfig = {
   aiFallbackConfidence: number;
   aiReplyPolicy: string;
   aiSystemInstruction: string;
+  activePersonaPackId: string;
+  qualityGateMode: QualityGateMode;
+  qualityGateThreshold: number;
   humanDelayMinMs: number;
   humanDelayMaxMs: number;
   humanTypingMinMs: number;
@@ -66,6 +70,9 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
   aiFallbackConfidence: 0.58,
   aiReplyPolicy: "",
   aiSystemInstruction: "",
+  activePersonaPackId: "",
+  qualityGateMode: "auto_rewrite_once",
+  qualityGateThreshold: 0.72,
   humanDelayMinMs: 12_000,
   humanDelayMaxMs: 65_000,
   humanTypingMinMs: 2_500,
@@ -133,6 +140,13 @@ function parseFallbackMode(value: string | undefined, fallback: AppConfig["aiFal
   return fallback;
 }
 
+function parseQualityGateMode(value: string | undefined, fallback: QualityGateMode): QualityGateMode {
+  if (value === "auto_rewrite_once" || value === "manual_review" || value === "log_only") {
+    return value;
+  }
+  return fallback;
+}
+
 export async function getConfig(ctx: QueryCtx | MutationCtx): Promise<AppConfig> {
   const rows = await ctx.db.query("appConfig").take(120);
   const map = new Map(rows.map((row) => [row.key, row.value]));
@@ -162,6 +176,13 @@ export async function getConfig(ctx: QueryCtx | MutationCtx): Promise<AppConfig>
     aiFallbackConfidence: clamp(parseNumber(map.get("aiFallbackConfidence"), DEFAULT_APP_CONFIG.aiFallbackConfidence), 0.01, 1),
     aiReplyPolicy: map.get("aiReplyPolicy") ?? DEFAULT_APP_CONFIG.aiReplyPolicy,
     aiSystemInstruction: map.get("aiSystemInstruction") ?? DEFAULT_APP_CONFIG.aiSystemInstruction,
+    activePersonaPackId: (map.get("activePersonaPackId") ?? DEFAULT_APP_CONFIG.activePersonaPackId).trim(),
+    qualityGateMode: parseQualityGateMode(map.get("qualityGateMode"), DEFAULT_APP_CONFIG.qualityGateMode),
+    qualityGateThreshold: clamp(
+      parseNumber(map.get("qualityGateThreshold"), DEFAULT_APP_CONFIG.qualityGateThreshold),
+      0.4,
+      0.95,
+    ),
     humanDelayMinMs: Math.round(clamp(parseNumber(map.get("humanDelayMinMs"), DEFAULT_APP_CONFIG.humanDelayMinMs), 500, 180_000)),
     humanDelayMaxMs: Math.round(clamp(parseNumber(map.get("humanDelayMaxMs"), DEFAULT_APP_CONFIG.humanDelayMaxMs), 500, 240_000)),
     humanTypingMinMs: Math.round(clamp(parseNumber(map.get("humanTypingMinMs"), DEFAULT_APP_CONFIG.humanTypingMinMs), 200, 60_000)),

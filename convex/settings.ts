@@ -38,6 +38,9 @@ export const save = mutation({
     aiFallbackConfidence: v.number(),
     aiReplyPolicy: v.optional(v.string()),
     aiSystemInstruction: v.optional(v.string()),
+    activePersonaPackId: v.optional(v.string()),
+    qualityGateMode: v.optional(v.union(v.literal("auto_rewrite_once"), v.literal("manual_review"), v.literal("log_only"))),
+    qualityGateThreshold: v.optional(v.number()),
     humanDelayMinMs: v.number(),
     humanDelayMaxMs: v.number(),
     humanTypingMinMs: v.number(),
@@ -87,6 +90,9 @@ export const save = mutation({
       aiFallbackConfidence: clamp(args.aiFallbackConfidence, 0.01, 1),
       aiReplyPolicy: args.aiReplyPolicy?.trim() || "",
       aiSystemInstruction: args.aiSystemInstruction?.trim() || "",
+      activePersonaPackId: args.activePersonaPackId?.trim() || "",
+      qualityGateMode: args.qualityGateMode || DEFAULT_APP_CONFIG.qualityGateMode,
+      qualityGateThreshold: clamp(args.qualityGateThreshold ?? DEFAULT_APP_CONFIG.qualityGateThreshold, 0.4, 0.95),
       humanDelayMinMs: clampInt(args.humanDelayMinMs, 500, 180_000),
       humanDelayMaxMs: clampInt(args.humanDelayMaxMs, 500, 240_000),
       humanTypingMinMs: clampInt(args.humanTypingMinMs, 200, 60_000),
@@ -149,6 +155,9 @@ export const save = mutation({
     await setConfigValue(ctx, "aiFallbackConfidence", String(normalized.aiFallbackConfidence));
     await setConfigValue(ctx, "aiReplyPolicy", normalized.aiReplyPolicy);
     await setConfigValue(ctx, "aiSystemInstruction", normalized.aiSystemInstruction);
+    await setConfigValue(ctx, "activePersonaPackId", normalized.activePersonaPackId);
+    await setConfigValue(ctx, "qualityGateMode", normalized.qualityGateMode);
+    await setConfigValue(ctx, "qualityGateThreshold", String(normalized.qualityGateThreshold));
     await setConfigValue(ctx, "humanDelayMinMs", String(normalized.humanDelayMinMs));
     await setConfigValue(ctx, "humanDelayMaxMs", String(normalized.humanDelayMaxMs));
     await setConfigValue(ctx, "humanTypingMinMs", String(normalized.humanTypingMinMs));

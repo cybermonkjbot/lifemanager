@@ -24,6 +24,16 @@ type TestResult = {
   guardrailBlocked: boolean;
   guardrailReason?: string;
   attempts: TestAttempt[];
+  qualityScore?: number;
+  qualityChecks?: Array<{
+    id: string;
+    label: string;
+    score: number;
+    passed: boolean;
+    detail: string;
+  }>;
+  qualityRewriteApplied?: boolean;
+  activePersonaPackId?: string | null;
   createdAt: number;
   usedThreadContext: boolean;
 };
@@ -156,6 +166,21 @@ function AiTestBench() {
               {result.provider.toUpperCase()} · {result.model} · {result.latencyMs}ms · {formatDateTime(result.createdAt)}
             </p>
             <p className="queue-meta">{result.usedThreadContext ? "Used conversation context." : "No conversation context used."}</p>
+            {result.activePersonaPackId ? <p className="queue-meta">Persona pack: {result.activePersonaPackId}</p> : null}
+            {typeof result.qualityScore === "number" ? (
+              <p className="queue-meta">
+                Quality score: {(result.qualityScore * 100).toFixed(0)}%{result.qualityRewriteApplied ? " · rewritten once" : ""}
+              </p>
+            ) : null}
+            {Array.isArray(result.qualityChecks) && result.qualityChecks.length > 0 ? (
+              <div className="stack compact">
+                {result.qualityChecks.map((check) => (
+                  <p key={check.id} className="queue-meta">
+                    {check.passed ? "PASS" : "FAIL"} · {check.label} · {(check.score * 100).toFixed(0)}%
+                  </p>
+                ))}
+              </div>
+            ) : null}
             {result.guardrailBlocked ? <p className="queue-meta">Guardrail: {result.guardrailReason || "Manual review required."}</p> : null}
           </div>
 

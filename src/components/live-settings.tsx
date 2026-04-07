@@ -26,6 +26,9 @@ type SettingsState = {
   aiFallbackConfidence: number;
   aiReplyPolicy: string;
   aiSystemInstruction: string;
+  activePersonaPackId: string;
+  qualityGateMode: "auto_rewrite_once" | "manual_review" | "log_only";
+  qualityGateThreshold: number;
   humanDelayMinMs: number;
   humanDelayMaxMs: number;
   humanTypingMinMs: number;
@@ -75,6 +78,9 @@ function toState(source: Partial<SettingsState> | undefined): SettingsState {
     aiFallbackConfidence: source?.aiFallbackConfidence ?? 0.58,
     aiReplyPolicy: source?.aiReplyPolicy ?? "",
     aiSystemInstruction: source?.aiSystemInstruction ?? "",
+    activePersonaPackId: source?.activePersonaPackId ?? "",
+    qualityGateMode: source?.qualityGateMode ?? "auto_rewrite_once",
+    qualityGateThreshold: source?.qualityGateThreshold ?? 0.72,
     humanDelayMinMs: source?.humanDelayMinMs ?? 12000,
     humanDelayMaxMs: source?.humanDelayMaxMs ?? 65000,
     humanTypingMinMs: source?.humanTypingMinMs ?? 2500,
@@ -122,6 +128,9 @@ function stateEquals(a: SettingsState, b: SettingsState) {
     nearlyEqual(a.aiFallbackConfidence, b.aiFallbackConfidence) &&
     a.aiReplyPolicy === b.aiReplyPolicy &&
     a.aiSystemInstruction === b.aiSystemInstruction &&
+    a.activePersonaPackId === b.activePersonaPackId &&
+    a.qualityGateMode === b.qualityGateMode &&
+    nearlyEqual(a.qualityGateThreshold, b.qualityGateThreshold) &&
     nearlyEqual(a.humanDelayMinMs, b.humanDelayMinMs) &&
     nearlyEqual(a.humanDelayMaxMs, b.humanDelayMaxMs) &&
     nearlyEqual(a.humanTypingMinMs, b.humanTypingMinMs) &&
@@ -212,6 +221,9 @@ export function LiveSettings() {
           aiFallbackConfidence: draft.aiFallbackConfidence,
           aiReplyPolicy: draft.aiReplyPolicy,
           aiSystemInstruction: draft.aiSystemInstruction,
+          activePersonaPackId: draft.activePersonaPackId,
+          qualityGateMode: draft.qualityGateMode,
+          qualityGateThreshold: draft.qualityGateThreshold,
           humanDelayMinMs: Math.round(draft.humanDelayMinMs),
           humanDelayMaxMs: Math.round(draft.humanDelayMaxMs),
           humanTypingMinMs: Math.round(draft.humanTypingMinMs),
@@ -419,6 +431,61 @@ export function LiveSettings() {
             />
           </label>
 
+          <label className="stack compact">
+            <span className="queue-meta">Active persona pack (optional)</span>
+            <input
+              name="activePersonaPackId"
+              value={draft.activePersonaPackId}
+              placeholder="josh_witty_shortcuts.v1"
+              onChange={(event) => setDraft((prev) => ({ ...prev, activePersonaPackId: event.target.value }))}
+              disabled={record.pending}
+              aria-disabled={record.pending}
+            />
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Quality gate mode</span>
+            <select
+              value={draft.qualityGateMode}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  qualityGateMode:
+                    event.target.value === "manual_review"
+                      ? "manual_review"
+                      : event.target.value === "log_only"
+                        ? "log_only"
+                        : "auto_rewrite_once",
+                }))
+              }
+              disabled={record.pending}
+              aria-disabled={record.pending}
+            >
+              <option value="auto_rewrite_once">Auto rewrite once</option>
+              <option value="manual_review">Manual review</option>
+              <option value="log_only">Log only</option>
+            </select>
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Quality gate threshold</span>
+            <input
+              type="number"
+              min={0.4}
+              max={0.95}
+              step={0.01}
+              value={draft.qualityGateThreshold}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  qualityGateThreshold: parseNumber(event.target.value, prev.qualityGateThreshold),
+                }))
+              }
+              disabled={record.pending}
+              aria-disabled={record.pending}
+            />
+          </label>
+
           <div className="topbar-controls">
             <button
               type="submit"
@@ -583,10 +650,11 @@ export function LiveSettings() {
               disabled={record.pending || !draft.statusAutoReplyEnabled}
               aria-disabled={record.pending || !draft.statusAutoReplyEnabled}
             >
-              <option value="true">Only funny/playful statuses</option>
+              <option value="true">Funny/playful + science/tech/AI + NGX/crypto/forex news</option>
               <option value="false">Any status text</option>
             </select>
             {!draft.statusAutoReplyEnabled ? <span className="queue-meta">Enable status auto-replies to use this.</span> : null}
+            <span className="queue-meta">Safety rule: status replies are always skipped if the status contains a link or email address.</span>
           </label>
 
           <label className="stack compact">
@@ -603,6 +671,9 @@ export function LiveSettings() {
               disabled={record.pending}
               aria-disabled={record.pending}
             />
+            <span className="queue-meta">
+              Used for playful detection. Status interest matching is always on for science/tech/AI and Nigerian markets (NGX), crypto, and forex.
+            </span>
           </label>
 
           <label className="stack compact">

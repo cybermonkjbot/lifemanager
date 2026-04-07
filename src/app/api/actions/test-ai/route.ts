@@ -16,6 +16,9 @@ type RuntimeSettings = {
   aiFallbackMode?: "all" | "azure_only";
   aiReplyPolicy?: string;
   aiSystemInstruction?: string;
+  activePersonaPackId?: string;
+  qualityGateMode?: "auto_rewrite_once" | "manual_review" | "log_only";
+  qualityGateThreshold?: number;
   humanDelayMinMs?: number;
   humanDelayMaxMs?: number;
   humanTypingMinMs?: number;
@@ -148,6 +151,9 @@ export async function POST(request: Request) {
         fallbackMode: runtimeSettings?.aiFallbackMode,
         replyPolicyInstruction: runtimeSettings?.aiReplyPolicy || "",
         systemInstruction: runtimeSettings?.aiSystemInstruction || "",
+        activePersonaPackId: runtimeSettings?.activePersonaPackId || "",
+        qualityGateMode: runtimeSettings?.qualityGateMode,
+        qualityGateThreshold: runtimeSettings?.qualityGateThreshold,
         soulModeEnabled: runtimeSettings?.soulModeEnabled,
         funnyStatusKeywords: runtimeSettings?.funnyStatusKeywords,
         funnyStatusEmojis: runtimeSettings?.funnyStatusEmojis,
@@ -206,6 +212,10 @@ export async function POST(request: Request) {
       attempts: aiResult.attempts,
       contextToolCalls: aiResult.contextToolCalls || [],
       contextWindow: aiResult.contextWindow || null,
+      qualityScore: aiResult.qualityScore,
+      qualityChecks: aiResult.qualityChecks || [],
+      qualityRewriteApplied: aiResult.qualityRewriteApplied || false,
+      activePersonaPackId: aiResult.activePersonaPackId || null,
       createdAt: Date.now(),
       usedThreadContext: historyLines.length > 0,
       threadId: threadId || null,

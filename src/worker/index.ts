@@ -20,6 +20,11 @@ import {
   type AiAttempt,
 } from "./ai";
 import {
+  EMOJI_COOLDOWN_MS,
+  applyEmojiCooldownPolicy,
+  containsAnyEmoji,
+} from "./emoji-policy";
+import {
   buildHistorySearchOverride,
   maybeFetchOlderHistoryForThread,
   readHistoryFetchConfigFromEnv,
@@ -58,6 +63,9 @@ type RuntimeSettings = {
   aiFallbackConfidence: number;
   aiReplyPolicy: string;
   aiSystemInstruction: string;
+  activePersonaPackId: string;
+  qualityGateMode: "auto_rewrite_once" | "manual_review" | "log_only";
+  qualityGateThreshold: number;
   humanDelayMinMs: number;
   humanDelayMaxMs: number;
   humanTypingMinMs: number;
@@ -192,6 +200,19 @@ function looksLikeFunnyStatus(text: string, funnyKeywords: string[], funnyEmojis
   const hasPlayfulSignal =
     /\b(lol|haha|lmao|funny|joke|banter|meme)\b/i.test(text) || containsKeyword(text, funnyKeywords) || containsEmoji(text, funnyEmojis);
   return hasStatusWord && hasPlayfulSignal;
+}
+
+function hasStatusInterestSignal(text: string) {
+  return /\b(science|scientific|technology|tech|ai|a\.i\.|artificial intelligence|machine learning|robotics|research|breakthrough|innovation|nigerian stock market|nigerian stocks|nigerian equities|nse|ngx|nigeria exchange|crypto|cryptocurrency|bitcoin|btc|ethereum|eth|forex|fx|usdngn|usd\/ngn|naira|goldusd|gold\/usd|xauusd|xau\/usd)\b/i.test(
+    text,
+  );
+}
+
+function hasLinkOrEmail(text: string) {
+  const emailPattern = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i;
+  const urlPattern =
+    /\b(?:https?:\/\/|www\.)\S+|\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|net|org|io|co|ng|edu|gov|info|ai|app|dev|xyz|me|tv|ly|biz|us|uk|ca|au|de|fr|jp|in|za)\b(?:\/\S*)?/i;
+  return emailPattern.test(text) || urlPattern.test(text);
 }
 
 function sleep(ms: number) {
@@ -677,10 +698,37 @@ async function run() {
   const outboxThreadLanes = new Map<string, Promise<void>>();
   const automatedOutboundIds = new Map<string, number>();
   const automatedOutboundThreadSends = new Map<string, number>();
+  const recentEmojiOutboundByThread = new Map<string, number>();
   let inboundConcurrency = Math.round(clamp(Number(process.env.SLM_INBOUND_CONCURRENCY || 4), 1, 16));
   let outboxSendConcurrency = Math.round(clamp(Number(process.env.SLM_OUTBOX_CONCURRENCY || 4), 1, 16));
   const runInboundWithLimit = createDynamicLimiter(() => inboundConcurrency);
   const runOutboxWithLimit = createDynamicLimiter(() => outboxSendConcurrency);
+  const pruneRecentEmojiOutboundByThread = () => {
+    const cutoff = Date.now() - EMOJI_COOLDOWN_MS;
+    for (const [threadJid, lastEmojiAt] of recentEmojiOutboundByThread.entries()) {
+      if (lastEmojiAt < cutoff) {
+        recentEmojiOutboundByThread.delete(threadJid);
+      }
+    }
+  };
+  const rememberEmojiOutboundAt = (threadJid: string, messageAt: number) => {
+    if (!threadJid || !Number.isFinite(messageAt)) {
+      return;
+    }
+    pruneRecentEmojiOutboundByThread();
+    const nextAt = Number(messageAt);
+    const existing = recentEmojiOutboundByThread.get(threadJid);
+    if (existing === undefined || nextAt > existing) {
+      recentEmojiOutboundByThread.set(threadJid, nextAt);
+    }
+  };
+  const getRecentEmojiOutboundAt = (threadJid: string) => {
+    if (!threadJid) {
+      return undefined;
+    }
+    pruneRecentEmojiOutboundByThread();
+    return recentEmojiOutboundByThread.get(threadJid);
+  };
   const pruneAutomatedOutboundIds = () => {
     const cutoff = Date.now() - 5 * 60 * 1000;
     for (const [id, seenAt] of automatedOutboundIds.entries()) {
@@ -847,6 +895,10 @@ async function run() {
       const messageType: "text" | "reaction" | "sticker" | "meme" =
         parsed.kind === "reaction" ? "reaction" : parsed.kind === "sticker" ? "sticker" : "text";
 
+      if (parsed.kind !== "reaction" && containsAnyEmoji(parsed.text)) {
+        rememberEmojiOutboundAt(threadJid, messageAt);
+      }
+
       await convex.mutation(convexRefs.outboxSuppressForManualIntervention, {
         threadJid,
         whatsappMessageId: outboundMessageId,
@@ -898,6 +950,10 @@ async function run() {
       const messageType: "text" | "reaction" | "sticker" | "meme" =
         parsed.kind === "reaction" ? "reaction" : parsed.kind === "sticker" ? "sticker" : "text";
       const messageAt = normalizeIncomingMessageTimestamp(message.messageTimestamp, Date.now());
+
+      if (direction === "outbound" && parsed.kind !== "reaction" && containsAnyEmoji(parsed.text)) {
+        rememberEmojiOutboundAt(threadJid, messageAt);
+      }
 
       await convex.mutation(convexRefs.inboundIngestHistorical, {
         ingestMode,
@@ -1120,6 +1176,9 @@ async function run() {
         fallbackMode: runtimeSettings?.aiFallbackMode,
         replyPolicyInstruction: effectiveReplyPolicyInstruction,
         systemInstruction: runtimeSettings?.aiSystemInstruction || "",
+        activePersonaPackId: runtimeSettings?.activePersonaPackId || "",
+        qualityGateMode: runtimeSettings?.qualityGateMode,
+        qualityGateThreshold: runtimeSettings?.qualityGateThreshold,
         soulModeEnabled: runtimeSettings?.soulModeEnabled,
         funnyStatusKeywords: runtimeSettings?.funnyStatusKeywords,
         funnyStatusEmojis: runtimeSettings?.funnyStatusEmojis,
@@ -1191,6 +1250,28 @@ async function run() {
         return;
       }
 
+      if (isStatusBroadcast) {
+        const statusScreeningTextParts = [effectiveParsed.text];
+        if (effectiveParsed.kind === "image" || effectiveParsed.kind === "sticker") {
+          const visualAnalysis = await getVisualAnalysis();
+          if (visualAnalysis?.description) {
+            statusScreeningTextParts.push(visualAnalysis.description);
+          }
+        }
+        const statusScreeningText = statusScreeningTextParts.filter(Boolean).join("\n");
+        if (hasLinkOrEmail(statusScreeningText)) {
+          await convex
+            .mutation(convexRefs.systemRecordEvent, {
+              source: "worker",
+              eventType: "inbound.status.skipped",
+              threadId: ingest.threadId as Id<"threads">,
+              detail: "Status update skipped because it contains a link or email address.",
+            })
+            .catch(() => undefined);
+          return;
+        }
+      }
+
       if (isStatusBroadcast && (runtimeSettings?.statusReplyRequireFunny ?? true)) {
         const funnySignalTextParts = [effectiveParsed.text];
         if (effectiveParsed.kind === "image" || effectiveParsed.kind === "sticker") {
@@ -1205,13 +1286,14 @@ async function run() {
           shouldUseMeme(funnySignalText, funnyKeywords, funnyEmojis) ||
           containsKeyword(funnySignalText, funnyKeywords) ||
           containsEmoji(funnySignalText, funnyEmojis);
-        if (!hasFunnySignal) {
+        const hasInterestSignal = hasStatusInterestSignal(funnySignalText);
+        if (!hasFunnySignal && !hasInterestSignal) {
           await convex
             .mutation(convexRefs.systemRecordEvent, {
               source: "worker",
               eventType: "inbound.status.skipped",
               threadId: ingest.threadId as Id<"threads">,
-              detail: "Status update skipped because it did not match funny/playful signals.",
+              detail: "Status update skipped because it did not match funny/playful or priority-news-interest signals.",
             })
             .catch(() => undefined);
           return;
@@ -1494,12 +1576,23 @@ async function run() {
         }
       }
 
-      const textForDraft =
+      const rawTextForDraft =
         outboundPolicy.mode === "reaction_only"
           ? `React with ${outboundPolicy.emoji}`
           : outboundPolicy.mode === "sticker"
             ? "Send sticker response"
             : normalizeOutboundText(ai?.text || "All good.");
+      const emojiAdjustedDraft =
+        outboundPolicy.mode === "text" || outboundPolicy.mode === "reaction_plus_text" || outboundPolicy.mode === "meme"
+          ? applyEmojiCooldownPolicy({
+              text: rawTextForDraft,
+              nowMs: Date.now(),
+              recentMessages: threadContext?.messages,
+              lastEmojiSentAtMs: getRecentEmojiOutboundAt(threadJid),
+              fallbackText: "All good.",
+            })
+          : null;
+      const textForDraft = emojiAdjustedDraft?.text || rawTextForDraft;
       const timing = estimateDelayAndTyping(textForDraft, {
         delayMinMs: runtimeSettings?.humanDelayMinMs,
         delayMaxMs: runtimeSettings?.humanDelayMaxMs,
@@ -1550,6 +1643,17 @@ async function run() {
             : `Reply generated via policy mode ${outboundPolicy.mode}.`,
         })
         .catch(() => undefined);
+
+      if (emojiAdjustedDraft?.emojiSuppressed) {
+        await convex
+          .mutation(convexRefs.systemRecordEvent, {
+            source: "ai",
+            eventType: "ai.reply.emoji_cooldown_applied",
+            threadId: ingest.threadId,
+            detail: "Emoji removed from draft due to 15-minute emoji cooldown policy.",
+          })
+          .catch(() => undefined);
+      }
 
       const health = await getSystemHealth();
 
@@ -1726,7 +1830,7 @@ async function run() {
     })) as
       | {
           thread: { title?: string; jid: string };
-          messages: Array<{ direction: "inbound" | "outbound"; text: string }>;
+          messages: Array<{ direction: "inbound" | "outbound"; text: string; messageAt?: number }>;
           grounding?: { myName?: string; theirName?: string; autoAliases?: string[]; vibeNotes?: string } | null;
           memory?: { summary?: string; styleNotes?: string[] } | null;
         }
@@ -1796,6 +1900,9 @@ async function run() {
         fallbackMode: runtimeSettings?.aiFallbackMode,
         replyPolicyInstruction: runtimeSettings?.aiReplyPolicy || "",
         systemInstruction: runtimeSettings?.aiSystemInstruction || "",
+        activePersonaPackId: runtimeSettings?.activePersonaPackId || "",
+        qualityGateMode: runtimeSettings?.qualityGateMode,
+        qualityGateThreshold: runtimeSettings?.qualityGateThreshold,
         soulModeEnabled: runtimeSettings?.soulModeEnabled,
         funnyStatusKeywords: runtimeSettings?.funnyStatusKeywords,
         funnyStatusEmojis: runtimeSettings?.funnyStatusEmojis,
@@ -1866,7 +1973,15 @@ async function run() {
     }
 
     const fallbackText = `Hey ${contactName}, just checking in. How is your day going?`;
-    const safeText = normalizeOutboundText(ai.guardrailBlocked ? fallbackText : ai.text);
+    const rawSafeText = normalizeOutboundText(ai.guardrailBlocked ? fallbackText : ai.text);
+    const emojiAdjusted = applyEmojiCooldownPolicy({
+      text: rawSafeText,
+      nowMs: Date.now(),
+      recentMessages: threadContext?.messages,
+      lastEmojiSentAtMs: getRecentEmojiOutboundAt(item.jid),
+      fallbackText,
+    });
+    const safeText = emojiAdjusted.text;
     const timing = estimateDelayAndTyping(safeText, {
       delayMinMs: runtimeSettings?.humanDelayMinMs,
       delayMaxMs: runtimeSettings?.humanDelayMaxMs,
@@ -1886,6 +2001,17 @@ async function run() {
       confidence,
       typingMs: timing.typingMs,
     });
+
+    if (emojiAdjusted.emojiSuppressed) {
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "ai",
+          eventType: "outreach.ai.emoji_cooldown_applied",
+          threadId: item.threadId,
+          detail: "Emoji removed from outreach draft due to 15-minute emoji cooldown policy.",
+        })
+        .catch(() => undefined);
+    }
 
     return {
       ...item,
@@ -2024,6 +2150,50 @@ async function run() {
                 rememberAutomatedOutboundId(preReactionSent?.key?.id || undefined);
               }
 
+              let effectiveMessageText = hydrated.messageText;
+              let effectiveMediaCaption = hydrated.mediaCaption || hydrated.messageText;
+              let emojiPolicyApplied = false;
+              if (hydrated.sendKind === "text" || hydrated.sendKind === "meme") {
+                const baseText = hydrated.sendKind === "meme" ? effectiveMediaCaption : effectiveMessageText;
+                const originalMediaCaption = hydrated.mediaCaption || hydrated.messageText;
+                const emojiAdjusted = applyEmojiCooldownPolicy({
+                  text: baseText,
+                  nowMs: Date.now(),
+                  lastEmojiSentAtMs: getRecentEmojiOutboundAt(item.jid),
+                  fallbackText: hydrated.sendKind === "meme" ? "Checking in with you." : "All good.",
+                });
+                emojiPolicyApplied = emojiAdjusted.emojiSuppressed;
+                if (hydrated.sendKind === "text") {
+                  effectiveMessageText = emojiAdjusted.text;
+                } else {
+                  effectiveMediaCaption = emojiAdjusted.text;
+                  effectiveMessageText = emojiAdjusted.text;
+                }
+
+                const captionChanged = hydrated.sendKind === "meme" && effectiveMediaCaption !== originalMediaCaption;
+                if (effectiveMessageText !== hydrated.messageText || captionChanged) {
+                  await convex
+                    .mutation(convexRefs.outboxRewriteClaimedMessage, {
+                      outboxId: item.outboxId as Id<"outbox">,
+                      messageText: effectiveMessageText,
+                      mediaCaption: hydrated.sendKind === "meme" ? effectiveMediaCaption : undefined,
+                    })
+                    .catch(() => undefined);
+                }
+              }
+
+              if (emojiPolicyApplied) {
+                await convex
+                  .mutation(convexRefs.systemRecordEvent, {
+                    source: "worker",
+                    eventType: "outbox.emoji_cooldown_applied",
+                    threadId: item.threadId as Id<"threads">,
+                    outboxId: item.outboxId as Id<"outbox">,
+                    detail: "Emoji removed from outbox message due to 15-minute emoji cooldown policy.",
+                  })
+                  .catch(() => undefined);
+              }
+
               let sent: { key?: { id?: string | null } } | undefined;
               if (hydrated.sendKind === "reaction") {
                 if (!hydrated.reactionEmoji || !hydrated.reactionTargetWhatsAppMessageId) {
@@ -2067,7 +2237,7 @@ async function run() {
                 rememberAutomatedThreadSend(item.jid);
                 sent = await sock.sendMessage(item.jid, {
                   image: memeBuffer,
-                  caption: hydrated.mediaCaption || hydrated.messageText,
+                  caption: effectiveMediaCaption || effectiveMessageText,
                 });
                 await sock.sendPresenceUpdate("paused", item.jid);
               } else {
@@ -2082,8 +2252,14 @@ async function run() {
                   return;
                 }
                 rememberAutomatedThreadSend(item.jid);
-                sent = await sock.sendMessage(item.jid, { text: hydrated.messageText });
+                sent = await sock.sendMessage(item.jid, { text: effectiveMessageText });
                 await sock.sendPresenceUpdate("paused", item.jid);
+              }
+
+              if (hydrated.sendKind === "text" && containsAnyEmoji(effectiveMessageText)) {
+                rememberEmojiOutboundAt(item.jid, Date.now());
+              } else if (hydrated.sendKind === "meme" && containsAnyEmoji(effectiveMediaCaption || "")) {
+                rememberEmojiOutboundAt(item.jid, Date.now());
               }
 
               rememberAutomatedOutboundId(sent?.key?.id || undefined);

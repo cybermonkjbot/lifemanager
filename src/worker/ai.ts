@@ -5,6 +5,12 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import ModelClient, { isUnexpected } from "@azure-rest/ai-inference";
 import { AzureKeyCredential } from "@azure/core-auth";
+import {
+  type PersonaPack,
+  type QualityGateMode,
+  getPersonaPackById,
+  selectFewShotsForPrompt,
+} from "../../convex/lib/personaPacks";
 
 const execFileAsync = promisify(execFile);
 
@@ -15,6 +21,10 @@ type AiResult = {
   latencyMs: number;
   guardrailBlocked: boolean;
   guardrailReason?: string;
+  qualityScore?: number;
+  qualityChecks?: QualityCheck[];
+  qualityRewriteApplied?: boolean;
+  activePersonaPackId?: string;
   attempts: AiAttempt[];
   contextToolCalls?: ContextToolCall[];
   contextWindow?: ContextWindowStats;
@@ -27,6 +37,14 @@ export type AiAttempt = {
   status: "success" | "error";
   latencyMs: number;
   error?: string;
+};
+
+export type QualityCheck = {
+  id: string;
+  label: string;
+  score: number;
+  passed: boolean;
+  detail: string;
 };
 
 type AttemptOutcome = {
@@ -95,6 +113,9 @@ type RuntimeAiTuning = {
   fallbackMode?: FallbackMode;
   systemInstruction?: string;
   replyPolicyInstruction?: string;
+  activePersonaPackId?: string;
+  qualityGateMode?: QualityGateMode;
+  qualityGateThreshold?: number;
   soulModeEnabled?: boolean;
   funnyStatusKeywords?: string[];
   funnyStatusEmojis?: string[];
@@ -258,6 +279,13 @@ function clamp01(value: number) {
     return 0.72;
   }
   return Math.max(0, Math.min(value, 1));
+}
+
+function clampQualityThreshold(value: number | undefined, fallback = 0.72) {
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.max(0.4, Math.min(value as number, 0.95));
 }
 
 function pickVariant(input: string, options: string[]) {
@@ -494,6 +522,13 @@ function estimateTokenCount(text: string) {
     return 0;
   }
   return Math.ceil(compact.length / 4);
+}
+
+function countWords(text: string) {
+  return text
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean).length;
 }
 
 function parseHistoryLine(rawLine: string) {
@@ -821,6 +856,21 @@ function buildPrompt(args: {
         ? "Apply the selected personality moderately while staying natural."
         : "Apply the selected personality lightly and keep responses neutral-first.";
   const personalityLabel = args.personality?.profileName || args.personality?.profileSlug || "";
+  const activePersonaPack = resolveActivePersonaPack(args.runtime, args.personality);
+  const personaPackShortcuts = activePersonaPack
+    ? activePersonaPack.shortcutDictionary
+        .slice(0, 10)
+        .map((entry) => `${entry.token}: ${entry.usageRule}`)
+        .join(" | ")
+    : "";
+  const personaPackGuardrails = activePersonaPack ? activePersonaPack.guardrails.slice(0, 6).join(" | ") : "";
+  const personaPackFewShots = activePersonaPack ? selectFewShotsForPrompt(activePersonaPack, 900) : [];
+  const personaPackFewShotText =
+    personaPackFewShots.length > 0
+      ? personaPackFewShots
+          .map((example, index) => `${index + 1}. IN: ${example.inbound}\nOUT: ${example.reply}`)
+          .join("\n\n")
+      : "";
   const replyPolicyInstruction =
     args.runtime?.replyPolicyInstruction ||
     process.env.SLM_AI_REPLY_POLICY ||
@@ -876,6 +926,11 @@ function buildPrompt(args: {
       args.personality?.threadPromptProfile
         ? `Conversation-specific prompt profile (${args.personality.threadPromptProfileSource || "manual"}): ${args.personality.threadPromptProfile}`
         : "",
+      activePersonaPack ? `Active persona pack: ${activePersonaPack.id} (${activePersonaPack.name}).` : "",
+      activePersonaPack ? `Persona pack master prompt: ${activePersonaPack.masterPrompt}` : "",
+      personaPackShortcuts ? `Shortcut dictionary: ${personaPackShortcuts}` : "",
+      personaPackGuardrails ? `Persona guardrails: ${personaPackGuardrails}` : "",
+      personaPackFewShotText ? `Persona few-shot examples:\n${personaPackFewShotText}` : "",
       args.grounding?.myName ? `My preferred name in this thread: ${args.grounding.myName}` : "",
       args.grounding?.theirName ? `Contact preferred name in this thread: ${args.grounding.theirName}` : "",
       args.grounding?.autoAliases?.length ? `Known contact aliases: ${args.grounding.autoAliases.slice(0, 8).join(", ")}` : "",
@@ -1198,6 +1253,139 @@ function isLowValueReply(text: string, inboundText?: string, historyLines: strin
 
   const overlap = shared / Math.max(replyKeywords.size, 1);
   return overlap < 0.2;
+}
+
+function resolveActivePersonaPack(runtime: RuntimeAiTuning | undefined, personality: PersonalityContext | undefined) {
+  const pack = getPersonaPackById(runtime?.activePersonaPackId);
+  if (!pack) {
+    return null;
+  }
+  const slug = (personality?.profileSlug || "").trim().toLowerCase();
+  if (!slug) {
+    return null;
+  }
+  if (!pack.activation.allowedProfileSlugs.some((item) => item.toLowerCase() === slug)) {
+    return null;
+  }
+  return pack;
+}
+
+function evaluateReplyQuality(args: {
+  replyText: string;
+  inboundText: string;
+  historyLines: string[];
+  pack: PersonaPack | null;
+  threshold: number;
+}) {
+  const text = args.replyText.trim();
+  const inbound = args.inboundText.trim();
+  const replyKeywords = new Set(extractKeywords(text));
+  const inboundKeywords = new Set(extractKeywords(inbound));
+  let shared = 0;
+  for (const token of replyKeywords) {
+    if (inboundKeywords.has(token)) {
+      shared += 1;
+    }
+  }
+
+  const contextScore =
+    inboundKeywords.size === 0
+      ? 0.78
+      : Math.max(0, Math.min(shared / Math.max(Math.min(inboundKeywords.size, 3), 1), 1));
+  const shortcutTokens = (args.pack?.shortcutDictionary || []).map((item) => item.token.toLowerCase());
+  const shortcutHits = shortcutTokens.filter((token) => token && new RegExp(`\\b${token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(text))
+    .length;
+  const naturalShortcutsScore =
+    shortcutTokens.length === 0 ? 1 : shortcutHits === 0 ? 0.62 : shortcutHits <= 2 ? 1 : shortcutHits === 3 ? 0.68 : 0.32;
+  const antiGenericScore = isLowValueReply(text, inbound, args.historyLines) ? 0.08 : 1;
+  const cringeHit = isCringeJoke(text) || /\b(skibidi|gyatt|sigma|rizz)\b/i.test(text);
+  const repeatedPunctHit = /([!?])\1{3,}/.test(text);
+  const antiCringeScore = cringeHit ? 0.05 : repeatedPunctHit ? 0.72 : 1;
+  const words = countWords(text);
+  const brevityScore = words < 2 ? 0.35 : words <= 24 ? 1 : words <= 36 ? 0.72 : 0.38;
+
+  const defaultCriteria: Array<{ id: string; label: string; weight: number; description: string }> = [
+    { id: "context_specificity", label: "Context Specificity", weight: 0.3, description: "Reply references inbound specifics." },
+    { id: "natural_shortcuts", label: "Natural Shortcuts", weight: 0.2, description: "Shorthand usage feels organic." },
+    { id: "anti_generic", label: "Anti-Generic", weight: 0.2, description: "Avoids canned template wording." },
+    { id: "anti_cringe", label: "Anti-Cringe", weight: 0.2, description: "Avoids forced or awkward tone." },
+    { id: "brevity_fit", label: "Brevity Fit", weight: 0.1, description: "Stays concise and natural." },
+  ];
+  const criteria = args.pack?.checklist.criteria.length ? args.pack.checklist.criteria : defaultCriteria;
+
+  const scoreById: Record<string, number> = {
+    context_specificity: contextScore,
+    natural_shortcuts: naturalShortcutsScore,
+    anti_generic: antiGenericScore,
+    anti_cringe: antiCringeScore,
+    brevity_fit: brevityScore,
+  };
+
+  const checks: QualityCheck[] = criteria.map((criterion) => {
+    const score = clamp01(scoreById[criterion.id] ?? 0.75);
+    return {
+      id: criterion.id,
+      label: criterion.label,
+      score,
+      passed: score >= 0.6,
+      detail: criterion.description,
+    };
+  });
+
+  let weightedScore = 0;
+  for (const criterion of criteria) {
+    const score = clamp01(scoreById[criterion.id] ?? 0.75);
+    weightedScore += score * criterion.weight;
+  }
+
+  return {
+    score: clamp01(weightedScore),
+    passed: weightedScore >= args.threshold,
+    checks,
+  };
+}
+
+async function rewriteReplyOnce(args: {
+  candidateText: string;
+  inboundText: string;
+  historyLines: string[];
+  basePrompt: string;
+  failedChecks: QualityCheck[];
+  runtime?: RuntimeAiTuning;
+  pack: PersonaPack | null;
+}) {
+  const failedCheckText = args.failedChecks
+    .filter((check) => !check.passed)
+    .slice(0, 4)
+    .map((check) => `${check.label} (${Math.round(check.score * 100)}%)`)
+    .join(", ");
+  const rewriteInstruction = args.pack?.rewritePolicy.instruction || "Rewrite to be specific, concise, and natural.";
+  const rewritePrompt = [
+    args.basePrompt,
+    `Current draft reply: ${args.candidateText}`,
+    failedCheckText ? `Failed quality checks: ${failedCheckText}.` : "",
+    rewriteInstruction,
+    "Return only the revised reply text.",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  const attempts: AiAttempt[] = [];
+  const azure = await runAzure(rewritePrompt, args.inboundText, args.historyLines, args.runtime);
+  attempts.push(...azure.attempts);
+  if (azure.result) {
+    return { result: azure.result, attempts };
+  }
+
+  if (resolveFallbackMode(args.runtime) === "all") {
+    const codex = await runCodex(rewritePrompt, args.inboundText, args.historyLines, args.runtime);
+    attempts.push(...codex.attempts);
+    if (codex.result) {
+      return { result: codex.result, attempts };
+    }
+  }
+
+  return { attempts };
 }
 
 function extractAzureResponsesText(data: unknown) {
@@ -1797,6 +1985,86 @@ async function runCodex(
   }
 }
 
+async function applyQualityGate(args: {
+  candidate: Omit<AiResult, "attempts" | "contextToolCalls" | "contextWindow">;
+  attempts: AiAttempt[];
+  inboundText: string;
+  historyLines: string[];
+  basePrompt: string;
+  runtime?: RuntimeAiTuning;
+  activePersonaPack: PersonaPack | null;
+}) {
+  const qualityMode: QualityGateMode = args.runtime?.qualityGateMode || "auto_rewrite_once";
+  const threshold = clampQualityThreshold(
+    args.runtime?.qualityGateThreshold,
+    args.activePersonaPack?.checklist.passThreshold ?? 0.72,
+  );
+  const baseline = evaluateReplyQuality({
+    replyText: args.candidate.text,
+    inboundText: args.inboundText,
+    historyLines: args.historyLines,
+    pack: args.activePersonaPack,
+    threshold,
+  });
+
+  let selected = args.candidate;
+  let selectedEvaluation = baseline;
+  let selectedAttempts = [...args.attempts];
+  let qualityRewriteApplied = false;
+
+  if (!baseline.passed && qualityMode === "auto_rewrite_once") {
+    const rewrite = await rewriteReplyOnce({
+      candidateText: args.candidate.text,
+      inboundText: args.inboundText,
+      historyLines: args.historyLines,
+      basePrompt: args.basePrompt,
+      failedChecks: baseline.checks,
+      runtime: args.runtime,
+      pack: args.activePersonaPack,
+    });
+    selectedAttempts = [...selectedAttempts, ...rewrite.attempts];
+    if (rewrite.result) {
+      const rewrittenEvaluation = evaluateReplyQuality({
+        replyText: rewrite.result.text,
+        inboundText: args.inboundText,
+        historyLines: args.historyLines,
+        pack: args.activePersonaPack,
+        threshold,
+      });
+      if (rewrittenEvaluation.score >= selectedEvaluation.score) {
+        selected = rewrite.result;
+        selectedEvaluation = rewrittenEvaluation;
+        qualityRewriteApplied = normalizeOutboundText(args.candidate.text) !== normalizeOutboundText(rewrite.result.text);
+      }
+    }
+  }
+
+  if (!selectedEvaluation.passed && qualityMode === "manual_review") {
+    return {
+      text: "Manual review required.",
+      provider: selected.provider,
+      model: selected.model,
+      latencyMs: selected.latencyMs,
+      guardrailBlocked: true,
+      guardrailReason: "Reply failed quality gate and manual review mode is enabled.",
+      qualityScore: selectedEvaluation.score,
+      qualityChecks: selectedEvaluation.checks,
+      qualityRewriteApplied,
+      activePersonaPackId: args.activePersonaPack?.id,
+      attempts: selectedAttempts,
+    } satisfies AiResult;
+  }
+
+  return {
+    ...selected,
+    qualityScore: selectedEvaluation.score,
+    qualityChecks: selectedEvaluation.checks,
+    qualityRewriteApplied,
+    activePersonaPackId: args.activePersonaPack?.id,
+    attempts: selectedAttempts,
+  } satisfies AiResult;
+}
+
 export async function generateReplyWithFallback(args: {
   inboundText: string;
   historyLines: string[];
@@ -1807,6 +2075,7 @@ export async function generateReplyWithFallback(args: {
   grounding?: GroundingContext;
   runtime?: RuntimeAiTuning;
 }): Promise<AiResult> {
+  const activePersonaPack = resolveActivePersonaPack(args.runtime, args.personality);
   const blocked = HIGH_RISK_PATTERNS.find((pattern) => pattern.test(args.inboundText));
   if (blocked) {
     const builtPrompt = buildPrompt(args);
@@ -1817,6 +2086,10 @@ export async function generateReplyWithFallback(args: {
       latencyMs: 0,
       guardrailBlocked: true,
       guardrailReason: "High-risk topic detected in inbound message.",
+      qualityScore: 1,
+      qualityChecks: [],
+      qualityRewriteApplied: false,
+      activePersonaPackId: activePersonaPack?.id,
       contextToolCalls: builtPrompt.contextToolCalls,
       contextWindow: builtPrompt.contextWindow,
       attempts: [
@@ -1844,6 +2117,10 @@ export async function generateReplyWithFallback(args: {
       model: `heuristic-local-${steeringMode}`,
       latencyMs: 0,
       guardrailBlocked: false,
+      qualityScore: 1,
+      qualityChecks: [],
+      qualityRewriteApplied: false,
+      activePersonaPackId: activePersonaPack?.id,
       attempts: [
         {
           provider: "heuristic",
@@ -1863,9 +2140,17 @@ export async function generateReplyWithFallback(args: {
   const azureOutcome = await runAzure(builtPrompt.prompt, args.inboundText, args.historyLines, args.runtime);
   attempts.push(...azureOutcome.attempts);
   if (azureOutcome.result) {
-    return {
-      ...azureOutcome.result,
+    const gated = await applyQualityGate({
+      candidate: azureOutcome.result,
       attempts,
+      inboundText: args.inboundText,
+      historyLines: args.historyLines,
+      basePrompt: builtPrompt.prompt,
+      runtime: args.runtime,
+      activePersonaPack,
+    });
+    return {
+      ...gated,
       contextToolCalls: builtPrompt.contextToolCalls,
       contextWindow: builtPrompt.contextWindow,
     };
@@ -1880,6 +2165,10 @@ export async function generateReplyWithFallback(args: {
       latencyMs: azureOutcome.attempts.reduce((sum, attempt) => sum + attempt.latencyMs, 0),
       guardrailBlocked: true,
       guardrailReason: "Azure-only mode enabled and Azure generation failed. Manual review required.",
+      qualityScore: 1,
+      qualityChecks: [],
+      qualityRewriteApplied: false,
+      activePersonaPackId: activePersonaPack?.id,
       attempts,
       contextToolCalls: builtPrompt.contextToolCalls,
       contextWindow: builtPrompt.contextWindow,
@@ -1889,9 +2178,17 @@ export async function generateReplyWithFallback(args: {
   const codexOutcome = await runCodex(builtPrompt.prompt, args.inboundText, args.historyLines, args.runtime);
   attempts.push(...codexOutcome.attempts);
   if (codexOutcome.result) {
-    return {
-      ...codexOutcome.result,
+    const gated = await applyQualityGate({
+      candidate: codexOutcome.result,
       attempts,
+      inboundText: args.inboundText,
+      historyLines: args.historyLines,
+      basePrompt: builtPrompt.prompt,
+      runtime: args.runtime,
+      activePersonaPack,
+    });
+    return {
+      ...gated,
       contextToolCalls: builtPrompt.contextToolCalls,
       contextWindow: builtPrompt.contextWindow,
     };
@@ -1904,13 +2201,24 @@ export async function generateReplyWithFallback(args: {
     status: "success",
     latencyMs: 0,
   });
-  return {
+  const heuristicCandidate: Omit<AiResult, "attempts" | "contextToolCalls" | "contextWindow"> = {
     text: normalizeOutboundText(heuristicReply(args.inboundText, args.historyLines)),
     provider: "heuristic",
     model: "heuristic-fallback",
     latencyMs: 0,
     guardrailBlocked: false,
+  };
+  const gated = await applyQualityGate({
+    candidate: heuristicCandidate,
     attempts,
+    inboundText: args.inboundText,
+    historyLines: args.historyLines,
+    basePrompt: builtPrompt.prompt,
+    runtime: args.runtime,
+    activePersonaPack,
+  });
+  return {
+    ...gated,
     contextToolCalls: builtPrompt.contextToolCalls,
     contextWindow: builtPrompt.contextWindow,
   };

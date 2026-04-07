@@ -2,6 +2,8 @@ import { v } from "convex/values";
 import type { Doc } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { mutation, query } from "./_generated/server";
+import { setConfigValue, getConfig } from "./lib/config";
+import { DEFAULT_PERSONA_PACK_ID, PERSONA_PACKS, getPersonaPackById } from "./lib/personaPacks";
 
 type DefaultPersonalityProfile = {
   slug: string;
@@ -93,6 +95,45 @@ function normalizeCompactText(value: string | undefined, maxChars: number) {
     return "";
   }
   return compact.slice(0, maxChars);
+}
+
+function mergeUniqueLimited(base: string[], additions: string[], limit: number) {
+  const seen = new Set<string>();
+  const merged: string[] = [];
+  for (const item of [...base, ...additions]) {
+    const normalized = normalizeCompactText(item, 280);
+    if (!normalized) {
+      continue;
+    }
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    merged.push(normalized);
+    if (merged.length >= limit) {
+      break;
+    }
+  }
+  return merged;
+}
+
+function buildPersonaPackBlock(packId: string, promptBlock: string) {
+  const markerStart = `[persona-pack:${packId}:start]`;
+  const markerEnd = `[persona-pack:${packId}:end]`;
+  return `${markerStart}\n${promptBlock.trim()}\n${markerEnd}`;
+}
+
+function upsertPersonaPackPromptBlock(existingPrompt: string, packId: string, promptBlock: string) {
+  const markerStart = `[persona-pack:${packId}:start]`;
+  const markerEnd = `[persona-pack:${packId}:end]`;
+  const blockPattern = new RegExp(`${markerStart}[\\s\\S]*?${markerEnd}`, "g");
+  const withoutExistingBlock = existingPrompt.replace(blockPattern, "").trim();
+  const nextBlock = buildPersonaPackBlock(packId, promptBlock);
+  if (!withoutExistingBlock) {
+    return nextBlock;
+  }
+  return `${withoutExistingBlock}\n\n${nextBlock}`.trim();
 }
 
 function fromStoredProfile(profile: Doc<"personalityProfiles">): PersonalityProfileView {
@@ -436,6 +477,25 @@ export const listProfiles = query({
   },
 });
 
+export const listPersonaPacks = query({
+  args: {},
+  handler: async (ctx) => {
+    const config = await getConfig(ctx);
+    return {
+      activePersonaPackId: config.activePersonaPackId || "",
+      qualityGateMode: config.qualityGateMode,
+      qualityGateThreshold: config.qualityGateThreshold,
+      packs: PERSONA_PACKS.map((pack) => ({
+        id: pack.id,
+        name: pack.name,
+        version: pack.version,
+        description: pack.description,
+        allowedProfileSlugs: pack.activation.allowedProfileSlugs,
+      })),
+    };
+  },
+});
+
 export const upsertProfile = mutation({
   args: {
     slug: v.string(),
@@ -586,6 +646,131 @@ export const deleteProfile = mutation({
 
     await ctx.db.delete(existing._id);
     return existing._id;
+  },
+});
+
+export const installPersonaPack = mutation({
+  args: {
+    packId: v.optional(v.string()),
+    autoActivate: v.optional(v.boolean()),
+  },
+  handler: async (ctx, args) => {
+    const selectedPackId = (args.packId || DEFAULT_PERSONA_PACK_ID).trim();
+    const pack = getPersonaPackById(selectedPackId);
+    if (!pack) {
+      throw new Error("Persona pack not found.");
+    }
+
+    const now = Date.now();
+    const styleProfile = await ctx.db
+      .query("styleProfiles")
+      .withIndex("by_scope", (q) => q.eq("scope", "global"))
+      .first();
+
+    if (styleProfile) {
+      const nextCommonPhrases = mergeUniqueLimited(styleProfile.commonPhrases || [], pack.styleTraits.commonPhrases, 40);
+      const nextPunctuationStyle = mergeUniqueLimited(styleProfile.punctuationStyle || [], pack.styleTraits.punctuationStyle, 30);
+      const nextHumorNotes = mergeUniqueLimited(styleProfile.humorNotes || [], pack.styleTraits.humorNotes, 30);
+      const nextSpellingNotes = mergeUniqueLimited(styleProfile.spellingNotes || [], pack.styleTraits.spellingNotes, 30);
+
+      const styleChanged =
+        JSON.stringify(nextCommonPhrases) !== JSON.stringify(styleProfile.commonPhrases || []) ||
+        JSON.stringify(nextPunctuationStyle) !== JSON.stringify(styleProfile.punctuationStyle || []) ||
+        JSON.stringify(nextHumorNotes) !== JSON.stringify(styleProfile.humorNotes || []) ||
+        JSON.stringify(nextSpellingNotes) !== JSON.stringify(styleProfile.spellingNotes || []);
+
+      if (styleChanged) {
+        await ctx.db.insert("styleProfileHistory", {
+          scope: styleProfile.scope,
+          threadId: styleProfile.threadId,
+          mimicryLevel: styleProfile.mimicryLevel,
+          commonPhrases: styleProfile.commonPhrases || [],
+          punctuationStyle: styleProfile.punctuationStyle || [],
+          humorNotes: styleProfile.humorNotes || [],
+          spellingNotes: styleProfile.spellingNotes || [],
+          reason: `pre-persona-pack-install:${pack.id}`,
+          createdAt: now,
+        });
+        await ctx.db.patch(styleProfile._id, {
+          commonPhrases: nextCommonPhrases,
+          punctuationStyle: nextPunctuationStyle,
+          humorNotes: nextHumorNotes,
+          spellingNotes: nextSpellingNotes,
+          updatedAt: now,
+        });
+      }
+    } else {
+      await ctx.db.insert("styleProfiles", {
+        scope: "global",
+        mimicryLevel: 0.72,
+        commonPhrases: mergeUniqueLimited([], pack.styleTraits.commonPhrases, 40),
+        punctuationStyle: mergeUniqueLimited([], pack.styleTraits.punctuationStyle, 30),
+        humorNotes: mergeUniqueLimited([], pack.styleTraits.humorNotes, 30),
+        spellingNotes: mergeUniqueLimited([], pack.styleTraits.spellingNotes, 30),
+        updatedAt: now,
+      });
+    }
+
+    let profileUpdates = 0;
+    for (const slug of pack.personalityPatch.appendToSlugs) {
+      const existing = await ctx.db
+        .query("personalityProfiles")
+        .withIndex("by_slug", (q) => q.eq("slug", slug))
+        .first();
+      const defaultProfile = DEFAULT_PERSONALITY_PROFILES.find((profile) => profile.slug === slug);
+      const currentPrompt = existing?.prompt || defaultProfile?.prompt || "";
+      const nextPrompt = upsertPersonaPackPromptBlock(currentPrompt, pack.id, pack.personalityPatch.promptBlock);
+
+      if (existing) {
+        if (existing.prompt === nextPrompt) {
+          continue;
+        }
+        await saveProfileVersionSnapshot(ctx, existing, `pre-persona-pack-install:${pack.id}`);
+        await ctx.db.patch(existing._id, {
+          prompt: nextPrompt,
+          updatedAt: now,
+        });
+        profileUpdates += 1;
+        continue;
+      }
+
+      const profileId = await ctx.db.insert("personalityProfiles", {
+        slug,
+        name: defaultProfile?.name || slug,
+        description: defaultProfile?.description || "Persona-managed profile.",
+        prompt: nextPrompt,
+        defaultIntensity: clamp01(defaultProfile?.defaultIntensity ?? 0.7),
+        createdAt: now,
+        updatedAt: now,
+      });
+      const created = await ctx.db.get(profileId);
+      if (created) {
+        await saveProfileVersionSnapshot(ctx, created, `persona-pack-install:${pack.id}`);
+      }
+      profileUpdates += 1;
+    }
+
+    const autoActivate = args.autoActivate ?? true;
+    if (autoActivate) {
+      await setConfigValue(ctx, "activePersonaPackId", pack.id);
+      await setConfigValue(ctx, "qualityGateMode", "auto_rewrite_once");
+      await setConfigValue(ctx, "qualityGateThreshold", String(pack.checklist.passThreshold));
+    }
+    await setConfigValue(ctx, "personaPackLastInstalledAt", String(now));
+
+    await ctx.db.insert("systemEvents", {
+      source: "dashboard",
+      eventType: "persona.pack.installed",
+      detail: `Installed ${pack.id} (autoActivate=${autoActivate ? "true" : "false"})`,
+      createdAt: now,
+    });
+
+    return {
+      packId: pack.id,
+      autoActivate,
+      profileUpdates,
+      installedAt: now,
+    };
   },
 });
 

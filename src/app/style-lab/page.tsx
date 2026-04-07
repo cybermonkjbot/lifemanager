@@ -7,7 +7,7 @@ export default async function StyleLabPage() {
   return (
     <DashboardShell
       title="Style Lab"
-      subtitle="Tune mimicry and inspect learned writing traits."
+      subtitle="Tune mimicry, inspect learned traits, and manage persona packs."
       convexUrl={convexUrl}
     >
       <LiveStyleLab />

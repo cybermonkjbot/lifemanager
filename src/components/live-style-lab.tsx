@@ -22,6 +22,7 @@ function StyleLabContent() {
   const updateLearnedTrait = useMutation(api.style.updateLearnedTrait);
   const removeLearnedTrait = useMutation(api.style.removeLearnedTrait);
   const clearLearnedTraitSection = useMutation(api.style.clearLearnedTraitSection);
+  const installPersonaPack = useMutation(api.personality.installPersonaPack);
   const { runAction, getRecord, notices, dismissNotice } = useActionStateRegistry();
   const key = "style:mimicry";
 
@@ -43,6 +44,20 @@ function StyleLabContent() {
         createdAt: number;
       }>
     | undefined;
+  const personaPacks = useQuery(api.personality.listPersonaPacks, {}) as
+    | {
+        activePersonaPackId: string;
+        qualityGateMode: "auto_rewrite_once" | "manual_review" | "log_only";
+        qualityGateThreshold: number;
+        packs: Array<{
+          id: string;
+          name: string;
+          version: string;
+          description: string;
+          allowedProfileSlugs: string[];
+        }>;
+      }
+    | undefined;
 
   const currentLevel = profile?.mimicryLevel ?? 0.72;
   const [mimicryLevel, setMimicryLevel] = useState(currentLevel);
@@ -57,6 +72,7 @@ function StyleLabContent() {
 
   const record = getRecord(key);
   const rollbackRecord = getRecord("style:rollback");
+  const installPackRecord = getRecord("style:persona-pack:install");
   const [editingTrait, setEditingTrait] = useState<{ trait: LearnedTraitField; value: string } | null>(null);
   const [traitDraft, setTraitDraft] = useState("");
   const [newTraitDrafts, setNewTraitDrafts] = useState<Record<LearnedTraitField, string>>({
@@ -440,6 +456,68 @@ function StyleLabContent() {
             </div>
           ))}
           {history !== undefined && history.length === 0 ? <p className="empty-line">No history yet.</p> : null}
+        </div>
+      </article>
+
+      <article className="panel-card">
+        <h3>Persona Pack</h3>
+        <p className="queue-meta">
+          Install or re-apply a persona pack. The active pack is used only when the thread personality matches its allowed profiles.
+        </p>
+        <div className="stack">
+          {personaPacks === undefined ? (
+            <p className="empty-line">Loading persona packs…</p>
+          ) : personaPacks.packs.length === 0 ? (
+            <p className="empty-line">No persona packs available.</p>
+          ) : (
+            personaPacks.packs.map((pack) => {
+              const isActive = personaPacks.activePersonaPackId === pack.id;
+              return (
+                <div key={pack.id} className="queue-item">
+                  <p className="queue-title">
+                    {pack.name} ({pack.version})
+                  </p>
+                  <p className="queue-body">{pack.description}</p>
+                  <p className="queue-meta">
+                    Allowed profiles: {pack.allowedProfileSlugs.join(", ")}{isActive ? " · Active" : ""}
+                  </p>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={() =>
+                      void runAction(
+                        "style:persona-pack:install",
+                        async () => {
+                          await installPersonaPack({
+                            packId: pack.id,
+                            autoActivate: true,
+                          });
+                        },
+                        {
+                          pendingLabel: "Installing persona pack...",
+                          successMessage: `Persona pack ${pack.id} applied.`,
+                        },
+                      )
+                    }
+                    disabled={installPackRecord.pending}
+                    aria-disabled={installPackRecord.pending}
+                  >
+                    {installPackRecord.pending ? "Applying..." : isActive ? "Re-Apply Active Pack" : "Apply + Activate Pack"}
+                  </button>
+                </div>
+              );
+            })
+          )}
+          {personaPacks ? (
+            <p className="queue-meta">
+              Quality gate default: {personaPacks.qualityGateMode} @ {personaPacks.qualityGateThreshold.toFixed(2)}
+            </p>
+          ) : null}
+          {installPackRecord.error ? (
+            <p className="queue-meta action-inline-error" role="alert">
+              {installPackRecord.error}
+            </p>
+          ) : null}
         </div>
       </article>
     </section>
