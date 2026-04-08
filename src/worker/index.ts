@@ -4150,11 +4150,18 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
                 return;
               }
 
-              const hydrated = await hydrateAiOutreach(item, runtimeSettings);
-              const initialDisposition = (await convex.query(convexRefs.outboxGetSendDisposition, {
+              const preHydrationDisposition = (await convex.query(convexRefs.outboxGetSendDisposition, {
                 outboxId: item.outboxId,
               })) as { canSend: boolean; reason?: string };
-              if (!initialDisposition.canSend) {
+              if (!preHydrationDisposition.canSend) {
+                return;
+              }
+
+              const hydrated = await hydrateAiOutreach(item, runtimeSettings);
+              const postHydrationDisposition = (await convex.query(convexRefs.outboxGetSendDisposition, {
+                outboxId: item.outboxId,
+              })) as { canSend: boolean; reason?: string };
+              if (!postHydrationDisposition.canSend) {
                 return;
               }
 

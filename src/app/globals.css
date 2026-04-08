@@ -1062,6 +1062,25 @@ textarea {
   pointer-events: none;
 }
 
+.activity-core-zoom-layer {
+  position: absolute;
+  inset: 0;
+  transform-origin: center center;
+  transition: transform 0.16s ease-out;
+}
+
+.activity-core-canvas-zoom-controls {
+  position: absolute;
+  right: 14px;
+  bottom: 14px;
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: min(92%, 520px);
+}
+
 .activity-log-node {
   position: absolute;
   width: min(310px, 44vw);
@@ -1105,6 +1124,59 @@ textarea {
 .activity-log-node.status-non-active {
   border-color: rgba(125, 167, 255, 0.5);
   box-shadow: 0 0 22px rgba(125, 167, 255, 0.19);
+}
+
+.activity-node-media-preview {
+  width: 86%;
+  margin: 0 0 6px;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 8px;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.28);
+  aspect-ratio: 16 / 9;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.activity-node-media-preview img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+
+.activity-modal-media-zoom {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.activity-modal-zoom-viewport {
+  width: 100%;
+  min-height: min(56vh, 640px);
+  max-height: min(70vh, 760px);
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 12px;
+  background:
+    radial-gradient(circle at 20% 20%, rgba(255, 255, 255, 0.06), transparent 36%),
+    rgba(0, 0, 0, 0.36);
+  touch-action: none;
+  user-select: none;
+}
+
+.activity-modal-zoom-canvas {
+  width: 100%;
+  min-height: inherit;
+  display: grid;
+  place-items: center;
+  transform-origin: center center;
+  transition: transform 0.11s ease-out;
+  will-change: transform;
+}
+
+.activity-modal-zoom-viewport.is-dragging .activity-modal-zoom-canvas {
+  transition: none;
 }
 
 .activity-halo-cloud {
@@ -1163,6 +1235,57 @@ textarea {
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+.activity-core-filter-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.activity-core-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.activity-core-filter-chip {
+  margin: 0;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 999px;
+  padding: 6px 11px;
+  font-size: 0.78rem;
+  letter-spacing: 0.02em;
+  color: #dde8ff;
+  background: rgba(10, 16, 25, 0.42);
+  box-shadow: 0 0 12px rgba(125, 167, 255, 0.12);
+  cursor: pointer;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease, color 0.16s ease;
+}
+
+.activity-core-filter-chip:hover {
+  border-color: rgba(255, 255, 255, 0.5);
+}
+
+.activity-core-filter-chip.is-active {
+  border-color: rgba(95, 255, 172, 0.58);
+  box-shadow: 0 0 16px rgba(95, 255, 172, 0.24);
+  color: #d7ffec;
+  background: rgba(20, 41, 29, 0.45);
+}
+
+.activity-core-filter-chip:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+  border-color: rgba(255, 255, 255, 0.2);
+  box-shadow: none;
+}
+
+.activity-core-filter-note {
+  margin: 0;
+  font-size: 0.76rem;
+  letter-spacing: 0.01em;
+  color: #b6c3de;
 }
 
 .activity-status-pill {
@@ -1519,7 +1642,8 @@ input:focus-visible,
 .workspace-modal-link:focus-visible,
 .thread-row:focus-visible,
 .system-node:focus-visible,
-.systems-chip-button:focus-visible {
+.systems-chip-button:focus-visible,
+.activity-core-filter-chip:focus-visible {
   outline: 2px solid #ffffff;
   outline-offset: 2px;
 }
@@ -1566,6 +1690,12 @@ input:focus-visible,
 
   .activity-core-stage {
     min-height: min(76vh, 700px);
+  }
+
+  .activity-core-canvas-zoom-controls {
+    right: 10px;
+    bottom: 10px;
+    gap: 6px;
   }
 
   .activity-log-node {

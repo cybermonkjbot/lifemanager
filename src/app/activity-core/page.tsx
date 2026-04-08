@@ -10,7 +10,7 @@ export default async function ActivityCorePage() {
   return (
     <DashboardShell
       title="Activity Core"
-      subtitle="Centered Spline object with live activity logs and glowing state signals."
+      subtitle="Centered Spline object with live activity + media signals, glowing states, and inline filters."
       convexUrl={convexUrl}
     >
       <LiveActivityCore splineSceneUrl={splineSceneUrl} />
