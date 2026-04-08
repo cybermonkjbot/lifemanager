@@ -129,7 +129,7 @@ function computeScore(args: {
   unresolvedCount: number;
   latestText: string;
   ignored: boolean;
-  hasPendingOutbox: boolean;
+  hasQueuedWork: boolean;
 }) {
   const pendingHours = msToHours(args.pendingAgeMs);
   const guardrail = evaluateGuardrail(args.latestText || "");
@@ -171,7 +171,7 @@ function computeScore(args: {
     score += 8;
   }
 
-  if (args.hasPendingOutbox) {
+  if (args.hasQueuedWork) {
     score -= 14;
   }
 
@@ -187,9 +187,9 @@ function recommendAction(args: {
   pendingAgeMs: number;
   latestText: string;
   unresolvedCount: number;
-  hasPendingOutbox: boolean;
+  hasQueuedWork: boolean;
 }): RecommendationKind {
-  if (args.hasPendingOutbox) {
+  if (args.hasQueuedWork) {
     return "already_queued";
   }
 
@@ -285,6 +285,13 @@ async function computeLiveSignals(
       .withIndex("by_thread_and_status", (q) => q.eq("threadId", thread._id).eq("status", "claimed"))
       .first(),
   );
+  const recentDrafts = await ctx.db
+    .query("replyDrafts")
+    .withIndex("by_thread", (q) => q.eq("threadId", thread._id))
+    .order("desc")
+    .take(24);
+  const hasOpenDraft = recentDrafts.some((draft) => draft.status !== "sent" && draft.status !== "rejected");
+  const hasQueuedWork = hasPendingOutbox || hasClaimedOutbox || hasOpenDraft;
 
   const setting = await ctx.db
     .query("threadPersonalitySettings")
@@ -316,7 +323,7 @@ async function computeLiveSignals(
     unresolvedCount,
     latestText: latestUnresolved.text || "",
     ignored: thread.isIgnored,
-    hasPendingOutbox: hasPendingOutbox || hasClaimedOutbox,
+    hasQueuedWork,
   });
 
   const autoImportance = scoreToImportance(score);
@@ -327,7 +334,7 @@ async function computeLiveSignals(
     pendingAgeMs,
     latestText: latestUnresolved.text || "",
     unresolvedCount,
-    hasPendingOutbox: hasPendingOutbox || hasClaimedOutbox,
+    hasQueuedWork,
   });
 
   return {
@@ -957,6 +964,16 @@ export const createDraft = mutation({
     mode: v.union(v.literal("answer"), v.literal("restart")),
   },
   handler: async (ctx, args) => {
+    const existingDrafts = await ctx.db
+      .query("replyDrafts")
+      .withIndex("by_thread", (q) => q.eq("threadId", args.threadId))
+      .order("desc")
+      .take(24);
+    const openDraft = existingDrafts.find((draft) => draft.status !== "sent" && draft.status !== "rejected");
+    if (openDraft) {
+      throw new Error("A draft is already open for this thread. Review it in Action Queue first.");
+    }
+
     const state = await refreshThreadSnapshot(ctx, args.threadId);
     const thread = await ctx.db.get(args.threadId);
 

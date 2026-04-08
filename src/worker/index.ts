@@ -1354,6 +1354,39 @@ async function run() {
     return creds?.me?.id || "";
   };
 
+  const buildStatusSendOptions = (audienceJids: string[] | undefined) => {
+    const statusAudience = new Set<string>();
+
+    for (const rawJid of audienceJids || []) {
+      const trimmed = rawJid.trim().toLowerCase();
+      if (!trimmed) {
+        continue;
+      }
+      const [userAndDevice = "", domain = ""] = trimmed.split("@");
+      const [bareUser = ""] = userAndDevice.split(":");
+      if (!bareUser) {
+        continue;
+      }
+
+      if (domain === "s.whatsapp.net" || domain === "lid") {
+        statusAudience.add(`${bareUser}@${domain}`);
+      } else if (!domain) {
+        statusAudience.add(`${bareUser}@s.whatsapp.net`);
+      }
+    }
+
+    const selfAccount = normalizeAccountJid(getSelfJid());
+    if (selfAccount) {
+      statusAudience.add(`${selfAccount}@s.whatsapp.net`);
+    }
+
+    const statusJidList = [...statusAudience];
+    if (statusJidList.length > 0) {
+      return { broadcast: true, statusJidList } as Parameters<typeof sock.sendMessage>[2];
+    }
+    return { broadcast: true } as Parameters<typeof sock.sendMessage>[2];
+  };
+
   const reconnectDelay = (attempt: number) => {
     const base = Math.min(1000 * 2 ** Math.max(0, attempt - 1), 15_000);
     const jitter = Math.floor(Math.random() * 350);
@@ -5116,9 +5149,7 @@ function resolveTextEmojiAllowlist() {
               let sent: { key?: { id?: string | null } } | undefined;
               const destinationJid = isStatusBroadcastSend ? "status@broadcast" : item.jid;
               if (isStatusBroadcastSend) {
-                const statusSendOptions = (hydrated.statusAudienceJids && hydrated.statusAudienceJids.length > 0
-                  ? ({ statusJidList: hydrated.statusAudienceJids } as Parameters<typeof sock.sendMessage>[2])
-                  : undefined);
+                const statusSendOptions = buildStatusSendOptions(hydrated.statusAudienceJids);
                 if (hydrated.sendKind === "meme") {
                   if (!hydrated.mediaAssetId) {
                     throw new Error("Status meme outbox item missing media asset id.");

@@ -241,6 +241,7 @@ function BacklogContent() {
           threadId: threadId as Id<"threads">,
           mode,
         });
+        await refreshRecent({ limit: 180 });
       },
       {
         pendingLabel: mode === "restart" ? "Creating reconnect draft..." : "Creating reply draft...",
@@ -510,6 +511,7 @@ function BacklogContent() {
           const ignoreKey = `backlog:ignore:${item.threadId}`;
           const importanceKey = `backlog:importance:${item.threadId}`;
           const relationshipKey = `backlog:relationship:${item.threadId}`;
+          const draftError = getRecord(answerKey).error || getRecord(restartKey).error;
 
           const isPending =
             getRecord(answerKey).pending ||
@@ -623,6 +625,11 @@ function BacklogContent() {
                     Open Thread
                   </Link>
                 </div>
+                {draftError ? (
+                  <p className="queue-meta action-inline-error" role="alert">
+                    {draftError}
+                  </p>
+                ) : null}
               </div>
 
               <div className="backlog-overrides">

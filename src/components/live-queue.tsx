@@ -5,7 +5,7 @@ import { SharedMediaPreview } from "@/components/media-preview";
 import { UIModal } from "@/components/ui-modal";
 import { formatDateTime, formatDateTimeWithRelative, trim } from "@/lib/format";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
-import { createFollowupActionHandlers, type FollowupItem } from "@/lib/ui/followups";
+import { followupRescheduleDueAt, type FollowupItem } from "@/lib/ui/followups";
 import type { MediaPreviewResource } from "@/lib/ui/media";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
@@ -98,6 +98,22 @@ function QueueContent() {
     [followupConfirmations.length, guardrailFlags.length, needsReply.length, todoCandidates.length],
   );
 
+  const closeReviewOnSuccess = (
+    kind: Exclude<QueueReviewState, null>["kind"],
+    id: string,
+    outcome: { executed: boolean; error?: string },
+  ) => {
+    if (!outcome.executed || outcome.error) {
+      return;
+    }
+    setReviewState((current) => {
+      if (!current || current.kind !== kind || current.item._id !== id) {
+        return current;
+      }
+      return null;
+    });
+  };
+
   const onSend = (draftId: string) => {
     const key = `send:${draftId}`;
     void runAction(
@@ -109,7 +125,7 @@ function QueueContent() {
         pendingLabel: "Sending...",
         successMessage: "Reply approved and queued.",
       },
-    );
+    ).then((outcome) => closeReviewOnSuccess("needsReply", draftId, outcome));
   };
 
   const onSnooze = (draftId: string) => {
@@ -123,22 +139,67 @@ function QueueContent() {
         pendingLabel: "Snoozing...",
         successMessage: "Reply snoozed for 30 minutes.",
       },
-    );
+    ).then((outcome) => closeReviewOnSuccess("needsReply", draftId, outcome));
   };
 
-  const followupActions = createFollowupActionHandlers({
-    runAction,
-    mutations: {
-      confirmFollowup: async (args) => await confirmFollowup(args),
-      snoozeFollowup: async (args) => await snoozeFollowup(args),
-      rescheduleFollowup: async (args) => await rescheduleFollowup(args),
-      cancelFollowup: async (args) => await cancelFollowup(args),
-    },
-  });
-  const onConfirmFollowup = followupActions.onConfirm;
-  const onSnoozeFollowup = followupActions.onSnooze;
-  const onRescheduleFollowup = followupActions.onReschedule;
-  const onDismissFollowup = followupActions.onDismiss;
+  const onConfirmFollowup = (followUpId: string) => {
+    const key = `followup:${followUpId}`;
+    void runAction(
+      key,
+      async () => {
+        await confirmFollowup({ followUpId: followUpId as Id<"followUps"> });
+      },
+      {
+        pendingLabel: "Confirming...",
+        successMessage: "Follow-up confirmed.",
+      },
+    ).then((outcome) => closeReviewOnSuccess("followups", followUpId, outcome));
+  };
+
+  const onSnoozeFollowup = (followUpId: string, minutes: number) => {
+    const key = `followup:snooze:${followUpId}`;
+    void runAction(
+      key,
+      async () => {
+        await snoozeFollowup({ followUpId: followUpId as Id<"followUps">, minutes });
+      },
+      {
+        pendingLabel: "Snoozing...",
+        successMessage: "Follow-up snoozed.",
+      },
+    ).then((outcome) => closeReviewOnSuccess("followups", followUpId, outcome));
+  };
+
+  const onRescheduleFollowup = (followUpId: string, hoursAhead: number) => {
+    const key = `followup:reschedule:${followUpId}`;
+    void runAction(
+      key,
+      async () => {
+        await rescheduleFollowup({
+          followUpId: followUpId as Id<"followUps">,
+          dueAt: followupRescheduleDueAt(hoursAhead),
+        });
+      },
+      {
+        pendingLabel: "Rescheduling...",
+        successMessage: "Follow-up rescheduled.",
+      },
+    ).then((outcome) => closeReviewOnSuccess("followups", followUpId, outcome));
+  };
+
+  const onDismissFollowup = (followUpId: string) => {
+    const key = `followup:cancel:${followUpId}`;
+    void runAction(
+      key,
+      async () => {
+        await cancelFollowup({ followUpId: followUpId as Id<"followUps"> });
+      },
+      {
+        pendingLabel: "Dismissing...",
+        successMessage: "Follow-up dismissed.",
+      },
+    ).then((outcome) => closeReviewOnSuccess("followups", followUpId, outcome));
+  };
 
   const onConvertTodo = (candidateId: string) => {
     const key = `todo:${candidateId}`;
@@ -151,7 +212,7 @@ function QueueContent() {
         pendingLabel: "Converting...",
         successMessage: "Candidate converted to TODO.",
       },
-    );
+    ).then((outcome) => closeReviewOnSuccess("todos", candidateId, outcome));
   };
 
   const onReject = (draftId: string) => {
@@ -165,7 +226,7 @@ function QueueContent() {
         pendingLabel: "Rejecting...",
         successMessage: "Draft rejected.",
       },
-    );
+    ).then((outcome) => closeReviewOnSuccess("needsReply", draftId, outcome));
   };
 
   const onEdit = (draftId: string, text: string) => {
@@ -201,7 +262,7 @@ function QueueContent() {
         pendingLabel: "Resolving guardrail...",
         successMessage: "Guardrail resolved.",
       },
-    );
+    ).then((outcome) => closeReviewOnSuccess("guardrails", guardrailEventId, outcome));
   };
 
   const onBulkNeedsReply = (mode: "send" | "snooze") => {
