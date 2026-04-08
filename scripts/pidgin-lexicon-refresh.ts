@@ -67,6 +67,9 @@ const MAX_FETCH_RETRIES = 2;
 const BASE_RETRY_DELAY_MS = 300;
 const FETCH_TIMEOUT_MS = 8_000;
 const MAX_BACKOFF_MS = 3_000;
+const REQUEST_HEADERS = {
+  "user-agent": "lifemanager-pidgin-lexicon-refresh/1.0",
+};
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -78,7 +81,10 @@ async function fetchJsonWithRetry(url: URL, label: string) {
 
   while (attempt <= MAX_FETCH_RETRIES) {
     try {
-      const response = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+      const response = await fetch(url, {
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        headers: REQUEST_HEADERS,
+      });
       if (response.ok) {
         return (await response.json()) as WikiCategoryResponse;
       }
@@ -281,6 +287,7 @@ async function run() {
   const categories = await discoverCategories(args.maxDepth);
   const termSources = new Map<string, Set<string>>();
   let totalRawPages = 0;
+  let failedPageCategories = 0;
 
   for (const category of categories) {
     let titles: string[] = [];
@@ -288,6 +295,7 @@ async function run() {
       titles = await fetchCategoryMembers(category, "page");
     } catch (error) {
       console.warn(`Skipping ${category}: ${error instanceof Error ? error.message : String(error)}`);
+      failedPageCategories += 1;
       continue;
     }
     totalRawPages += titles.length;
@@ -303,6 +311,11 @@ async function run() {
   }
 
   const normalized = [...termSources.keys()].sort((a, b) => a.localeCompare(b));
+  if (totalRawPages === 0) {
+    throw new Error(
+      `No category pages were fetched successfully (${failedPageCategories}/${categories.length} failed). Likely rate-limited; try again later.`,
+    );
+  }
   const classified = normalized
     .filter((term) => !known.has(term.replace(/\s+/g, "")) && !known.has(term))
     .map((term) => {

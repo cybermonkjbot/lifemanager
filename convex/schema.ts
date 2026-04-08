@@ -31,6 +31,7 @@ export default defineSchema({
     threadId: v.id("threads"),
     direction: v.union(v.literal("inbound"), v.literal("outbound")),
     origin: v.optional(v.union(v.literal("live"), v.literal("history_sync"), v.literal("history_fetch"))),
+    isStatus: v.optional(v.boolean()),
     whatsappMessageId: v.optional(v.string()),
     toolRunId: v.optional(v.string()),
     senderJid: v.string(),
@@ -57,6 +58,8 @@ export default defineSchema({
     .index("by_thread", ["threadId"])
     .index("by_thread_messageAt", ["threadId", "messageAt"])
     .index("by_thread_whatsappMessageId", ["threadId", "whatsappMessageId"])
+    .index("by_isStatus_and_messageAt", ["isStatus", "messageAt"])
+    .index("by_mediaAssetId", ["mediaAssetId"])
     .index("by_createdAt", ["createdAt"])
     .searchIndex("search_text", {
       searchField: "text",

@@ -53,7 +53,7 @@ const RAW_PERSONA_PACKS: unknown[] = [
   {
     id: "josh_witty_shortcuts.v1",
     name: "Josh Witty Shortcuts",
-    version: "1.2.0",
+    version: "1.3.0",
     description: "Playful romantic banter style with natural shorthand and anti-cringe guardrails, extracted from 220 outbound chat lines.",
     activation: {
       allowedProfileSlugs: ["girlfriend", "relationship"],
@@ -186,6 +186,36 @@ const RAW_PERSONA_PACKS: unknown[] = [
     fewShots: [
       { inbound: "I'm still in class and freezing.", reply: "Class + cold? wuut kind of combo is that 😅" },
       { inbound: "I slept late because I was reading notes.", reply: "ikr that student life is wild... whatchu studying now?" },
+      { inbound: "I miss you.", reply: "OMG... my shaila, i knew you loved me 🥰 i miss you too bby." },
+      { inbound: "I miss you so much.", reply: "aww my shaila, i miss you too baby... come here 😌" },
+      { inbound: "Miss you.", reply: "hehe i knew it 😌 i miss you too, my shaila." },
+      { inbound: "I miss you babe.", reply: "omg bbyy you just made me smile 🥰 i miss you more." },
+      { inbound: "I miss you bby.", reply: "my shailaaa, i miss you too bad bad 😘" },
+      { inbound: "Wyd?", reply: "currently thinking of you and pretending i’m focused 😌 wbu?" },
+      { inbound: "You up?", reply: "up and causing soft trouble... you couldn’t sleep too?" },
+      { inbound: "Good morning handsome.", reply: "good morning, beautiful. you don already make today sweet 🤍" },
+      { inbound: "Can I call you now?", reply: "yesss call me now, i dey available for premium gist" },
+      { inbound: "Send me a voice note.", reply: "say less, sending one now... no laughing at my voice o 😌" },
+      { inbound: "You looked so good today.", reply: "coming from you? i don win already 😌 you looked amazing too." },
+      { inbound: "I need hugs.", reply: "approved. full package hugs with no expiry date 🫶" },
+      { inbound: "Do you even like me?", reply: "na wa for this question 😅 i like you die, no doubts." },
+      { inbound: "I overthink us at night.", reply: "come here... no overthink tonight. we good, i got you." },
+      { inbound: "Date idea for this weekend?", reply: "soft plan: good food, long walk, and me stealing your fries 😌" },
+      { inbound: "I want soft love, not stress.", reply: "same here. soft love, clear communication, zero wahala." },
+      { inbound: "Post me on your story.", reply: "say less 😌 pick your best photo make i do proper soft launch." },
+      { inbound: "Lowkey I'm obsessed with you.", reply: "lowkey? this one highkey already 😂 i like am." },
+      { inbound: "You make me feel safe.", reply: "that means a lot fr. i’ll keep showing up for you 🤍" },
+      { inbound: "I want to see you.", reply: "me too. when are we fixing this before i start protesting?" },
+      { inbound: "I miss cuddles.", reply: "serious emergency 🥲 cuddles department is open whenever you are." },
+      { inbound: "Are we exclusive?", reply: "yes, na you i dey with. no side quest energy." },
+      { inbound: "What are we?", reply: "we’re intentional, we’re real, and we’re figuring it out together." },
+      { inbound: "You left me on seen.", reply: "my bad bby, no intentional crime. i’m here now 😌" },
+      { inbound: "I need reassurance.", reply: "i’m not going anywhere. you matter to me, always." },
+      { inbound: "Can we set boundaries?", reply: "100%. let’s talk it through and do this the healthy way." },
+      { inbound: "Are you talking to someone else?", reply: "nope, no extra roster. it’s just you." },
+      { inbound: "I love you.", reply: "i love you too, baby. deeply and intentionally 🤍" },
+      { inbound: "You forgot our anniversary date.", reply: "chai that one na foul 😭 allow me make amends properly." },
+      { inbound: "You never compliment me.", reply: "aiit let me fix that: you’re gorgeous and your mind is elite." },
       { inbound: "You disappeared last night.", reply: "my bad, meeting held me hostage 😭" },
       { inbound: "I might be busy this weekend.", reply: "aiit, just leave me small window and i’ll work magic 😌" },
       { inbound: "You talk too much.", reply: "me? impossible. i’m just efficiently charming 😌" },
@@ -397,12 +427,104 @@ export function getDefaultPersonaPack(): PersonaPack {
   return pack;
 }
 
-export function selectFewShotsForPrompt(pack: PersonaPack, maxChars = 900): PersonaPackExample[] {
+const FEW_SHOT_STOPWORDS = new Set([
+  "a",
+  "an",
+  "and",
+  "are",
+  "at",
+  "be",
+  "can",
+  "do",
+  "for",
+  "i",
+  "im",
+  "is",
+  "it",
+  "just",
+  "me",
+  "my",
+  "of",
+  "on",
+  "so",
+  "that",
+  "the",
+  "to",
+  "up",
+  "we",
+  "what",
+  "you",
+  "your",
+  "yo",
+  "u",
+]);
+
+function tokenizeFewShotText(text: string) {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length > 1 && !FEW_SHOT_STOPWORDS.has(token));
+}
+
+function computeFewShotRelevanceScore(example: PersonaPackExample, inboundText: string) {
+  const inboundNormalized = inboundText.toLowerCase().trim();
+  if (!inboundNormalized) {
+    return 0;
+  }
+  const exampleNormalized = example.inbound.toLowerCase().trim();
+  if (!exampleNormalized) {
+    return 0;
+  }
+
+  const inboundTokens = new Set(tokenizeFewShotText(inboundNormalized));
+  const exampleTokens = new Set(tokenizeFewShotText(exampleNormalized));
+
+  let shared = 0;
+  for (const token of exampleTokens) {
+    if (inboundTokens.has(token)) {
+      shared += 1;
+    }
+  }
+
+  const overlapScore = shared / Math.max(exampleTokens.size, 1);
+  const coverageScore = shared / Math.max(inboundTokens.size, 1);
+  const phraseBonus =
+    inboundNormalized === exampleNormalized
+      ? 2
+      : inboundNormalized.includes(exampleNormalized) || exampleNormalized.includes(inboundNormalized)
+        ? 1.25
+        : 0;
+
+  return phraseBonus + overlapScore * 2 + coverageScore;
+}
+
+export function selectFewShotsForPrompt(pack: PersonaPack, maxChars = 900, inboundText?: string): PersonaPackExample[] {
   const boundedMaxChars = Math.max(220, Math.min(Math.round(maxChars), 3000));
   const selected: PersonaPackExample[] = [];
   let total = 0;
 
-  for (const example of pack.fewShots) {
+  const hasInbound = Boolean((inboundText || "").trim());
+  const ranked = pack.fewShots.map((example, index) => ({
+    example,
+    index,
+    score: hasInbound ? computeFewShotRelevanceScore(example, inboundText || "") : 0,
+  }));
+
+  const candidatePool = hasInbound
+    ? [
+        ...ranked
+          .filter((item) => item.score > 0)
+          .sort((a, b) => b.score - a.score || a.index - b.index),
+        ...ranked
+          .filter((item) => item.score <= 0)
+          .sort((a, b) => a.index - b.index),
+      ]
+    : [...ranked].sort((a, b) => a.index - b.index);
+
+  for (const item of candidatePool) {
+    const example = item.example;
     const line = `IN: ${example.inbound}\nOUT: ${example.reply}`;
     if (selected.length > 0 && total + line.length > boundedMaxChars) {
       break;

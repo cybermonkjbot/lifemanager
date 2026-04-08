@@ -12,7 +12,16 @@ type KnownContact = {
   jid: string;
   title?: string;
   isIgnored?: boolean;
+  threadKind?: "direct" | "group" | "broadcast_or_system";
 };
+
+function inferTargetType(targetValue: string): "contact" | "group" {
+  return targetValue.endsWith("@g.us") ? "group" : "contact";
+}
+
+function formatTargetType(targetType: "contact" | "group") {
+  return targetType === "group" ? "Group" : "Contact";
+}
 
 function RulesContent() {
   const upsertIgnoreRule = useMutation(api.rules.upsertIgnoreRule);
@@ -33,13 +42,17 @@ function RulesContent() {
         }>;
       }
     | undefined;
-  const contacts = useQuery(api.threads.listContacts, { limit: 250 }) as KnownContact[] | undefined;
+  const contacts = useQuery(api.threads.list, { limit: 250 }) as KnownContact[] | undefined;
   const rulesLoading = rules === undefined;
   const contactsLoading = contacts === undefined;
   const ignoreRules = useMemo(() => rules?.ignoreRules || [], [rules]);
-  const knownContacts = useMemo(() => contacts || [], [contacts]);
+  const knownContacts = useMemo(
+    () => (contacts || []).filter((contact) => (contact.threadKind || "direct") !== "broadcast_or_system"),
+    [contacts],
+  );
 
   const normalizedTarget = targetValue.trim();
+  const inferredTargetType = inferTargetType(normalizedTarget);
 
   const duplicateActiveRule = useMemo(() => {
     if (!normalizedTarget) {
@@ -47,9 +60,9 @@ function RulesContent() {
     }
 
     return ignoreRules.some(
-      (rule) => rule.targetType === "contact" && rule.enabled && rule.targetValue === normalizedTarget,
+      (rule) => rule.targetType === inferredTargetType && rule.enabled && rule.targetValue === normalizedTarget,
     );
-  }, [ignoreRules, normalizedTarget]);
+  }, [ignoreRules, inferredTargetType, normalizedTarget]);
 
   const record = getRecord(key);
 
@@ -64,7 +77,6 @@ function RulesContent() {
       key,
       async () => {
         await upsertIgnoreRule({
-          targetType: "contact",
           targetValue: normalizedTarget,
           enabled: true,
         });
@@ -81,10 +93,10 @@ function RulesContent() {
     <section className="panel-grid two-col">
       <article className="panel-card">
         <ActionNotices notices={notices} onDismiss={dismissNotice} />
-        <h3>Add Ignore Contact</h3>
+        <h3>Add Ignore Target</h3>
         <form onSubmit={onSubmit} className="stack compact" aria-busy={record.pending}>
           <label className="stack compact">
-            <span className="queue-meta">Select from previous contacts</span>
+            <span className="queue-meta">Select from previous conversations</span>
             <select
               value=""
               onChange={(event) => {
@@ -96,10 +108,11 @@ function RulesContent() {
               disabled={record.pending || contactsLoading}
               aria-disabled={record.pending || contactsLoading}
             >
-              <option value="">{contactsLoading ? "Loading contacts..." : "Choose a contact"}</option>
+              <option value="">{contactsLoading ? "Loading conversations..." : "Choose a conversation"}</option>
               {knownContacts.map((contact) => (
                 <option key={contact._id} value={contact.jid}>
                   {contact.title ? `${contact.title} (${contact.jid})` : contact.jid}
+                  {` · ${formatTargetType(contact.threadKind === "group" ? "group" : "contact")}`}
                 </option>
               ))}
             </select>
@@ -108,13 +121,14 @@ function RulesContent() {
           <input
             type="text"
             name="targetValue"
-            placeholder="12345@s.whatsapp.net"
+            placeholder="12345@s.whatsapp.net or 12345@g.us"
             value={targetValue}
             onChange={(event) => setTargetValue(event.target.value)}
             required
             aria-disabled={record.pending || rulesLoading || contactsLoading}
             disabled={record.pending || rulesLoading || contactsLoading}
           />
+          <p className="queue-meta">Detected type: {formatTargetType(inferredTargetType)}</p>
           <button
             type="submit"
             className="btn btn-primary"
@@ -125,11 +139,11 @@ function RulesContent() {
           </button>
         </form>
         {rulesLoading ? <p className="empty-line">Loading rules…</p> : null}
-        {contactsLoading ? <p className="empty-line">Loading previous contacts…</p> : null}
+        {contactsLoading ? <p className="empty-line">Loading previous conversations…</p> : null}
 
         {duplicateActiveRule ? (
           <p className="queue-meta action-inline-error" role="status">
-            This contact is already ignored.
+            This {inferredTargetType === "group" ? "group" : "contact"} is already ignored.
           </p>
         ) : null}
 

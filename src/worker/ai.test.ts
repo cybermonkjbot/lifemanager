@@ -14,7 +14,7 @@ import {
   postProcessReplyText,
   sanitizeCommonPhrasesForPrompt,
 } from "./ai";
-import { getDefaultPersonaPack, getPersonaPackById } from "../../convex/lib/personaPacks";
+import { getDefaultPersonaPack, getPersonaPackById, selectFewShotsForPrompt } from "../../convex/lib/personaPacks";
 
 const ENV_KEYS = [
   "AZURE_AI_ENDPOINT",
@@ -112,6 +112,52 @@ test("postProcessReplyText keeps family terms unchanged outside pidgin mode", ()
     historyLines: ["Them: thanks for the update"],
   });
   assert.equal(output, "My mum and dad will call later.");
+});
+
+test("postProcessReplyText strips sales or stock claims", () => {
+  const output = postProcessReplyText({
+    text: "I have stock for this. We can chat later.",
+    inboundText: "Are you around?",
+    historyLines: [],
+  });
+  assert.equal(output, "We can chat later.");
+});
+
+test("postProcessReplyText falls back when reply is only a stock claim", () => {
+  const output = postProcessReplyText({
+    text: "I get small stock.",
+    inboundText: "Are you online?",
+    historyLines: [],
+    fallbackText: "All good.",
+  });
+  assert.equal(output, "All good.");
+});
+
+test("postProcessReplyText strips gendered wording when gender is unknown", () => {
+  const output = postProcessReplyText({
+    text: "Thanks bro, you handled this well.",
+    inboundText: "Can you check this now?",
+    historyLines: [],
+  });
+  assert.equal(output, "Thanks, you handled this well.");
+});
+
+test("postProcessReplyText allows male-gendered wording when contact self-identifies as male", () => {
+  const output = postProcessReplyText({
+    text: "No wahala bro, I got you.",
+    inboundText: "I'm a guy and I'm stuck on this.",
+    historyLines: [],
+  });
+  assert.equal(output, "No wahala bro, I got you.");
+});
+
+test("postProcessReplyText allows female-gendered wording when contact self-identifies as female", () => {
+  const output = postProcessReplyText({
+    text: "You got this queen.",
+    inboundText: "I'm a woman and I need help with this.",
+    historyLines: [],
+  });
+  assert.equal(output, "You got this queen.");
 });
 
 test("hasBossAddressCue detects vocative boss forms and ignores plain references", () => {
@@ -218,6 +264,38 @@ test("detectConversationSteeringMode flags pause requests", () => {
     historyLines: [],
   });
   assert.equal(mode, "pause");
+});
+
+test("detectConversationSteeringMode flags anti beggi beggi money requests", () => {
+  const mode = detectConversationSteeringMode({
+    inboundText: "abeg you fit send me 2k? money don choke me",
+    historyLines: [],
+  });
+  assert.equal(mode, "anti_beggi_beggi");
+});
+
+test("detectConversationSteeringMode does not flag non-money send requests as anti beggi beggi", () => {
+  const mode = detectConversationSteeringMode({
+    inboundText: "Can you send me the invoice summary?",
+    historyLines: [],
+  });
+  assert.equal(mode, "none");
+});
+
+test("detectConversationSteeringMode flags sales pitch negotiation attempts", () => {
+  const mode = detectConversationSteeringMode({
+    inboundText: "Promo offer: sneakers available now for 45k, DM to order.",
+    historyLines: [],
+  });
+  assert.equal(mode, "anti_sales_pitch");
+});
+
+test("detectConversationSteeringMode does not flag non-sales buy wording", () => {
+  const mode = detectConversationSteeringMode({
+    inboundText: "Can you buy milk on your way home?",
+    historyLines: [],
+  });
+  assert.equal(mode, "none");
 });
 
 test("detectConversationSteeringMode flags wrap-up acknowledgements", () => {
@@ -541,6 +619,83 @@ test("generateReplyWithFallback short-circuits wrap-up messages locally", async 
     assert.ok(result.contextToolCalls && result.contextToolCalls.some((call) => call.name === "conversation_history_search"));
     assert.ok(result.contextToolCalls && result.contextToolCalls.some((call) => call.name === "context_window_detection"));
     assert.ok(result.contextWindow);
+  } finally {
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback short-circuits anti beggi beggi money requests locally", async () => {
+  const snapshot = clearAiEnv();
+
+  try {
+    const result = await generateReplyWithFallback({
+      inboundText: "abeg you fit send me 2k?",
+      historyLines: ["Me: I sent update earlier."],
+      styleHints: [],
+    });
+
+    assert.equal(result.provider, "heuristic");
+    assert.equal(result.model, "heuristic-local-anti_beggi_beggi");
+    assert.equal(result.attempts.length, 1);
+    assert.equal(result.attempts[0]?.stage, "heuristic_fallback");
+    assert.match(result.text, /money tight|no fit send|cannot send/i);
+  } finally {
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback auto-selects firm anti beggi beggi tone for urgent requests", async () => {
+  const snapshot = clearAiEnv();
+
+  try {
+    const result = await generateReplyWithFallback({
+      inboundText: "Can you transfer me 10k urgently please? I need it now now.",
+      historyLines: [],
+      styleHints: [],
+    });
+
+    assert.equal(result.provider, "heuristic");
+    assert.equal(result.model, "heuristic-local-anti_beggi_beggi");
+    assert.match(result.text, /cannot assist financially|cannot transfer money|cannot lend or borrow out money|cannot help with cash/i);
+  } finally {
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback auto-selects funny anti beggi beggi tone for playful asks", async () => {
+  const snapshot = clearAiEnv();
+
+  try {
+    const result = await generateReplyWithFallback({
+      inboundText: "lol abeg can you send me 10k 😂",
+      historyLines: [],
+      styleHints: [],
+    });
+
+    assert.equal(result.provider, "heuristic");
+    assert.equal(result.model, "heuristic-local-anti_beggi_beggi");
+    assert.match(result.text, /small joke aside/i);
+  } finally {
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback short-circuits sales pitches locally", async () => {
+  const snapshot = clearAiEnv();
+
+  try {
+    const result = await generateReplyWithFallback({
+      inboundText: "Limited offer today. We have wristwatches in stock, DM to order now.",
+      historyLines: [],
+      styleHints: [],
+    });
+
+    assert.equal(result.provider, "heuristic");
+    assert.equal(result.model, "heuristic-local-anti_sales_pitch");
+    assert.equal(result.attempts.length, 1);
+    assert.equal(result.attempts[0]?.stage, "heuristic_fallback");
+    assert.match(result.text, /take a look|check/i);
+    assert.doesNotMatch(result.text, /\?/);
   } finally {
     restoreAiEnv(snapshot);
   }
@@ -908,6 +1063,64 @@ test("generateReplyWithFallback emits context tool calls and searchable context 
   }
 });
 
+test("generateReplyWithFallback records response workbench diagnostics", async () => {
+  const snapshot = clearAiEnv();
+  try {
+    const result = await generateReplyWithFallback({
+      inboundText: "Can you share the owner list and due date?",
+      historyLines: ["Them: can you share owner list", "Me: yes"],
+      styleHints: [],
+      runtime: {
+        fallbackMode: "azure_only",
+      },
+    });
+
+    const workbenchCall = result.contextToolCalls?.find((call) => call.name === "response_workbench");
+    assert.ok(workbenchCall);
+    assert.ok(["answer", "confirm", "clarify", "close"].includes(String(workbenchCall?.output?.replyMode || "")));
+    assert.equal(typeof workbenchCall?.output?.confidence, "number");
+  } finally {
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback injects clarify reply-mode instruction for ambiguous inbound text", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  const requestBodies: string[] = [];
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      requestBodies.push(typeof init?.body === "string" ? init.body : "");
+      return new Response(JSON.stringify({ output_text: "Which specific item should I use?" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "about that one from earlier...",
+      historyLines: ["Them: can you send the schedule soon?", "Me: yes I can."],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "log_only",
+      },
+    });
+
+    assert.equal(result.provider, "azure");
+    assert.ok(requestBodies.some((body) => /Reply mode is CLARIFY/i.test(body)));
+    assert.ok(requestBodies.some((body) => /Pre-response workbench/i.test(body)));
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
 test("generateReplyWithFallback records external semantic search diagnostics when override is provided", async () => {
   const snapshot = clearAiEnv();
   try {
@@ -1011,6 +1224,38 @@ test("context window trimming keeps prompt within configured budget", async () =
   }
 });
 
+test("large context windows expand history usage beyond baseline history limit", async () => {
+  const snapshot = clearAiEnv();
+  try {
+    const longHistory = Array.from({ length: 90 }).map((_, index) => {
+      const speaker = index % 2 === 0 ? "Them" : "Me";
+      return `${speaker}: project thread note ${index} about launch blockers, owner handoff, and dependency sequencing`;
+    });
+
+    const result = await generateReplyWithFallback({
+      inboundText: "Can you recap what we aligned on for launch dependencies and owners?",
+      historyLines: longHistory,
+      styleHints: [],
+      runtime: {
+        fallbackMode: "azure_only",
+        historyLineLimit: 8,
+        maxContextTokens: 64_000,
+        contextReserveTokens: 220,
+      },
+    });
+
+    assert.ok(result.contextWindow);
+    assert.ok((result.contextWindow?.usedHistoryLines || 0) > 8);
+    const expansionDetectionCall = (result.contextToolCalls || []).find(
+      (call) => call.name === "context_window_detection" && call.input?.mode === "post_expand",
+    );
+    assert.ok(expansionDetectionCall);
+    assert.ok(Number(expansionDetectionCall?.input?.expandedLines || 0) >= 1);
+  } finally {
+    restoreAiEnv(snapshot);
+  }
+});
+
 test("persona pack loader returns validated default pack", () => {
   const pack = getDefaultPersonaPack();
   assert.equal(pack.id, "josh_witty_shortcuts.v1");
@@ -1020,6 +1265,27 @@ test("persona pack loader returns validated default pack", () => {
   assert.ok(pack.shortcutDictionary.some((entry) => entry.token === "no wahala"));
   assert.ok(pack.guardrails.some((line) => /mama and papa/i.test(line)));
   assert.equal(getPersonaPackById("missing-pack"), null);
+});
+
+test("selectFewShotsForPrompt prioritizes miss-you examples for miss-you inbounds", () => {
+  const pack = getDefaultPersonaPack();
+  const selected = selectFewShotsForPrompt(pack, 900, "i miss you bby");
+  assert.ok(selected.length > 0);
+  assert.match(selected[0]?.inbound || "", /miss you/i);
+});
+
+test("selectFewShotsForPrompt prioritizes exclusivity examples for exclusivity inbounds", () => {
+  const pack = getDefaultPersonaPack();
+  const selected = selectFewShotsForPrompt(pack, 900, "are we exclusive now?");
+  assert.ok(selected.length > 0);
+  assert.equal(selected[0]?.inbound, "Are we exclusive?");
+});
+
+test("selectFewShotsForPrompt falls back to pack order when inbound is empty", () => {
+  const pack = getDefaultPersonaPack();
+  const selected = selectFewShotsForPrompt(pack, 220);
+  assert.ok(selected.length > 0);
+  assert.equal(selected[0]?.inbound, "I'm still in class and freezing.");
 });
 
 test("generateReplyWithFallback applies active persona pack only for romantic profile slugs", async () => {

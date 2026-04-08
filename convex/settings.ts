@@ -31,6 +31,7 @@ export const save = mutation({
     humorLearningEnabled: v.boolean(),
     statusAutoReplyEnabled: v.boolean(),
     statusReplyRequireFunny: v.boolean(),
+    captureGroupMediaEnabled: v.optional(v.boolean()),
     funnyStatusKeywords: v.optional(v.array(v.string())),
     funnyStatusEmojis: v.optional(v.array(v.string())),
     aiFallbackMode: v.union(v.literal("all"), v.literal("azure_only")),
@@ -55,6 +56,15 @@ export const save = mutation({
     manualInterventionCooldownMs: v.optional(v.number()),
     inboundConcurrency: v.optional(v.number()),
     outboxSendConcurrency: v.optional(v.number()),
+    statusRetentionMs: v.optional(v.number()),
+    statusCleanupIntervalMs: v.optional(v.number()),
+    statusCleanupBatchLimit: v.optional(v.number()),
+    statusContextKeepPerThread: v.optional(v.number()),
+    groupContextKeepPerThread: v.optional(v.number()),
+    contextCompactionIntervalMs: v.optional(v.number()),
+    contextCompactionMaxThreads: v.optional(v.number()),
+    contextCompactionMaxDeletes: v.optional(v.number()),
+    compactContextGroupJids: v.optional(v.array(v.string())),
     quietHoursEnabled: v.optional(v.boolean()),
     quietHoursStartHour: v.optional(v.number()),
     quietHoursEndHour: v.optional(v.number()),
@@ -87,6 +97,7 @@ export const save = mutation({
       humorLearningEnabled: args.humorLearningEnabled,
       statusAutoReplyEnabled: args.statusAutoReplyEnabled,
       statusReplyRequireFunny: args.statusReplyRequireFunny,
+      captureGroupMediaEnabled: args.captureGroupMediaEnabled ?? DEFAULT_APP_CONFIG.captureGroupMediaEnabled,
       funnyStatusKeywords: funnyStatusKeywords.length ? funnyStatusKeywords : DEFAULT_APP_CONFIG.funnyStatusKeywords,
       funnyStatusEmojis: funnyStatusEmojis.length ? funnyStatusEmojis : DEFAULT_APP_CONFIG.funnyStatusEmojis,
       aiFallbackMode: args.aiFallbackMode,
@@ -115,6 +126,45 @@ export const save = mutation({
       ),
       inboundConcurrency: clampInt(args.inboundConcurrency ?? DEFAULT_APP_CONFIG.inboundConcurrency, 1, 16),
       outboxSendConcurrency: clampInt(args.outboxSendConcurrency ?? DEFAULT_APP_CONFIG.outboxSendConcurrency, 1, 16),
+      statusRetentionMs: clampInt(
+        args.statusRetentionMs ?? DEFAULT_APP_CONFIG.statusRetentionMs,
+        5 * 60 * 1000,
+        24 * 60 * 60 * 1000,
+      ),
+      statusCleanupIntervalMs: clampInt(
+        args.statusCleanupIntervalMs ?? DEFAULT_APP_CONFIG.statusCleanupIntervalMs,
+        5 * 60 * 1000,
+        24 * 60 * 60 * 1000,
+      ),
+      statusCleanupBatchLimit: clampInt(args.statusCleanupBatchLimit ?? DEFAULT_APP_CONFIG.statusCleanupBatchLimit, 20, 800),
+      statusContextKeepPerThread: clampInt(
+        args.statusContextKeepPerThread ?? DEFAULT_APP_CONFIG.statusContextKeepPerThread,
+        8,
+        120,
+      ),
+      groupContextKeepPerThread: clampInt(
+        args.groupContextKeepPerThread ?? DEFAULT_APP_CONFIG.groupContextKeepPerThread,
+        8,
+        120,
+      ),
+      contextCompactionIntervalMs: clampInt(
+        args.contextCompactionIntervalMs ?? DEFAULT_APP_CONFIG.contextCompactionIntervalMs,
+        2 * 60 * 1000,
+        24 * 60 * 60 * 1000,
+      ),
+      contextCompactionMaxThreads: clampInt(
+        args.contextCompactionMaxThreads ?? DEFAULT_APP_CONFIG.contextCompactionMaxThreads,
+        2,
+        80,
+      ),
+      contextCompactionMaxDeletes: clampInt(
+        args.contextCompactionMaxDeletes ?? DEFAULT_APP_CONFIG.contextCompactionMaxDeletes,
+        20,
+        800,
+      ),
+      compactContextGroupJids: [
+        ...new Set((args.compactContextGroupJids || []).map((item) => item.trim()).filter(Boolean)),
+      ].slice(0, 80),
       quietHoursEnabled: args.quietHoursEnabled ?? DEFAULT_APP_CONFIG.quietHoursEnabled,
       quietHoursStartHour: clampInt(args.quietHoursStartHour ?? DEFAULT_APP_CONFIG.quietHoursStartHour, 0, 23),
       quietHoursEndHour: clampInt(args.quietHoursEndHour ?? DEFAULT_APP_CONFIG.quietHoursEndHour, 0, 23),
@@ -156,6 +206,7 @@ export const save = mutation({
     await setConfigValue(ctx, "humorLearningEnabled", normalized.humorLearningEnabled ? "true" : "false");
     await setConfigValue(ctx, "statusAutoReplyEnabled", normalized.statusAutoReplyEnabled ? "true" : "false");
     await setConfigValue(ctx, "statusReplyRequireFunny", normalized.statusReplyRequireFunny ? "true" : "false");
+    await setConfigValue(ctx, "captureGroupMediaEnabled", normalized.captureGroupMediaEnabled ? "true" : "false");
     await setConfigValue(ctx, "funnyStatusKeywords", normalized.funnyStatusKeywords.join("\n"));
     await setConfigValue(ctx, "funnyStatusEmojis", normalized.funnyStatusEmojis.join("\n"));
     await setConfigValue(ctx, "aiFallbackMode", normalized.aiFallbackMode);
@@ -180,6 +231,15 @@ export const save = mutation({
     await setConfigValue(ctx, "manualInterventionCooldownMs", String(normalized.manualInterventionCooldownMs));
     await setConfigValue(ctx, "inboundConcurrency", String(normalized.inboundConcurrency));
     await setConfigValue(ctx, "outboxSendConcurrency", String(normalized.outboxSendConcurrency));
+    await setConfigValue(ctx, "statusRetentionMs", String(normalized.statusRetentionMs));
+    await setConfigValue(ctx, "statusCleanupIntervalMs", String(normalized.statusCleanupIntervalMs));
+    await setConfigValue(ctx, "statusCleanupBatchLimit", String(normalized.statusCleanupBatchLimit));
+    await setConfigValue(ctx, "statusContextKeepPerThread", String(normalized.statusContextKeepPerThread));
+    await setConfigValue(ctx, "groupContextKeepPerThread", String(normalized.groupContextKeepPerThread));
+    await setConfigValue(ctx, "contextCompactionIntervalMs", String(normalized.contextCompactionIntervalMs));
+    await setConfigValue(ctx, "contextCompactionMaxThreads", String(normalized.contextCompactionMaxThreads));
+    await setConfigValue(ctx, "contextCompactionMaxDeletes", String(normalized.contextCompactionMaxDeletes));
+    await setConfigValue(ctx, "compactContextGroupJids", normalized.compactContextGroupJids.join("\n"));
     await setConfigValue(ctx, "quietHoursEnabled", normalized.quietHoursEnabled ? "true" : "false");
     await setConfigValue(ctx, "quietHoursStartHour", String(normalized.quietHoursStartHour));
     await setConfigValue(ctx, "quietHoursEndHour", String(normalized.quietHoursEndHour));

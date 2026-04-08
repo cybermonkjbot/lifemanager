@@ -21,6 +21,7 @@ type SettingsState = {
   humorLearningEnabled: boolean;
   statusAutoReplyEnabled: boolean;
   statusReplyRequireFunny: boolean;
+  captureGroupMediaEnabled: boolean;
   funnyStatusKeywords: string[];
   funnyStatusEmojis: string[];
   aiFallbackMode: "all" | "azure_only";
@@ -43,6 +44,15 @@ type SettingsState = {
   outboxPollMs: number;
   inboundMergeWindowMs: number;
   manualInterventionCooldownMs: number;
+  statusRetentionMs: number;
+  statusCleanupIntervalMs: number;
+  statusCleanupBatchLimit: number;
+  statusContextKeepPerThread: number;
+  groupContextKeepPerThread: number;
+  contextCompactionIntervalMs: number;
+  contextCompactionMaxThreads: number;
+  contextCompactionMaxDeletes: number;
+  compactContextGroupJids: string[];
   quietHoursEnabled: boolean;
   quietHoursStartHour: number;
   quietHoursEndHour: number;
@@ -119,6 +129,7 @@ function toState(source: Partial<SettingsState> | undefined): SettingsState {
     humorLearningEnabled: source?.humorLearningEnabled ?? true,
     statusAutoReplyEnabled: source?.statusAutoReplyEnabled ?? true,
     statusReplyRequireFunny: source?.statusReplyRequireFunny ?? true,
+    captureGroupMediaEnabled: source?.captureGroupMediaEnabled ?? false,
     funnyStatusKeywords:
       source?.funnyStatusKeywords ?? ["lol", "lmao", "haha", "funny", "joke", "banter", "meme", "roast"],
     funnyStatusEmojis: source?.funnyStatusEmojis ?? ["😂", "🤣", "😹", "😆", "😅", "😄", "😁", "😜", "🤪", "🙃"],
@@ -142,6 +153,15 @@ function toState(source: Partial<SettingsState> | undefined): SettingsState {
     outboxPollMs: source?.outboxPollMs ?? 3000,
     inboundMergeWindowMs: source?.inboundMergeWindowMs ?? 45000,
     manualInterventionCooldownMs: source?.manualInterventionCooldownMs ?? 120000,
+    statusRetentionMs: source?.statusRetentionMs ?? 40 * 60 * 1000,
+    statusCleanupIntervalMs: source?.statusCleanupIntervalMs ?? 40 * 60 * 1000,
+    statusCleanupBatchLimit: source?.statusCleanupBatchLimit ?? 160,
+    statusContextKeepPerThread: source?.statusContextKeepPerThread ?? 24,
+    groupContextKeepPerThread: source?.groupContextKeepPerThread ?? 24,
+    contextCompactionIntervalMs: source?.contextCompactionIntervalMs ?? 12 * 60 * 1000,
+    contextCompactionMaxThreads: source?.contextCompactionMaxThreads ?? 24,
+    contextCompactionMaxDeletes: source?.contextCompactionMaxDeletes ?? 260,
+    compactContextGroupJids: source?.compactContextGroupJids ?? [],
     quietHoursEnabled: source?.quietHoursEnabled ?? false,
     quietHoursStartHour: source?.quietHoursStartHour ?? 23,
     quietHoursEndHour: source?.quietHoursEndHour ?? 7,
@@ -174,6 +194,7 @@ function stateEquals(a: SettingsState, b: SettingsState) {
     a.humorLearningEnabled === b.humorLearningEnabled &&
     a.statusAutoReplyEnabled === b.statusAutoReplyEnabled &&
     a.statusReplyRequireFunny === b.statusReplyRequireFunny &&
+    a.captureGroupMediaEnabled === b.captureGroupMediaEnabled &&
     a.funnyStatusKeywords.join("\n") === b.funnyStatusKeywords.join("\n") &&
     a.funnyStatusEmojis.join("\n") === b.funnyStatusEmojis.join("\n") &&
     a.aiFallbackMode === b.aiFallbackMode &&
@@ -196,6 +217,15 @@ function stateEquals(a: SettingsState, b: SettingsState) {
     nearlyEqual(a.outboxPollMs, b.outboxPollMs) &&
     nearlyEqual(a.inboundMergeWindowMs, b.inboundMergeWindowMs) &&
     nearlyEqual(a.manualInterventionCooldownMs, b.manualInterventionCooldownMs) &&
+    nearlyEqual(a.statusRetentionMs, b.statusRetentionMs) &&
+    nearlyEqual(a.statusCleanupIntervalMs, b.statusCleanupIntervalMs) &&
+    nearlyEqual(a.statusCleanupBatchLimit, b.statusCleanupBatchLimit) &&
+    nearlyEqual(a.statusContextKeepPerThread, b.statusContextKeepPerThread) &&
+    nearlyEqual(a.groupContextKeepPerThread, b.groupContextKeepPerThread) &&
+    nearlyEqual(a.contextCompactionIntervalMs, b.contextCompactionIntervalMs) &&
+    nearlyEqual(a.contextCompactionMaxThreads, b.contextCompactionMaxThreads) &&
+    nearlyEqual(a.contextCompactionMaxDeletes, b.contextCompactionMaxDeletes) &&
+    a.compactContextGroupJids.join("\n") === b.compactContextGroupJids.join("\n") &&
     a.quietHoursEnabled === b.quietHoursEnabled &&
     nearlyEqual(a.quietHoursStartHour, b.quietHoursStartHour) &&
     nearlyEqual(a.quietHoursEndHour, b.quietHoursEndHour) &&
@@ -399,6 +429,7 @@ export function LiveSettings() {
           humorLearningEnabled: draft.humorLearningEnabled,
           statusAutoReplyEnabled: draft.statusAutoReplyEnabled,
           statusReplyRequireFunny: draft.statusReplyRequireFunny,
+          captureGroupMediaEnabled: draft.captureGroupMediaEnabled,
           funnyStatusKeywords: draft.funnyStatusKeywords,
           funnyStatusEmojis: draft.funnyStatusEmojis,
           aiFallbackMode: draft.aiFallbackMode,
@@ -421,6 +452,15 @@ export function LiveSettings() {
           outboxPollMs: Math.round(draft.outboxPollMs),
           inboundMergeWindowMs: Math.round(draft.inboundMergeWindowMs),
           manualInterventionCooldownMs: Math.round(draft.manualInterventionCooldownMs),
+          statusRetentionMs: Math.round(draft.statusRetentionMs),
+          statusCleanupIntervalMs: Math.round(draft.statusCleanupIntervalMs),
+          statusCleanupBatchLimit: Math.round(draft.statusCleanupBatchLimit),
+          statusContextKeepPerThread: Math.round(draft.statusContextKeepPerThread),
+          groupContextKeepPerThread: Math.round(draft.groupContextKeepPerThread),
+          contextCompactionIntervalMs: Math.round(draft.contextCompactionIntervalMs),
+          contextCompactionMaxThreads: Math.round(draft.contextCompactionMaxThreads),
+          contextCompactionMaxDeletes: Math.round(draft.contextCompactionMaxDeletes),
+          compactContextGroupJids: draft.compactContextGroupJids,
           quietHoursEnabled: draft.quietHoursEnabled,
           quietHoursStartHour: Math.round(draft.quietHoursStartHour),
           quietHoursEndHour: Math.round(draft.quietHoursEndHour),
@@ -1047,6 +1087,172 @@ export function LiveSettings() {
             </select>
             {!draft.statusAutoReplyEnabled ? <span className="queue-meta">Enable status auto-replies to use this.</span> : null}
             <span className="queue-meta">Safety rule: status replies are always skipped if the status contains a link or email address.</span>
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Capture media from group chats</span>
+            <select
+              value={draft.captureGroupMediaEnabled ? "true" : "false"}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  captureGroupMediaEnabled: event.target.value === "true",
+                }))
+              }
+              disabled={record.pending}
+              aria-disabled={record.pending}
+            >
+              <option value="false">No (recommended for storage)</option>
+              <option value="true">Yes (store group media too)</option>
+            </select>
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Status retention (ms)</span>
+            <input
+              type="number"
+              min={300000}
+              max={86400000}
+              step={60000}
+              value={draft.statusRetentionMs}
+              onChange={(event) => setDraft((prev) => ({ ...prev, statusRetentionMs: parseNumber(event.target.value, prev.statusRetentionMs) }))}
+              disabled={record.pending}
+              aria-disabled={record.pending}
+            />
+            <span className="queue-meta">Status messages/media older than this are removed.</span>
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Status cleanup interval (ms)</span>
+            <input
+              type="number"
+              min={300000}
+              max={86400000}
+              step={60000}
+              value={draft.statusCleanupIntervalMs}
+              onChange={(event) =>
+                setDraft((prev) => ({ ...prev, statusCleanupIntervalMs: parseNumber(event.target.value, prev.statusCleanupIntervalMs) }))
+              }
+              disabled={record.pending}
+              aria-disabled={record.pending}
+            />
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Status cleanup batch limit</span>
+            <input
+              type="number"
+              min={20}
+              max={800}
+              step={1}
+              value={draft.statusCleanupBatchLimit}
+              onChange={(event) =>
+                setDraft((prev) => ({ ...prev, statusCleanupBatchLimit: parseNumber(event.target.value, prev.statusCleanupBatchLimit) }))
+              }
+              disabled={record.pending}
+              aria-disabled={record.pending}
+            />
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Status context keep per thread</span>
+            <input
+              type="number"
+              min={8}
+              max={120}
+              step={1}
+              value={draft.statusContextKeepPerThread}
+              onChange={(event) =>
+                setDraft((prev) => ({ ...prev, statusContextKeepPerThread: parseNumber(event.target.value, prev.statusContextKeepPerThread) }))
+              }
+              disabled={record.pending}
+              aria-disabled={record.pending}
+            />
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Group context keep per thread</span>
+            <input
+              type="number"
+              min={8}
+              max={120}
+              step={1}
+              value={draft.groupContextKeepPerThread}
+              onChange={(event) =>
+                setDraft((prev) => ({ ...prev, groupContextKeepPerThread: parseNumber(event.target.value, prev.groupContextKeepPerThread) }))
+              }
+              disabled={record.pending}
+              aria-disabled={record.pending}
+            />
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Context compaction interval (ms)</span>
+            <input
+              type="number"
+              min={120000}
+              max={86400000}
+              step={60000}
+              value={draft.contextCompactionIntervalMs}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  contextCompactionIntervalMs: parseNumber(event.target.value, prev.contextCompactionIntervalMs),
+                }))
+              }
+              disabled={record.pending}
+              aria-disabled={record.pending}
+            />
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Context compaction max threads</span>
+            <input
+              type="number"
+              min={2}
+              max={80}
+              step={1}
+              value={draft.contextCompactionMaxThreads}
+              onChange={(event) =>
+                setDraft((prev) => ({ ...prev, contextCompactionMaxThreads: parseNumber(event.target.value, prev.contextCompactionMaxThreads) }))
+              }
+              disabled={record.pending}
+              aria-disabled={record.pending}
+            />
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Context compaction max deletes</span>
+            <input
+              type="number"
+              min={20}
+              max={800}
+              step={1}
+              value={draft.contextCompactionMaxDeletes}
+              onChange={(event) =>
+                setDraft((prev) => ({ ...prev, contextCompactionMaxDeletes: parseNumber(event.target.value, prev.contextCompactionMaxDeletes) }))
+              }
+              disabled={record.pending}
+              aria-disabled={record.pending}
+            />
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Target group JIDs for aggressive compaction (optional, one per line)</span>
+            <textarea
+              rows={4}
+              placeholder={"1234567890-123456789@g.us\n9876543210-111222333@g.us"}
+              value={draft.compactContextGroupJids.join("\n")}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  compactContextGroupJids: parseContactJids(event.target.value),
+                }))
+              }
+              disabled={record.pending}
+              aria-disabled={record.pending}
+            />
+            <span className="queue-meta">Leave empty to compact all recent group chats automatically.</span>
           </label>
 
           <label className="stack compact">

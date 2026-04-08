@@ -439,6 +439,7 @@ export const suppressForManualIntervention = mutation({
     reactionEmoji: v.optional(v.string()),
     reactionTargetWhatsAppMessageId: v.optional(v.string()),
     mediaCaption: v.optional(v.string()),
+    isStatus: v.optional(v.boolean()),
     messageAt: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
@@ -499,6 +500,7 @@ export const suppressForManualIntervention = mutation({
         threadId: thread._id,
         direction: "outbound",
         origin: "live",
+        isStatus: args.isStatus ? true : undefined,
         whatsappMessageId: args.whatsappMessageId,
         senderJid: "me",
         text: messageText,
@@ -684,6 +686,7 @@ export const markSent = mutation({
     });
 
     const draft = await ctx.db.get(item.draftId);
+    const sourceMessage = draft ? await ctx.db.get(draft.sourceMessageId) : null;
     if (draft) {
       await ctx.db.patch(draft._id, {
         status: "sent",
@@ -713,6 +716,7 @@ export const markSent = mutation({
       threadId: item.threadId,
       direction: "outbound",
       origin: "live",
+      isStatus: sourceMessage?.isStatus ? true : undefined,
       senderJid: "me",
       whatsappMessageId: args.whatsappMessageId,
       toolRunId: item.toolRunId,

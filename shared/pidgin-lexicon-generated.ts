@@ -13,13 +13,13 @@ export const GENERATED_PIDGIN_WEAK_TOKENS: string[] = [
 ];
 
 export const GENERATED_PIDGIN_LEXICON_METADATA = {
-  "generatedAt": "2026-04-08T12:16:40.602Z",
+  "generatedAt": "2026-04-08T12:38:49.909Z",
   "sourceCandidatesFile": "data/pidgin-lexicon-candidates.json",
   "sourceApprovalsFile": "data/pidgin-lexicon-approvals.json",
   "promoted": {
     "total": 4,
-    "auto": 1,
-    "manual": 3,
+    "auto": 0,
+    "manual": 0,
     "strong": 1,
     "extended": 2,
     "weak": 1

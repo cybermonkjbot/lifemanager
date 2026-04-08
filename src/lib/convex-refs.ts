@@ -79,6 +79,8 @@ export const convexRefs = {
   mediaUpsertAssetContext: makeFunctionReference<"mutation">("media:upsertAssetContext"),
   mediaListStickerAssetsNeedingContext: makeFunctionReference<"query">("media:listStickerAssetsNeedingContext"),
   mediaListAssets: makeFunctionReference<"query">("media:listAssets"),
+  mediaCleanupStatusRetention: makeFunctionReference<"mutation">("media:cleanupStatusRetention"),
+  mediaCompactContextWindows: makeFunctionReference<"mutation">("media:compactContextWindows"),
   mediaGetEnabledByKind: makeFunctionReference<"query">("media:getEnabledByKind"),
   mediaGetBestGeneratedMemeForThread: makeFunctionReference<"query">("media:getBestGeneratedMemeForThread"),
   mediaGetBestUploadedMemeFallback: makeFunctionReference<"query">("media:getBestUploadedMemeFallback"),

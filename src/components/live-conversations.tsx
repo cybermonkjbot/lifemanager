@@ -136,6 +136,56 @@ type MessageToolSummary = {
   styleGuardrails: ThreadToolEvent[];
 };
 
+type PlannerSummary = {
+  intentLabel: string;
+  replyMode: "answer" | "confirm" | "clarify" | "close";
+  explicitAskCount: number;
+  ambiguityCount: number;
+  confidence: number;
+};
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function parsePlannerSummary(value: unknown): PlannerSummary | null {
+  const record = asRecord(value);
+  if (!record) {
+    return null;
+  }
+  const intentLabel = typeof record.intentLabel === "string" ? record.intentLabel : "";
+  const replyModeRaw = typeof record.replyMode === "string" ? record.replyMode : "";
+  const replyMode =
+    replyModeRaw === "answer" || replyModeRaw === "confirm" || replyModeRaw === "clarify" || replyModeRaw === "close"
+      ? replyModeRaw
+      : null;
+  const explicitAskCount = Number(record.explicitAskCount);
+  const ambiguityCount = Number(record.ambiguityCount);
+  const confidence = Number(record.confidence);
+
+  if (!intentLabel || !replyMode || !Number.isFinite(explicitAskCount) || !Number.isFinite(ambiguityCount) || !Number.isFinite(confidence)) {
+    return null;
+  }
+
+  return {
+    intentLabel,
+    replyMode,
+    explicitAskCount: Math.max(0, Math.round(explicitAskCount)),
+    ambiguityCount: Math.max(0, Math.round(ambiguityCount)),
+    confidence: clamp01(confidence),
+  };
+}
+
+function plannerModeLabel(mode: PlannerSummary["replyMode"]) {
+  if (mode === "answer") return "Answer";
+  if (mode === "confirm") return "Confirm";
+  if (mode === "clarify") return "Clarify";
+  return "Close";
+}
+
 function messageKindLabel(kind?: string) {
   if (kind === "reaction") {
     return "Reaction";
@@ -914,6 +964,8 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
                 const toolSummaryCount = messageToolSummary
                   ? messageToolSummary.toolCalls.length + messageToolSummary.contextWindows.length + messageToolSummary.styleGuardrails.length
                   : 0;
+                const plannerEvent = messageToolSummary?.toolCalls.find((event) => event.toolName === "response_workbench");
+                const plannerSummary = parsePlannerSummary(plannerEvent?.parsedOutput);
 
                 return (
                   <div key={message._id} className={`chat-row ${outbound ? "outbound" : "inbound"}`}>
@@ -950,6 +1002,12 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
                               ? ` · ${messageToolSummary.styleGuardrails.length} style guardrail`
                               : ""}
                           </p>
+                          {plannerSummary ? (
+                            <p className="queue-meta message-tool-summary-meta">
+                              Planner {plannerModeLabel(plannerSummary.replyMode).toLowerCase()} · {plannerSummary.intentLabel} ·{" "}
+                              {Math.round(plannerSummary.confidence * 100)}%
+                            </p>
+                          ) : null}
                         </div>
                       ) : null}
                       <span>{formatDateTime(message.messageAt)}</span>
@@ -1065,12 +1123,40 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
               </div>
 
               <div className="queue-item">
+                <p className="queue-title">Response Planner</p>
+                {(() => {
+                  const plannerEvent = selectedToolSummary.toolCalls.find((event) => event.toolName === "response_workbench");
+                  const plannerSummary = parsePlannerSummary(plannerEvent?.parsedOutput);
+                  if (!plannerEvent || !plannerSummary) {
+                    return <p className="empty-line">No planner diagnostics captured for this response.</p>;
+                  }
+                  return (
+                    <div className="tool-summary-item">
+                      <p className="queue-meta">
+                        {plannerEvent.phase === "outreach" ? "Outreach" : "Reply"} planner · {plannerEvent.latencyMs || 0}ms ·{" "}
+                        {formatDateTime(plannerEvent.createdAt)}
+                      </p>
+                      <p className="queue-body">
+                        Mode: {plannerModeLabel(plannerSummary.replyMode)} · Intent: {plannerSummary.intentLabel} · Confidence:{" "}
+                        {Math.round(plannerSummary.confidence * 100)}%
+                      </p>
+                      <p className="queue-meta">
+                        Explicit asks: {plannerSummary.explicitAskCount} · Ambiguity signals: {plannerSummary.ambiguityCount}
+                      </p>
+                    </div>
+                  );
+                })()}
+              </div>
+
+              <div className="queue-item">
                 <p className="queue-title">Tool Calls</p>
                 {selectedToolSummary.toolCalls.length === 0 ? (
                   <p className="empty-line">No tool calls captured for this response.</p>
                 ) : (
                   <div className="stack compact">
-                    {selectedToolSummary.toolCalls.map((event) => (
+                    {selectedToolSummary.toolCalls
+                      .filter((event) => event.toolName !== "response_workbench")
+                      .map((event) => (
                       <div key={event._id} className="tool-summary-item">
                         <p className="queue-meta">
                           {event.phase === "outreach" ? "Outreach" : "Reply"} · {event.toolName || event.eventType} · {event.latencyMs || 0}ms ·{" "}

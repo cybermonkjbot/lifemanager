@@ -117,8 +117,13 @@ type GroundingContext = {
 
 type AzureApiStyle = "auto" | "chat_completions" | "responses";
 type FallbackMode = "all" | "azure_only";
-export type ConversationSteeringMode = "none" | "hard_stop" | "pause" | "wrap_up" | "loop" | "anti_beggi_beggi";
-export type ContextToolName = "context_window_detection" | "context_window_cleaning" | "conversation_history_search";
+type AntiBeggiBeggiTone = "soft" | "firm" | "funny";
+export type ConversationSteeringMode = "none" | "hard_stop" | "pause" | "wrap_up" | "loop" | "anti_beggi_beggi" | "anti_sales_pitch";
+export type ContextToolName =
+  | "context_window_detection"
+  | "context_window_cleaning"
+  | "conversation_history_search"
+  | "response_workbench";
 
 export type ContextToolCall = {
   name: ContextToolName;
@@ -135,6 +140,8 @@ export type ContextWindowStats = {
   usedHistoryLines: number;
   relevantHistoryLines: number;
 };
+
+type ResponseReplyMode = "answer" | "confirm" | "clarify" | "close";
 
 type RuntimeAiTuning = {
   model?: string;
@@ -156,6 +163,9 @@ type RuntimeAiTuning = {
   contextReserveTokens?: number;
   contextSearchLineLimit?: number;
   contextOverflowLineDropStep?: number;
+  contextUtilizationTarget?: number;
+  contextExpansionLineStep?: number;
+  adaptiveContextMinTokens?: number;
   codexTimeoutMs?: number;
   delayMinMs?: number;
   delayMaxMs?: number;
@@ -230,6 +240,17 @@ const LOW_VALUE_GENERIC_PHRASE_PATTERNS = [
   /\blet me (?:sort|check|look into|get back)\b/i,
   /\bplease allow me small\b/i,
 ];
+const SALES_INVENTORY_CLAIM_PATTERNS = [
+  /\bi\s+(?:have|got|get)\s+(?:small\s+)?stock\b/i,
+  /\bi(?:'|’)m\s+selling\b/i,
+  /\bi\s+sell\b/i,
+  /\bin\s+stock\b/i,
+  /\bout\s+of\s+stock\b/i,
+  /\bfor\s+sale\b/i,
+  /\bavailable\s+for\s+orders?\b/i,
+];
+const MALE_GENDERED_TERMS = ["bro", "broski", "brother", "dude", "guy", "boy", "king", "sir", "mr", "handsome", "gentleman"];
+const FEMALE_GENDERED_TERMS = ["sis", "sister", "girl", "queen", "maam", "madam", "mrs", "miss", "lady", "beautiful", "princess"];
 const BLOCKED_REFUSAL_PATTERNS = [/\bi(?:'|’)m sorry,\s*but\s*i cannot assist with that request\.?\b/i];
 const BLOCKED_REFUSAL_ERROR = "Blocked refusal phrase detected.";
 const BLOCKED_REFUSAL_REPROMPT_LIMIT = 2;
@@ -336,6 +357,60 @@ const MONEY_REQUEST_PATTERNS = [
   /\b(?:send|borrow|lend|loan|dash|transfer)\s+me\s+(?:like\s+|just\s+|small\s+)?(?:\d+(?:\.\d+)?\s*[km]?|money|cash|naira|funds?|airtime)\b/i,
   /\bhelp\s+me\b.*\b(?:with|for)\b.*\b(?:\d+(?:\.\d+)?\s*[km]?|money|cash|naira|funds?|airtime|transport|fare)\b/i,
 ];
+const SALES_PITCH_STRONG_PATTERN =
+  /\b(link in bio|order now|buy now|book now|promo code|use code|limited offer|while stocks? last|for sale|available for (booking|bookings|order|orders|sale))\b/i;
+const SALES_PITCH_INTENT_PATTERN =
+  /\b(sale|discount|promo|promotion|offer|deal|clearance|pre[- ]?order|order|orders|buy|selling|sell|book|booking|bookings|price|pricing|rates?|slot|slots|available|delivery)\b/i;
+const SALES_PITCH_CTA_PATTERN = /\b(dm|dms|inbox|message|whatsapp|call|text|tap|click|contact|pay|payment|deposit)\b/i;
+const SALES_PITCH_PRICE_PATTERN = /(?:[$£€₦]|usd|ngn|naira)\s?\d|\b\d{2,}\s?(?:usd|ngn|naira|bucks|k)\b/i;
+const SALES_PITCH_DISCOUNT_PATTERN = /\b\d{1,3}\s?%\s?off\b/i;
+const SALES_PITCH_PATRONIZE_PATTERN = /\b(patroni[sz]e|place an? order|interested\??|available now)\b/i;
+const ANTI_BEGGI_BEGGI_PIDGIN_VARIANTS: Record<AntiBeggiBeggiTone, string[]> = {
+  soft: [
+    "Omohhh, things no really good here mehn. Money tight, I no fit send now.",
+    "Omoh, e no easy for my side right now. Money tight, I no fit help with cash now.",
+    "Omo, things tight for my end mehn. Money tight, I no fit do transfer now.",
+    "Omoh, money tight die for my side now. I no fit send you cash this period.",
+    "I for like help you, but things no soft for here now. Money tight, I no fit assist financially now.",
+  ],
+  firm: [
+    "Abeg understand, I cannot help financially now. Money tight, I no fit send you anything.",
+    "No vex, I cannot assist financially at the moment. Money tight for my side.",
+    "I cannot transfer money now, abeg. Things tight and I no fit run am.",
+    "I cannot borrow you now, abeg. Money tight and I need hold my expenses.",
+    "Please no pressure me on this one, I cannot assist financially now.",
+  ],
+  funny: [
+    "Small cruise aside, account don lock up. Money tight, I no fit send now.",
+    "Small cruise aside, my wallet dey do hide and seek. Money tight, I no fit transfer now.",
+    "Small cruise aside, na survival mode I dey. Money tight, I no fit lend now.",
+    "Small cruise aside, budget don humble me. Money tight, I no fit send cash now.",
+    "Small cruise aside, my bank app and I dey quarrel. Money tight, I no fit help now.",
+  ],
+};
+const ANTI_BEGGI_BEGGI_EN_VARIANTS: Record<AntiBeggiBeggiTone, string[]> = {
+  soft: [
+    "Omoh, things are really tight on my side right now. Money is tight, so I cannot send anything now.",
+    "Things are tight for me at the moment and money is really stretched, so I cannot help financially right now.",
+    "I am not in a good place financially right now. Money is tight, so I cannot send anything at the moment.",
+    "I wish I could help, but money is very tight for me right now, so I cannot send anything.",
+    "I am currently stretched with bills, and money is tight, so I cannot assist financially now.",
+  ],
+  firm: [
+    "I cannot assist financially right now. Money is tight on my side.",
+    "I cannot transfer money at the moment. Money is tight for me right now.",
+    "I cannot lend or borrow out money now. Things are tight on my end.",
+    "I cannot help with cash right now. My finances are tight at the moment.",
+    "Please understand, I cannot assist financially now because money is tight.",
+  ],
+  funny: [
+    "Small joke aside, my account is on red alert. Money is tight, so I cannot send anything now.",
+    "Small joke aside, my wallet is on strike. Money is tight, so I cannot transfer now.",
+    "Small joke aside, my budget has humbled me. Money is tight, so I cannot lend now.",
+    "Small joke aside, my bank app is giving me attitude. Money is tight, so I cannot help with cash now.",
+    "Small joke aside, this month is wrestling me. Money is tight, so I cannot assist financially now.",
+  ],
+};
 const WRAP_UP_PATTERNS = [
   /^(ok|okay|cool|great|nice|perfect|all good|all gud|sounds good|done|resolved|all set|we good|we gud|bet+|say less+|k{1,4}|o+k+|works|copy|solid|valid|for sure|fs|fasho|word|heard|copy that|copy dat|sharp sharp|na so|ehen)[.!]*$/i,
   /^(thanks|thank you|thx|ty|tnx|thnks|tysm|that helps|got it|noted|understood|appreciate it|appreciate you)[.!]*$/i,
@@ -495,6 +570,44 @@ function hasMoneyRequestCue(text: string) {
   return MONEY_REQUEST_PATTERNS.some((pattern) => pattern.test(normalized));
 }
 
+function hasSalesPitchCue(text: string) {
+  const normalized = normalizeOutboundText(text || "");
+  if (!normalized) {
+    return false;
+  }
+
+  if (SALES_PITCH_STRONG_PATTERN.test(normalized)) {
+    return true;
+  }
+
+  const hasIntent = SALES_PITCH_INTENT_PATTERN.test(normalized);
+  const hasCta = SALES_PITCH_CTA_PATTERN.test(normalized);
+  const hasPrice = SALES_PITCH_PRICE_PATTERN.test(normalized) || SALES_PITCH_DISCOUNT_PATTERN.test(normalized);
+  const hasPatronize = SALES_PITCH_PATRONIZE_PATTERN.test(normalized);
+  return (hasIntent && hasCta) || (hasIntent && hasPrice) || (hasIntent && hasPatronize);
+}
+
+function detectAntiBeggiBeggiToneFromInbound(input: string): AntiBeggiBeggiTone {
+  const normalized = normalizeOutboundText(input || "");
+  if (!normalized) {
+    return "soft";
+  }
+
+  if (/\b(lol|lmao|haha|hehe|joke|banter)\b/i.test(normalized) || /[😂🤣😅😆]/u.test(normalized)) {
+    return "funny";
+  }
+
+  if (/\b(again|still|urgent|asap|now now|today|immediately|pls pls|please please)\b/i.test(normalized)) {
+    return "firm";
+  }
+
+  return "soft";
+}
+
+function resolveAntiBeggiBeggiTone(input: string): AntiBeggiBeggiTone {
+  return detectAntiBeggiBeggiToneFromInbound(input);
+}
+
 export function detectConversationSteeringMode(args: {
   inboundText: string;
   historyLines: string[];
@@ -510,6 +623,10 @@ export function detectConversationSteeringMode(args: {
 
   if (hasMoneyRequestCue(inbound)) {
     return "anti_beggi_beggi";
+  }
+
+  if (hasSalesPitchCue(inbound)) {
+    return "anti_sales_pitch";
   }
 
   if (PAUSE_PATTERNS.some((pattern) => pattern.test(inbound)) || hasPidginPauseCue(inbound)) {
@@ -644,6 +761,9 @@ function steeringInstructionForMode(mode: ConversationSteeringMode) {
   if (mode === "anti_beggi_beggi") {
     return "The latest message is asking you for money/transfer support. Decline politely in one short line, explain that money is tight, and do not over-explain or ask follow-up questions.";
   }
+  if (mode === "anti_sales_pitch") {
+    return "The latest message appears to be a sales pitch or negotiation attempt. Send one short close-out line like you'll take a look/check, and do not negotiate, ask follow-up questions, or continue the sales thread.";
+  }
   if (mode === "pause") {
     return "The latest message signals they are busy or want to continue later. Send a short sign-off that confirms the pause. Do not introduce new topics.";
   }
@@ -662,7 +782,8 @@ function heuristicReply(input: string, historyLines: string[] = []) {
     historyLines,
   });
   const pidginMode = detectPidginSignal({ inboundText: input, historyLines });
-  const allowBossEscalation = steeringMode !== "hard_stop" && steeringMode !== "anti_beggi_beggi";
+  const allowBossEscalation =
+    steeringMode !== "hard_stop" && steeringMode !== "anti_beggi_beggi" && steeringMode !== "anti_sales_pitch";
   const finalize = (candidate: string) =>
     applyBossAddressEscalation({
       inboundText: input,
@@ -679,18 +800,19 @@ function heuristicReply(input: string, historyLines: string[] = []) {
   }
 
   if (steeringMode === "anti_beggi_beggi") {
+    const tone = resolveAntiBeggiBeggiTone(input);
+    const pidginOptions = ANTI_BEGGI_BEGGI_PIDGIN_VARIANTS[tone];
+    const englishOptions = ANTI_BEGGI_BEGGI_EN_VARIANTS[tone];
+    return finalize(
+      pidginMode ? pickVariant(`${input}:anti_beggi_beggi:${tone}:pidgin`, pidginOptions) : pickVariant(`${input}:anti_beggi_beggi:${tone}:en`, englishOptions),
+    );
+  }
+
+  if (steeringMode === "anti_sales_pitch") {
     return finalize(
       pidginMode
-        ? pickVariant(input, [
-            "Omohhh, things no really dey easy for me now mehn. Money tight well well, I no fit send now.",
-            "Omoh, e no easy for my side right now. Money tight, I no fit help with cash now.",
-            "Omo, things tight for my end mehn. Money tight, I no fit do transfer now.",
-          ])
-        : pickVariant(input, [
-            "Omoh, things are really tight on my side right now. Money is tight, so I cannot send anything now.",
-            "Things are tight for me at the moment and money is really stretched, so I cannot help financially right now.",
-            "I am not in a good place financially right now. Money is tight, so I cannot send anything at the moment.",
-          ]),
+        ? pickVariant(input, ["I don see am, I go check am.", "Noted, I go take look and check.", "Thanks, I go check am on my side."])
+        : pickVariant(input, ["Thanks for sharing. I'll take a look and check.", "Noted, I'll check it out on my end.", "I see it. I'll take a look and review."]),
     );
   }
 
@@ -805,6 +927,9 @@ const HISTORY_ACK_ONLY_PATTERNS = [
 const DEFAULT_MAX_CONTEXT_TOKENS = 8192;
 const DEFAULT_CONTEXT_SEARCH_LIMIT = 4;
 const DEFAULT_CONTEXT_LINE_CHAR_LIMIT = 220;
+const DEFAULT_ADAPTIVE_CONTEXT_MIN_TOKENS = 16_384;
+const DEFAULT_CONTEXT_UTILIZATION_TARGET = 0.62;
+const DEFAULT_CONTEXT_EXPANSION_LINE_STEP = 6;
 
 type IndexedHistoryLine = {
   index: number;
@@ -839,6 +964,7 @@ type ContextWindowCleaningInput = {
   historyLines: string[];
   historyLineLimit: number;
   maxLineChars: number;
+  maxRetainedLines?: number;
 };
 
 type ConversationSearchInput = {
@@ -847,12 +973,214 @@ type ConversationSearchInput = {
   limit: number;
 };
 
+type ResponseWorkbenchInput = {
+  inboundText: string;
+  recentHistory: IndexedHistoryLine[];
+  relevantHistory: IndexedHistoryLine[];
+  steeringMode: ConversationSteeringMode;
+  pidginMode: boolean;
+  oldEnglishMode: boolean;
+};
+
+type ResponseWorkbench = {
+  intentLabel: string;
+  replyMode: ResponseReplyMode;
+  explicitAsks: string[];
+  ambiguitySignals: string[];
+  confidence: number;
+};
+
 function parseBoundedNumber(value: string | undefined, fallback: number, min: number, max: number) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) {
     return fallback;
   }
   return Math.round(Math.max(min, Math.min(parsed, max)));
+}
+
+function parseBoundedFloat(value: string | undefined, fallback: number, min: number, max: number) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.max(min, Math.min(parsed, max));
+}
+
+function suggestContextSearchLineLimit(maxContextTokens: number) {
+  if (maxContextTokens >= 120_000) {
+    return 16;
+  }
+  if (maxContextTokens >= 64_000) {
+    return 12;
+  }
+  if (maxContextTokens >= 32_000) {
+    return 8;
+  }
+  if (maxContextTokens >= 16_384) {
+    return 6;
+  }
+  return DEFAULT_CONTEXT_SEARCH_LIMIT;
+}
+
+function suggestExpandedHistoryLineLimit(maxContextTokens: number) {
+  if (maxContextTokens >= 120_000) {
+    return 96;
+  }
+  if (maxContextTokens >= 64_000) {
+    return 72;
+  }
+  if (maxContextTokens >= 32_000) {
+    return 52;
+  }
+  if (maxContextTokens >= 16_384) {
+    return 36;
+  }
+  return 40;
+}
+
+function extractQuestionFragments(text: string) {
+  const normalized = normalizeOutboundText(text);
+  if (!normalized) {
+    return [];
+  }
+  const segments = normalized
+    .split(/[?\n]/)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+
+  const out: string[] = [];
+  for (const segment of segments) {
+    if (!segment) {
+      continue;
+    }
+    const directQuestion = /\b(can|could|would|will|should|when|where|what|why|how|which|who)\b/i.test(segment);
+    if (!directQuestion) {
+      continue;
+    }
+    out.push(segment.replace(/[.?!]+$/g, "").trim());
+    if (out.length >= 4) {
+      break;
+    }
+  }
+  return out;
+}
+
+function hasAmbiguityCue(text: string) {
+  const normalized = normalizeOutboundText(text);
+  if (!normalized) {
+    return false;
+  }
+  if (/\b(this|that|it|thing|stuff|one)\b/i.test(normalized) && normalized.length <= 28) {
+    return true;
+  }
+  if (/\?{2,}/.test(normalized)) {
+    return true;
+  }
+  if (/\b(what do you mean|which one|the one|as discussed|you know|same as before)\b/i.test(normalized)) {
+    return true;
+  }
+  return false;
+}
+
+function inferIntentLabel(args: { inboundText: string; steeringMode: ConversationSteeringMode }) {
+  if (args.steeringMode === "hard_stop") {
+    return "conversation_end";
+  }
+  if (args.steeringMode === "pause") {
+    return "pause_for_later";
+  }
+  if (args.steeringMode === "wrap_up" || args.steeringMode === "loop") {
+    return "close_or_ack";
+  }
+  if (args.steeringMode === "anti_beggi_beggi") {
+    return "money_request_decline";
+  }
+  if (args.steeringMode === "anti_sales_pitch") {
+    return "sales_pitch_close_out";
+  }
+
+  const inbound = normalizeOutboundText(args.inboundText);
+  if (/\?/.test(inbound)) {
+    return "question_or_request";
+  }
+  if (/\b(please|abeg|kindly|send|share|help|assist|check|review|confirm|remind)\b/i.test(inbound)) {
+    return "action_request";
+  }
+  if (/\b(thanks|thank you|nice|great|cool|ok|okay|alright)\b/i.test(inbound)) {
+    return "acknowledgement";
+  }
+  return "general_reply";
+}
+
+function buildResponseWorkbench(args: ResponseWorkbenchInput) {
+  const startedAt = Date.now();
+  const explicitAsks = extractQuestionFragments(args.inboundText);
+  const ambiguitySignals: string[] = [];
+  if (hasAmbiguityCue(args.inboundText)) {
+    ambiguitySignals.push("ambiguous_reference");
+  }
+  if (explicitAsks.length === 0 && /\b(can|could|would|will|should)\b/i.test(args.inboundText)) {
+    ambiguitySignals.push("implicit_request_without_question_mark");
+  }
+  if (args.relevantHistory.length === 0 && /\b(as discussed|earlier|before|last time|follow up)\b/i.test(args.inboundText)) {
+    ambiguitySignals.push("recall_requested_without_match");
+  }
+
+  let replyMode: ResponseReplyMode = "answer";
+  if (
+    args.steeringMode === "hard_stop" ||
+    args.steeringMode === "pause" ||
+    args.steeringMode === "wrap_up" ||
+    args.steeringMode === "loop" ||
+    args.steeringMode === "anti_beggi_beggi" ||
+    args.steeringMode === "anti_sales_pitch"
+  ) {
+    replyMode = "close";
+  } else if (explicitAsks.length === 0 && /\b(confirm|is that fine|is that okay|still on|we good)\b/i.test(args.inboundText)) {
+    replyMode = "confirm";
+  } else if (ambiguitySignals.length > 0 && explicitAsks.length === 0) {
+    replyMode = "clarify";
+  } else if (explicitAsks.length > 0) {
+    replyMode = "answer";
+  }
+
+  const confidence = clamp01(
+    0.84 -
+      ambiguitySignals.length * 0.17 +
+      Math.min(0.1, explicitAsks.length * 0.05) +
+      Math.min(0.08, args.relevantHistory.length * 0.02),
+  );
+
+  const workbench: ResponseWorkbench = {
+    intentLabel: inferIntentLabel({ inboundText: args.inboundText, steeringMode: args.steeringMode }),
+    replyMode,
+    explicitAsks,
+    ambiguitySignals,
+    confidence,
+  };
+
+  return {
+    workbench,
+    call: {
+      name: "response_workbench" as const,
+      latencyMs: Date.now() - startedAt,
+      input: {
+        inboundChars: args.inboundText.length,
+        recentHistoryLines: args.recentHistory.length,
+        relevantHistoryLines: args.relevantHistory.length,
+        steeringMode: args.steeringMode,
+        pidginMode: args.pidginMode,
+        oldEnglishMode: args.oldEnglishMode,
+      },
+      output: {
+        intentLabel: workbench.intentLabel,
+        replyMode: workbench.replyMode,
+        explicitAskCount: workbench.explicitAsks.length,
+        ambiguityCount: workbench.ambiguitySignals.length,
+        confidence: workbench.confidence,
+      },
+    },
+  };
 }
 
 function estimateTokenCount(text: string) {
@@ -912,7 +1240,13 @@ function isLowSignalHistoryBody(body: string) {
 
 function runContextWindowCleaningTool(args: ContextWindowCleaningInput) {
   const startedAt = Date.now();
-  const cappedLimit = Math.round(Math.max(4, Math.min(args.historyLineLimit * 3, 120)));
+  const requestedRetainedLines = Math.round(
+    Math.max(
+      args.historyLineLimit * 3,
+      Math.min(args.maxRetainedLines ?? args.historyLineLimit * 3, 600),
+    ),
+  );
+  const cappedLimit = Math.round(Math.max(4, Math.min(requestedRetainedLines, 600)));
   const maxLineChars = Math.round(Math.max(80, Math.min(args.maxLineChars, 800)));
   const dedupe = new Set<string>();
   const cleanedReversed: IndexedHistoryLine[] = [];
@@ -957,6 +1291,7 @@ function runContextWindowCleaningTool(args: ContextWindowCleaningInput) {
         inputHistoryLines: args.historyLines.length,
         historyLineLimit: args.historyLineLimit,
         maxLineChars,
+        maxRetainedLines: cappedLimit,
       },
       output: {
         cleanedHistoryLines: bounded.length,
@@ -1064,10 +1399,6 @@ function buildPrompt(args: {
   grounding?: GroundingContext;
   runtime?: RuntimeAiTuning;
 }): PromptBuildResult {
-  const historyLineLimit = Math.round(Math.max(4, Math.min(args.runtime?.historyLineLimit ?? 14, 40)));
-  const contextSearchLineLimit = Math.round(
-    Math.max(1, Math.min(args.runtime?.contextSearchLineLimit ?? DEFAULT_CONTEXT_SEARCH_LIMIT, 8)),
-  );
   const maxContextTokens = Math.round(
     Math.max(
       512,
@@ -1075,6 +1406,41 @@ function buildPrompt(args: {
         args.runtime?.maxContextTokens ??
           parseBoundedNumber(process.env.SLM_AI_MAX_CONTEXT_TOKENS, DEFAULT_MAX_CONTEXT_TOKENS, 512, 200_000),
         200_000,
+      ),
+    ),
+  );
+  const adaptiveContextMinTokens = Math.round(
+    Math.max(
+      2048,
+      Math.min(
+        args.runtime?.adaptiveContextMinTokens ??
+          parseBoundedNumber(
+            process.env.SLM_AI_ADAPTIVE_CONTEXT_MIN_TOKENS,
+            DEFAULT_ADAPTIVE_CONTEXT_MIN_TOKENS,
+            2048,
+            200_000,
+          ),
+        200_000,
+      ),
+    ),
+  );
+  const largeContextMode = maxContextTokens >= adaptiveContextMinTokens;
+  const historyLineLimit = Math.round(Math.max(4, Math.min(args.runtime?.historyLineLimit ?? 14, 40)));
+  const contextSearchLineLimit = Math.round(
+    Math.max(
+      1,
+      Math.min(
+        args.runtime?.contextSearchLineLimit ?? suggestContextSearchLineLimit(maxContextTokens),
+        24,
+      ),
+    ),
+  );
+  const maxExpandedHistoryLines = Math.round(
+    Math.max(
+      historyLineLimit,
+      Math.min(
+        largeContextMode ? suggestExpandedHistoryLineLimit(maxContextTokens) : historyLineLimit,
+        180,
       ),
     ),
   );
@@ -1095,6 +1461,7 @@ function buildPrompt(args: {
     historyLines: args.historyLines,
     historyLineLimit,
     maxLineChars: DEFAULT_CONTEXT_LINE_CHAR_LIMIT,
+    maxRetainedLines: largeContextMode ? Math.max(historyLineLimit * 3, maxExpandedHistoryLines * 3) : undefined,
   });
   toolCalls.push(cleanedHistory.call);
 
@@ -1233,7 +1600,7 @@ function buildPrompt(args: {
         .join(" | ")
     : "";
   const personaPackGuardrails = activePersonaPack ? activePersonaPack.guardrails.slice(0, 6).join(" | ") : "";
-  const personaPackFewShots = activePersonaPack ? selectFewShotsForPrompt(activePersonaPack, 900) : [];
+  const personaPackFewShots = activePersonaPack ? selectFewShotsForPrompt(activePersonaPack, 900, args.inboundText) : [];
   const personaPackFewShotText =
     personaPackFewShots.length > 0
       ? personaPackFewShots
@@ -1284,10 +1651,39 @@ function buildPrompt(args: {
   const bossEscalationInstruction = hasBossAddressCue(args.inboundText)
     ? `If the latest message addresses you as boss/oga/chairman, treat it as friendly local banter, not hierarchy. Lightly mirror once by calling them a playful upgraded title (examples: ${BOSS_ESCALATION_PROMPT_TITLES}). Keep it subtle, respectful, and use it at most once in the reply.`
     : "";
+  const responseWorkbench = buildResponseWorkbench({
+    inboundText: args.inboundText,
+    recentHistory,
+    relevantHistory,
+    steeringMode,
+    pidginMode,
+    oldEnglishMode,
+  });
+  toolCalls.push(responseWorkbench.call);
+  const responseWorkbenchInstruction =
+    responseWorkbench.workbench.replyMode === "clarify"
+      ? "Reply mode is CLARIFY. Ask one concise clarifying question before making assumptions."
+      : responseWorkbench.workbench.replyMode === "confirm"
+        ? "Reply mode is CONFIRM. Confirm succinctly and keep the response brief."
+        : responseWorkbench.workbench.replyMode === "close"
+          ? "Reply mode is CLOSE. End gracefully in one short line without reopening the topic."
+          : "Reply mode is ANSWER. Give a direct answer/action-focused reply grounded in the latest ask.";
+  const responseWorkbenchSummary = [
+    `Intent label: ${responseWorkbench.workbench.intentLabel}`,
+    `Reply mode: ${responseWorkbench.workbench.replyMode}`,
+    responseWorkbench.workbench.explicitAsks.length > 0
+      ? `Explicit asks: ${responseWorkbench.workbench.explicitAsks.join(" | ")}`
+      : "Explicit asks: none",
+    responseWorkbench.workbench.ambiguitySignals.length > 0
+      ? `Ambiguity signals: ${responseWorkbench.workbench.ambiguitySignals.join(", ")}`
+      : "Ambiguity signals: none",
+    `Planner confidence: ${Math.round(responseWorkbench.workbench.confidence * 100)}%`,
+  ].join("\n");
 
   const buildPromptText = () =>
     [
       "You are writing one WhatsApp reply as the account owner.",
+      "Use an editor-style workflow: first plan quickly from context, then write the final message.",
       "Write like a real person: warm, calm, confident, and practical.",
       "Prefer one concise line. Only use a second short line when it clearly adds needed context.",
       "Sound conversational and specific, never stiff or corporate.",
@@ -1301,6 +1697,8 @@ function buildPrompt(args: {
       "Never send placeholder lines like 'Sounds good, I'll handle it and update you soon' or 'Got it, I'm on it.'",
       "Mimic style lightly: borrow tone, not exact catchphrases. If a remembered phrase sounds awkward, rewrite it in plain natural wording.",
       "Never use awkward stock phrases like 'please allow me small'.",
+      "Do not imply you sell anything or hold inventory. Never use claims like 'I have stock', 'I get small stock', 'in stock', 'for sale', or order/promo language.",
+      "Avoid gendered address terms (for example bro/sis/king/queen/handsome/beautiful) unless the contact explicitly self-identifies gender in this chat context.",
       soulInstruction,
       playfulInstruction,
       jokeSafetyInstruction,
@@ -1310,6 +1708,7 @@ function buildPrompt(args: {
       pidginInstruction,
       oldEnglishInstruction,
       bossEscalationInstruction,
+      responseWorkbenchInstruction,
       replyPolicyInstruction ? `Additional reply policy: ${replyPolicyInstruction}` : "",
       mimicryInstruction,
       personalityLevelInstruction,
@@ -1334,6 +1733,7 @@ function buildPrompt(args: {
       hints ? `Style hints: ${hints}` : "",
       phrases ? `Optional lexical fingerprints (inspiration only, do not copy verbatim): ${phrases}` : "",
       outboundSamples ? `Recent sent-message examples: ${outboundSamples}` : "",
+      `Pre-response workbench:\n${responseWorkbenchSummary}`,
       relevantHistory.length > 0
         ? `Relevant earlier context matches:\n${relevantHistory.map((line) => line.line).join("\n")}`
         : "",
@@ -1353,6 +1753,93 @@ function buildPrompt(args: {
     relevantHistoryLines: relevantHistory.length,
   });
   toolCalls.push(detection.call);
+
+  const availablePromptTokens = Math.max(128, maxContextTokens - reserveOutputTokens);
+  const utilizationTarget = parseBoundedFloat(
+    String(args.runtime?.contextUtilizationTarget ?? process.env.SLM_AI_CONTEXT_UTILIZATION_TARGET),
+    DEFAULT_CONTEXT_UTILIZATION_TARGET,
+    0.35,
+    0.9,
+  );
+  const expansionLineStep = Math.round(
+    Math.max(
+      1,
+      Math.min(
+        args.runtime?.contextExpansionLineStep ??
+          parseBoundedNumber(
+            process.env.SLM_AI_CONTEXT_EXPANSION_LINE_STEP,
+            DEFAULT_CONTEXT_EXPANSION_LINE_STEP,
+            1,
+            24,
+          ),
+        24,
+      ),
+    ),
+  );
+  if (
+    largeContextMode &&
+    detection.stats.overflowTokens === 0 &&
+    recentHistory.length < maxExpandedHistoryLines &&
+    detection.stats.estimatedPromptTokens / availablePromptTokens < utilizationTarget
+  ) {
+    const usedIndices = new Set([...recentHistory, ...relevantHistory].map((line) => line.index));
+    const expandableHistory = cleanedHistory.cleaned.filter((line) => !usedIndices.has(line.index));
+    let expandedLines = 0;
+    let iterations = 0;
+    while (
+      detection.stats.overflowTokens === 0 &&
+      detection.stats.estimatedPromptTokens / availablePromptTokens < utilizationTarget &&
+      recentHistory.length < maxExpandedHistoryLines &&
+      expandableHistory.length > 0 &&
+      iterations < 40
+    ) {
+      iterations += 1;
+      const remainingSlots = Math.max(0, maxExpandedHistoryLines - recentHistory.length);
+      if (remainingSlots <= 0) {
+        break;
+      }
+      const batchSize = Math.min(expansionLineStep, remainingSlots, expandableHistory.length);
+      if (batchSize <= 0) {
+        break;
+      }
+
+      const previousRecent = recentHistory;
+      const previousDetection = detection;
+      const batch = expandableHistory.splice(Math.max(0, expandableHistory.length - batchSize), batchSize);
+      recentHistory = [...batch, ...recentHistory].sort((left, right) => left.index - right.index);
+      prompt = buildPromptText();
+      const expandedDetection = runContextWindowDetectionTool({
+        prompt,
+        maxContextTokens,
+        reserveOutputTokens,
+        usedHistoryLines: recentHistory.length,
+        relevantHistoryLines: relevantHistory.length,
+      });
+
+      if (expandedDetection.stats.overflowTokens > 0) {
+        recentHistory = previousRecent;
+        detection = previousDetection;
+        break;
+      }
+
+      detection = expandedDetection;
+      expandedLines += batch.length;
+    }
+
+    if (expandedLines > 0) {
+      toolCalls.push({
+        ...detection.call,
+        input: {
+          ...detection.call.input,
+          mode: "post_expand",
+          utilizationTarget,
+          expansionLineStep,
+          expandedLines,
+          maxExpandedHistoryLines,
+        },
+      });
+    }
+  }
 
   if (detection.stats.overflowTokens > 0) {
     const lineDropStep = Math.round(Math.max(1, Math.min(args.runtime?.contextOverflowLineDropStep ?? 2, 8)));
@@ -1404,6 +1891,80 @@ function sanitizeReplyText(raw: string, maxChars = 320) {
   }
 
   return normalizeOutboundText(stripEmojiCharacters(text));
+}
+
+function stripSalesInventoryClaims(text: string) {
+  const parts = normalizeOutboundText(text)
+    .split(/(?<=[.!?])\s+|\n+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (parts.length === 0) {
+    return "";
+  }
+
+  const kept = parts.filter((part) => !SALES_INVENTORY_CLAIM_PATTERNS.some((pattern) => pattern.test(part)));
+  if (kept.length === 0) {
+    return "";
+  }
+
+  return normalizeOutboundText(kept.join(" "));
+}
+
+function inferKnownGenderFromContext(args: { inboundText: string; historyLines?: string[] }): "male" | "female" | null {
+  const inbound = normalizeOutboundText(args.inboundText || "");
+  const themHistory = (args.historyLines || [])
+    .filter((line) => /^Them:\s*/i.test(line))
+    .map((line) => line.replace(/^Them:\s*/i, "").trim())
+    .filter(Boolean)
+    .join(" ");
+  const context = normalizeOutboundText(`${inbound} ${themHistory}`.trim()).toLowerCase();
+  if (!context) {
+    return null;
+  }
+
+  const maleSignals = [
+    /\b(?:i am|i'm|im)\s+(?:a\s+)?(?:man|male|guy|boy)\b/i,
+    /\b(?:as a|being a)\s+(?:man|male|guy)\b/i,
+    /\b(?:my pronouns are|pronouns:\s*)(?:he\/him|he him)\b/i,
+    /\b(?:i use|use)\s+(?:he\/him|he him)\b/i,
+  ];
+  const femaleSignals = [
+    /\b(?:i am|i'm|im)\s+(?:a\s+)?(?:woman|female|girl|lady)\b/i,
+    /\b(?:as a|being a)\s+(?:woman|female|girl|lady)\b/i,
+    /\b(?:my pronouns are|pronouns:\s*)(?:she\/her|she her)\b/i,
+    /\b(?:i use|use)\s+(?:she\/her|she her)\b/i,
+  ];
+
+  const male = maleSignals.some((pattern) => pattern.test(context));
+  const female = femaleSignals.some((pattern) => pattern.test(context));
+  if (male === female) {
+    return null;
+  }
+  return male ? "male" : "female";
+}
+
+function stripGenderedWording(text: string, knownGender: "male" | "female" | null) {
+  const terms =
+    knownGender === "male"
+      ? FEMALE_GENDERED_TERMS
+      : knownGender === "female"
+        ? MALE_GENDERED_TERMS
+        : [...MALE_GENDERED_TERMS, ...FEMALE_GENDERED_TERMS];
+
+  if (terms.length === 0) {
+    return normalizeOutboundText(text);
+  }
+
+  const escaped = terms.map((term) => escapeRegex(term)).join("|");
+  const pattern = new RegExp(`(^|[\\s,!.?;:])(?:${escaped})(?=$|[\\s,!.?;:])`, "gi");
+  const withoutTerms = text.replace(pattern, (match, prefix: string) => (prefix || " "));
+  return normalizeOutboundText(
+    withoutTerms
+      .replace(/[ \t]{2,}/g, " ")
+      .replace(/\s+([,.;:!?])/g, "$1")
+      .replace(/^[,.;:!?]\s*/, "")
+      .trim(),
+  );
 }
 
 export function normalizeOutboundText(input: string) {
@@ -1501,14 +2062,20 @@ export function postProcessReplyText(args: {
     inboundText: args.inboundText,
     replyText: normalized,
     pidginMode,
-    allow: steeringMode !== "hard_stop" && steeringMode !== "anti_beggi_beggi",
+    allow: steeringMode !== "hard_stop" && steeringMode !== "anti_beggi_beggi" && steeringMode !== "anti_sales_pitch",
   });
   const oldEnglishMode = detectOldEnglishSignal({
     inboundText: args.inboundText,
     historyLines: args.historyLines || [],
   });
   const withOldEnglishMirror = applyOldEnglishMirror(withBossEscalation, oldEnglishMode);
-  return withOldEnglishMirror || fallback;
+  const withoutSalesClaims = stripSalesInventoryClaims(withOldEnglishMirror);
+  const knownGender = inferKnownGenderFromContext({
+    inboundText: args.inboundText,
+    historyLines: args.historyLines || [],
+  });
+  const withoutGenderedWording = stripGenderedWording(withoutSalesClaims, knownGender);
+  return withoutGenderedWording || fallback;
 }
 
 function containsBlockedRefusalText(text: string) {
@@ -3312,6 +3879,7 @@ export async function generateReplyWithFallback(args: {
   const shouldUseHeuristicOnly =
     steeringMode === "hard_stop" ||
     steeringMode === "anti_beggi_beggi" ||
+    steeringMode === "anti_sales_pitch" ||
     steeringMode === "pause" ||
     steeringMode === "loop" ||
     steeringMode === "wrap_up";

@@ -114,6 +114,16 @@ type RuntimeSettings = {
   outboxPollMs: number;
   inboundConcurrency: number;
   outboxSendConcurrency: number;
+  captureGroupMediaEnabled: boolean;
+  statusRetentionMs: number;
+  statusCleanupIntervalMs: number;
+  statusCleanupBatchLimit: number;
+  statusContextKeepPerThread: number;
+  groupContextKeepPerThread: number;
+  contextCompactionIntervalMs: number;
+  contextCompactionMaxThreads: number;
+  contextCompactionMaxDeletes: number;
+  compactContextGroupJids: string[];
   quietHoursStartHour: number;
   quietHoursEndHour: number;
 };
@@ -210,6 +220,12 @@ const TEXT_EMOJI_ALLOWLIST = ["🌚", "🙂‍↔️", "🥲", "😒"];
 const TEXT_EMOJI_MAX_PER_WINDOW = 2;
 const TEXT_EMOJI_WINDOW_MS = 6 * 60 * 60 * 1000;
 const STICKER_COMPANION_COOLDOWN_MS = 45 * 60 * 1000;
+const STATUS_RETENTION_MS = 40 * 60 * 1000;
+const STATUS_CLEANUP_INTERVAL_MS = 40 * 60 * 1000;
+const STATUS_CLEANUP_BATCH_LIMIT = 160;
+const CONTEXT_COMPACTION_INTERVAL_MS = 12 * 60 * 1000;
+const CONTEXT_COMPACTION_MAX_THREADS = 24;
+const CONTEXT_COMPACTION_MAX_DELETES = 260;
 const CORE_HUMOR_PATTERN = /\b(lol|lmao|lmfao|rofl|haha|hehe|funny|joke|banter|meme|roast|hilarious)\b/i;
 const CORE_HUMOR_EMOJI_PATTERN = /[😂🤣😹😆😄😁😅😜🤪🙃]/u;
 const LOW_SIGNAL_HUMOR_KEYWORDS = new Set(["status", "story", "update", "wild", "dead"]);
@@ -2243,10 +2259,13 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
         reactionEmoji: parsed.kind === "reaction" ? parsed.emoji : undefined,
         reactionTargetWhatsAppMessageId: parsed.kind === "reaction" ? parsed.targetWhatsAppMessageId : undefined,
         mediaCaption: resolveMediaCaptionFromParsed(parsed),
+        isStatus: isStatusBroadcast,
         messageAt,
       })) as { recordedMessageId?: string; threadId?: string };
 
-      if (mediaKind && ownSync.recordedMessageId) {
+      const runtimeSettings = await getRuntimeSettings();
+      const shouldCaptureGroupMedia = runtimeSettings?.captureGroupMediaEnabled ?? false;
+      if (mediaKind && ownSync.recordedMessageId && (shouldCaptureGroupMedia || !isGroupJid(rawThreadJid || ""))) {
         await maybeCaptureMediaAsset({
           message: message as Parameters<typeof downloadMediaMessage>[0],
           messageId: ownSync.recordedMessageId,
@@ -2315,6 +2334,7 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
         reactionEmoji: parsed.kind === "reaction" ? parsed.emoji : undefined,
         reactionTargetWhatsAppMessageId: parsed.kind === "reaction" ? parsed.targetWhatsAppMessageId : undefined,
         mediaCaption: resolveMediaCaptionFromParsed(parsed),
+        isStatus: isStatusBroadcast,
         isGroup: isGroupJid(threadJid),
         threadKind: classifyThreadKindFromJid(threadJid),
         whatsappMessageId: message.key.id || undefined,
@@ -2325,7 +2345,9 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
         duplicate: boolean;
       };
 
-      if (mediaKind && ingested.messageId) {
+      const runtimeSettings = await getRuntimeSettings();
+      const shouldCaptureGroupMedia = runtimeSettings?.captureGroupMediaEnabled ?? false;
+      if (mediaKind && ingested.messageId && (shouldCaptureGroupMedia || !isGroupJid(rawThreadJid || ""))) {
         await maybeCaptureMediaAsset({
           message: message as Parameters<typeof downloadMediaMessage>[0],
           messageId: ingested.messageId,
@@ -2424,6 +2446,7 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
       const threadKind = classifyThreadKindFromJid(threadJid);
       const archivedState = chatArchiveState.get(threadJid);
       const mediaKind = resolveCapturableMediaKind(effectiveParsed);
+      const runtimeSettings = await getRuntimeSettings();
 
       const ingest = (await convex.mutation(convexRefs.inboundIngest, {
         threadJid,
@@ -2434,6 +2457,7 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
         reactionEmoji: effectiveParsed.kind === "reaction" ? effectiveParsed.emoji : undefined,
         reactionTargetWhatsAppMessageId: effectiveParsed.kind === "reaction" ? effectiveParsed.targetWhatsAppMessageId : undefined,
         mediaCaption: resolveMediaCaptionFromParsed(effectiveParsed),
+        isStatus: isStatusBroadcast,
         isGroup: isGroupJid(threadJid),
         threadKind,
         isArchived: archivedState?.isArchived,
@@ -2452,7 +2476,8 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
         nightPausedUntil?: number;
       };
 
-      if (mediaKind && ingest.messageId) {
+      const shouldCaptureGroupMedia = runtimeSettings?.captureGroupMediaEnabled ?? false;
+      if (mediaKind && ingest.messageId && (shouldCaptureGroupMedia || !isGroupJid(rawThreadJid || ""))) {
         await maybeCaptureMediaAsset({
           message: message as Parameters<typeof downloadMediaMessage>[0],
           messageId: ingest.messageId,
@@ -2529,7 +2554,6 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
         }
       }
 
-      const runtimeSettings = await getRuntimeSettings();
       const now = Date.now();
       const nightStartHour = normalizeHour(runtimeSettings?.quietHoursStartHour, DEFAULT_NIGHT_WIND_DOWN_START_HOUR);
       const nightEndHour = normalizeHour(runtimeSettings?.quietHoursEndHour, DEFAULT_NIGHT_WIND_DOWN_END_HOUR);
@@ -4068,6 +4092,158 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
     }
   };
 
+  const runStatusCleanupPass = async (runtimeSettings?: RuntimeSettings | null) => {
+    try {
+      const statusRetentionMs = Math.max(5 * 60 * 1000, Math.min(runtimeSettings?.statusRetentionMs ?? STATUS_RETENTION_MS, 24 * 60 * 60 * 1000));
+      const statusCleanupBatchLimit = Math.max(
+        20,
+        Math.min(runtimeSettings?.statusCleanupBatchLimit ?? STATUS_CLEANUP_BATCH_LIMIT, 800),
+      );
+      const result = (await convex.mutation(convexRefs.mediaCleanupStatusRetention, {
+        olderThanMs: statusRetentionMs,
+        limit: statusCleanupBatchLimit,
+      })) as {
+        deletedMessages?: number;
+        deletedAssets?: number;
+        hasMore?: boolean;
+      } | null;
+
+      if (!result) {
+        return;
+      }
+
+      const deletedMessages = Number(result.deletedMessages || 0);
+      const deletedAssets = Number(result.deletedAssets || 0);
+      if (deletedMessages <= 0 && deletedAssets <= 0) {
+        return;
+      }
+
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: "retention.status.cleanup",
+          detail: `Deleted ${deletedMessages} status message(s) and ${deletedAssets} status media asset(s) older than ${Math.round(statusRetentionMs / 60_000)}m.`,
+        })
+        .catch(() => undefined);
+
+      if (result.hasMore) {
+        setTimeout(() => {
+          void runStatusCleanupPass(runtimeSettings);
+        }, 1_500);
+      }
+    } catch (error) {
+      const err = error instanceof Error ? error.message : String(error);
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: "retention.status.cleanup_error",
+          detail: compactLogText(err, 280),
+        })
+        .catch(() => undefined);
+    }
+  };
+
+  const runContextCompactionPass = async (runtimeSettings?: RuntimeSettings | null) => {
+    try {
+      const statusKeepPerThread = Math.max(
+        8,
+        Math.min(runtimeSettings?.statusContextKeepPerThread ?? 24, 120),
+      );
+      const groupKeepPerThread = Math.max(
+        8,
+        Math.min(runtimeSettings?.groupContextKeepPerThread ?? 24, 120),
+      );
+      const maxThreads = Math.max(
+        2,
+        Math.min(runtimeSettings?.contextCompactionMaxThreads ?? CONTEXT_COMPACTION_MAX_THREADS, 80),
+      );
+      const maxDeletes = Math.max(
+        20,
+        Math.min(runtimeSettings?.contextCompactionMaxDeletes ?? CONTEXT_COMPACTION_MAX_DELETES, 800),
+      );
+      const compactContextGroupJids = (runtimeSettings?.compactContextGroupJids || [])
+        .map((jid) => jid.trim())
+        .filter(Boolean)
+        .slice(0, 80);
+
+      const result = (await convex.mutation(convexRefs.mediaCompactContextWindows, {
+        statusKeepPerThread,
+        groupKeepPerThread,
+        groupThreadJids: compactContextGroupJids.length > 0 ? compactContextGroupJids : undefined,
+        maxThreads,
+        maxDeletes,
+      })) as {
+        deletedMessages?: number;
+        deletedAssets?: number;
+        hitDeleteLimit?: boolean;
+      } | null;
+
+      if (!result) {
+        return;
+      }
+      const deletedMessages = Number(result.deletedMessages || 0);
+      const deletedAssets = Number(result.deletedAssets || 0);
+      if (deletedMessages <= 0 && deletedAssets <= 0) {
+        return;
+      }
+
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: "retention.context.compacted",
+          detail: `Compacted context: deleted ${deletedMessages} message(s), ${deletedAssets} media asset(s), statusKeep=${statusKeepPerThread}, groupKeep=${groupKeepPerThread}${result.hitDeleteLimit ? " (batch limited)" : ""}.`,
+        })
+        .catch(() => undefined);
+
+      if (result.hitDeleteLimit) {
+        setTimeout(() => {
+          void runContextCompactionPass(runtimeSettings);
+        }, 2_000);
+      }
+    } catch (error) {
+      const err = error instanceof Error ? error.message : String(error);
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: "retention.context.compaction_error",
+          detail: compactLogText(err, 280),
+        })
+        .catch(() => undefined);
+    }
+  };
+
+  let lastStatusCleanupAt = 0;
+  let lastContextCompactionAt = 0;
+  const MAINTENANCE_TICK_MS = 60_000;
+
+  const maybeRunStatusCleanup = async (force = false) => {
+    const runtimeSettings = await getRuntimeSettings();
+    const intervalMs = Math.max(
+      5 * 60 * 1000,
+      Math.min(runtimeSettings?.statusCleanupIntervalMs ?? STATUS_CLEANUP_INTERVAL_MS, 24 * 60 * 60 * 1000),
+    );
+    const now = Date.now();
+    if (!force && now - lastStatusCleanupAt < intervalMs) {
+      return;
+    }
+    lastStatusCleanupAt = now;
+    await runStatusCleanupPass(runtimeSettings);
+  };
+
+  const maybeRunContextCompaction = async (force = false) => {
+    const runtimeSettings = await getRuntimeSettings();
+    const intervalMs = Math.max(
+      2 * 60 * 1000,
+      Math.min(runtimeSettings?.contextCompactionIntervalMs ?? CONTEXT_COMPACTION_INTERVAL_MS, 24 * 60 * 60 * 1000),
+    );
+    const now = Date.now();
+    if (!force && now - lastContextCompactionAt < intervalMs) {
+      return;
+    }
+    lastContextCompactionAt = now;
+    await runContextCompactionPass(runtimeSettings);
+  };
+
   const startupSettings = await getRuntimeSettings();
   const intervalMs = Math.round(
     clamp(startupSettings?.outboxPollMs ?? Number(process.env.SLM_OUTBOX_POLL_MS || 3000), 500, 60_000),
@@ -4078,7 +4254,15 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
   setInterval(() => {
     void runStickerContextBackfillPass();
   }, STICKER_CONTEXT_PASS_INTERVAL_MS);
+  setInterval(() => {
+    void maybeRunStatusCleanup();
+  }, MAINTENANCE_TICK_MS);
+  setInterval(() => {
+    void maybeRunContextCompaction();
+  }, MAINTENANCE_TICK_MS);
   void runStickerContextBackfillPass();
+  void maybeRunStatusCleanup(true);
+  void maybeRunContextCompaction(true);
 
   logger.info(
     {
@@ -4086,6 +4270,20 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
       intervalMs,
       visionFilterMode: VISION_FILTER_MODE,
       visionUncaptionedCooldownMs: VISION_FILTER_UNCAPTIONED_COOLDOWN_MS,
+      captureGroupMediaEnabled: startupSettings?.captureGroupMediaEnabled ?? false,
+      statusRetentionMinutes: Math.round((startupSettings?.statusRetentionMs ?? STATUS_RETENTION_MS) / 60_000),
+      statusCleanupIntervalMinutes: Math.round(
+        (startupSettings?.statusCleanupIntervalMs ?? STATUS_CLEANUP_INTERVAL_MS) / 60_000,
+      ),
+      statusCleanupBatchLimit: startupSettings?.statusCleanupBatchLimit ?? STATUS_CLEANUP_BATCH_LIMIT,
+      statusContextKeepPerThread: startupSettings?.statusContextKeepPerThread ?? 24,
+      groupContextKeepPerThread: startupSettings?.groupContextKeepPerThread ?? 24,
+      contextCompactionIntervalMinutes: Math.round(
+        (startupSettings?.contextCompactionIntervalMs ?? CONTEXT_COMPACTION_INTERVAL_MS) / 60_000,
+      ),
+      contextCompactionMaxThreads: startupSettings?.contextCompactionMaxThreads ?? CONTEXT_COMPACTION_MAX_THREADS,
+      contextCompactionMaxDeletes: startupSettings?.contextCompactionMaxDeletes ?? CONTEXT_COMPACTION_MAX_DELETES,
+      compactContextGroupJidsConfigured: startupSettings?.compactContextGroupJids?.length || 0,
     },
     "Social Life Manager worker started",
   );

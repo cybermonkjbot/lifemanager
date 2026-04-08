@@ -23,6 +23,13 @@ const dashboardFilterValidator = v.union(
   v.literal("documents"),
 );
 
+function clampInt(value: number | undefined, fallback: number, min: number, max: number) {
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.round(Math.max(min, Math.min(max, value as number)));
+}
+
 type MediaKind = Doc<"mediaAssets">["kind"];
 
 function matchesDashboardFilter(kind: MediaKind, filter: "all" | "stickers" | "memes" | "images" | "video" | "audio" | "documents") {
@@ -399,6 +406,191 @@ export const listUnifiedMedia = query({
       }));
 
     return [...messageItems, ...libraryItems].sort((a, b) => b.createdAt - a.createdAt).slice(0, limit);
+  },
+});
+
+export const cleanupStatusRetention = mutation({
+  args: {
+    olderThanMs: v.optional(v.number()),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const olderThanMs = Math.max(5 * 60 * 1000, Math.min(args.olderThanMs ?? 40 * 60 * 1000, 24 * 60 * 60 * 1000));
+    const limit = Math.max(10, Math.min(args.limit ?? 120, 400));
+    const cutoff = Date.now() - olderThanMs;
+
+    const staleStatusMessages = await ctx.db
+      .query("messages")
+      .withIndex("by_isStatus_and_messageAt", (q) => q.eq("isStatus", true).lte("messageAt", cutoff))
+      .take(limit);
+
+    const candidateAssetIds = new Set<Id<"mediaAssets">>();
+    for (const message of staleStatusMessages) {
+      if (message.mediaAssetId) {
+        candidateAssetIds.add(message.mediaAssetId);
+      }
+      await ctx.db.delete(message._id);
+    }
+
+    let deletedAssets = 0;
+    for (const assetId of candidateAssetIds) {
+      const remainingReferences = await ctx.db
+        .query("messages")
+        .withIndex("by_mediaAssetId", (q) => q.eq("mediaAssetId", assetId))
+        .take(1);
+      if (remainingReferences.length > 0) {
+        continue;
+      }
+
+      const asset = await ctx.db.get(assetId);
+      if (!asset) {
+        continue;
+      }
+      await ctx.db.delete(asset._id);
+      await ctx.storage.delete(asset.fileId as Id<"_storage">);
+      deletedAssets += 1;
+    }
+
+    const hasMore = (
+      await ctx.db
+        .query("messages")
+        .withIndex("by_isStatus_and_messageAt", (q) => q.eq("isStatus", true).lte("messageAt", cutoff))
+        .take(1)
+    ).length > 0;
+
+    return {
+      deletedMessages: staleStatusMessages.length,
+      deletedAssets,
+      hasMore,
+      cutoff,
+    };
+  },
+});
+
+export const compactContextWindows = mutation({
+  args: {
+    statusKeepPerThread: v.optional(v.number()),
+    groupKeepPerThread: v.optional(v.number()),
+    groupThreadJids: v.optional(v.array(v.string())),
+    maxThreads: v.optional(v.number()),
+    maxDeletes: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const statusKeepPerThread = clampInt(args.statusKeepPerThread, 24, 8, 120);
+    const groupKeepPerThread = clampInt(args.groupKeepPerThread, 24, 8, 120);
+    const maxThreads = clampInt(args.maxThreads, 20, 2, 80);
+    const maxDeletes = clampInt(args.maxDeletes, 240, 20, 800);
+
+    const deletionQueue: Id<"messages">[] = [];
+    const candidateAssetIds = new Set<Id<"mediaAssets">>();
+    const enqueueMessageDelete = (message: Doc<"messages">) => {
+      if (deletionQueue.length >= maxDeletes) {
+        return false;
+      }
+      deletionQueue.push(message._id);
+      if (message.mediaAssetId) {
+        candidateAssetIds.add(message.mediaAssetId);
+      }
+      return true;
+    };
+
+    const statusRecent = await ctx.db
+      .query("messages")
+      .withIndex("by_isStatus_and_messageAt", (q) => q.eq("isStatus", true))
+      .order("desc")
+      .take(Math.min(maxThreads * 40, 1200));
+    const statusThreadIds = [...new Set(statusRecent.map((row) => row.threadId))].slice(0, maxThreads);
+    for (const threadId of statusThreadIds) {
+      if (deletionQueue.length >= maxDeletes) {
+        break;
+      }
+      const rows = await ctx.db
+        .query("messages")
+        .withIndex("by_thread_messageAt", (q) => q.eq("threadId", threadId))
+        .order("desc")
+        .take(Math.min(statusKeepPerThread + maxDeletes, 1200));
+      const statusRows = rows.filter((row) => row.isStatus);
+      for (const stale of statusRows.slice(statusKeepPerThread)) {
+        if (!enqueueMessageDelete(stale)) {
+          break;
+        }
+      }
+    }
+
+    const targetGroupThreadIds = new Set<Id<"threads">>();
+    const configuredGroupJids = (args.groupThreadJids || []).map((jid) => jid.trim()).filter(Boolean);
+    if (configuredGroupJids.length > 0) {
+      for (const jid of configuredGroupJids.slice(0, maxThreads)) {
+        const thread = await ctx.db
+          .query("threads")
+          .withIndex("by_jid", (q) => q.eq("jid", jid))
+          .first();
+        if (thread && (thread.threadKind === "group" || thread.isGroup)) {
+          targetGroupThreadIds.add(thread._id);
+        }
+      }
+    } else {
+      const recentGroups = await ctx.db
+        .query("threads")
+        .withIndex("by_threadKind_and_lastMessageAt", (q) => q.eq("threadKind", "group"))
+        .order("desc")
+        .take(maxThreads);
+      for (const thread of recentGroups) {
+        targetGroupThreadIds.add(thread._id);
+      }
+    }
+
+    for (const threadId of targetGroupThreadIds) {
+      if (deletionQueue.length >= maxDeletes) {
+        break;
+      }
+      const rows = await ctx.db
+        .query("messages")
+        .withIndex("by_thread_messageAt", (q) => q.eq("threadId", threadId))
+        .order("desc")
+        .take(Math.min(groupKeepPerThread + maxDeletes, 1500));
+      for (const stale of rows.slice(groupKeepPerThread)) {
+        if (!enqueueMessageDelete(stale)) {
+          break;
+        }
+      }
+    }
+
+    if (deletionQueue.length === 0) {
+      return {
+        deletedMessages: 0,
+        deletedAssets: 0,
+        hitDeleteLimit: false,
+      };
+    }
+
+    for (const messageId of deletionQueue) {
+      await ctx.db.delete(messageId);
+    }
+
+    let deletedAssets = 0;
+    for (const assetId of candidateAssetIds) {
+      const stillReferenced = await ctx.db
+        .query("messages")
+        .withIndex("by_mediaAssetId", (q) => q.eq("mediaAssetId", assetId))
+        .take(1);
+      if (stillReferenced.length > 0) {
+        continue;
+      }
+      const asset = await ctx.db.get(assetId);
+      if (!asset) {
+        continue;
+      }
+      await ctx.db.delete(asset._id);
+      await ctx.storage.delete(asset.fileId as Id<"_storage">);
+      deletedAssets += 1;
+    }
+
+    return {
+      deletedMessages: deletionQueue.length,
+      deletedAssets,
+      hitDeleteLimit: deletionQueue.length >= maxDeletes,
+    };
   },
 });
 

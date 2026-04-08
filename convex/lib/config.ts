@@ -16,6 +16,7 @@ export type AppConfig = {
   humorLearningEnabled: boolean;
   statusAutoReplyEnabled: boolean;
   statusReplyRequireFunny: boolean;
+  captureGroupMediaEnabled: boolean;
   funnyStatusKeywords: string[];
   funnyStatusEmojis: string[];
   aiFallbackMode: "all" | "azure_only";
@@ -40,6 +41,15 @@ export type AppConfig = {
   manualInterventionCooldownMs: number;
   inboundConcurrency: number;
   outboxSendConcurrency: number;
+  statusRetentionMs: number;
+  statusCleanupIntervalMs: number;
+  statusCleanupBatchLimit: number;
+  statusContextKeepPerThread: number;
+  groupContextKeepPerThread: number;
+  contextCompactionIntervalMs: number;
+  contextCompactionMaxThreads: number;
+  contextCompactionMaxDeletes: number;
+  compactContextGroupJids: string[];
   quietHoursEnabled: boolean;
   quietHoursStartHour: number;
   quietHoursEndHour: number;
@@ -67,6 +77,7 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
   humorLearningEnabled: true,
   statusAutoReplyEnabled: true,
   statusReplyRequireFunny: true,
+  captureGroupMediaEnabled: false,
   funnyStatusKeywords: ["lol", "lmao", "haha", "funny", "joke", "banter", "meme", "roast"],
   funnyStatusEmojis: ["😂", "🤣", "😹", "😆", "😅", "😄", "😁", "😜", "🤪", "🙃"],
   aiFallbackMode: "all",
@@ -91,6 +102,15 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
   manualInterventionCooldownMs: 2 * 60 * 1000,
   inboundConcurrency: 4,
   outboxSendConcurrency: 4,
+  statusRetentionMs: 40 * 60 * 1000,
+  statusCleanupIntervalMs: 40 * 60 * 1000,
+  statusCleanupBatchLimit: 160,
+  statusContextKeepPerThread: 24,
+  groupContextKeepPerThread: 24,
+  contextCompactionIntervalMs: 12 * 60 * 1000,
+  contextCompactionMaxThreads: 24,
+  contextCompactionMaxDeletes: 260,
+  compactContextGroupJids: [],
   quietHoursEnabled: false,
   quietHoursStartHour: 23,
   quietHoursEndHour: 7,
@@ -182,6 +202,7 @@ export async function getConfig(ctx: QueryCtx | MutationCtx): Promise<AppConfig>
     humorLearningEnabled: parseBoolean(map.get("humorLearningEnabled"), DEFAULT_APP_CONFIG.humorLearningEnabled),
     statusAutoReplyEnabled: parseBoolean(map.get("statusAutoReplyEnabled"), DEFAULT_APP_CONFIG.statusAutoReplyEnabled),
     statusReplyRequireFunny: parseBoolean(map.get("statusReplyRequireFunny"), DEFAULT_APP_CONFIG.statusReplyRequireFunny),
+    captureGroupMediaEnabled: parseBoolean(map.get("captureGroupMediaEnabled"), DEFAULT_APP_CONFIG.captureGroupMediaEnabled),
     funnyStatusKeywords: parseList(map.get("funnyStatusKeywords")).length
       ? parseList(map.get("funnyStatusKeywords"))
       : DEFAULT_APP_CONFIG.funnyStatusKeywords,
@@ -224,6 +245,39 @@ export async function getConfig(ctx: QueryCtx | MutationCtx): Promise<AppConfig>
     outboxSendConcurrency: Math.round(
       clamp(parseNumber(map.get("outboxSendConcurrency"), DEFAULT_APP_CONFIG.outboxSendConcurrency), 1, 16),
     ),
+    statusRetentionMs: Math.round(
+      clamp(parseNumber(map.get("statusRetentionMs"), DEFAULT_APP_CONFIG.statusRetentionMs), 5 * 60 * 1000, 24 * 60 * 60 * 1000),
+    ),
+    statusCleanupIntervalMs: Math.round(
+      clamp(
+        parseNumber(map.get("statusCleanupIntervalMs"), DEFAULT_APP_CONFIG.statusCleanupIntervalMs),
+        5 * 60 * 1000,
+        24 * 60 * 60 * 1000,
+      ),
+    ),
+    statusCleanupBatchLimit: Math.round(
+      clamp(parseNumber(map.get("statusCleanupBatchLimit"), DEFAULT_APP_CONFIG.statusCleanupBatchLimit), 20, 800),
+    ),
+    statusContextKeepPerThread: Math.round(
+      clamp(parseNumber(map.get("statusContextKeepPerThread"), DEFAULT_APP_CONFIG.statusContextKeepPerThread), 8, 120),
+    ),
+    groupContextKeepPerThread: Math.round(
+      clamp(parseNumber(map.get("groupContextKeepPerThread"), DEFAULT_APP_CONFIG.groupContextKeepPerThread), 8, 120),
+    ),
+    contextCompactionIntervalMs: Math.round(
+      clamp(
+        parseNumber(map.get("contextCompactionIntervalMs"), DEFAULT_APP_CONFIG.contextCompactionIntervalMs),
+        2 * 60 * 1000,
+        24 * 60 * 60 * 1000,
+      ),
+    ),
+    contextCompactionMaxThreads: Math.round(
+      clamp(parseNumber(map.get("contextCompactionMaxThreads"), DEFAULT_APP_CONFIG.contextCompactionMaxThreads), 2, 80),
+    ),
+    contextCompactionMaxDeletes: Math.round(
+      clamp(parseNumber(map.get("contextCompactionMaxDeletes"), DEFAULT_APP_CONFIG.contextCompactionMaxDeletes), 20, 800),
+    ),
+    compactContextGroupJids: parseList(map.get("compactContextGroupJids")),
     quietHoursEnabled: parseBoolean(map.get("quietHoursEnabled"), DEFAULT_APP_CONFIG.quietHoursEnabled),
     quietHoursStartHour: Math.round(
       clamp(parseNumber(map.get("quietHoursStartHour"), DEFAULT_APP_CONFIG.quietHoursStartHour), 0, 23),
