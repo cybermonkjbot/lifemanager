@@ -6,6 +6,7 @@ const crons = cronJobs();
 crons.interval("process-confirmed-followups", { minutes: 1 }, internal.followupsPromoter.run, {});
 crons.interval("recover-stuck-outbox-claims", { minutes: 2 }, internal.outbox.recoverExpiredClaims, {});
 crons.interval("proactive-outreach", { minutes: 30 }, internal.outreach.run, {});
+crons.interval("auto-status-builder", { minutes: 20 }, internal.statusBuilder.run, {});
 crons.interval("refresh-backlog-snapshots", { minutes: 30 }, internal.backlog.refreshRecentInternal, {
   limit: 320,
 });

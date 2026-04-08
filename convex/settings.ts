@@ -76,9 +76,18 @@ export const save = mutation({
     outreachMaxContactsPerRun: v.number(),
     outreachContactJids: v.array(v.string()),
     outreachStarterTemplate: v.optional(v.string()),
+    statusBuilderEnabled: v.boolean(),
+    statusBuilderCadenceHours: v.number(),
+    statusBuilderDailyMaxPosts: v.number(),
+    statusBuilderTextPostRatio: v.number(),
+    statusBuilderAudienceJids: v.optional(v.array(v.string())),
+    statusBuilderAudienceSampleSize: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const outreachContactJids = [...new Set(args.outreachContactJids.map((item) => item.trim()).filter(Boolean))];
+    const statusBuilderAudienceJids = [
+      ...new Set((args.statusBuilderAudienceJids || []).map((item) => item.trim()).filter(Boolean)),
+    ];
     const funnyStatusKeywords = [...new Set((args.funnyStatusKeywords || []).map((item) => item.trim().toLowerCase()).filter(Boolean))].slice(
       0,
       40,
@@ -180,6 +189,16 @@ export const save = mutation({
       outreachMaxContactsPerRun: clampInt(args.outreachMaxContactsPerRun, 1, 25),
       outreachContactJids,
       outreachStarterTemplate: args.outreachStarterTemplate?.trim() || DEFAULT_APP_CONFIG.outreachStarterTemplate,
+      statusBuilderEnabled: args.statusBuilderEnabled,
+      statusBuilderCadenceHours: clampInt(args.statusBuilderCadenceHours, 1, 24 * 7),
+      statusBuilderDailyMaxPosts: clampInt(args.statusBuilderDailyMaxPosts, 1, 24),
+      statusBuilderTextPostRatio: clamp(args.statusBuilderTextPostRatio, 0, 1),
+      statusBuilderAudienceJids,
+      statusBuilderAudienceSampleSize: clampInt(
+        args.statusBuilderAudienceSampleSize ?? DEFAULT_APP_CONFIG.statusBuilderAudienceSampleSize,
+        10,
+        256,
+      ),
     };
 
     // Keep ranges valid after clamping.
@@ -251,6 +270,12 @@ export const save = mutation({
     await setConfigValue(ctx, "outreachMaxContactsPerRun", String(normalized.outreachMaxContactsPerRun));
     await setConfigValue(ctx, "outreachContactJids", normalized.outreachContactJids.join("\n"));
     await setConfigValue(ctx, "outreachStarterTemplate", normalized.outreachStarterTemplate);
+    await setConfigValue(ctx, "statusBuilderEnabled", normalized.statusBuilderEnabled ? "true" : "false");
+    await setConfigValue(ctx, "statusBuilderCadenceHours", String(normalized.statusBuilderCadenceHours));
+    await setConfigValue(ctx, "statusBuilderDailyMaxPosts", String(normalized.statusBuilderDailyMaxPosts));
+    await setConfigValue(ctx, "statusBuilderTextPostRatio", String(normalized.statusBuilderTextPostRatio));
+    await setConfigValue(ctx, "statusBuilderAudienceJids", normalized.statusBuilderAudienceJids.join("\n"));
+    await setConfigValue(ctx, "statusBuilderAudienceSampleSize", String(normalized.statusBuilderAudienceSampleSize));
 
     await ctx.db.insert("systemEvents", {
       source: "dashboard",

@@ -114,6 +114,11 @@ export const claimDue = mutation({
       idempotencyKey: string;
       provider: "azure" | "codex" | "heuristic";
       sendKind: "text" | "reaction" | "sticker" | "meme";
+      isStatusPost?: boolean;
+      statusAudienceJids?: string[];
+      statusTrendTheme?: string;
+      statusDemographicHint?: string;
+      statusFormat?: "text" | "meme";
       reactionEmoji?: string;
       reactionTargetWhatsAppMessageId?: string;
       preReactionEmoji?: string;
@@ -243,83 +248,86 @@ export const claimDue = mutation({
         continue;
       }
 
-      const explicitIgnore = await ctx.db
-        .query("ignoreRules")
-        .withIndex("by_target", (q) =>
-          q.eq("targetType", threadKind === "group" ? "group" : "contact").eq("targetValue", thread.jid),
-        )
-        .first();
-      const eligibility = resolveThreadEligibility({
-        thread: {
-          jid: thread.jid,
-          isIgnored: thread.isIgnored,
-          isArchived: thread.isArchived,
-          threadKind,
-          ghostedUntil: thread.ghostedUntil,
-        },
-        ignoreGroupsByDefault: config.ignoreGroupsByDefault,
-        explicitIgnoreEnabled: Boolean(explicitIgnore?.enabled),
-        nowMs: now,
-      });
-      if (!eligibility.allowed) {
-        if (eligibility.reason === "temporary_ghost") {
-          const ghostUntil = Math.max(thread.ghostedUntil ?? now, now + 30_000);
-          await ctx.db.patch(item._id, {
-            status: "pending",
-            workerId: undefined,
-            leaseExpiresAt: undefined,
-            sendAt: ghostUntil + 2_000,
-            updatedAt: now,
-          });
-          await ctx.db.insert("systemEvents", {
-            source: "worker",
-            eventType: "outbox.deferred.ghost_mode",
-            threadId: item.threadId,
-            outboxId: item._id,
-            detail: `Deferred send until temporary ghost window ends (${new Date(ghostUntil).toISOString()}).`,
-            createdAt: now,
-          });
-          continue;
-        }
-
-        const reason = `Blocked by eligibility: ${eligibility.reason} (${eligibilityReasonLabel(eligibility.reason)}).`;
-        await ctx.db.patch(item._id, {
-          status: "failed",
-          workerId: undefined,
-          leaseExpiresAt: undefined,
-          error: reason,
-          updatedAt: now,
+      const isStatusBroadcastSend = item.isStatusPost === true && thread.jid === "status@broadcast";
+      if (!isStatusBroadcastSend) {
+        const explicitIgnore = await ctx.db
+          .query("ignoreRules")
+          .withIndex("by_target", (q) =>
+            q.eq("targetType", threadKind === "group" ? "group" : "contact").eq("targetValue", thread.jid),
+          )
+          .first();
+        const eligibility = resolveThreadEligibility({
+          thread: {
+            jid: thread.jid,
+            isIgnored: thread.isIgnored,
+            isArchived: thread.isArchived,
+            threadKind,
+            ghostedUntil: thread.ghostedUntil,
+          },
+          ignoreGroupsByDefault: config.ignoreGroupsByDefault,
+          explicitIgnoreEnabled: Boolean(explicitIgnore?.enabled),
+          nowMs: now,
         });
-        await ctx.db.patch(draft._id, {
-          status: "rejected",
-          updatedAt: now,
-        });
-        if (item.followUpId) {
-          const followUp = await ctx.db.get(item.followUpId);
-          if (followUp && followUp.status === "queued") {
-            await ctx.db.patch(followUp._id, {
-              status: "failed",
+        if (!eligibility.allowed) {
+          if (eligibility.reason === "temporary_ghost") {
+            const ghostUntil = Math.max(thread.ghostedUntil ?? now, now + 30_000);
+            await ctx.db.patch(item._id, {
+              status: "pending",
+              workerId: undefined,
+              leaseExpiresAt: undefined,
+              sendAt: ghostUntil + 2_000,
               updatedAt: now,
             });
             await ctx.db.insert("systemEvents", {
               source: "worker",
-              eventType: "followup.failed",
+              eventType: "outbox.deferred.ghost_mode",
               threadId: item.threadId,
               outboxId: item._id,
-              detail: reason.slice(0, 240),
+              detail: `Deferred send until temporary ghost window ends (${new Date(ghostUntil).toISOString()}).`,
               createdAt: now,
             });
+            continue;
           }
+
+          const reason = `Blocked by eligibility: ${eligibility.reason} (${eligibilityReasonLabel(eligibility.reason)}).`;
+          await ctx.db.patch(item._id, {
+            status: "failed",
+            workerId: undefined,
+            leaseExpiresAt: undefined,
+            error: reason,
+            updatedAt: now,
+          });
+          await ctx.db.patch(draft._id, {
+            status: "rejected",
+            updatedAt: now,
+          });
+          if (item.followUpId) {
+            const followUp = await ctx.db.get(item.followUpId);
+            if (followUp && followUp.status === "queued") {
+              await ctx.db.patch(followUp._id, {
+                status: "failed",
+                updatedAt: now,
+              });
+              await ctx.db.insert("systemEvents", {
+                source: "worker",
+                eventType: "followup.failed",
+                threadId: item.threadId,
+                outboxId: item._id,
+                detail: reason.slice(0, 240),
+                createdAt: now,
+              });
+            }
+          }
+          await ctx.db.insert("systemEvents", {
+            source: "worker",
+            eventType: "outbox.blocked.eligibility",
+            threadId: item.threadId,
+            outboxId: item._id,
+            detail: reason,
+            createdAt: now,
+          });
+          continue;
         }
-        await ctx.db.insert("systemEvents", {
-          source: "worker",
-          eventType: "outbox.blocked.eligibility",
-          threadId: item.threadId,
-          outboxId: item._id,
-          detail: reason,
-          createdAt: now,
-        });
-        continue;
       }
 
       await ctx.db.patch(item._id, {
@@ -355,6 +363,11 @@ export const claimDue = mutation({
         idempotencyKey: item.idempotencyKey,
         provider: item.provider,
         sendKind: item.sendKind || "text",
+        isStatusPost: item.isStatusPost,
+        statusAudienceJids: item.statusAudienceJids,
+        statusTrendTheme: item.statusTrendTheme,
+        statusDemographicHint: item.statusDemographicHint,
+        statusFormat: item.statusFormat,
         reactionEmoji: item.reactionEmoji,
         reactionTargetWhatsAppMessageId: item.reactionTargetWhatsAppMessageId,
         preReactionEmoji: item.preReactionEmoji,
@@ -630,6 +643,72 @@ export const hydrateAiOutreach = mutation({
   },
 });
 
+export const hydrateAiStatus = mutation({
+  args: {
+    outboxId: v.id("outbox"),
+    text: v.string(),
+    provider: v.union(v.literal("azure"), v.literal("codex"), v.literal("heuristic")),
+    confidence: v.number(),
+    typingMs: v.optional(v.number()),
+    toolRunId: v.optional(v.string()),
+    statusFormat: v.union(v.literal("text"), v.literal("meme")),
+    mediaAssetId: v.optional(v.id("mediaAssets")),
+    mediaCaption: v.optional(v.string()),
+    statusTrendTheme: v.optional(v.string()),
+    statusDemographicHint: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const outbox = await ctx.db.get(args.outboxId);
+    if (!outbox) {
+      return null;
+    }
+
+    const now = Date.now();
+    const nextSendKind: "text" | "meme" = args.statusFormat === "meme" ? "meme" : "text";
+    await ctx.db.patch(outbox._id, {
+      messageText: args.text,
+      provider: args.provider,
+      toolRunId: args.toolRunId,
+      sendKind: nextSendKind,
+      mediaAssetId: args.statusFormat === "meme" ? args.mediaAssetId : undefined,
+      mediaCaption: args.statusFormat === "meme" ? args.mediaCaption : undefined,
+      statusTrendTheme: args.statusTrendTheme ?? outbox.statusTrendTheme,
+      statusDemographicHint: args.statusDemographicHint ?? outbox.statusDemographicHint,
+      statusFormat: args.statusFormat,
+      updatedAt: now,
+    });
+
+    const draft = await ctx.db.get(outbox.draftId);
+    if (draft) {
+      await ctx.db.patch(draft._id, {
+        text: args.text,
+        provider: args.provider,
+        confidence: args.confidence,
+        typingMs: args.typingMs ?? draft.typingMs,
+        toolRunId: args.toolRunId,
+        sendKind: nextSendKind,
+        mediaAssetId: args.statusFormat === "meme" ? args.mediaAssetId : undefined,
+        mediaCaption: args.statusFormat === "meme" ? args.mediaCaption : undefined,
+        statusTrendTheme: args.statusTrendTheme ?? draft.statusTrendTheme,
+        statusDemographicHint: args.statusDemographicHint ?? draft.statusDemographicHint,
+        statusFormat: args.statusFormat,
+        updatedAt: now,
+      });
+    }
+
+    await ctx.db.insert("systemEvents", {
+      source: "worker",
+      eventType: "outbox.aiStatusHydrated",
+      threadId: outbox.threadId,
+      outboxId: outbox._id,
+      detail: args.text.slice(0, 240),
+      createdAt: now,
+    });
+
+    return outbox._id;
+  },
+});
+
 export const rewriteClaimedMessage = mutation({
   args: {
     outboxId: v.id("outbox"),
@@ -716,7 +795,7 @@ export const markSent = mutation({
       threadId: item.threadId,
       direction: "outbound",
       origin: "live",
-      isStatus: sourceMessage?.isStatus ? true : undefined,
+      isStatus: item.isStatusPost || sourceMessage?.isStatus ? true : undefined,
       senderJid: "me",
       whatsappMessageId: args.whatsappMessageId,
       toolRunId: item.toolRunId,

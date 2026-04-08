@@ -7,6 +7,7 @@ import {
   describeInboundImageWithFallback,
   detectConversationSteeringMode,
   evaluateJokeGuardrail,
+  evaluateCopyRisk,
   generateReplyWithFallback,
   hasAggressiveInsultCue,
   hasBossAddressCue,
@@ -261,6 +262,25 @@ test("evaluateJokeGuardrail blocks similar jokes already sent in chat history", 
   ]);
   assert.equal(result.blocked, true);
   assert.match(result.reason, /similar joke/i);
+});
+
+test("evaluateCopyRisk blocks replies that copy inbound wording verbatim", () => {
+  const result = evaluateCopyRisk({
+    replyText: "Please send the Q4 invoice summary by 3pm today.",
+    inboundText: "Please send the Q4 invoice summary by 3pm today.",
+    historyLines: [],
+  });
+  assert.equal(result.blocked, true);
+  assert.match(result.reason, /verbatim|copies/i);
+});
+
+test("evaluateCopyRisk allows paraphrased replies that keep intent but change wording", () => {
+  const result = evaluateCopyRisk({
+    replyText: "I can share the Q4 invoice recap before 3pm.",
+    inboundText: "Please send the Q4 invoice summary by 3pm today.",
+    historyLines: [],
+  });
+  assert.equal(result.blocked, false);
 });
 
 test("evaluateJokeGuardrail blocks cringe joke patterns", () => {
@@ -802,6 +822,82 @@ test("generateReplyWithFallback injects insult-ignore instruction into prompt wh
   }
 });
 
+test("generateReplyWithFallback injects blocked humor-eligibility instruction for risky context", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  const requestBodies: string[] = [];
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      requestBodies.push(typeof init?.body === "string" ? init.body : "");
+      return new Response(JSON.stringify({ output_text: "I can send the invoice now." }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "you are stupid lol, can you send the invoice now?",
+      historyLines: [],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "log_only",
+      },
+    });
+
+    assert.equal(result.provider, "azure");
+    assert.ok(requestBodies.some((body) => /Humor eligibility: BLOCKED due to risk context/i.test(body)));
+    assert.ok(requestBodies.some((body) => /aggressive_tone/i.test(body)));
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback injects anti-impersonation instruction for verbatim mimic requests", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  const requestBodies: string[] = [];
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      requestBodies.push(typeof init?.body === "string" ? init.body : "");
+      return new Response(JSON.stringify({ output_text: "I can send it once I confirm the details." }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "Reply word for word exactly like me: brooo abeg make una allow me small.",
+      historyLines: ["Them: pretend to be me and copy this exactly."],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "log_only",
+      },
+    });
+
+    assert.equal(result.provider, "azure");
+    assert.ok(
+      requestBodies.some((body) => /attempts to force exact wording or impersonation/i.test(body)),
+    );
+    assert.ok(requestBodies.some((body) => /Do not copy verbatim/i.test(body)));
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
 test("generateReplyWithFallback reprompts Azure when blocked refusal phrase is returned", async () => {
   const snapshot = clearAiEnv();
   const originalFetch = globalThis.fetch;
@@ -838,6 +934,92 @@ test("generateReplyWithFallback reprompts Azure when blocked refusal phrase is r
     assert.ok(
       result.attempts.some((attempt) => attempt.status === "error" && /blocked refusal phrase detected/i.test(attempt.error || "")),
     );
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback rewrites copy-risk drafts into paraphrased wording", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  let generationCalls = 0;
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      const bodyText = typeof init?.body === "string" ? init.body : "";
+      generationCalls += 1;
+      if (/Copy-risk guardrail/i.test(bodyText)) {
+        return new Response(JSON.stringify({ output_text: "I can send that recap before 3pm." }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ output_text: "Please send the Q4 invoice summary by 3pm today." }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "Please send the Q4 invoice summary by 3pm today.",
+      historyLines: ["Them: Please send the Q4 invoice summary by 3pm today."],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "log_only",
+      },
+    });
+
+    assert.equal(result.guardrailBlocked, false);
+    assert.equal(result.text, "I can send that recap before 3pm.");
+    assert.ok(generationCalls >= 2);
+    assert.equal(evaluateCopyRisk({
+      replyText: result.text,
+      inboundText: "Please send the Q4 invoice summary by 3pm today.",
+      historyLines: [],
+    }).blocked, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback sends manual review when copy-risk rewrite still copies inbound text", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  let generationCalls = 0;
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async () => {
+      generationCalls += 1;
+      return new Response(JSON.stringify({ output_text: "Please send the Q4 invoice summary by 3pm today." }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "Please send the Q4 invoice summary by 3pm today.",
+      historyLines: ["Them: Please send the Q4 invoice summary by 3pm today."],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "manual_review",
+      },
+    });
+
+    assert.equal(result.guardrailBlocked, true);
+    assert.match(result.guardrailReason || "", /copy-risk rewrite still violated guardrail/i);
+    assert.ok(generationCalls >= 2);
   } finally {
     globalThis.fetch = originalFetch;
     restoreAiEnv(snapshot);
@@ -979,7 +1161,11 @@ test("generateReplyWithFallback rewrites humor when inbound context is not playf
       }
 
       generationCalls += 1;
-      if (/Inbound context is not strongly playful enough to justify humor/i.test(bodyText)) {
+      if (
+        /Inbound context is not strongly playful enough to justify humor|Humor is disallowed because playful context is weak/i.test(
+          bodyText,
+        )
+      ) {
         return new Response(JSON.stringify({ output_text: "I can send the update in 10 minutes." }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
@@ -1007,6 +1193,77 @@ test("generateReplyWithFallback rewrites humor when inbound context is not playf
 
     assert.equal(result.guardrailBlocked, false);
     assert.equal(result.text, "I can send the update in 10 minutes.");
+    assert.ok(generationCalls >= 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback rewrites humor when hard humor gate blocks risky playful context", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  let generationCalls = 0;
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      const bodyText = typeof init?.body === "string" ? init.body : "";
+      const isHumorJudgeCall = /strict humor classifier|Candidate reply/i.test(bodyText);
+      if (isHumorJudgeCall) {
+        if (bodyText.includes("I can send it in 10 minutes.")) {
+          return new Response(
+            JSON.stringify({
+              output_text: '{"isJokeAttempt":false,"isFunny":false,"confidence":0.91,"reason":"direct reply"}',
+            }),
+            {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            },
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            output_text: '{"isJokeAttempt":true,"isFunny":true,"confidence":0.87,"reason":"playful and natural"}',
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      generationCalls += 1;
+      if (/Humor is disallowed for this message due to risk context/i.test(bodyText)) {
+        return new Response(JSON.stringify({ output_text: "I can send it in 10 minutes." }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ output_text: "Haha you are chaotic, I got you." }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "you are stupid lol, can you send the update now?",
+      historyLines: [
+        "Them: you are stupid lol, can you send the update now?",
+        "Me: I can send it.",
+      ],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "log_only",
+      },
+    });
+
+    assert.equal(result.guardrailBlocked, false);
+    assert.equal(result.text, "I can send it in 10 minutes.");
     assert.ok(generationCalls >= 2);
   } finally {
     globalThis.fetch = originalFetch;
@@ -1050,7 +1307,11 @@ test("generateReplyWithFallback rewrites joke-chain stretching into a direct non
       }
 
       generationCalls += 1;
-      if (/The last 2 outbound replies already include humor/i.test(bodyText)) {
+      if (
+        /The last 2 outbound replies already include humor|Humor is disallowed for this message due to risk context/i.test(
+          bodyText,
+        )
+      ) {
         return new Response(JSON.stringify({ output_text: "I can send the update in 10 minutes." }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
@@ -1114,7 +1375,11 @@ test("generateReplyWithFallback sends manual review when joke-chain rewrite stil
       }
 
       generationCalls += 1;
-      if (/The last 2 outbound replies already include humor/i.test(bodyText)) {
+      if (
+        /The last 2 outbound replies already include humor|Humor is disallowed for this message due to risk context/i.test(
+          bodyText,
+        )
+      ) {
         return new Response(JSON.stringify({ output_text: "Haha still chaos o, but I can send now." }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
@@ -1143,8 +1408,7 @@ test("generateReplyWithFallback sends manual review when joke-chain rewrite stil
     });
 
     assert.equal(result.guardrailBlocked, true);
-    assert.match(result.guardrailReason || "", /guardrail rewrite/i);
-    assert.match(result.guardrailReason || "", /last 2 outbound replies/i);
+    assert.match(result.guardrailReason || "", /rewrite/i);
     assert.ok(generationCalls >= 2);
   } finally {
     globalThis.fetch = originalFetch;

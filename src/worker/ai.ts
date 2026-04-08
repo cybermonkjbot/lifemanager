@@ -207,6 +207,21 @@ type JokeGuardrailResult = {
   code: JokeGuardrailCode;
 };
 
+type HumorEligibilityDecision = {
+  allowHumor: boolean;
+  playfulContext: boolean;
+  riskContext: boolean;
+  reasons: string[];
+};
+
+type CopyRiskResult = {
+  blocked: boolean;
+  reason: string;
+  matchedSource?: string;
+  lexicalSimilarity: number;
+  longestTokenRun: number;
+};
+
 const HARD_CODED_AZURE_DEFAULTS: {
   endpoint: string;
   apiKey: string;
@@ -278,6 +293,12 @@ const BLOCKED_REFUSAL_PATTERNS = [/\bi(?:'|’)m sorry,\s*but\s*i cannot assist 
 const BLOCKED_REFUSAL_ERROR = "Blocked refusal phrase detected.";
 const BLOCKED_REFUSAL_REPROMPT_LIMIT = 2;
 const AWKWARD_CATCHPHRASE_PATTERNS = [/\bplease allow me\b/i, /\ballow me small\b/i];
+const MIMICRY_INJECTION_PATTERNS = [
+  /\b(word for word|verbatim|exact(?:ly)?|copy(?:\s+and\s+paste)?)\b/i,
+  /\b(reply|respond|say|write)\b[\s\S]{0,60}\b(exact(?:ly)?|verbatim|word for word|copy)\b/i,
+  /\b(pretend to be me|act as me|impersonat(?:e|ing)|sound exactly like me)\b/i,
+  /\b(same typo|same punctuation|same spelling mistakes?)\b/i,
+];
 const STYLE_MIMICRY_BLOCK_PATTERNS = [
   /\b(?:https?:\/\/|www\.)\S+\b/i,
   /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i,
@@ -285,6 +306,9 @@ const STYLE_MIMICRY_BLOCK_PATTERNS = [
   /\b(password|passcode|otp|pin|bank|account|routing|sort code|wire transfer|social security)\b/i,
   /\b(api key|access token|secret|auth token)\b/i,
 ];
+const COPY_RISK_MIN_CHARS = 26;
+const COPY_RISK_HIGH_SIMILARITY_THRESHOLD = 0.92;
+const COPY_RISK_MEDIUM_SIMILARITY_THRESHOLD = 0.87;
 const STYLE_MAX_PROMPT_PHRASE_WORDS = 6;
 const JOKE_INTENT_PATTERNS = [
   /\b(joke|banter|roast|pun|punchline)\b/i,
@@ -600,6 +624,93 @@ function hasHumorSignal(text: string, keywords: string[], emojis: string[]) {
     return true;
   }
   return false;
+}
+
+function hasMimicryInjectionCue(args: { inboundText: string; historyLines: string[] }) {
+  const inbound = normalizeOutboundText(args.inboundText || "");
+  const recentInbound = args.historyLines
+    .slice(-6)
+    .map((line) => parseHistoryLine(line))
+    .filter((line) => line.label === "Them")
+    .map((line) => line.body)
+    .join(" ");
+  const sample = normalizeOutboundText([inbound, recentInbound].filter(Boolean).join(" "));
+  if (!sample) {
+    return false;
+  }
+  return MIMICRY_INJECTION_PATTERNS.some((pattern) => pattern.test(sample));
+}
+
+function evaluateHumorEligibility(args: {
+  inboundText: string;
+  historyLines: string[];
+  steeringMode: ConversationSteeringMode;
+  soulModeEnabled: boolean;
+  funnyKeywords: string[];
+  funnyEmojis: string[];
+}) {
+  if (!args.soulModeEnabled) {
+    return {
+      allowHumor: false,
+      playfulContext: false,
+      riskContext: true,
+      reasons: ["soul_mode_disabled"],
+    } satisfies HumorEligibilityDecision;
+  }
+
+  const inbound = normalizeOutboundText(args.inboundText || "");
+  const recentInboundSample = args.historyLines
+    .slice(-10)
+    .map((line) => parseHistoryLine(line))
+    .filter((line) => line.label === "Them")
+    .map((line) => line.body)
+    .join(" ");
+  const contextSample = [inbound, recentInboundSample].filter(Boolean).join(" ");
+  const playfulContext =
+    hasHumorSignal(inbound, args.funnyKeywords, args.funnyEmojis) ||
+    (Boolean(recentInboundSample) && hasHumorSignal(recentInboundSample, args.funnyKeywords, args.funnyEmojis));
+
+  const reasons: string[] = [];
+  if (!playfulContext) {
+    reasons.push("no_strong_playful_context");
+  }
+  if (contextSample && hasHumorContextBlock(contextSample)) {
+    reasons.push("sensitive_context");
+  }
+  if (HIGH_RISK_PATTERNS.some((pattern) => pattern.test(contextSample))) {
+    reasons.push("high_risk_pattern");
+  }
+  if (hasMoneyRequestCue(inbound)) {
+    reasons.push("money_request");
+  }
+  if (hasSalesPitchCue(inbound)) {
+    reasons.push("sales_pitch");
+  }
+  if (hasAggressiveInsultCue(inbound)) {
+    reasons.push("aggressive_tone");
+  }
+  if (args.steeringMode !== "none") {
+    reasons.push(`steering_${args.steeringMode}`);
+  }
+  if (hasRecentOutboundJokeInCooldown(args.historyLines, JOKE_CHAIN_OUTBOUND_COOLDOWN)) {
+    reasons.push("recent_joke_chain");
+  }
+
+  const riskReasons = reasons.filter((reason) => reason !== "no_strong_playful_context");
+  return {
+    allowHumor: playfulContext && riskReasons.length === 0,
+    playfulContext,
+    riskContext: riskReasons.length > 0,
+    reasons,
+  } satisfies HumorEligibilityDecision;
+}
+
+function buildHumorEligibilityRewriteInstruction(decision: HumorEligibilityDecision) {
+  const riskReasons = decision.reasons.filter((reason) => reason !== "no_strong_playful_context");
+  if (riskReasons.length > 0) {
+    return `Humor is disallowed for this message due to risk context (${riskReasons.join(", ")}). Rewrite into a direct, non-joke reply.`;
+  }
+  return "Humor is disallowed because playful context is weak. Rewrite into a direct, non-joke reply.";
 }
 
 function isAckLike(text: string) {
@@ -1691,28 +1802,47 @@ function buildPrompt(args: {
     process.env.SLM_AI_REPLY_POLICY ||
     HARD_CODED_AZURE_DEFAULTS.replyPolicyInstruction ||
     "";
+  const steeringMode = detectConversationSteeringMode({
+    inboundText: args.inboundText,
+    historyLines: recentHistory.map((line) => line.line),
+  });
   const soulModeEnabled = args.runtime?.soulModeEnabled ?? true;
   const funnyKeywords = (args.runtime?.funnyStatusKeywords || DEFAULT_FUNNY_STATUS_KEYWORDS).slice(0, 30);
   const funnyEmojis = (args.runtime?.funnyStatusEmojis || DEFAULT_FUNNY_STATUS_EMOJIS).slice(0, 30);
-  const playfulMoment = hasHumorSignal(args.inboundText, funnyKeywords, funnyEmojis);
+  const humorEligibility = evaluateHumorEligibility({
+    inboundText: args.inboundText,
+    historyLines: recentHistory.map((line) => line.line),
+    steeringMode,
+    soulModeEnabled,
+    funnyKeywords,
+    funnyEmojis,
+  });
+  const humorEligibilityInstruction = humorEligibility.allowHumor
+    ? "Humor eligibility: ALLOWED (strong playful context detected and no risk context). If humor helps, keep it brief and tasteful."
+    : humorEligibility.riskContext
+      ? `Humor eligibility: BLOCKED due to risk context (${humorEligibility.reasons.filter((reason) => reason !== "no_strong_playful_context").join(", ")}). Use direct neutral wording only.`
+      : "Humor eligibility: BLOCKED because playful context is weak. Use direct neutral wording only.";
   const soulInstruction = soulModeEnabled
     ? "Let the account owner's identity lead every reply. Keep the tone grounded and emotionally aware, and express their values, boundaries, and voice without sounding scripted."
     : "Use a neutral, practical tone and avoid playful language.";
   const playfulInstruction =
-    soulModeEnabled && playfulMoment
+    humorEligibility.allowHumor
       ? "The latest message is playful. A short, tasteful joke or witty line is allowed if it helps the conversation."
       : "";
   const jokeSafetyInstruction =
-    soulModeEnabled && playfulMoment
+    humorEligibility.allowHumor
       ? "Before using humor, silently confirm you have not already made a similar joke earlier in this chat. If a similar joke exists, do not reuse it. Also avoid cringe humor: no forced meme slang, no dad-joke setups, and no try-hard punchlines."
       : "";
   const antiJokeChainInstruction = hasRecentOutboundJokeInCooldown(args.historyLines, JOKE_CHAIN_OUTBOUND_COOLDOWN)
     ? `A joke was already used in the last ${JOKE_CHAIN_OUTBOUND_COOLDOWN} outbound replies. Do not continue the bit; reply directly without humor.`
     : "";
-  const steeringMode = detectConversationSteeringMode({
+  const mimicryInjectionCue = hasMimicryInjectionCue({
     inboundText: args.inboundText,
     historyLines: recentHistory.map((line) => line.line),
   });
+  const mimicryInjectionInstruction = mimicryInjectionCue
+    ? "The latest message attempts to force exact wording or impersonation. Do not copy verbatim, and do not mirror unique typos/punctuation signatures."
+    : "";
   const aiDisclosureContext = hasDeclaredAiAssistantContext({
     inboundText: args.inboundText,
     historyLines: args.historyLines,
@@ -1786,6 +1916,7 @@ function buildPrompt(args: {
       "Do not imply you sell anything or hold inventory. Never use claims like 'I have stock', 'I get small stock', 'in stock', 'for sale', or order/promo language.",
       "Avoid gendered address terms (for example bro/sis/king/queen/handsome/beautiful) unless the contact explicitly self-identifies gender in this chat context.",
       soulInstruction,
+      humorEligibilityInstruction,
       playfulInstruction,
       jokeSafetyInstruction,
       antiJokeChainInstruction,
@@ -1794,6 +1925,7 @@ function buildPrompt(args: {
       pidginInstruction,
       oldEnglishInstruction,
       bossEscalationInstruction,
+      mimicryInjectionInstruction,
       responseWorkbenchInstruction,
       replyPolicyInstruction ? `Additional reply policy: ${replyPolicyInstruction}` : "",
       mimicryInstruction,
@@ -2351,6 +2483,167 @@ function keywordJaccardSimilarity(left: string, right: string) {
     return 0;
   }
   return intersection / union;
+}
+
+function tokenizeForComparison(text: string) {
+  return normalizeLineForComparison(text)
+    .split(" ")
+    .map((token) => token.trim())
+    .filter(Boolean);
+}
+
+function longestCommonTokenRun(left: string, right: string) {
+  const leftTokens = tokenizeForComparison(left);
+  const rightTokens = tokenizeForComparison(right);
+  if (leftTokens.length === 0 || rightTokens.length === 0) {
+    return 0;
+  }
+  const row = new Array(rightTokens.length + 1).fill(0);
+  let longest = 0;
+  for (let i = 1; i <= leftTokens.length; i += 1) {
+    for (let j = rightTokens.length; j >= 1; j -= 1) {
+      if (leftTokens[i - 1] === rightTokens[j - 1]) {
+        row[j] = row[j - 1] + 1;
+        if (row[j] > longest) {
+          longest = row[j];
+        }
+      } else {
+        row[j] = 0;
+      }
+    }
+  }
+  return longest;
+}
+
+function commonPrefixRatio(left: string, right: string) {
+  const a = normalizeLineForComparison(left);
+  const b = normalizeLineForComparison(right);
+  if (!a || !b) {
+    return 0;
+  }
+  const max = Math.min(a.length, b.length);
+  let matched = 0;
+  for (let index = 0; index < max; index += 1) {
+    if (a[index] !== b[index]) {
+      break;
+    }
+    matched += 1;
+  }
+  return matched / Math.max(Math.min(a.length, b.length), 1);
+}
+
+function collectInboundCopyRiskSources(inboundText: string, historyLines: string[]) {
+  const sources: string[] = [];
+  const seen = new Set<string>();
+  const push = (value: string) => {
+    const normalized = normalizeLineForComparison(value);
+    if (!normalized || seen.has(normalized)) {
+      return;
+    }
+    seen.add(normalized);
+    sources.push(value.trim());
+  };
+
+  push(inboundText);
+  const recentInbound = historyLines
+    .slice(-10)
+    .map((line) => parseHistoryLine(line))
+    .filter((line) => line.label === "Them" && line.body.trim().length > 0)
+    .map((line) => line.body)
+    .slice(-6);
+  for (const inbound of recentInbound) {
+    push(inbound);
+  }
+
+  return sources;
+}
+
+export function evaluateCopyRisk(args: { replyText: string; inboundText: string; historyLines: string[] }): CopyRiskResult {
+  const candidate = normalizeLineForComparison(args.replyText || "");
+  if (!candidate || candidate.length < COPY_RISK_MIN_CHARS) {
+    return {
+      blocked: false,
+      reason: "",
+      lexicalSimilarity: 0,
+      longestTokenRun: 0,
+    };
+  }
+
+  const sources = collectInboundCopyRiskSources(args.inboundText, args.historyLines);
+  let highestSimilarity = 0;
+  let highestRun = 0;
+  let highestSource = "";
+
+  for (const source of sources) {
+    const normalizedSource = normalizeLineForComparison(source);
+    if (!normalizedSource) {
+      continue;
+    }
+
+    const lexicalSimilarity = keywordJaccardSimilarity(candidate, normalizedSource);
+    const tokenRun = longestCommonTokenRun(candidate, normalizedSource);
+    const prefixRatio = commonPrefixRatio(candidate, normalizedSource);
+    if (lexicalSimilarity > highestSimilarity) {
+      highestSimilarity = lexicalSimilarity;
+      highestRun = tokenRun;
+      highestSource = source;
+    }
+
+    const minLength = Math.min(candidate.length, normalizedSource.length);
+    if (candidate === normalizedSource && minLength >= 18) {
+      return {
+        blocked: true,
+        reason: "Reply copies inbound wording verbatim.",
+        matchedSource: source,
+        lexicalSimilarity: 1,
+        longestTokenRun: tokenRun,
+      };
+    }
+    if (minLength >= 32 && (candidate.includes(normalizedSource) || normalizedSource.includes(candidate))) {
+      return {
+        blocked: true,
+        reason: "Reply closely copies inbound phrasing span.",
+        matchedSource: source,
+        lexicalSimilarity: lexicalSimilarity || 0.99,
+        longestTokenRun: tokenRun,
+      };
+    }
+    if (lexicalSimilarity >= COPY_RISK_HIGH_SIMILARITY_THRESHOLD && tokenRun >= 5) {
+      return {
+        blocked: true,
+        reason: "Reply is too lexically similar to inbound phrasing.",
+        matchedSource: source,
+        lexicalSimilarity,
+        longestTokenRun: tokenRun,
+      };
+    }
+    if (lexicalSimilarity >= COPY_RISK_MEDIUM_SIMILARITY_THRESHOLD && tokenRun >= 7) {
+      return {
+        blocked: true,
+        reason: "Reply reuses too much contiguous inbound wording.",
+        matchedSource: source,
+        lexicalSimilarity,
+        longestTokenRun: tokenRun,
+      };
+    }
+    if (prefixRatio >= 0.86 && minLength >= 34) {
+      return {
+        blocked: true,
+        reason: "Reply starts with near-identical inbound wording.",
+        matchedSource: source,
+        lexicalSimilarity,
+        longestTokenRun: tokenRun,
+      };
+    }
+  }
+
+  return {
+    blocked: false,
+    reason: "",
+    matchedSource: highestSource || undefined,
+    lexicalSimilarity: highestSimilarity,
+    longestTokenRun: highestRun,
+  };
 }
 
 function hasSimilarPriorOutboundJoke(text: string, historyLines: string[]) {
@@ -2951,6 +3244,45 @@ async function rewriteReplyOnce(args: {
     `Current draft reply: ${args.candidateText}`,
     failedCheckText ? `Failed quality checks: ${failedCheckText}.` : "",
     rewriteInstruction,
+    "Return only the revised reply text.",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  const attempts: AiAttempt[] = [];
+  const azure = await runAzure(rewritePrompt, args.inboundText, args.historyLines, args.runtime);
+  attempts.push(...azure.attempts);
+  if (azure.result) {
+    return { result: azure.result, attempts };
+  }
+
+  if (resolveFallbackMode(args.runtime) === "all") {
+    const codex = await runCodex(rewritePrompt, args.inboundText, args.historyLines, args.runtime);
+    attempts.push(...codex.attempts);
+    if (codex.result) {
+      return { result: codex.result, attempts };
+    }
+  }
+
+  return { attempts };
+}
+
+async function rewriteCopyRiskReplyOnce(args: {
+  candidateText: string;
+  inboundText: string;
+  historyLines: string[];
+  basePrompt: string;
+  runtime?: RuntimeAiTuning;
+  copyRisk: CopyRiskResult;
+}) {
+  const sourceHint = args.copyRisk.matchedSource ? normalizeOutboundText(args.copyRisk.matchedSource).slice(0, 180) : "";
+  const rewritePrompt = [
+    args.basePrompt,
+    `Current draft reply: ${args.candidateText}`,
+    `Copy-risk guardrail: ${args.copyRisk.reason}`,
+    sourceHint ? `Inbound/source phrase to avoid copying: ${sourceHint}` : "",
+    "Rewrite with the same meaning but clearly different wording, order, and phrasing.",
+    "Do not copy contiguous fragments from inbound text. Keep it concise and natural.",
     "Return only the revised reply text.",
   ]
     .filter(Boolean)
@@ -4077,6 +4409,17 @@ async function applyQualityGate(args: {
   let selectedEvaluation = baseline;
   let selectedAttempts = [...args.attempts];
   let qualityRewriteApplied = false;
+  const humorEligibilityForGate = evaluateHumorEligibility({
+    inboundText: args.inboundText,
+    historyLines: args.historyLines,
+    steeringMode: detectConversationSteeringMode({
+      inboundText: args.inboundText,
+      historyLines: args.historyLines,
+    }),
+    soulModeEnabled: args.runtime?.soulModeEnabled ?? true,
+    funnyKeywords: (args.runtime?.funnyStatusKeywords || DEFAULT_FUNNY_STATUS_KEYWORDS).slice(0, 30),
+    funnyEmojis: (args.runtime?.funnyStatusEmojis || DEFAULT_FUNNY_STATUS_EMOJIS).slice(0, 30),
+  });
   const manualReviewResult = (reason: string) =>
     ({
       text: "Manual review required.",
@@ -4119,6 +4462,45 @@ async function applyQualityGate(args: {
     }
   }
 
+  const copyRisk = evaluateCopyRisk({
+    replyText: selected.text,
+    inboundText: args.inboundText,
+    historyLines: args.historyLines,
+  });
+  if (copyRisk.blocked) {
+    const copyRiskRewrite = await rewriteCopyRiskReplyOnce({
+      candidateText: selected.text,
+      inboundText: args.inboundText,
+      historyLines: args.historyLines,
+      basePrompt: args.basePrompt,
+      runtime: args.runtime,
+      copyRisk,
+    });
+    selectedAttempts = [...selectedAttempts, ...copyRiskRewrite.attempts];
+    if (!copyRiskRewrite.result) {
+      return manualReviewResult(`Copy-risk rewrite failed: ${copyRisk.reason}`);
+    }
+
+    selected = copyRiskRewrite.result;
+    selectedEvaluation = evaluateReplyQuality({
+      replyText: copyRiskRewrite.result.text,
+      inboundText: args.inboundText,
+      historyLines: args.historyLines,
+      pack: args.activePersonaPack,
+      threshold,
+    });
+    qualityRewriteApplied = qualityRewriteApplied || normalizeOutboundText(args.candidate.text) !== normalizeOutboundText(selected.text);
+
+    const rewrittenCopyRisk = evaluateCopyRisk({
+      replyText: selected.text,
+      inboundText: args.inboundText,
+      historyLines: args.historyLines,
+    });
+    if (rewrittenCopyRisk.blocked) {
+      return manualReviewResult(`Copy-risk rewrite still violated guardrail: ${rewrittenCopyRisk.reason}`);
+    }
+  }
+
   const humorEvaluation = await evaluateHumorWithAi({
     candidateText: selected.text,
     inboundText: args.inboundText,
@@ -4143,13 +4525,16 @@ async function applyQualityGate(args: {
       funnyKeywords: args.runtime?.funnyStatusKeywords,
       funnyEmojis: args.runtime?.funnyStatusEmojis,
     });
-    if (jokeGuardrail.blocked) {
-      if (jokeGuardrail.code !== "recent_joke_chain" && jokeGuardrail.code !== "unsupported_context") {
+    const humorEligibilityBlocked = !humorEligibilityForGate.allowHumor;
+    if (humorEligibilityBlocked || jokeGuardrail.blocked) {
+      if (!humorEligibilityBlocked && jokeGuardrail.code !== "recent_joke_chain" && jokeGuardrail.code !== "unsupported_context") {
         return manualReviewResult(jokeGuardrail.reason);
       }
 
       const guardrailInstruction =
-        jokeGuardrail.code === "unsupported_context"
+        humorEligibilityBlocked
+          ? buildHumorEligibilityRewriteInstruction(humorEligibilityForGate)
+          : jokeGuardrail.code === "unsupported_context"
           ? "Inbound context is not strongly playful enough to justify humor. Rewrite into a direct, non-joke reply."
           : `The last ${JOKE_CHAIN_OUTBOUND_COOLDOWN} outbound replies already include humor. Rewrite this into a direct, non-joke response.`;
       const antiStretchRewrite = await rewriteJokeChainReplyOnce({
@@ -4162,7 +4547,8 @@ async function applyQualityGate(args: {
       });
       selectedAttempts = [...selectedAttempts, ...antiStretchRewrite.attempts];
       if (!antiStretchRewrite.result) {
-        return manualReviewResult(`${jokeGuardrail.reason} Auto-rewrite failed.`);
+        const reason = humorEligibilityBlocked ? "Humor eligibility gate blocked humor." : jokeGuardrail.reason;
+        return manualReviewResult(`${reason} Auto-rewrite failed.`);
       }
 
       selected = antiStretchRewrite.result;
@@ -4191,6 +4577,10 @@ async function applyQualityGate(args: {
         return manualReviewResult(
           `Humor-guardrail rewrite was still humor but judged not funny (${Math.round(rewrittenHumorEvaluation.judgment.confidence * 100)}%): ${rewrittenHumorEvaluation.judgment.reason}`,
         );
+      }
+
+      if (humorEligibilityBlocked && rewrittenHumorEvaluation.judgment?.isJokeAttempt) {
+        return manualReviewResult("Humor-eligibility rewrite still produced humor while humor is blocked for this context.");
       }
 
       if (rewrittenHumorEvaluation.judgment?.isJokeAttempt && rewrittenHumorEvaluation.judgment.isFunny) {

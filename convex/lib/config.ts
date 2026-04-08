@@ -61,6 +61,12 @@ export type AppConfig = {
   outreachMaxContactsPerRun: number;
   outreachContactJids: string[];
   outreachStarterTemplate: string;
+  statusBuilderEnabled: boolean;
+  statusBuilderCadenceHours: number;
+  statusBuilderDailyMaxPosts: number;
+  statusBuilderTextPostRatio: number;
+  statusBuilderAudienceJids: string[];
+  statusBuilderAudienceSampleSize: number;
 };
 
 export const DEFAULT_APP_CONFIG: AppConfig = {
@@ -122,6 +128,12 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
   outreachMaxContactsPerRun: 3,
   outreachContactJids: [],
   outreachStarterTemplate: "Hey {{name}}, checking in on you today.",
+  statusBuilderEnabled: false,
+  statusBuilderCadenceHours: 8,
+  statusBuilderDailyMaxPosts: 3,
+  statusBuilderTextPostRatio: 0.4,
+  statusBuilderAudienceJids: [],
+  statusBuilderAudienceSampleSize: 80,
 };
 
 function parseBoolean(value: string | undefined, fallback: boolean) {
@@ -307,6 +319,26 @@ export async function getConfig(ctx: QueryCtx | MutationCtx): Promise<AppConfig>
     ),
     outreachContactJids: parseList(map.get("outreachContactJids")),
     outreachStarterTemplate: map.get("outreachStarterTemplate") ?? DEFAULT_APP_CONFIG.outreachStarterTemplate,
+    statusBuilderEnabled: parseBoolean(map.get("statusBuilderEnabled"), DEFAULT_APP_CONFIG.statusBuilderEnabled),
+    statusBuilderCadenceHours: Math.round(
+      clamp(parseNumber(map.get("statusBuilderCadenceHours"), DEFAULT_APP_CONFIG.statusBuilderCadenceHours), 1, 24 * 7),
+    ),
+    statusBuilderDailyMaxPosts: Math.round(
+      clamp(parseNumber(map.get("statusBuilderDailyMaxPosts"), DEFAULT_APP_CONFIG.statusBuilderDailyMaxPosts), 1, 24),
+    ),
+    statusBuilderTextPostRatio: clamp(
+      parseNumber(map.get("statusBuilderTextPostRatio"), DEFAULT_APP_CONFIG.statusBuilderTextPostRatio),
+      0,
+      1,
+    ),
+    statusBuilderAudienceJids: parseList(map.get("statusBuilderAudienceJids")),
+    statusBuilderAudienceSampleSize: Math.round(
+      clamp(
+        parseNumber(map.get("statusBuilderAudienceSampleSize"), DEFAULT_APP_CONFIG.statusBuilderAudienceSampleSize),
+        10,
+        256,
+      ),
+    ),
   };
 }
 

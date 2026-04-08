@@ -165,6 +165,11 @@ type OutboxClaimedItem = {
   typingMs: number;
   provider: "azure" | "codex" | "heuristic";
   sendKind: "text" | "reaction" | "sticker" | "meme";
+  isStatusPost?: boolean;
+  statusAudienceJids?: string[];
+  statusTrendTheme?: string;
+  statusDemographicHint?: string;
+  statusFormat?: "text" | "meme";
   reactionEmoji?: string;
   reactionTargetWhatsAppMessageId?: string;
   preReactionEmoji?: string;
@@ -223,6 +228,7 @@ type SystemHealthSnapshot = {
 } | null;
 
 const AI_OUTREACH_PLACEHOLDER = "__SLM_AI_OUTREACH__";
+const AI_STATUS_PLACEHOLDER = "__SLM_AI_STATUS__";
 const DEFAULT_NIGHT_WIND_DOWN_START_HOUR = 23;
 const DEFAULT_NIGHT_WIND_DOWN_END_HOUR = 7;
 const TEXT_EMOJI_ALLOWLIST = ["🌚", "🙂‍↔️", "🥲", "😒"];
@@ -706,7 +712,7 @@ function formatAttemptUsage(attempt: AiAttempt) {
   return parts.join(" · ");
 }
 
-function createToolRunId(scope: "reply" | "outreach", threadId: string, sourceMessageId?: string) {
+function createToolRunId(scope: "reply" | "outreach" | "status", threadId: string, sourceMessageId?: string) {
   const randomToken = Math.random().toString(36).slice(2, 10);
   const sourceToken = sourceMessageId ? sourceMessageId.slice(-8) : "none";
   return `${scope}_${threadId.slice(-8)}_${sourceToken}_${Date.now()}_${randomToken}`;
@@ -4077,6 +4083,168 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
     };
   };
 
+  const hydrateAiStatus = async (
+    item: OutboxClaimedItem,
+    runtimeSettings: RuntimeSettings | null,
+  ) => {
+    if (!item.isStatusPost || item.messageText !== AI_STATUS_PLACEHOLDER) {
+      return {
+        ...item,
+        messageText: item.messageText,
+      };
+    }
+
+    const toolRunId = createToolRunId("status", item.threadId, item.outboxId);
+    const trendTheme = (item.statusTrendTheme || "daily life, motivation, fun").trim();
+    const demographic = (item.statusDemographicHint || "mixed").trim();
+    const audienceCount = Math.max(0, item.statusAudienceJids?.length || 0);
+    const requestedFormat: "text" | "meme" = item.statusFormat === "meme" ? "meme" : "text";
+
+    const promptSeed = [
+      "Generate one WhatsApp status update designed to spark genuine conversation replies.",
+      `Audience size: ${audienceCount}.`,
+      `Audience mix: ${demographic}.`,
+      `Trending topics from my chats: ${trendTheme}.`,
+      `Required format: ${requestedFormat === "meme" ? "short meme caption" : "text-only status"}.`,
+      "Style: concise, playful, human, and natural.",
+      "Do not sound like marketing, spam, or clickbait.",
+      "Keep under 140 characters. Use at most one emoji.",
+    ].join("\n");
+
+    const ai = await generateReplyWithFallback({
+      inboundText: promptSeed,
+      historyLines: [
+        `Trend keywords: ${trendTheme}`,
+        `Demographic mix: ${demographic}`,
+        `Audience count: ${audienceCount}`,
+      ],
+      styleHints: [
+        "status",
+        "engagement",
+        `demographic:${demographic}`,
+      ],
+      runtime: {
+        temperature: runtimeSettings?.aiTemperature,
+        maxOutputTokens: Math.min(runtimeSettings?.aiMaxOutputTokens ?? 120, 120),
+        maxReplyChars: Math.min(runtimeSettings?.aiMaxReplyChars ?? 220, 220),
+        historyLineLimit: Math.min(runtimeSettings?.aiHistoryLineLimit ?? 8, 8),
+        fallbackMode: runtimeSettings?.aiFallbackMode,
+        replyPolicyInstruction: runtimeSettings?.aiReplyPolicy || "",
+        systemInstruction: runtimeSettings?.aiSystemInstruction || "",
+        activePersonaPackId: runtimeSettings?.activePersonaPackId || "",
+        qualityGateMode: runtimeSettings?.qualityGateMode,
+        qualityGateThreshold: runtimeSettings?.qualityGateThreshold,
+        soulModeEnabled: runtimeSettings?.soulModeEnabled,
+        funnyStatusKeywords: runtimeSettings?.funnyStatusKeywords,
+        funnyStatusEmojis: runtimeSettings?.funnyStatusEmojis,
+      },
+    });
+
+    for (let index = 0; index < ai.attempts.length; index += 1) {
+      const attempt = ai.attempts[index];
+      const label = attemptStageLabel(attempt.stage);
+      const usageSuffix = formatAttemptUsage(attempt);
+      const detail = attempt.error
+        ? `Status attempt ${index + 1}/${ai.attempts.length} · ${label} · ${attempt.model} · ${attempt.latencyMs}ms${usageSuffix ? ` · ${usageSuffix}` : ""} · ${attempt.error.slice(0, 220)}`
+        : `Status attempt ${index + 1}/${ai.attempts.length} · ${label} · ${attempt.model} · ${attempt.latencyMs}ms${usageSuffix ? ` · ${usageSuffix}` : ""}`;
+
+      await convex
+        .mutation(convexRefs.systemRecordProviderRun, {
+          threadId: item.threadId,
+          provider: attempt.provider,
+          model: attempt.model,
+          latencyMs: attempt.latencyMs,
+          status: attempt.status,
+          ...(attempt.error ? { error: attempt.error.slice(0, 300) } : {}),
+          ...(attempt.inputTokens === undefined ? {} : { inputTokens: attempt.inputTokens }),
+          ...(attempt.outputTokens === undefined ? {} : { outputTokens: attempt.outputTokens }),
+          ...(attempt.totalTokens === undefined ? {} : { totalTokens: attempt.totalTokens }),
+          ...(attempt.usageSource ? { usageSource: attempt.usageSource } : {}),
+          ...(attempt.estimatedCostUsd === undefined ? {} : { estimatedCostUsd: attempt.estimatedCostUsd }),
+          ...(attempt.costCurrency ? { costCurrency: attempt.costCurrency } : {}),
+          ...(attempt.pricingVersion ? { pricingVersion: attempt.pricingVersion } : {}),
+        })
+        .catch(() => undefined);
+
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "ai",
+          eventType: `status_builder.${attemptEventType(attempt)}`,
+          threadId: item.threadId,
+          toolRunId,
+          detail,
+        })
+        .catch(() => undefined);
+    }
+
+    const fallbackText =
+      requestedFormat === "meme"
+        ? "Small chaos, big laughs. Who can relate? 😅"
+        : "Quick check: what's one win from your day?";
+    const aiText = normalizeOutboundText(ai.guardrailBlocked ? fallbackText : ai.text);
+    const normalizedText = aiText.slice(0, 220).trim() || fallbackText;
+    let resolvedFormat: "text" | "meme" = requestedFormat;
+    let mediaAssetId: Id<"mediaAssets"> | undefined;
+    let mediaCaption: string | undefined;
+
+    if (requestedFormat === "meme") {
+      mediaCaption = normalizedText;
+      mediaAssetId = await generateAndStoreThreadMeme({
+        threadId: item.threadId,
+        threadJid: "status@broadcast",
+        inboundText: promptSeed,
+        recentHistoryLines: [
+          `Trend: ${trendTheme}`,
+          `Demographic: ${demographic}`,
+          `Audience: ${audienceCount}`,
+        ],
+        styleHints: [
+          trendTheme,
+          demographic,
+          "status update",
+        ],
+        runtimeSettings,
+        threadTitle: "My Status",
+        reason: "on_demand",
+      });
+
+      if (!mediaAssetId) {
+        resolvedFormat = "text";
+        mediaCaption = undefined;
+      }
+    }
+
+    const primaryConfidence = clamp(runtimeSettings?.aiPrimaryConfidence ?? 0.78, 0.01, 1);
+    const fallbackConfidence = clamp(runtimeSettings?.aiFallbackConfidence ?? 0.58, 0.01, 1);
+    const provider = ai.guardrailBlocked ? "heuristic" : ai.provider;
+    const confidence = provider === "heuristic" ? fallbackConfidence : primaryConfidence;
+
+    await convex.mutation(convexRefs.outboxHydrateAiStatus, {
+      outboxId: item.outboxId as Id<"outbox">,
+      text: normalizedText,
+      provider,
+      confidence,
+      typingMs: 0,
+      toolRunId,
+      statusFormat: resolvedFormat,
+      mediaAssetId,
+      mediaCaption,
+      statusTrendTheme: trendTheme,
+      statusDemographicHint: demographic,
+    });
+
+    return {
+      ...item,
+      toolRunId,
+      sendKind: resolvedFormat === "meme" ? "meme" : "text",
+      statusFormat: resolvedFormat,
+      mediaAssetId,
+      mediaCaption,
+      messageText: normalizedText,
+      typingMs: 0,
+    };
+  };
+
   const fetchMediaAssetBuffer = async (assetId: string) => {
     pruneMediaAssetBufferCache();
     const cached = mediaAssetBufferCache.get(assetId);
@@ -4165,27 +4333,30 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
         enqueueByThreadLane(outboxThreadLanes, item.threadId, () =>
           runOutboxWithLimit(async () => {
             try {
-              const eligibility = (await convex.query(convexRefs.threadsGetEligibility, {
-                threadId: item.threadId,
-              })) as {
-                allowed: boolean;
-                reason?: "group_ignored" | "archived" | "broadcast_or_system" | "explicit_ignore" | "temporary_ghost";
-                detail?: string;
-              };
-              if (!eligibility.allowed) {
-                await convex.mutation(convexRefs.outboxMarkFailed, {
-                  outboxId: item.outboxId,
-                  error: `Blocked by eligibility: ${eligibility.reason || eligibility.detail || "unknown"}.`,
-                  forceFinal: true,
-                });
-                return;
+              if (!item.isStatusPost) {
+                const eligibility = (await convex.query(convexRefs.threadsGetEligibility, {
+                  threadId: item.threadId,
+                })) as {
+                  allowed: boolean;
+                  reason?: "group_ignored" | "archived" | "broadcast_or_system" | "explicit_ignore" | "temporary_ghost";
+                  detail?: string;
+                };
+                if (!eligibility.allowed) {
+                  await convex.mutation(convexRefs.outboxMarkFailed, {
+                    outboxId: item.outboxId,
+                    error: `Blocked by eligibility: ${eligibility.reason || eligibility.detail || "unknown"}.`,
+                    forceFinal: true,
+                  });
+                  return;
+                }
               }
 
               if (
                 runtimeSettings?.aiFallbackMode === "azure_only" &&
                 item.provider !== "azure" &&
                 (item.sendKind === "text" || item.sendKind === "meme") &&
-                item.messageText !== AI_OUTREACH_PLACEHOLDER
+                item.messageText !== AI_OUTREACH_PLACEHOLDER &&
+                item.messageText !== AI_STATUS_PLACEHOLDER
               ) {
                 await convex.mutation(convexRefs.outboxMarkFailed, {
                   outboxId: item.outboxId,
@@ -4202,7 +4373,8 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
                 return;
               }
 
-              const hydrated = await hydrateAiOutreach(item, runtimeSettings);
+              const outreachHydrated = await hydrateAiOutreach(item, runtimeSettings);
+              const hydrated = await hydrateAiStatus(outreachHydrated, runtimeSettings);
               const postHydrationDisposition = (await convex.query(convexRefs.outboxGetSendDisposition, {
                 outboxId: item.outboxId,
               })) as { canSend: boolean; reason?: string };
@@ -4230,7 +4402,7 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
               const quotedMessageOptions = buildQuotedMessageOptions(hydrated);
               let threadForEmojiPolicy: ThreadContextSnapshot = null;
               let emojiPolicyApplied = false;
-              if (hydrated.sendKind === "text" || hydrated.sendKind === "meme") {
+              if (!hydrated.isStatusPost && (hydrated.sendKind === "text" || hydrated.sendKind === "meme")) {
                 threadForEmojiPolicy = (await convex
                   .query(convexRefs.threadGet, {
                     threadId: item.threadId as Id<"threads">,
@@ -4286,7 +4458,7 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
                   .reverse()
                   .find((message) => message.direction === "inbound")?.text || "";
               const stickerCompanionPlan =
-                hydrated.sendKind === "text"
+                hydrated.sendKind === "text" && !hydrated.isStatusPost
                   ? await decideStickerCompanionPlan({
                       jid: item.jid,
                       threadId: item.threadId,
@@ -4330,7 +4502,30 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
               };
 
               let sent: { key?: { id?: string | null } } | undefined;
-              if (hydrated.sendKind === "reaction") {
+              const destinationJid = hydrated.isStatusPost ? "status@broadcast" : item.jid;
+              if (hydrated.isStatusPost) {
+                const statusSendOptions = (hydrated.statusAudienceJids && hydrated.statusAudienceJids.length > 0
+                  ? ({ statusJidList: hydrated.statusAudienceJids } as Parameters<typeof sock.sendMessage>[2])
+                  : undefined);
+                if (hydrated.sendKind === "meme") {
+                  if (!hydrated.mediaAssetId) {
+                    throw new Error("Status meme outbox item missing media asset id.");
+                  }
+                  const memeBuffer = await fetchMediaAssetBuffer(hydrated.mediaAssetId);
+                  rememberAutomatedThreadSend(destinationJid);
+                  sent = await sock.sendMessage(
+                    destinationJid,
+                    {
+                      image: memeBuffer,
+                      caption: effectiveMediaCaption || effectiveMessageText,
+                    },
+                    statusSendOptions,
+                  );
+                } else {
+                  rememberAutomatedThreadSend(destinationJid);
+                  sent = await sock.sendMessage(destinationJid, { text: effectiveMessageText }, statusSendOptions);
+                }
+              } else if (hydrated.sendKind === "reaction") {
                 if (!hydrated.reactionEmoji || !hydrated.reactionTargetWhatsAppMessageId) {
                   throw new Error("Reaction outbox item missing emoji or target message id.");
                 }
@@ -4394,9 +4589,9 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
                 await sock.sendPresenceUpdate("paused", item.jid);
               }
 
-              if (hydrated.sendKind === "text" && containsAnyEmoji(effectiveMessageText)) {
+              if (!hydrated.isStatusPost && hydrated.sendKind === "text" && containsAnyEmoji(effectiveMessageText)) {
                 rememberEmojiOutboundAt(item.jid, Date.now());
-              } else if (hydrated.sendKind === "meme" && containsAnyEmoji(effectiveMediaCaption || "")) {
+              } else if (!hydrated.isStatusPost && hydrated.sendKind === "meme" && containsAnyEmoji(effectiveMediaCaption || "")) {
                 rememberEmojiOutboundAt(item.jid, Date.now());
               }
 

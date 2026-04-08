@@ -38,6 +38,7 @@ import type * as queue from "../queue.js";
 import type * as retention from "../retention.js";
 import type * as rules from "../rules.js";
 import type * as settings from "../settings.js";
+import type * as statusBuilder from "../statusBuilder.js";
 import type * as style from "../style.js";
 import type * as system from "../system.js";
 import type * as threads from "../threads.js";
@@ -80,6 +81,7 @@ declare const fullApi: ApiFromModules<{
   retention: typeof retention;
   rules: typeof rules;
   settings: typeof settings;
+  statusBuilder: typeof statusBuilder;
   style: typeof style;
   system: typeof system;
   threads: typeof threads;
