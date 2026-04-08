@@ -13,6 +13,7 @@ import {
   selectFewShotsForPrompt,
 } from "../../convex/lib/personaPacks";
 import {
+  buildPidginReplyInstruction,
   hasPidginHardStopCue,
   hasPidginPauseCue,
   hasPidginSignal,
@@ -336,6 +337,33 @@ const WRAP_UP_PATTERNS = [
   /^(thanks|thank you|thx|ty|appreciate it|appreciate you)\s*,\s*(all good|we good|sounds good|got it|that helps|done|resolved|all set)[.!]*$/i,
   /^(bet+|say less+|kk|k|works|copy|solid|valid|all set|we good|for sure|fs|fasho|word|heard|copy that)[.!]*$/i,
 ];
+const BOSS_ADDRESS_VOCATIVE_PATTERNS = [
+  /^(?:hi|hey|hello|yo|dear|good\s+(?:morning|afternoon|evening))[\s,!.-]*(?:boss|oga|chairman)\b/i,
+  /^(?:boss|oga|chairman)\b/i,
+  /[,;]\s*(?:boss|oga|chairman)\b/i,
+  /\b(?:boss|oga|chairman)\s*[!?.]*$/i,
+];
+const BOSS_ESCALATION_TITLES_EN = [
+  "main boss",
+  "big boss",
+  "biggest boss",
+  "boss of bosses",
+  "top boss",
+  "supreme boss",
+  "main chairman",
+  "chief chairman",
+];
+const BOSS_ESCALATION_TITLES_PIDGIN = [
+  "main oga",
+  "big oga",
+  "grand oga",
+  "oga at the top",
+  "chairman",
+  "chief chairman",
+];
+const BOSS_ESCALATION_PROMPT_TITLES = [...BOSS_ESCALATION_TITLES_EN, ...BOSS_ESCALATION_TITLES_PIDGIN]
+  .slice(0, 10)
+  .join(", ");
 const ACK_ONLY_PATTERNS = [
   /^(ok|okay|sure|cool|great|perfect|nice|done|noted|got it|understood|alright|aight|ight|alrighty|alryt|k{1,4}|o+k+|bet+|say less+|works|copy|copy dat|solid|valid|all set|we good|we gud|for sure|fs|sounds good|all good|all gud|fasho|word|heard|copy that|na so|ehen|sharp sharp)[.!]*$/i,
   /^(thanks|thank you|thx|ty|tnx|thnks|tysm|appreciate it|appreciate you)[.!]*$/i,
@@ -472,6 +500,42 @@ export function detectPidginSignal(args: { inboundText: string; historyLines: st
   });
 }
 
+export function hasBossAddressCue(inboundText: string) {
+  const text = normalizeOutboundText(inboundText || "");
+  if (!text) {
+    return false;
+  }
+  return BOSS_ADDRESS_VOCATIVE_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+function pickBossEscalationTitle(inboundText: string, pidginMode: boolean) {
+  const options = pidginMode ? BOSS_ESCALATION_TITLES_PIDGIN : BOSS_ESCALATION_TITLES_EN;
+  return pickVariant(inboundText, options);
+}
+
+export function applyBossAddressEscalation(args: {
+  inboundText: string;
+  replyText: string;
+  pidginMode?: boolean;
+  allow?: boolean;
+}) {
+  const reply = normalizeOutboundText(args.replyText || "");
+  if (!reply || args.allow === false || !hasBossAddressCue(args.inboundText)) {
+    return reply;
+  }
+
+  const title = pickBossEscalationTitle(args.inboundText, Boolean(args.pidginMode));
+  if (!title) {
+    return reply;
+  }
+
+  if (new RegExp(`\\b${escapeRegex(title)}\\b`, "i").test(reply)) {
+    return reply;
+  }
+
+  return normalizeOutboundText(`${title}, ${reply}`);
+}
+
 function steeringInstructionForMode(mode: ConversationSteeringMode) {
   if (mode === "hard_stop") {
     return "The latest message asks to end contact. Reply with one short, respectful acknowledgment and end the conversation. Do not ask follow-up questions.";
@@ -494,22 +558,35 @@ function heuristicReply(input: string, historyLines: string[] = []) {
     historyLines,
   });
   const pidginMode = detectPidginSignal({ inboundText: input, historyLines });
+  const finalize = (candidate: string) =>
+    applyBossAddressEscalation({
+      inboundText: input,
+      replyText: candidate,
+      pidginMode,
+      allow: steeringMode !== "hard_stop",
+    });
   if (steeringMode === "hard_stop") {
-    return pidginMode
-      ? pickVariant(input, ["I hear you. I no go text again.", "Understood. I go leave am here.", "Okay, I go step back now."])
-      : pickVariant(input, ["Understood. I'll leave it here.", "Got it, I'll step back now.", "Understood. I won't push this further."]);
+    return finalize(
+      pidginMode
+        ? pickVariant(input, ["I hear you. I no go text again.", "Understood. I go leave am here.", "Okay, I go step back now."])
+        : pickVariant(input, ["Understood. I'll leave it here.", "Got it, I'll step back now.", "Understood. I won't push this further."]),
+    );
   }
 
   if (steeringMode === "pause") {
-    return pidginMode
-      ? pickVariant(input, ["No wahala, make we continue later.", "Sharp, we go yarn later.", "All good, ping me when you free."])
-      : pickVariant(input, ["No worries, we can pick this up later.", "All good, let's continue later.", "Got you, we'll talk later."]);
+    return finalize(
+      pidginMode
+        ? pickVariant(input, ["No wahala, make we continue later.", "Sharp, we go yarn later.", "All good, ping me when you free."])
+        : pickVariant(input, ["No worries, we can pick this up later.", "All good, let's continue later.", "Got you, we'll talk later."]),
+    );
   }
 
   if (steeringMode === "loop" || steeringMode === "wrap_up") {
-    return pidginMode
-      ? pickVariant(input, ["Sharp, we good here.", "No wahala, talk later.", "Nice one, thanks for update."])
-      : pickVariant(input, ["Perfect, we're good here.", "Sounds good, talk soon.", "Great, thanks for the update."]);
+    return finalize(
+      pidginMode
+        ? pickVariant(input, ["Sharp, we good here.", "No wahala, talk later.", "Nice one, thanks for update."])
+        : pickVariant(input, ["Perfect, we're good here.", "Sounds good, talk soon.", "Great, thanks for the update."]),
+    );
   }
 
   const focus = input
@@ -522,62 +599,74 @@ function heuristicReply(input: string, historyLines: string[] = []) {
     .join(" ");
 
   if (/\bweird|odd|strange|robot|generic|template\b/i.test(input)) {
-    return pidginMode
-      ? pickVariant(input, [
-          "You dey right, that one no sound natural. Make I answer well now.",
-          "True talk, that reply weird small. I go keep am clear from here.",
-          "Yeah, that one come out somehow. Make I reply proper now.",
-        ])
-      : pickVariant(input, [
-          "You're right, that sounded off. I'll reply properly from here.",
-          "Fair call, that reply was weird. I'll keep this one human and clear.",
-          "Yeah, that came out weird. Let me answer you properly now.",
-        ]);
+    return finalize(
+      pidginMode
+        ? pickVariant(input, [
+            "You dey right, that one no sound natural. Make I answer well now.",
+            "True talk, that reply weird small. I go keep am clear from here.",
+            "Yeah, that one come out somehow. Make I reply proper now.",
+          ])
+        : pickVariant(input, [
+            "You're right, that sounded off. I'll reply properly from here.",
+            "Fair call, that reply was weird. I'll keep this one human and clear.",
+            "Yeah, that came out weird. Let me answer you properly now.",
+          ]),
+    );
   }
 
   if (/\?|\b(can you|could you|when|where|what|why|how)\b/i.test(input)) {
-    return pidginMode
-      ? pickVariant(input, [
-          "Yes, e go work. Give me small time make I send details.",
-          "I fit do am. Make I sort am first, I go update you shortly.",
-          "No wahala, I go handle am and send details soon.",
-        ])
-      : pickVariant(input, [
-          "Yeah, that works on my side. Give me a bit and I'll send details shortly.",
-          "Yep, I can do that. Let me sort it and get back to you shortly.",
-          "That works. Give me a little time and I'll send the details.",
-        ]);
+    return finalize(
+      pidginMode
+        ? pickVariant(input, [
+            "Yes, e go work. Give me small time make I send details.",
+            "I fit do am. Make I sort am first, I go update you shortly.",
+            "No wahala, I go handle am and send details soon.",
+          ])
+        : pickVariant(input, [
+            "Yeah, that works on my side. Give me a bit and I'll send details shortly.",
+            "Yep, I can do that. Let me sort it and get back to you shortly.",
+            "That works. Give me a little time and I'll send the details.",
+          ]),
+    );
   }
 
   if (/\b(thanks|thank you)\b/i.test(input)) {
-    return pidginMode
-      ? pickVariant(input, ["Anytime.", "No wahala at all.", "I dey happy to help."])
-      : pickVariant(input, ["Anytime.", "Always happy to help.", "No worries at all."]);
+    return finalize(
+      pidginMode
+        ? pickVariant(input, ["Anytime.", "No wahala at all.", "I dey happy to help."])
+        : pickVariant(input, ["Anytime.", "Always happy to help.", "No worries at all."]),
+    );
   }
 
   if (/\b(sorry|apolog|my bad)\b/i.test(input)) {
-    return pidginMode
-      ? pickVariant(input, ["All good.", "No stress, we dey okay.", "You dey fine, no wahala."])
-      : pickVariant(input, ["All good.", "No stress, we're good.", "You're fine, no worries."]);
+    return finalize(
+      pidginMode
+        ? pickVariant(input, ["All good.", "No stress, we dey okay.", "You dey fine, no wahala."])
+        : pickVariant(input, ["All good.", "No stress, we're good.", "You're fine, no worries."]),
+    );
   }
 
   if (focus) {
-    return pidginMode
-      ? pickVariant(input, [
-          `I hear you on ${focus}. Make I send clear reply now.`,
-          `Thanks for flagging ${focus}. I go answer you properly now.`,
-          `You dey right about ${focus}. Give me small time make I sort am.`,
-        ])
-      : pickVariant(input, [
-          `I got you on ${focus}. Give me a moment and I'll send a clear reply.`,
-          `Thanks for flagging ${focus}. I'll answer this properly now.`,
-          `You're right about ${focus}. Let me respond clearly in a sec.`,
-        ]);
+    return finalize(
+      pidginMode
+        ? pickVariant(input, [
+            `I hear you on ${focus}. Make I send clear reply now.`,
+            `Thanks for flagging ${focus}. I go answer you properly now.`,
+            `You dey right about ${focus}. Give me small time make I sort am.`,
+          ])
+        : pickVariant(input, [
+            `I got you on ${focus}. Give me a moment and I'll send a clear reply.`,
+            `Thanks for flagging ${focus}. I'll answer this properly now.`,
+            `You're right about ${focus}. Let me respond clearly in a sec.`,
+          ]),
+    );
   }
 
-  return pidginMode
-    ? pickVariant(input, ["I don see your message. Give me small time make I reply well.", "Thanks for the nudge. I go respond proper now."])
-    : pickVariant(input, ["I got your message. Give me a moment and I'll reply clearly.", "Thanks for the nudge. I'll respond properly now."]);
+  return finalize(
+    pidginMode
+      ? pickVariant(input, ["I don see your message. Give me small time make I reply well.", "Thanks for the nudge. I go respond proper now."])
+      : pickVariant(input, ["I got your message. Give me a moment and I'll reply clearly.", "Thanks for the nudge. I'll respond properly now."]),
+  );
 }
 
 const HISTORY_ACK_ONLY_PATTERNS = [
@@ -1058,9 +1147,10 @@ function buildPrompt(args: {
     inboundText: args.inboundText,
     historyLines: recentHistory.map((line) => line.line),
   });
-  const pidginInstruction = pidginMode
-    ? "Pidgin/Naija mode is active from this chat. Mirror naturally with Nigerian Pidgin where it fits, keep it readable, and avoid forced slang. Prefer common local markers only when context fits (e.g., abeg, no vex, how far, wetin, no wahala, dey). If you mention parents, use 'Mama' and 'Papa' (not 'mum' or 'dad')."
-    : "Use standard conversational English unless the contact clearly uses Pidgin/Naija slang.";
+  const pidginInstruction = buildPidginReplyInstruction(pidginMode);
+  const bossEscalationInstruction = hasBossAddressCue(args.inboundText)
+    ? `If the latest message addresses you as boss/oga/chairman, treat it as friendly local banter, not hierarchy. Lightly mirror once by calling them a playful upgraded title (examples: ${BOSS_ESCALATION_PROMPT_TITLES}). Keep it subtle, respectful, and use it at most once in the reply.`
+    : "";
 
   const buildPromptText = () =>
     [
@@ -1084,6 +1174,7 @@ function buildPrompt(args: {
       antiJokeChainInstruction,
       steeringInstruction,
       pidginInstruction,
+      bossEscalationInstruction,
       replyPolicyInstruction ? `Additional reply policy: ${replyPolicyInstruction}` : "",
       mimicryInstruction,
       personalityLevelInstruction,
@@ -1267,7 +1358,17 @@ export function postProcessReplyText(args: {
     historyLines: args.historyLines || [],
   });
   const normalized = normalizeOutboundText(pidginMode ? normalizePidginFamilyTerms(withoutNameOveruse) : withoutNameOveruse);
-  return normalized || fallback;
+  const steeringMode = detectConversationSteeringMode({
+    inboundText: args.inboundText,
+    historyLines: args.historyLines || [],
+  });
+  const withBossEscalation = applyBossAddressEscalation({
+    inboundText: args.inboundText,
+    replyText: normalized,
+    pidginMode,
+    allow: steeringMode !== "hard_stop",
+  });
+  return withBossEscalation || fallback;
 }
 
 function containsBlockedRefusalText(text: string) {

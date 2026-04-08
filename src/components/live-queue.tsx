@@ -21,7 +21,7 @@ type NeedsReplyItem = {
   mediaCaption?: string;
   mediaPreview?: {
     assetId: string;
-    kind: "sticker" | "meme";
+    kind: "sticker" | "meme" | "image" | "video" | "audio" | "document";
     mimeType: string;
     label: string;
     url: string | null;
@@ -33,7 +33,7 @@ type NeedsReplyItem = {
         mediaCaption?: string;
         mediaPreview?: {
           assetId: string;
-          kind: "sticker" | "meme";
+          kind: "sticker" | "meme" | "image" | "video" | "audio" | "document";
           mimeType: string;
           label: string;
           url: string | null;
@@ -94,7 +94,7 @@ type QueueReviewState =
 function renderQueueMediaPreview(args: {
   mediaPreview?: {
     assetId: string;
-    kind: "sticker" | "meme";
+    kind: "sticker" | "meme" | "image" | "video" | "audio" | "document";
     mimeType: string;
     label: string;
     url: string | null;

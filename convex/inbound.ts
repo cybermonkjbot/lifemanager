@@ -22,7 +22,7 @@ const GHOST_ACTIVITY_MIN_OUTBOUND_MESSAGES = 3;
 const GHOST_ACTIVITY_MIN_TURNS = 4;
 const GHOST_TRIGGER_PROBABILITY = 0.2;
 type IngestMode = "live" | "history_sync" | "history_fetch";
-type InboundMessageType = "text" | "reaction" | "sticker" | "meme";
+type InboundMessageType = "text" | "reaction" | "sticker" | "meme" | "image" | "video" | "audio" | "document";
 
 type IngestHistoricalResult = {
   threadId: Id<"threads">;
@@ -154,7 +154,18 @@ export const ingest = mutation({
     senderJid: v.string(),
     senderTitle: v.optional(v.string()),
     text: v.string(),
-    messageType: v.optional(v.union(v.literal("text"), v.literal("reaction"), v.literal("sticker"), v.literal("meme"))),
+    messageType: v.optional(
+      v.union(
+        v.literal("text"),
+        v.literal("reaction"),
+        v.literal("sticker"),
+        v.literal("meme"),
+        v.literal("image"),
+        v.literal("video"),
+        v.literal("audio"),
+        v.literal("document"),
+      ),
+    ),
     reactionEmoji: v.optional(v.string()),
     reactionTargetWhatsAppMessageId: v.optional(v.string()),
     mediaAssetId: v.optional(v.id("mediaAssets")),
@@ -540,7 +551,18 @@ export const ingestHistorical = mutation({
     senderJid: v.string(),
     senderTitle: v.optional(v.string()),
     text: v.string(),
-    messageType: v.optional(v.union(v.literal("text"), v.literal("reaction"), v.literal("sticker"), v.literal("meme"))),
+    messageType: v.optional(
+      v.union(
+        v.literal("text"),
+        v.literal("reaction"),
+        v.literal("sticker"),
+        v.literal("meme"),
+        v.literal("image"),
+        v.literal("video"),
+        v.literal("audio"),
+        v.literal("document"),
+      ),
+    ),
     reactionEmoji: v.optional(v.string()),
     reactionTargetWhatsAppMessageId: v.optional(v.string()),
     mediaAssetId: v.optional(v.id("mediaAssets")),

@@ -1,0 +1,652 @@
+{
+  "generatedAt": "2026-04-08T12:08:52.174Z",
+  "source": "en.wiktionary.org categorymembers API",
+  "query": {
+    "roots": [
+      "Category:Nigerian_Pidgin_lemmas",
+      "Category:Nigerian_Pidgin_terms_by_usage"
+    ],
+    "direct": [
+      "Category:Nigerian_Pidgin_adjectives",
+      "Category:Nigerian_Pidgin_adverbs",
+      "Category:Nigerian_Pidgin_conjunctions",
+      "Category:Nigerian_Pidgin_determiners",
+      "Category:Nigerian_Pidgin_interjections",
+      "Category:Nigerian_Pidgin_multiword_terms",
+      "Category:Nigerian_Pidgin_nouns",
+      "Category:Nigerian_Pidgin_numerals",
+      "Category:Nigerian_Pidgin_particles",
+      "Category:Nigerian_Pidgin_prepositions",
+      "Category:Nigerian_Pidgin_pronouns",
+      "Category:Nigerian_Pidgin_slang",
+      "Category:Nigerian_Pidgin_verbs"
+    ],
+    "maxDepth": 1,
+    "includeSensitive": false
+  },
+  "categories": [
+    "Category:Nigerian Pidgin adjectives",
+    "Category:Nigerian Pidgin adverbs",
+    "Category:Nigerian Pidgin articles",
+    "Category:Nigerian Pidgin auxiliary verbs",
+    "Category:Nigerian Pidgin conjunctions",
+    "Category:Nigerian Pidgin derogatory terms",
+    "Category:Nigerian Pidgin determiners",
+    "Category:Nigerian Pidgin genericized trademarks",
+    "Category:Nigerian Pidgin interjections",
+    "Category:Nigerian Pidgin intransitive verbs",
+    "Category:Nigerian Pidgin lemmas",
+    "Category:Nigerian Pidgin morphemes",
+    "Category:Nigerian Pidgin multiword terms",
+    "Category:Nigerian Pidgin noun forms",
+    "Category:Nigerian Pidgin nouns",
+    "Category:Nigerian Pidgin numerals",
+    "Category:Nigerian Pidgin offensive terms",
+    "Category:Nigerian Pidgin particles",
+    "Category:Nigerian Pidgin personal pronouns",
+    "Category:Nigerian Pidgin prepositions",
+    "Category:Nigerian Pidgin pronouns",
+    "Category:Nigerian Pidgin proper nouns",
+    "Category:Nigerian Pidgin reflexive pronouns",
+    "Category:Nigerian Pidgin slang",
+    "Category:Nigerian Pidgin suffixes",
+    "Category:Nigerian Pidgin terms by usage",
+    "Category:Nigerian Pidgin trademarks",
+    "Category:Nigerian Pidgin transitive verbs",
+    "Category:Nigerian Pidgin verbs"
+  ],
+  "totals": {
+    "categoriesScanned": 29,
+    "rawPageTitles": 416,
+    "normalizedUnique": 175,
+    "knownSeedCount": 139,
+    "candidateCount": 36,
+    "highConfidenceCount": 2,
+    "reviewQueueCount": 9,
+    "lowConfidenceCount": 25,
+    "blockedCount": 0
+  },
+  "highConfidence": [
+    {
+      "term": "govnorship",
+      "sourceCategories": [
+        "Category:Nigerian Pidgin lemmas",
+        "Category:Nigerian Pidgin nouns"
+      ],
+      "score": 0.95,
+      "bucket": "strong",
+      "reasons": [
+        "pidgin-phonology",
+        "compressed-spelling",
+        "wiktionary-pcm-category",
+        "high-yield-pos-category"
+      ],
+      "safety": "safe"
+    },
+    {
+      "term": "igbo",
+      "sourceCategories": [
+        "Category:Nigerian Pidgin lemmas",
+        "Category:Nigerian Pidgin nouns"
+      ],
+      "score": 0.85,
+      "bucket": "strong",
+      "reasons": [
+        "pidgin-phonology",
+        "wiktionary-pcm-category",
+        "high-yield-pos-category"
+      ],
+      "safety": "safe"
+    }
+  ],
+  "reviewQueue": [
+    {
+      "term": "yansh",
+      "sourceCategories": [
+        "Category:Nigerian Pidgin lemmas",
+        "Category:Nigerian Pidgin nouns"
+      ],
+      "score": 0.95,
+      "bucket": "strong",
+      "reasons": [
+        "pidgin-phonology",
+        "compressed-spelling",
+        "wiktionary-pcm-category",
+        "high-yield-pos-category"
+      ],
+      "safety": "review"
+    },
+    {
+      "term": "blom-blom",
+      "sourceCategories": [
+        "Category:Nigerian Pidgin lemmas",
+        "Category:Nigerian Pidgin multiword terms",
+        "Category:Nigerian Pidgin nouns"
+      ],
+      "score": 0.65,
+      "bucket": "extended",
+      "reasons": [
+        "hyphenated-colloquial",
+        "compressed-spelling",
+        "wiktionary-pcm-category",
+        "high-yield-pos-category"
+      ],
+      "safety": "safe"
+    },
+    {
+      "term": "cho-cho-cho",
+      "sourceCategories": [
+        "Category:Nigerian Pidgin lemmas",
+        "Category:Nigerian Pidgin multiword terms",
+        "Category:Nigerian Pidgin nouns"
+      ],
+      "score": 0.65,
+      "bucket": "extended",
+      "reasons": [
+        "hyphenated-colloquial",
+        "compressed-spelling",
+        "wiktionary-pcm-category",
+        "high-yield-pos-category"
+      ],
+      "safety": "safe"
+    },
+    {
+      "term": "small-small",
+      "sourceCategories": [
+        "Category:Nigerian Pidgin adverbs",
+        "Category:Nigerian Pidgin lemmas",
+        "Category:Nigerian Pidgin multiword terms"
+      ],
+      "score": 0.65,
+      "bucket": "extended",
+      "reasons": [
+        "hyphenated-colloquial",
+        "compressed-spelling",
+        "wiktionary-pcm-category",
+        "high-yield-pos-category"
+      ],
+      "safety": "safe"
+    },
+    {
+      "term": "baff up",
+      "sourceCategories": [
+        "Category:Nigerian Pidgin lemmas",
+        "Category:Nigerian Pidgin multiword terms",
+        "Category:Nigerian Pidgin verbs"
+      ],
+      "score": 0.6,
+      "bucket": "extended",
+      "reasons": [
+        "multiword-colloquial",
+        "compressed-spelling",
+        "wiktionary-pcm-category",
+        "high-yield-pos-category"
+      ],
+      "safety": "safe"
+    },
+    {
+      "term": "how now",
+      "sourceCategories": [
+        "Category:Nigerian Pidgin interjections",
+        "Category:Nigerian Pidgin lemmas",
+        "Category:Nigerian Pidgin multiword terms"
+      ],
+      "score": 0.6,
+      "bucket": "extended",
+      "reasons": [
+        "multiword-colloquial",
+        "compressed-spelling",
+        "wiktionary-pcm-category",
+        "high-yield-pos-category"
+      ],
+      "safety": "safe"
+    },
+    {
+      "term": "poo-poo",
+      "sourceCategories": [
+        "Category:Nigerian Pidgin lemmas",
+        "Category:Nigerian Pidgin multiword terms",
+        "Category:Nigerian Pidgin nouns"
+      ],
+      "score": 0.55,
+      "bucket": "extended",
+      "reasons": [
+        "hyphenated-colloquial",
+        "wiktionary-pcm-category",
+        "high-yield-pos-category"
+      ],
+      "safety": "safe"
+    },
+    {
+      "term": "wuru-wuru",
+      "sourceCategories": [
+        "Category:Nigerian Pidgin adjectives",
+        "Category:Nigerian Pidgin lemmas",
+        "Category:Nigerian Pidgin multiword terms"
+      ],
+      "score": 0.55,
+      "bucket": "extended",
+      "reasons": [
+        "hyphenated-colloquial",
+        "wiktionary-pcm-category",
+        "high-yield-pos-category"
+      ],
+      "safety": "safe"
+    },
+    {
+      "term": "yama-yama",
+      "sourceCategories": [
+        "Category:Nigerian Pidgin adjectives",
+        "Category:Nigerian Pidgin lemmas",
+        "Category:Nigerian Pidgin multiword terms"
+      ],
+      "score": 0.55,
+      "bucket": "extended",
+      "reasons": [
+        "hyphenated-colloquial",
+        "wiktionary-pcm-category",
+        "high-yield-pos-category"
+      ],
+      "safety": "safe"
+    }
+  ],
+  "lowConfidence": [
+    {
+      "term": "before before",
+      "sourceCategories": [
+        "Category:Nigerian Pidgin adverbs",
+        "Category:Nigerian Pidgin lemmas",
+        "Category:Nigerian Pidgin multiword terms"
+      ],
+      "score": 0.5,
+      "bucket": "weak",
+      "reasons": [
+        "multiword-colloquial",
+        "wiktionary-pcm-category",
+        "high-yield-pos-category"
+      ],
+      "safety": "safe"
+    },
+    {
+      "term": "na wa o",
+      "sourceCategories": [
+        "Category:Nigerian Pidgin interjections",
+        "Category:Nigerian Pidgin lemmas",
+        "Category:Nigerian Pidgin multiword terms"
+      ],
+      "score": 0.5,
+      "bucket": "weak",
+      "reasons": [
+        "multiword-colloquial",
+        "wiktionary-pcm-category",
+        "high-yield-pos-category"
+      ],
+      "safety": "safe"
+    },
+    {
+      "term": "bit",
+      "sourceCategories": [
+        "Category:Nigerian Pidgin lemmas",
+        "Category:Nigerian Pidgin verbs"
+      ],
+      "score": 0.4,
+      "bucket": "weak",
+      "reasons": [
+        "wiktionary-pcm-category",
+        "high-yield-pos-category"
+      ],
+      "safety": "safe"
+    },
+    {
+      "term": "bodi",
+      "sourceCategories": [
+        "Category:Nigerian Pidgin lemmas",
+        "Category:Nigerian Pidgin nouns",
+        "Category:Nigerian Pidgin pronouns",
+        "Category:Nigerian Pidgin reflexive pronouns"
+      ],
+      "score": 0.4,
+      "bucket": "weak",
+      "reasons": [
+        "wiktionary-pcm-category",
+        "high-yield-pos-category"
+      ],
+      "safety": "safe"
+    },
+    {
+      "term": "buk",
+      "sourceCategories": [
+        "Category:Nigerian Pidgin lemmas",
+        "Category:Nigerian Pidgin nouns"
+      ],
+      "score": 0.4,
+      "bucket": "weak",
+      "reasons": [
+        "wiktionary-pcm-category",
+        "high-yield-pos-category"
+      ],
+      "safety": "safe"
+    },
+    {
+      "term": "chook",
+      "sourceCategories": [
+        "Category:Nigerian Pidgin lemmas",
+        "Category:Nigerian Pidgin verbs"
+      ],
+      "score": 0.4,
+      "bucket": "weak",
+      "reasons": [
+        "wiktionary-pcm-category",
+        "high-yield-pos-category"
+      ],
+      "safety": "safe"
+    },
+    {
+      "term": "chu",
+      "sourceCategories": [
+        "Category:Nigerian Pidgin lemmas",
+        "Category:Nigerian Pidgin verbs"
+      ],
+      "score": 0.4,
+      "bucket": "weak",
+      "reasons": [
+        "wiktionary-pcm-category",
+        "high-yield-pos-category"
+      ],
+      "safety": "safe"
+    },
+    {
+      "term": "collabo",
+      "sourceCategories": [
+        "Category:Nigerian Pidgin adverbs",
+        "Category:Nigerian Pidgin lemmas",
+        "Category:Nigerian Pidgin nouns"
+      ],
+      "score": 0.4,
+      "bucket": "weak",
+      "reasons": [
+        "wiktionary-pcm-category",
+        "high-yield-pos-category"
+      ],
+      "safety": "safe"
+    },
+    {
+      "term": "dodo",
+      "sourceCategories": [
+        "Category:Nigerian Pidgin lemmas",
+        "Category:Nigerian Pidgin nouns"
+      ],
+      "score": 0.4,
+      "bucket": "weak",
+      "reasons": [
+        "wiktionary-pcm-category",
+        "high-yield-pos-category"
+      ],
+      "safety": "safe"
+    },
+    {
+      "term": "doti",
+      "sourceCategories": [
+        "Category:Nigerian Pidgin lemmas",
+        "Category:Nigerian Pidgin nouns"
+      ],
+      "score": 0.4,
+      "bucket": "weak",
+      "reasons": [
+        "wiktionary-pcm-category",
+        "high-yield-pos-category"
+      ],
+      "safety": "safe"
+    },
+    {
+      "term": "gada",
+      "sourceCategories": [
+        "Category:Nigerian Pidgin lemmas",
+        "Category:Nigerian Pidgin verbs"
+      ],
+      "score": 0.4,
+      "bucket": "weak",
+      "reasons": [
+        "wiktionary-pcm-category",
+        "high-yield-pos-category"
+      ],
+      "safety": "safe"
+    },
+    {
+      "term": "gatz",
+      "sourceCategories": [
+        "Category:Nigerian Pidgin lemmas",
+        "Category:Nigerian Pidgin verbs"
+      ],
+      "score": 0.4,
+      "bucket": "weak",
+      "reasons": [
+        "wiktionary-pcm-category",
+        "high-yield-pos-category"
+      ],
+      "safety": "safe"
+    },
+    {
+      "term": "govnor",
+      "sourceCategories": [
+        "Category:Nigerian Pidgin lemmas",
+        "Category:Nigerian Pidgin nouns"
+      ],
+      "score": 0.4,
+      "bucket": "weak",
+      "reasons": [
+        "wiktionary-pcm-category",
+        "high-yield-pos-category"
+      ],
+      "safety": "safe"
+    },
+    {
+      "term": "hala",
+      "sourceCategories": [
+        "Category:Nigerian Pidgin lemmas",
+        "Category:Nigerian Pidgin verbs"
+      ],
+      "score": 0.4,
+      "bucket": "weak",
+      "reasons": [
+        "wiktionary-pcm-category",
+        "high-yield-pos-category"
+      ],
+      "safety": "safe"
+    },
+    {
+      "term": "mimba",
+      "sourceCategories": [
+        "Category:Nigerian Pidgin lemmas",
+        "Category:Nigerian Pidgin nouns"
+      ],
+      "score": 0.4,
+      "bucket": "weak",
+      "reasons": [
+        "wiktionary-pcm-category",
+        "high-yield-pos-category"
+      ],
+      "safety": "safe"
+    },
+    {
+      "term": "mineral",
+      "sourceCategories": [
+        "Category:Nigerian Pidgin lemmas",
+        "Category:Nigerian Pidgin nouns"
+      ],
+      "score": 0.4,
+      "bucket": "weak",
+      "reasons": [
+        "wiktionary-pcm-category",
+        "high-yield-pos-category"
+      ],
+      "safety": "safe"
+    },
+    {
+      "term": "pampers",
+      "sourceCategories": [
+        "Category:Nigerian Pidgin genericized trademarks",
+        "Category:Nigerian Pidgin lemmas",
+        "Category:Nigerian Pidgin nouns"
+      ],
+      "score": 0.4,
+      "bucket": "weak",
+      "reasons": [
+        "wiktionary-pcm-category",
+        "high-yield-pos-category"
+      ],
+      "safety": "safe"
+    },
+    {
+      "term": "pippo",
+      "sourceCategories": [
+        "Category:Nigerian Pidgin lemmas",
+        "Category:Nigerian Pidgin nouns"
+      ],
+      "score": 0.4,
+      "bucket": "weak",
+      "reasons": [
+        "wiktionary-pcm-category",
+        "high-yield-pos-category"
+      ],
+      "safety": "safe"
+    },
+    {
+      "term": "rais",
+      "sourceCategories": [
+        "Category:Nigerian Pidgin lemmas",
+        "Category:Nigerian Pidgin nouns"
+      ],
+      "score": 0.4,
+      "bucket": "weak",
+      "reasons": [
+        "wiktionary-pcm-category",
+        "high-yield-pos-category"
+      ],
+      "safety": "safe"
+    },
+    {
+      "term": "skul",
+      "sourceCategories": [
+        "Category:Nigerian Pidgin lemmas",
+        "Category:Nigerian Pidgin nouns"
+      ],
+      "score": 0.4,
+      "bucket": "weak",
+      "reasons": [
+        "wiktionary-pcm-category",
+        "high-yield-pos-category"
+      ],
+      "safety": "safe"
+    },
+    {
+      "term": "soja",
+      "sourceCategories": [
+        "Category:Nigerian Pidgin lemmas",
+        "Category:Nigerian Pidgin nouns"
+      ],
+      "score": 0.4,
+      "bucket": "weak",
+      "reasons": [
+        "wiktionary-pcm-category",
+        "high-yield-pos-category"
+      ],
+      "safety": "safe"
+    },
+    {
+      "term": "tiff",
+      "sourceCategories": [
+        "Category:Nigerian Pidgin lemmas",
+        "Category:Nigerian Pidgin nouns",
+        "Category:Nigerian Pidgin verbs"
+      ],
+      "score": 0.4,
+      "bucket": "weak",
+      "reasons": [
+        "wiktionary-pcm-category",
+        "high-yield-pos-category"
+      ],
+      "safety": "safe"
+    },
+    {
+      "term": "ting",
+      "sourceCategories": [
+        "Category:Nigerian Pidgin lemmas",
+        "Category:Nigerian Pidgin nouns"
+      ],
+      "score": 0.4,
+      "bucket": "weak",
+      "reasons": [
+        "wiktionary-pcm-category",
+        "high-yield-pos-category"
+      ],
+      "safety": "safe"
+    },
+    {
+      "term": "wik",
+      "sourceCategories": [
+        "Category:Nigerian Pidgin lemmas",
+        "Category:Nigerian Pidgin nouns"
+      ],
+      "score": 0.4,
+      "bucket": "weak",
+      "reasons": [
+        "wiktionary-pcm-category",
+        "high-yield-pos-category"
+      ],
+      "safety": "safe"
+    },
+    {
+      "term": "kontris",
+      "sourceCategories": [
+        "Category:Nigerian Pidgin noun forms"
+      ],
+      "score": 0.35,
+      "bucket": "weak",
+      "reasons": [
+        "compressed-spelling",
+        "wiktionary-pcm-category"
+      ],
+      "safety": "safe"
+    }
+  ],
+  "blocked": [],
+  "candidates": [
+    "govnorship",
+    "yansh",
+    "igbo",
+    "blom-blom",
+    "cho-cho-cho",
+    "small-small",
+    "baff up",
+    "how now",
+    "poo-poo",
+    "wuru-wuru",
+    "yama-yama",
+    "before before",
+    "na wa o",
+    "bit",
+    "bodi",
+    "buk",
+    "chook",
+    "chu",
+    "collabo",
+    "dodo",
+    "doti",
+    "gada",
+    "gatz",
+    "govnor",
+    "hala",
+    "mimba",
+    "mineral",
+    "pampers",
+    "pippo",
+    "rais",
+    "skul",
+    "soja",
+    "tiff",
+    "ting",
+    "wik",
+    "kontris"
+  ]
+}

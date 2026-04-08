@@ -10,6 +10,23 @@ export type PidginDetection = {
   intents: Record<PidginIntent, boolean>;
 };
 
+export type PidginCandidateBucket = "strong" | "weak" | "extended" | "unknown";
+export type PidginCandidateSafety = "safe" | "review" | "blocked";
+
+export type CandidateAssessment = {
+  score: number;
+  bucket: PidginCandidateBucket;
+  reasons: string[];
+  safety: PidginCandidateSafety;
+};
+
+export type CandidateClassificationInput =
+  | string
+  | {
+      term: string;
+      sourceCategories?: string[];
+    };
+
 export const PIDGIN_STRONG_TOKENS = [
   "abeg",
   "abi",
@@ -27,6 +44,7 @@ export const PIDGIN_STRONG_TOKENS = [
   "japa",
   "kasala",
   "moni",
+  "naija",
   "nawa",
   "oya",
   "padi",
@@ -38,6 +56,7 @@ export const PIDGIN_STRONG_TOKENS = [
   "sha",
   "shey",
   "tori",
+  "una",
   "wahala",
   "waka",
   "wetin",
@@ -53,71 +72,124 @@ export const PIDGIN_WEAK_TOKENS = [
   "omo",
   "papa",
   "sista",
+  "bobo",
+  "broda",
   "gud",
   "laik",
   "mek",
   "neva",
   "oda",
   "ova",
+  "wan",
   "wen",
   "wey",
   "wok",
+  "won",
   "yu",
 ] as const;
 
 export const PIDGIN_EXTENDED_TOKENS = [
   "afta",
+  "ajebota",
   "aks",
   "anoda",
   "anytin",
   "awa",
   "becos",
+  "beta",
   "bifo",
   "bifor",
   "bigin",
+  "bin",
+  "boku",
   "chop",
   "confam",
   "dat",
   "deh",
+  "demsef",
+  "demself",
   "den",
   "dia",
+  "diasef",
   "dis",
+  "domot",
   "ehn",
   "fada",
+  "gbege",
+  "gbese",
+  "gidigba",
+  "ginger",
   "gofment",
   "goment",
   "govment",
   "happun",
-  "how",
   "hyar",
+  "jaguda",
   "kain",
   "komot",
   "kontri",
   "kuku",
   "kwanta",
+  "kpai",
+  "kpatakpata",
+  "kpeme",
   "moto",
   "na",
   "nack",
+  "nem",
+  "nyam",
   "notin",
   "ogbonge",
   "olodo",
+  "onyibo",
   "ontop",
+  "oshey",
+  "oyibo",
+  "oyinbo",
+  "patapata",
   "pipo",
   "pipul",
   "plenti",
+  "sama",
+  "sapa",
+  "shakara",
   "sotay",
+  "sup",
   "swit",
   "tif",
-  "ting",
+  "tin",
   "tink",
   "tok",
+  "tokunbo",
+  "troway",
+  "tufiakwa",
   "tri",
   "weda",
   "weti",
+  "weting",
   "wia",
   "wit",
+  "yakpa",
   "yan",
+  "yankee",
+  "yeye",
 ] as const;
+
+const PIDGIN_STYLE_MARKERS = ["abeg", "no vex", "how far", "wetin", "no wahala", "dey"] as const;
+
+const TOKEN_ALIASES: Record<string, string> = {
+  "how far": "howfar",
+  gatz: "gats",
+  komot: "commot",
+  weti: "wetin",
+  weting: "wetin",
+  ting: "tin",
+  onyibo: "oyinbo",
+  oyibo: "oyinbo",
+  demself: "demsef",
+  diasef: "demsef",
+  yansh: "yansh",
+};
 
 const PIDGIN_MULTIWORD_PATTERNS: Array<{ id: string; pattern: RegExp; weight: number }> = [
   { id: "how_far", pattern: /\bhow far\b/i, weight: 1.0 },
@@ -128,7 +200,11 @@ const PIDGIN_MULTIWORD_PATTERNS: Array<{ id: string; pattern: RegExp; weight: nu
   { id: "make_i", pattern: /\bmake i\b/i, weight: 0.8 },
   { id: "i_dey_waka", pattern: /\bi dey waka\b/i, weight: 1.0 },
   { id: "wetin_dey_sup", pattern: /\bwetin(?:\s+dey)?(?:\s+sup)?\b/i, weight: 1.1 },
+  { id: "wetin_happen", pattern: /\bwetin happen\b/i, weight: 1.1 },
   { id: "i_no_sabi", pattern: /\bi no sabi\b/i, weight: 1.1 },
+  { id: "small_small", pattern: /\bsmall[-\s]small\b/i, weight: 0.8 },
+  { id: "before_before", pattern: /\bbefore\s+before\b/i, weight: 0.8 },
+  { id: "na_wa_o", pattern: /\bna\s+wa\s+o\b/i, weight: 0.9 },
   { id: "na_so", pattern: /\bna so\b/i, weight: 0.8 },
 ];
 
@@ -139,7 +215,7 @@ const PIDGIN_GRAMMAR_PATTERNS: Array<{ id: string; pattern: RegExp; weight: numb
 ];
 
 const PIDGIN_CASUAL_PATTERN =
-  /\b(no wahala|abeg|gist|wahala|omo|how far|wetin|dey|sabi|padi|tori|comot|commot|japa|kasala|yawa)\b/i;
+  /\b(no wahala|abeg|gist|wahala|omo|how far|wetin|dey|sabi|padi|tori|comot|commot|japa|kasala|yawa|na wa o|sapa|naija)\b/i;
 
 const PIDGIN_RECALL_PATTERNS = [
   /\b(we still dey on(?: for)?|still dey on for|still dey on)\b/i,
@@ -170,20 +246,34 @@ const PIDGIN_PAUSE_PATTERNS = [
   /\bi go (?:call|text|ping) you later\b/i,
   /\bi dey (?:road|class|work|traffic|wrk|trafic) rn\b/i,
   /\bi dey waka now\b/i,
+  /\bmake we yarn later\b/i,
 ];
 
 const PIDGIN_WRAP_UP_PATTERNS = [
-  /^\s*(?:no wahala|nwahala|sharp|sharp sharp|na so|ehen|safe|we move|copy o|all good sha|we good abeg)\s*[.!]*\s*$/i,
+  /^\s*(?:no wahala|nwahala|sharp|sharp sharp|na so|ehen|safe|we move|copy o|all good sha|we good abeg|na wa o)\s*[.!]*\s*$/i,
   /^\s*(?:thanks o|thank you o+|thx abeg)\s*[.!]*\s*$/i,
 ];
 
-type CandidateBucket = "strong" | "weak" | "extended" | "unknown";
+const CANDIDATE_STOPWORDS = new Set([
+  "the",
+  "and",
+  "for",
+  "from",
+  "with",
+  "that",
+  "this",
+  "where",
+  "which",
+  "whose",
+  "about",
+  "one",
+  "send",
+]);
 
-type CandidateAssessment = {
-  score: number;
-  bucket: CandidateBucket;
-  reasons: string[];
-};
+const SENSITIVE_CATEGORY_PATTERN = /\b(offensive|derogatory)\b/i;
+const TRADEMARK_CATEGORY_PATTERN = /\btrademark\b/i;
+
+type CandidateBucket = PidginCandidateBucket;
 
 const STRONG_SET = new Set<string>(PIDGIN_STRONG_TOKENS as readonly string[]);
 const WEAK_SET = new Set<string>(PIDGIN_WEAK_TOKENS as readonly string[]);
@@ -205,6 +295,16 @@ function tokenize(text: string) {
 
 function normalizeWhitespace(text: string) {
   return text.trim().replace(/\s+/g, " ");
+}
+
+function canonicalizeToken(token: string, tokenBag?: Set<string>) {
+  if (!token) {
+    return token;
+  }
+  if (token === "how" && tokenBag?.has("far")) {
+    return "howfar";
+  }
+  return TOKEN_ALIASES[token] || token;
 }
 
 function scoreToken(token: string) {
@@ -239,6 +339,19 @@ function detectIntents(text: string) {
   } satisfies Record<PidginIntent, boolean>;
 }
 
+function parseCandidateInput(input: CandidateClassificationInput) {
+  if (typeof input === "string") {
+    return {
+      term: input,
+      sourceCategories: [] as string[],
+    };
+  }
+  return {
+    term: input.term,
+    sourceCategories: (input.sourceCategories || []).map((entry) => entry.toLowerCase()),
+  };
+}
+
 export function computePidginSignalScore(sample: string) {
   const normalized = normalizeWhitespace(sample);
   if (!normalized) {
@@ -251,10 +364,7 @@ export function computePidginSignalScore(sample: string) {
   const tokenHits: string[] = [];
 
   for (const token of uniqueTokens) {
-    let normalizedToken = token;
-    if (token === "how" && uniqueTokens.has("far")) {
-      normalizedToken = "howfar";
-    }
+    const normalizedToken = canonicalizeToken(token, uniqueTokens);
     const weight = scoreToken(normalizedToken);
     if (weight > 0) {
       tokenScore += weight;
@@ -273,7 +383,7 @@ export function computePidginSignalScore(sample: string) {
     (intents.style ? 0.2 : 0) +
     (intents.casual ? 0.2 : 0);
 
-  const repetitionHits = tokens.filter((token) => scoreToken(token) > 0).length;
+  const repetitionHits = tokens.filter((token) => scoreToken(canonicalizeToken(token, uniqueTokens)) > 0).length;
   const repetitionBoost = repetitionHits >= 4 ? 0.25 : repetitionHits >= 2 ? 0.1 : 0;
 
   const score = tokenScore + multiword.score + grammar.score + intentBoost + repetitionBoost;
@@ -301,7 +411,14 @@ export function detectPidginContext(args: {
   const score = Number((inboundScore + historyScore * historyWeight).toFixed(3));
 
   const featureText = normalizeWhitespace([inbound, historySample].filter(Boolean).join(" "));
-  const tokenHits = [...new Set(tokenize(featureText).map((token) => (token === "how" ? "howfar" : token)).filter((token) => scoreToken(token) > 0))];
+  const featureTokens = new Set(tokenize(featureText));
+  const tokenHits = [
+    ...new Set(
+      tokenize(featureText)
+        .map((token) => canonicalizeToken(token, featureTokens))
+        .filter((token) => scoreToken(token) > 0),
+    ),
+  ];
   const multiwordHits = hitPatterns(featureText, PIDGIN_MULTIWORD_PATTERNS).hits;
   const grammarHits = hitPatterns(featureText, PIDGIN_GRAMMAR_PATTERNS).hits;
   const intents = detectIntents(featureText);
@@ -356,25 +473,36 @@ export function normalizePidginFamilyTerms(text: string) {
     .replace(/\b(dad|daddy|father|pops)\b/gi, "Papa");
 }
 
-export function classifyPidginCandidateTerm(input: string): CandidateAssessment {
-  const term = normalizeWhitespace(input.toLowerCase());
+export function buildPidginReplyInstruction(pidginMode: boolean) {
+  if (pidginMode) {
+    return `Pidgin/Naija mode is active from this chat. Mirror naturally with Nigerian Pidgin where it fits, keep it readable, and avoid forced slang. Prefer common local markers only when context fits (e.g., ${PIDGIN_STYLE_MARKERS.join(", ")}). If you mention parents, use 'Mama' and 'Papa' (not 'mum' or 'dad'). Avoid offensive slurs even if present in history.`;
+  }
+  return "Use standard conversational English unless the contact clearly uses Pidgin/Naija slang.";
+}
+
+export function classifyPidginCandidateTerm(input: CandidateClassificationInput): CandidateAssessment {
+  const parsed = parseCandidateInput(input);
+  const term = normalizeWhitespace(parsed.term.toLowerCase());
+  const sourceCategories = parsed.sourceCategories;
   if (!term) {
-    return { score: 0, bucket: "unknown", reasons: ["empty"] };
+    return { score: 0, bucket: "unknown", reasons: ["empty"], safety: "review" };
   }
 
-  if (STRONG_SET.has(term)) {
-    return { score: 1, bucket: "strong", reasons: ["already-strong"] };
+  const compact = term.replace(/\s+/g, "");
+  if (STRONG_SET.has(term) || STRONG_SET.has(compact)) {
+    return { score: 1, bucket: "strong", reasons: ["already-strong"], safety: "safe" };
   }
-  if (WEAK_SET.has(term)) {
-    return { score: 0.7, bucket: "weak", reasons: ["already-weak"] };
+  if (WEAK_SET.has(term) || WEAK_SET.has(compact)) {
+    return { score: 0.7, bucket: "weak", reasons: ["already-weak"], safety: "safe" };
   }
-  if (EXTENDED_SET.has(term)) {
-    return { score: 0.55, bucket: "extended", reasons: ["already-extended"] };
+  if (EXTENDED_SET.has(term) || EXTENDED_SET.has(compact)) {
+    return { score: 0.55, bucket: "extended", reasons: ["already-extended"], safety: "safe" };
   }
 
   let score = 0;
   const reasons: string[] = [];
-  if (/[kg]b|kp|sh|ny|wah|wet|dey|don|abi|abeg|japa|kasala|yawa/.test(term)) {
+
+  if (/[kg]b|kp|sh|ny|wah|wet|dey|don|abi|abeg|japa|kasala|yawa|sapa/.test(term)) {
     score += 0.45;
     reasons.push("pidgin-phonology");
   }
@@ -390,7 +518,19 @@ export function classifyPidginCandidateTerm(input: string): CandidateAssessment 
     score += 0.1;
     reasons.push("compressed-spelling");
   }
-  if (/^(the|and|for|from|with|that|this|where|which|whose|about)$/.test(term)) {
+  if (sourceCategories.some((category) => /\bnigerian pidgin\b/.test(category))) {
+    score += 0.25;
+    reasons.push("wiktionary-pcm-category");
+  }
+  if (sourceCategories.some((category) => /\b(interjections|slang|multiword terms|verbs|nouns)\b/.test(category))) {
+    score += 0.15;
+    reasons.push("high-yield-pos-category");
+  }
+  if (sourceCategories.some((category) => TRADEMARK_CATEGORY_PATTERN.test(category))) {
+    score -= 0.25;
+    reasons.push("trademark-category");
+  }
+  if (CANDIDATE_STOPWORDS.has(term)) {
     score -= 0.5;
     reasons.push("plain-english-stopword");
   }
@@ -399,11 +539,21 @@ export function classifyPidginCandidateTerm(input: string): CandidateAssessment 
     reasons.push("length-outlier");
   }
 
-  const bucket: CandidateBucket = score >= 0.75 ? "strong" : score >= 0.5 ? "extended" : score >= 0.35 ? "weak" : "unknown";
+  const normalizedScore = Number(Math.max(0, Math.min(1, score)).toFixed(3));
+  const bucket: CandidateBucket =
+    normalizedScore >= 0.78 ? "strong" : normalizedScore >= 0.55 ? "extended" : normalizedScore >= 0.35 ? "weak" : "unknown";
+
+  let safety: PidginCandidateSafety = "safe";
+  if (sourceCategories.some((category) => SENSITIVE_CATEGORY_PATTERN.test(category))) {
+    safety = "blocked";
+  } else if (/\b(ashawo|yansh)\b/.test(term)) {
+    safety = "review";
+  }
+
   return {
-    score: Number(Math.max(0, Math.min(1, score)).toFixed(3)),
+    score: normalizedScore,
     bucket,
     reasons,
+    safety,
   };
 }
-

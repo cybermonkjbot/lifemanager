@@ -339,7 +339,7 @@ export const get = query({
       string,
       {
         assetId: string;
-        kind: "sticker" | "meme";
+        kind: "sticker" | "meme" | "image" | "video" | "audio" | "document";
         mimeType: string;
         label: string;
         url: string | null;

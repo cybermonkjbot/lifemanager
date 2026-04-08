@@ -85,18 +85,20 @@ type ThreadGrounding = {
 
 type MessageMediaPreview = {
   assetId: string;
-  kind: "sticker" | "meme";
+  kind: "sticker" | "meme" | "image" | "video" | "audio" | "document";
   mimeType: string;
   label: string;
   url: string | null;
 };
+
+type ConversationMessageType = "text" | "reaction" | "sticker" | "meme" | "image" | "video" | "audio" | "document";
 
 type ThreadMessage = {
   _id: string;
   direction: "inbound" | "outbound";
   toolRunId?: string;
   text: string;
-  messageType?: "text" | "reaction" | "sticker" | "meme";
+  messageType?: ConversationMessageType;
   reactionEmoji?: string;
   reactionTargetWhatsAppMessageId?: string;
   mediaAssetId?: string;
@@ -144,12 +146,24 @@ function messageKindLabel(kind?: string) {
   if (kind === "meme") {
     return "Meme";
   }
+  if (kind === "image") {
+    return "Image";
+  }
+  if (kind === "video") {
+    return "Video";
+  }
+  if (kind === "audio") {
+    return "Audio";
+  }
+  if (kind === "document") {
+    return "Document";
+  }
   return "Text";
 }
 
 function messageDisplayText(message: {
   text: string;
-  messageType?: "text" | "reaction" | "sticker" | "meme";
+  messageType?: ConversationMessageType;
   reactionEmoji?: string;
 }) {
   const normalized = message.text.trim();
@@ -165,20 +179,41 @@ function messageDisplayText(message: {
   if (message.messageType === "meme") {
     return "Sent a meme";
   }
+  if (message.messageType === "image") {
+    return "Sent an image";
+  }
+  if (message.messageType === "video") {
+    return "Sent a video";
+  }
+  if (message.messageType === "audio") {
+    return "Sent audio";
+  }
+  if (message.messageType === "document") {
+    return "Sent a document";
+  }
   return "Sent a message";
 }
 
-function renderMessageMediaPreview(message: ThreadMessage) {
+function renderMessageMediaPreview(message: ThreadMessage, onOpenImagePreview?: (preview: MessageMediaPreview) => void) {
   const preview = message.mediaPreview;
   if (!preview?.url) {
     return message.mediaAssetId ? <p className="queue-meta">Media preview unavailable.</p> : null;
   }
 
   const mimeType = preview.mimeType.toLowerCase();
-  const altText = preview.label || (preview.kind === "meme" ? "Meme" : "Sticker");
+  const altText = preview.label || (preview.kind === "meme" ? "Meme" : preview.kind === "sticker" ? "Sticker" : "Media");
   if (mimeType.startsWith("image/") || preview.kind === "meme" || preview.kind === "sticker") {
-    // eslint-disable-next-line @next/next/no-img-element
-    return <img src={preview.url} alt={altText} className="message-media-image" loading="lazy" />;
+    return (
+      <button
+        type="button"
+        className="message-media-open"
+        onClick={() => (onOpenImagePreview ? onOpenImagePreview(preview) : undefined)}
+        aria-label={`Open ${altText}`}
+      >
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src={preview.url} alt={altText} className="message-media-image" loading="lazy" />
+      </button>
+    );
   }
   if (mimeType.startsWith("video/")) {
     return <video src={preview.url} controls preload="metadata" className="message-media-video" />;
@@ -586,6 +621,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
   ) as ThreadToolEvent[] | undefined;
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
   const [toolSummaryMessageId, setToolSummaryMessageId] = useState<string | null>(null);
+  const [mediaPreviewModal, setMediaPreviewModal] = useState<MessageMediaPreview | null>(null);
 
   const settingsKey = selectedThreadId ? `personality:thread:${selectedThreadId}` : "personality:thread:none";
   const promptProfileKey = selectedThreadId ? `personality:promptprofile:${selectedThreadId}` : "personality:promptprofile:none";
@@ -887,7 +923,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
                     <div className={`message-bubble ${outbound ? "outbound" : "inbound"}`}>
                       <p className="message-sender">{senderName}</p>
                       <p className="message-text">{displayText}</p>
-                      {renderMessageMediaPreview(message)}
+                      {renderMessageMediaPreview(message, (preview) => setMediaPreviewModal(preview))}
                       {showMediaCaption ? <p className="message-media-caption">{mediaCaption}</p> : null}
                       <p className="queue-meta">{messageKindLabel(message.messageType)}</p>
                       {(reactionsByMessage.get(message._id) || []).length > 0 ? (
@@ -982,13 +1018,36 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
             ) : null}
 
             <p className="queue-meta">
-              Global profile studio and media library now live in{" "}
+              Global profile studio lives in{" "}
               <Link href="/settings" onClick={() => setSettingsModalOpen(false)}>
                 Settings
+              </Link>
+              . Unified media view lives in{" "}
+              <Link href="/media" onClick={() => setSettingsModalOpen(false)}>
+                Media
               </Link>
               .
             </p>
           </div>
+        </UIModal>
+
+        <UIModal
+          open={Boolean(mediaPreviewModal)}
+          onClose={() => setMediaPreviewModal(null)}
+          title={mediaPreviewModal?.label || "Media Preview"}
+          description={mediaPreviewModal?.mimeType || "Conversation attachment preview."}
+        >
+          {mediaPreviewModal?.url ? (
+            <div className="stack compact">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={mediaPreviewModal.url} alt={mediaPreviewModal.label || "Media preview"} className="message-media-image modal-preview-image" />
+              <a href={mediaPreviewModal.url} target="_blank" rel="noreferrer" className="message-media-link">
+                Open full size
+              </a>
+            </div>
+          ) : (
+            <p className="empty-line">Media preview unavailable.</p>
+          )}
         </UIModal>
 
         <UIModal

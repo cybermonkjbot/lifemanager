@@ -196,9 +196,9 @@ function parseDisplayDateToMs(value: string) {
     return undefined;
   }
 
-  let first = Number(parts[1]);
-  let second = Number(parts[2]);
-  let third = Number(parts[3]);
+  const first = Number(parts[1]);
+  const second = Number(parts[2]);
+  const third = Number(parts[3]);
   let year = third;
   let month = second;
   let day = first;

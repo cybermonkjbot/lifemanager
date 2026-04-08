@@ -34,6 +34,12 @@ const navItems = [
     primary: true,
   },
   {
+    href: "/media",
+    label: "Media",
+    description: "Unified gallery for stickers and all captured message media.",
+    primary: true,
+  },
+  {
     href: "/backlog",
     label: "Backlog",
     description: "Triage unread threads and restart stale relationships.",

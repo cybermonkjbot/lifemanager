@@ -51,7 +51,7 @@ export const list = query({
       Id<"mediaAssets">,
       Promise<{
         assetId: Id<"mediaAssets">;
-        kind: "sticker" | "meme";
+        kind: "sticker" | "meme" | "image" | "video" | "audio" | "document";
         mimeType: string;
         label: string;
         url: string | null;

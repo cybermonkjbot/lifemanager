@@ -1,6 +1,51 @@
 import { v } from "convex/values";
-import type { Id } from "./_generated/dataModel";
+import type { Doc, Id } from "./_generated/dataModel";
 import { mutation, query } from "./_generated/server";
+
+const mediaKindValidator = v.union(
+  v.literal("sticker"),
+  v.literal("meme"),
+  v.literal("image"),
+  v.literal("video"),
+  v.literal("audio"),
+  v.literal("document"),
+);
+
+const stickerOrMemeKindValidator = v.union(v.literal("sticker"), v.literal("meme"));
+
+const dashboardFilterValidator = v.union(
+  v.literal("all"),
+  v.literal("stickers"),
+  v.literal("memes"),
+  v.literal("images"),
+  v.literal("video"),
+  v.literal("audio"),
+  v.literal("documents"),
+);
+
+type MediaKind = Doc<"mediaAssets">["kind"];
+
+function matchesDashboardFilter(kind: MediaKind, filter: "all" | "stickers" | "memes" | "images" | "video" | "audio" | "documents") {
+  if (filter === "all") {
+    return true;
+  }
+  if (filter === "stickers") {
+    return kind === "sticker";
+  }
+  if (filter === "memes") {
+    return kind === "meme";
+  }
+  if (filter === "images") {
+    return kind === "image";
+  }
+  if (filter === "video") {
+    return kind === "video";
+  }
+  if (filter === "audio") {
+    return kind === "audio";
+  }
+  return kind === "document";
+}
 
 function normalizeTags(tags: string[]) {
   const deduped = new Set(
@@ -35,13 +80,13 @@ export const generateUploadUrl = mutation({
 
 export const registerAsset = mutation({
   args: {
-    kind: v.union(v.literal("sticker"), v.literal("meme")),
+    kind: mediaKindValidator,
     label: v.string(),
     tags: v.array(v.string()),
     fileId: v.id("_storage"),
     mimeType: v.string(),
     contentHash: v.optional(v.string()),
-    source: v.optional(v.union(v.literal("uploaded"), v.literal("generated"))),
+    source: v.optional(v.union(v.literal("uploaded"), v.literal("generated"), v.literal("captured"))),
     threadId: v.optional(v.id("threads")),
     generationPromptHash: v.optional(v.string()),
     generationContextSnippet: v.optional(v.string()),
@@ -69,7 +114,7 @@ export const registerAsset = mutation({
 
 export const findAssetByContentHash = query({
   args: {
-    kind: v.union(v.literal("sticker"), v.literal("meme")),
+    kind: mediaKindValidator,
     contentHash: v.string(),
   },
   handler: async (ctx, args) => {
@@ -86,13 +131,13 @@ export const findAssetByContentHash = query({
 
 export const registerAssetIfMissing = mutation({
   args: {
-    kind: v.union(v.literal("sticker"), v.literal("meme")),
+    kind: mediaKindValidator,
     label: v.string(),
     tags: v.array(v.string()),
     fileId: v.id("_storage"),
     mimeType: v.string(),
     contentHash: v.string(),
-    source: v.optional(v.union(v.literal("uploaded"), v.literal("generated"))),
+    source: v.optional(v.union(v.literal("uploaded"), v.literal("generated"), v.literal("captured"))),
     threadId: v.optional(v.id("threads")),
     generationPromptHash: v.optional(v.string()),
     generationContextSnippet: v.optional(v.string()),
@@ -188,7 +233,7 @@ export const listStickerAssetsNeedingContext = query({
 
 export const listAssets = query({
   args: {
-    kind: v.optional(v.union(v.literal("sticker"), v.literal("meme"))),
+    kind: v.optional(mediaKindValidator),
     enabledOnly: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
@@ -217,9 +262,149 @@ export const listAssets = query({
   },
 });
 
+export const listUnifiedMedia = query({
+  args: {
+    filter: v.optional(dashboardFilterValidator),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const filter = args.filter || "all";
+    const limit = Math.max(20, Math.min(args.limit ?? 240, 400));
+    const messageScanLimit = Math.min(Math.max(limit * 4, 300), 1500);
+    const assetScanLimit = Math.min(Math.max(limit * 4, 300), 1500);
+
+    const [recentMessages, recentAssets] = await Promise.all([
+      ctx.db.query("messages").withIndex("by_createdAt").order("desc").take(messageScanLimit),
+      ctx.db.query("mediaAssets").order("desc").take(assetScanLimit),
+    ]);
+
+    const messagesWithMedia = recentMessages.filter((message) => Boolean(message.mediaAssetId));
+    const messageAssetIds = [
+      ...new Set(
+        messagesWithMedia
+          .map((message) => message.mediaAssetId)
+          .filter((assetId): assetId is Id<"mediaAssets"> => Boolean(assetId)),
+      ),
+    ];
+
+    const allAssetIds = [...new Set([...messageAssetIds, ...recentAssets.map((asset) => asset._id)])];
+    const assetById = new Map<Id<"mediaAssets">, Doc<"mediaAssets">>();
+    await Promise.all(
+      allAssetIds.map(async (assetId) => {
+        const asset = await ctx.db.get(assetId);
+        if (asset) {
+          assetById.set(assetId, asset);
+        }
+      }),
+    );
+
+    const threadIds = [
+      ...new Set(
+        [...messagesWithMedia.map((message) => message.threadId), ...recentAssets.map((asset) => asset.threadId)].filter(
+          (threadId): threadId is Id<"threads"> => Boolean(threadId),
+        ),
+      ),
+    ];
+    const threadById = new Map<
+      Id<"threads">,
+      {
+        _id: Id<"threads">;
+        jid: string;
+        title?: string;
+      }
+    >();
+    await Promise.all(
+      threadIds.map(async (threadId) => {
+        const thread = await ctx.db.get(threadId);
+        if (!thread) {
+          return;
+        }
+        threadById.set(threadId, {
+          _id: thread._id,
+          jid: thread.jid,
+          title: thread.title,
+        });
+      }),
+    );
+
+    const assetUrlById = new Map<Id<"mediaAssets">, string | null>();
+    await Promise.all(
+      [...assetById.values()].map(async (asset) => {
+        const url = await ctx.storage.getUrl(asset.fileId);
+        assetUrlById.set(asset._id, url);
+      }),
+    );
+
+    const messageItems = messagesWithMedia
+      .map((message) => {
+        const assetId = message.mediaAssetId;
+        if (!assetId) {
+          return null;
+        }
+        const asset = assetById.get(assetId);
+        if (!asset || !matchesDashboardFilter(asset.kind, filter)) {
+          return null;
+        }
+        const thread = threadById.get(message.threadId) || null;
+        return {
+          id: `message:${message._id}`,
+          assetId: asset._id,
+          source: "message" as const,
+          createdAt: message.messageAt,
+          kind: asset.kind,
+          mimeType: asset.mimeType,
+          label: asset.label,
+          url: assetUrlById.get(asset._id) || null,
+          enabled: asset.enabled,
+          tags: asset.tags,
+          contextSummary: asset.contextSummary,
+          contextTags: asset.contextTags,
+          contextTriggers: asset.contextTriggers,
+          contextAvoid: asset.contextAvoid,
+          contextConfidence: asset.contextConfidence,
+          thread,
+          message: {
+            _id: message._id,
+            direction: message.direction,
+            text: message.text,
+            messageType: message.messageType || "text",
+            mediaCaption: message.mediaCaption,
+            messageAt: message.messageAt,
+          },
+        };
+      })
+      .filter((item): item is NonNullable<typeof item> => Boolean(item));
+
+    const usedAssetIds = new Set(messageItems.map((item) => item.assetId));
+    const libraryItems = recentAssets
+      .filter((asset) => !usedAssetIds.has(asset._id) && matchesDashboardFilter(asset.kind, filter))
+      .map((asset) => ({
+        id: `asset:${asset._id}`,
+        assetId: asset._id,
+        source: "library" as const,
+        createdAt: asset.createdAt,
+        kind: asset.kind,
+        mimeType: asset.mimeType,
+        label: asset.label,
+        url: assetUrlById.get(asset._id) || null,
+        enabled: asset.enabled,
+        tags: asset.tags,
+        contextSummary: asset.contextSummary,
+        contextTags: asset.contextTags,
+        contextTriggers: asset.contextTriggers,
+        contextAvoid: asset.contextAvoid,
+        contextConfidence: asset.contextConfidence,
+        thread: asset.threadId ? threadById.get(asset.threadId) || null : null,
+        message: null,
+      }));
+
+    return [...messageItems, ...libraryItems].sort((a, b) => b.createdAt - a.createdAt).slice(0, limit);
+  },
+});
+
 export const getEnabledByKind = query({
   args: {
-    kind: v.union(v.literal("sticker"), v.literal("meme")),
+    kind: stickerOrMemeKindValidator,
   },
   handler: async (ctx, args) => {
     const assets = await ctx.db

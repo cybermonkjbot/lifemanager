@@ -31,6 +31,19 @@ export type ParsedInboundMessage =
       isVoiceNote: boolean;
     }
   | {
+      kind: "video";
+      text: string;
+      caption?: string;
+      mimeType?: string;
+    }
+  | {
+      kind: "document";
+      text: string;
+      caption?: string;
+      fileName?: string;
+      mimeType?: string;
+    }
+  | {
       kind: "unsupported";
       text: "";
     };
@@ -129,6 +142,31 @@ export function parseInboundMessage(message: proto.IMessage | null | undefined):
       mimeType,
       durationSeconds,
       isVoiceNote,
+    };
+  }
+
+  if (unwrapped.videoMessage || unwrapped.ptvMessage) {
+    const caption = (unwrapped.videoMessage?.caption || "").trim() || undefined;
+    const mimeType = (unwrapped.videoMessage?.mimetype || unwrapped.ptvMessage?.mimetype || "").trim() || undefined;
+    return {
+      kind: "video",
+      text: caption ? `[Video] ${caption}` : "[Video]",
+      caption,
+      mimeType,
+    };
+  }
+
+  if (unwrapped.documentMessage) {
+    const caption = (unwrapped.documentMessage.caption || "").trim() || undefined;
+    const fileName = (unwrapped.documentMessage.fileName || "").trim() || undefined;
+    const mimeType = (unwrapped.documentMessage.mimetype || "").trim() || undefined;
+    const label = fileName ? `[Document] ${fileName}` : "[Document]";
+    return {
+      kind: "document",
+      text: caption ? `${label} ${caption}` : label,
+      caption,
+      fileName,
+      mimeType,
     };
   }
 

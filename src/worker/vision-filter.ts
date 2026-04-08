@@ -18,6 +18,8 @@ export type VisionFilterDecision = {
   signals: string[];
 };
 
+type VisionFilterEnv = Record<string, string | undefined>;
+
 const DEFAULT_UNCAPTIONED_COOLDOWN_MS = 90 * 60 * 1000;
 
 const HIGH_SIGNAL_PATTERNS = [
@@ -45,7 +47,7 @@ function normalizeCaption(raw: string | undefined) {
   return (raw || "").replace(/\s+/g, " ").trim();
 }
 
-export function readVisionFilterModeFromEnv(env: NodeJS.ProcessEnv = process.env): VisionFilterMode {
+export function readVisionFilterModeFromEnv(env: VisionFilterEnv = process.env): VisionFilterMode {
   const raw = (env.SLM_VISION_FILTER_MODE || "smart").trim().toLowerCase();
   if (raw === "all" || raw === "none" || raw === "smart") {
     return raw;
@@ -53,7 +55,7 @@ export function readVisionFilterModeFromEnv(env: NodeJS.ProcessEnv = process.env
   return "smart";
 }
 
-export function readVisionFilterUncaptionedCooldownMsFromEnv(env: NodeJS.ProcessEnv = process.env): number {
+export function readVisionFilterUncaptionedCooldownMsFromEnv(env: VisionFilterEnv = process.env): number {
   return parsePositiveInt(env.SLM_VISION_FILTER_UNCAPTIONED_COOLDOWN_MS, DEFAULT_UNCAPTIONED_COOLDOWN_MS, 60_000, 24 * 60 * 60 * 1000);
 }
 

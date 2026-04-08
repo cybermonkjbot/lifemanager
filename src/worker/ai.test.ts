@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  applyBossAddressEscalation,
   detectPidginSignal,
   describeInboundImageWithFallback,
   detectConversationSteeringMode,
   evaluateJokeGuardrail,
   generateReplyWithFallback,
+  hasBossAddressCue,
   normalizeOutboundText,
   postProcessReplyText,
   sanitizeCommonPhrasesForPrompt,
@@ -108,6 +110,38 @@ test("postProcessReplyText keeps family terms unchanged outside pidgin mode", ()
     historyLines: ["Them: thanks for the update"],
   });
   assert.equal(output, "My mum and dad will call later.");
+});
+
+test("hasBossAddressCue detects vocative boss forms and ignores plain references", () => {
+  assert.equal(hasBossAddressCue("Boss, can you send the update?"), true);
+  assert.equal(hasBossAddressCue("Hi oga please check this."), true);
+  assert.equal(hasBossAddressCue("My boss asked for the report."), false);
+});
+
+test("applyBossAddressEscalation prefixes upgraded title when inbound uses boss vocative", () => {
+  const output = applyBossAddressEscalation({
+    inboundText: "Boss can you send this now?",
+    replyText: "I can send it now.",
+  });
+  assert.match(output, /, I can send it now\.$/);
+  assert.ok(/\bboss\b|\bchairman\b|\boga\b/i.test(output));
+});
+
+test("postProcessReplyText applies boss escalation in normal flows but skips hard stop", () => {
+  const regular = postProcessReplyText({
+    text: "I can sort this now.",
+    inboundText: "Boss, can you sort this now?",
+    historyLines: [],
+  });
+  assert.match(regular, /, I can sort this now\.$/);
+  assert.ok(/\bboss\b|\bchairman\b|\boga\b/i.test(regular));
+
+  const hardStop = postProcessReplyText({
+    text: "Understood. I'll leave it here.",
+    inboundText: "Boss stop texting me.",
+    historyLines: [],
+  });
+  assert.equal(hardStop, "Understood. I'll leave it here.");
 });
 
 test("sanitizeCommonPhrasesForPrompt drops awkward catchphrases and keeps useful phrases", () => {

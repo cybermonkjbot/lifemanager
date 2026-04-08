@@ -3,18 +3,18 @@ import test from "node:test";
 import { decideInboundVisionAnalysis, readVisionFilterModeFromEnv, readVisionFilterUncaptionedCooldownMsFromEnv } from "./vision-filter";
 
 test("readVisionFilterModeFromEnv defaults to smart and accepts valid modes", () => {
-  assert.equal(readVisionFilterModeFromEnv({} as NodeJS.ProcessEnv), "smart");
-  assert.equal(readVisionFilterModeFromEnv({ SLM_VISION_FILTER_MODE: "all" } as NodeJS.ProcessEnv), "all");
-  assert.equal(readVisionFilterModeFromEnv({ SLM_VISION_FILTER_MODE: "none" } as NodeJS.ProcessEnv), "none");
-  assert.equal(readVisionFilterModeFromEnv({ SLM_VISION_FILTER_MODE: "SMART" } as NodeJS.ProcessEnv), "smart");
-  assert.equal(readVisionFilterModeFromEnv({ SLM_VISION_FILTER_MODE: "weird" } as NodeJS.ProcessEnv), "smart");
+  assert.equal(readVisionFilterModeFromEnv({}), "smart");
+  assert.equal(readVisionFilterModeFromEnv({ SLM_VISION_FILTER_MODE: "all" }), "all");
+  assert.equal(readVisionFilterModeFromEnv({ SLM_VISION_FILTER_MODE: "none" }), "none");
+  assert.equal(readVisionFilterModeFromEnv({ SLM_VISION_FILTER_MODE: "SMART" }), "smart");
+  assert.equal(readVisionFilterModeFromEnv({ SLM_VISION_FILTER_MODE: "weird" }), "smart");
 });
 
 test("readVisionFilterUncaptionedCooldownMsFromEnv clamps to valid range", () => {
-  assert.equal(readVisionFilterUncaptionedCooldownMsFromEnv({} as NodeJS.ProcessEnv), 90 * 60 * 1000);
-  assert.equal(readVisionFilterUncaptionedCooldownMsFromEnv({ SLM_VISION_FILTER_UNCAPTIONED_COOLDOWN_MS: "30000" } as NodeJS.ProcessEnv), 60_000);
+  assert.equal(readVisionFilterUncaptionedCooldownMsFromEnv({}), 90 * 60 * 1000);
+  assert.equal(readVisionFilterUncaptionedCooldownMsFromEnv({ SLM_VISION_FILTER_UNCAPTIONED_COOLDOWN_MS: "30000" }), 60_000);
   assert.equal(
-    readVisionFilterUncaptionedCooldownMsFromEnv({ SLM_VISION_FILTER_UNCAPTIONED_COOLDOWN_MS: String(30 * 60 * 60 * 1000) } as NodeJS.ProcessEnv),
+    readVisionFilterUncaptionedCooldownMsFromEnv({ SLM_VISION_FILTER_UNCAPTIONED_COOLDOWN_MS: String(30 * 60 * 60 * 1000) }),
     24 * 60 * 60 * 1000,
   );
 });

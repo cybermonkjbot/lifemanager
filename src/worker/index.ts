@@ -320,6 +320,57 @@ function hasStickerCue(text: string) {
   return /\b(sticker|stickerify|drop (a|that) sticker|send (a|that) sticker|sticker me)\b/i.test(text);
 }
 
+type StoredMessageType = "text" | "reaction" | "sticker" | "meme" | "image" | "video" | "audio" | "document";
+type CapturableMediaKind = "sticker" | "image" | "video" | "audio" | "document";
+
+function resolveMessageTypeFromParsed(parsed: ParsedInboundMessage): StoredMessageType {
+  if (parsed.kind === "reaction") {
+    return "reaction";
+  }
+  if (parsed.kind === "sticker") {
+    return "sticker";
+  }
+  if (parsed.kind === "image") {
+    return "image";
+  }
+  if (parsed.kind === "video") {
+    return "video";
+  }
+  if (parsed.kind === "audio") {
+    return "audio";
+  }
+  if (parsed.kind === "document") {
+    return "document";
+  }
+  return "text";
+}
+
+function resolveCapturableMediaKind(parsed: ParsedInboundMessage): CapturableMediaKind | null {
+  if (parsed.kind === "sticker") {
+    return "sticker";
+  }
+  if (parsed.kind === "image") {
+    return "image";
+  }
+  if (parsed.kind === "video") {
+    return "video";
+  }
+  if (parsed.kind === "audio") {
+    return "audio";
+  }
+  if (parsed.kind === "document") {
+    return "document";
+  }
+  return null;
+}
+
+function resolveMediaCaptionFromParsed(parsed: ParsedInboundMessage) {
+  if (parsed.kind === "sticker" || parsed.kind === "image" || parsed.kind === "video" || parsed.kind === "document") {
+    return parsed.caption;
+  }
+  return undefined;
+}
+
 function hasStatusInterestSignal(text: string) {
   return /\b(science|scientific|technology|tech|ai|a\.i\.|artificial intelligence|machine learning|robotics|research|breakthrough|innovation|nigerian stock market|nigerian stocks|nigerian equities|nse|ngx|nigeria exchange|crypto|cryptocurrency|bitcoin|btc|ethereum|eth|forex|fx|usdngn|usd\/ngn|naira|goldusd|gold\/usd|xauusd|xau\/usd)\b/i.test(
     text,
@@ -1590,7 +1641,7 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
   const automatedOutboundThreadSends = new Map<string, number>();
   const recentEmojiOutboundByThread = new Map<string, number>();
   const recentStickerCompanionByThread = new Map<string, number>();
-  const stickerAssetIdByHash = new Map<string, Id<"mediaAssets">>();
+  const mediaAssetIdByKey = new Map<string, Id<"mediaAssets">>();
   const inboundImageVisionLastSentAtByThread = new Map<string, number>();
   let inboundConcurrency = Math.round(clamp(Number(process.env.SLM_INBOUND_CONCURRENCY || 4), 1, 16));
   let outboxSendConcurrency = Math.round(clamp(Number(process.env.SLM_OUTBOX_CONCURRENCY || 4), 1, 16));
@@ -1641,6 +1692,8 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
     pruneRecentStickerCompanionByThread();
     return recentStickerCompanionByThread.get(threadJid);
   };
+
+  const mediaCacheKey = (kind: CapturableMediaKind, contentHash: string) => `${kind}:${contentHash}`;
   const pruneInboundImageVisionByThread = () => {
     const ttl = Math.max(VISION_FILTER_UNCAPTIONED_COOLDOWN_MS * 3, 6 * 60 * 60 * 1000);
     const cutoff = Date.now() - ttl;
@@ -1807,9 +1860,10 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
       .catch(() => undefined);
   };
 
-  const maybeCaptureStickerAsset = async (args: {
+  const maybeCaptureMediaAsset = async (args: {
     message: Parameters<typeof downloadMediaMessage>[0];
     messageId: string;
+    kind: CapturableMediaKind;
     threadId?: string;
     whatsappMessageId?: string;
     mimeType?: string;
@@ -1832,7 +1886,8 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
       }
 
       const contentHash = createHash("sha256").update(buffer).digest("hex");
-      const cachedAssetId = stickerAssetIdByHash.get(contentHash);
+      const cacheKey = mediaCacheKey(args.kind, contentHash);
+      const cachedAssetId = mediaAssetIdByKey.get(cacheKey);
       if (cachedAssetId) {
         await convex
           .mutation(convexRefs.inboundAttachMediaAsset, {
@@ -1840,79 +1895,98 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
             mediaAssetId: cachedAssetId,
           })
           .catch(() => undefined);
-        void ensureStickerContextForAsset(cachedAssetId);
+        if (args.kind === "sticker") {
+          void ensureStickerContextForAsset(cachedAssetId);
+        }
         return;
       }
 
       const existing = (await convex
         .query(convexRefs.mediaFindAssetByContentHash, {
-          kind: "sticker",
+          kind: args.kind,
           contentHash,
         })
         .catch(() => null)) as { _id: Id<"mediaAssets"> } | null;
 
       if (existing?._id) {
-        stickerAssetIdByHash.set(contentHash, existing._id);
+        mediaAssetIdByKey.set(cacheKey, existing._id);
         await convex
           .mutation(convexRefs.inboundAttachMediaAsset, {
             messageId: args.messageId as Id<"messages">,
             mediaAssetId: existing._id,
           })
           .catch(() => undefined);
-        void ensureStickerContextForAsset(existing._id);
+        if (args.kind === "sticker") {
+          void ensureStickerContextForAsset(existing._id);
+        }
         return;
       }
 
+      const fallbackMimeType =
+        args.kind === "sticker"
+          ? "image/webp"
+          : args.kind === "image"
+            ? "image/jpeg"
+            : args.kind === "video"
+              ? "video/mp4"
+              : args.kind === "audio"
+                ? "audio/ogg"
+                : "application/octet-stream";
       const uploadUrl = (await convex.mutation(convexRefs.mediaGenerateUploadUrl, {})) as string;
       const upload = await fetch(uploadUrl, {
         method: "POST",
         headers: {
-          "Content-Type": args.mimeType || "image/webp",
+          "Content-Type": args.mimeType || fallbackMimeType,
         },
         body: buffer,
       });
       if (!upload.ok) {
-        throw new Error(`Sticker upload failed (${upload.status}).`);
+        throw new Error(`Media upload failed (${upload.status}).`);
       }
       const uploadPayload = (await upload.json()) as { storageId?: string };
       if (!uploadPayload.storageId) {
-        throw new Error("Sticker upload response missing storageId.");
+        throw new Error("Media upload response missing storageId.");
       }
 
       const nowIso = new Date().toISOString().slice(0, 10);
       const labelSuffix = (args.whatsappMessageId || contentHash).slice(-8);
+      const kindLabel = args.kind === "audio" ? "voice/audio" : args.kind;
       const assetId = (await convex.mutation(convexRefs.mediaRegisterAssetIfMissing, {
-        kind: "sticker",
-        label: `Auto sticker ${nowIso} ${labelSuffix}`,
+        kind: args.kind,
+        label: `Auto ${kindLabel} ${nowIso} ${labelSuffix}`,
         tags: [
           "autocaptured",
           "whatsapp",
-          "sticker",
+          args.kind,
           args.direction === "outbound" ? "outbound" : "inbound",
           args.ingestMode === "live" ? "live" : "history",
         ],
         fileId: uploadPayload.storageId as Id<"_storage">,
-        mimeType: args.mimeType || "image/webp",
+        mimeType: args.mimeType || fallbackMimeType,
+        source: "captured",
+        threadId: args.threadId as Id<"threads"> | undefined,
         enabled: true,
         contentHash,
       })) as Id<"mediaAssets">;
 
-      stickerAssetIdByHash.set(contentHash, assetId);
+      mediaAssetIdByKey.set(cacheKey, assetId);
       await convex
         .mutation(convexRefs.inboundAttachMediaAsset, {
           messageId: args.messageId as Id<"messages">,
           mediaAssetId: assetId,
         })
         .catch(() => undefined);
-      void ensureStickerContextForAsset(assetId);
+      if (args.kind === "sticker") {
+        void ensureStickerContextForAsset(assetId);
+      }
     } catch (error) {
       const err = error instanceof Error ? error.message : String(error);
       await convex
         .mutation(convexRefs.systemRecordEvent, {
           source: "worker",
-          eventType: "media.sticker.capture_error",
+          eventType: "media.capture_error",
           threadId: args.threadId as Id<"threads"> | undefined,
-          detail: compactLogText(err, 280),
+          detail: compactLogText(`${args.kind}: ${err}`, 280),
         })
         .catch(() => undefined);
     }
@@ -2153,8 +2227,8 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
         return;
       }
 
-      const messageType: "text" | "reaction" | "sticker" | "meme" =
-        parsed.kind === "reaction" ? "reaction" : parsed.kind === "sticker" ? "sticker" : "text";
+      const messageType = resolveMessageTypeFromParsed(parsed);
+      const mediaKind = resolveCapturableMediaKind(parsed);
 
       if (parsed.kind !== "reaction" && containsAnyEmoji(parsed.text)) {
         rememberEmojiOutboundAt(threadJid, messageAt);
@@ -2167,17 +2241,18 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
         messageType,
         reactionEmoji: parsed.kind === "reaction" ? parsed.emoji : undefined,
         reactionTargetWhatsAppMessageId: parsed.kind === "reaction" ? parsed.targetWhatsAppMessageId : undefined,
-        mediaCaption: parsed.kind === "sticker" || parsed.kind === "image" ? parsed.caption : undefined,
+        mediaCaption: resolveMediaCaptionFromParsed(parsed),
         messageAt,
       })) as { recordedMessageId?: string; threadId?: string };
 
-      if (parsed.kind === "sticker" && ownSync.recordedMessageId) {
-        await maybeCaptureStickerAsset({
+      if (mediaKind && ownSync.recordedMessageId) {
+        await maybeCaptureMediaAsset({
           message: message as Parameters<typeof downloadMediaMessage>[0],
           messageId: ownSync.recordedMessageId,
+          kind: mediaKind,
           threadId: ownSync.threadId,
           whatsappMessageId: outboundMessageId,
-          mimeType: parsed.mimeType,
+          mimeType: "mimeType" in parsed ? parsed.mimeType : undefined,
           direction: "outbound",
           ingestMode: "live",
         });
@@ -2220,8 +2295,8 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
 
       const direction = message.key.fromMe ? "outbound" : "inbound";
       const senderJid = direction === "outbound" ? "me" : senderJidFromKey;
-      const messageType: "text" | "reaction" | "sticker" | "meme" =
-        parsed.kind === "reaction" ? "reaction" : parsed.kind === "sticker" ? "sticker" : "text";
+      const messageType = resolveMessageTypeFromParsed(parsed);
+      const mediaKind = resolveCapturableMediaKind(parsed);
       const messageAt = normalizeIncomingMessageTimestamp(message.messageTimestamp, Date.now());
 
       if (direction === "outbound" && parsed.kind !== "reaction" && containsAnyEmoji(parsed.text)) {
@@ -2238,7 +2313,7 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
         messageType,
         reactionEmoji: parsed.kind === "reaction" ? parsed.emoji : undefined,
         reactionTargetWhatsAppMessageId: parsed.kind === "reaction" ? parsed.targetWhatsAppMessageId : undefined,
-        mediaCaption: parsed.kind === "sticker" || parsed.kind === "image" ? parsed.caption : undefined,
+        mediaCaption: resolveMediaCaptionFromParsed(parsed),
         isGroup: isGroupJid(threadJid),
         threadKind: classifyThreadKindFromJid(threadJid),
         whatsappMessageId: message.key.id || undefined,
@@ -2249,13 +2324,14 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
         duplicate: boolean;
       };
 
-      if (parsed.kind === "sticker" && ingested.messageId) {
-        await maybeCaptureStickerAsset({
+      if (mediaKind && ingested.messageId) {
+        await maybeCaptureMediaAsset({
           message: message as Parameters<typeof downloadMediaMessage>[0],
           messageId: ingested.messageId,
+          kind: mediaKind,
           threadId: ingested.threadId,
           whatsappMessageId: message.key.id || undefined,
-          mimeType: parsed.mimeType,
+          mimeType: "mimeType" in parsed ? parsed.mimeType : undefined,
           direction,
           ingestMode,
         });
@@ -2346,16 +2422,17 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
       const messageAt = normalizeIncomingMessageTimestamp(message.messageTimestamp, Date.now());
       const threadKind = classifyThreadKindFromJid(threadJid);
       const archivedState = chatArchiveState.get(threadJid);
+      const mediaKind = resolveCapturableMediaKind(effectiveParsed);
 
       const ingest = (await convex.mutation(convexRefs.inboundIngest, {
         threadJid,
         senderJid,
         senderTitle: message.pushName || undefined,
         text: effectiveParsed.text,
-        messageType: effectiveParsed.kind === "reaction" ? "reaction" : effectiveParsed.kind === "sticker" ? "sticker" : "text",
+        messageType: resolveMessageTypeFromParsed(effectiveParsed),
         reactionEmoji: effectiveParsed.kind === "reaction" ? effectiveParsed.emoji : undefined,
         reactionTargetWhatsAppMessageId: effectiveParsed.kind === "reaction" ? effectiveParsed.targetWhatsAppMessageId : undefined,
-        mediaCaption: effectiveParsed.kind === "sticker" || effectiveParsed.kind === "image" ? effectiveParsed.caption : undefined,
+        mediaCaption: resolveMediaCaptionFromParsed(effectiveParsed),
         isGroup: isGroupJid(threadJid),
         threadKind,
         isArchived: archivedState?.isArchived,
@@ -2374,13 +2451,14 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
         nightPausedUntil?: number;
       };
 
-      if (effectiveParsed.kind === "sticker" && ingest.messageId) {
-        await maybeCaptureStickerAsset({
+      if (mediaKind && ingest.messageId) {
+        await maybeCaptureMediaAsset({
           message: message as Parameters<typeof downloadMediaMessage>[0],
           messageId: ingest.messageId,
+          kind: mediaKind,
           threadId: ingest.threadId,
           whatsappMessageId: message.key.id || undefined,
-          mimeType: effectiveParsed.mimeType,
+          mimeType: "mimeType" in effectiveParsed ? effectiveParsed.mimeType : undefined,
           direction: "inbound",
           ingestMode: "live",
         });
