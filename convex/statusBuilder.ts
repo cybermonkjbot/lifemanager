@@ -1,6 +1,7 @@
 import { internalMutation, type MutationCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import { getConfig } from "./lib/config";
+import { classifyThreadKind } from "./lib/threadEligibility";
 
 const STATUS_JID = "status@broadcast";
 const AI_STATUS_PLACEHOLDER = "__SLM_AI_STATUS__";
@@ -54,7 +55,7 @@ function normalizeSpace(value: string) {
   return value.replace(/\s+/g, " ").trim();
 }
 
-function stableHash(value: string) {
+export function stableHash(value: string) {
   let hash = 0;
   for (let index = 0; index < value.length; index += 1) {
     hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
@@ -62,7 +63,7 @@ function stableHash(value: string) {
   return hash;
 }
 
-function isWithinHourWindow(hour: number, startHour: number, endHour: number) {
+export function isWithinHourWindow(hour: number, startHour: number, endHour: number) {
   if (startHour === endHour) {
     return false;
   }
@@ -72,7 +73,7 @@ function isWithinHourWindow(hour: number, startHour: number, endHour: number) {
   return hour >= startHour || hour < endHour;
 }
 
-function relationshipLabel(value?: string) {
+export function relationshipLabel(value?: string) {
   if (!value) {
     return "mixed";
   }
@@ -91,7 +92,7 @@ function relationshipLabel(value?: string) {
   return "mixed";
 }
 
-function extractKeywords(text: string) {
+export function extractKeywords(text: string) {
   return text
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, " ")
@@ -197,11 +198,34 @@ export const run = internalMutation({
 
     const configuredAudience = [...new Set((config.statusBuilderAudienceJids || []).map((jid) => jid.trim()).filter(Boolean))];
     let audienceJids = configuredAudience;
-    const directThreads = await ctx.db
+    const indexedDirectThreads = await ctx.db
       .query("threads")
       .withIndex("by_threadKind_and_lastMessageAt", (q) => q.eq("threadKind", "direct"))
       .order("desc")
       .take(260);
+    const directThreads = [...indexedDirectThreads];
+    if (directThreads.length < 40) {
+      const fallbackScan = await ctx.db
+        .query("threads")
+        .withIndex("by_lastMessageAt")
+        .order("desc")
+        .take(700);
+      const seen = new Set(directThreads.map((thread) => thread._id));
+      for (const thread of fallbackScan) {
+        if (seen.has(thread._id)) {
+          continue;
+        }
+        const kind = thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup });
+        if (kind !== "direct") {
+          continue;
+        }
+        directThreads.push(thread);
+        seen.add(thread._id);
+        if (directThreads.length >= 260) {
+          break;
+        }
+      }
+    }
 
     if (audienceJids.length === 0) {
       audienceJids = directThreads

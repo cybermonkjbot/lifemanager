@@ -133,6 +133,12 @@ type RuntimeSettings = {
   contextCompactionMaxThreads: number;
   contextCompactionMaxDeletes: number;
   compactContextGroupJids: string[];
+  statusBuilderEnabled: boolean;
+  statusBuilderCadenceHours: number;
+  statusBuilderDailyMaxPosts: number;
+  statusBuilderTextPostRatio: number;
+  statusBuilderAudienceJids: string[];
+  statusBuilderAudienceSampleSize: number;
   quietHoursStartHour: number;
   quietHoursEndHour: number;
 };
@@ -4086,7 +4092,7 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
   const hydrateAiStatus = async (
     item: OutboxClaimedItem,
     runtimeSettings: RuntimeSettings | null,
-  ) => {
+  ): Promise<OutboxClaimedItem> => {
     if (!item.isStatusPost || item.messageText !== AI_STATUS_PLACEHOLDER) {
       return {
         ...item,
@@ -4236,7 +4242,7 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
     return {
       ...item,
       toolRunId,
-      sendKind: resolvedFormat === "meme" ? "meme" : "text",
+      sendKind: (resolvedFormat === "meme" ? "meme" : "text") as OutboxClaimedItem["sendKind"],
       statusFormat: resolvedFormat,
       mediaAssetId,
       mediaCaption,
@@ -4333,7 +4339,8 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
         enqueueByThreadLane(outboxThreadLanes, item.threadId, () =>
           runOutboxWithLimit(async () => {
             try {
-              if (!item.isStatusPost) {
+              const isStatusBroadcastSend = item.isStatusPost === true && item.jid === "status@broadcast";
+              if (!isStatusBroadcastSend) {
                 const eligibility = (await convex.query(convexRefs.threadsGetEligibility, {
                   threadId: item.threadId,
                 })) as {
@@ -4402,7 +4409,7 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
               const quotedMessageOptions = buildQuotedMessageOptions(hydrated);
               let threadForEmojiPolicy: ThreadContextSnapshot = null;
               let emojiPolicyApplied = false;
-              if (!hydrated.isStatusPost && (hydrated.sendKind === "text" || hydrated.sendKind === "meme")) {
+              if (!isStatusBroadcastSend && (hydrated.sendKind === "text" || hydrated.sendKind === "meme")) {
                 threadForEmojiPolicy = (await convex
                   .query(convexRefs.threadGet, {
                     threadId: item.threadId as Id<"threads">,
@@ -4458,7 +4465,7 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
                   .reverse()
                   .find((message) => message.direction === "inbound")?.text || "";
               const stickerCompanionPlan =
-                hydrated.sendKind === "text" && !hydrated.isStatusPost
+                hydrated.sendKind === "text" && !isStatusBroadcastSend
                   ? await decideStickerCompanionPlan({
                       jid: item.jid,
                       threadId: item.threadId,
@@ -4502,8 +4509,8 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
               };
 
               let sent: { key?: { id?: string | null } } | undefined;
-              const destinationJid = hydrated.isStatusPost ? "status@broadcast" : item.jid;
-              if (hydrated.isStatusPost) {
+              const destinationJid = isStatusBroadcastSend ? "status@broadcast" : item.jid;
+              if (isStatusBroadcastSend) {
                 const statusSendOptions = (hydrated.statusAudienceJids && hydrated.statusAudienceJids.length > 0
                   ? ({ statusJidList: hydrated.statusAudienceJids } as Parameters<typeof sock.sendMessage>[2])
                   : undefined);
@@ -4589,9 +4596,9 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
                 await sock.sendPresenceUpdate("paused", item.jid);
               }
 
-              if (!hydrated.isStatusPost && hydrated.sendKind === "text" && containsAnyEmoji(effectiveMessageText)) {
+              if (!isStatusBroadcastSend && hydrated.sendKind === "text" && containsAnyEmoji(effectiveMessageText)) {
                 rememberEmojiOutboundAt(item.jid, Date.now());
-              } else if (!hydrated.isStatusPost && hydrated.sendKind === "meme" && containsAnyEmoji(effectiveMediaCaption || "")) {
+              } else if (!isStatusBroadcastSend && hydrated.sendKind === "meme" && containsAnyEmoji(effectiveMediaCaption || "")) {
                 rememberEmojiOutboundAt(item.jid, Date.now());
               }
 

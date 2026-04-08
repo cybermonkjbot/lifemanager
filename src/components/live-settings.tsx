@@ -64,6 +64,12 @@ type SettingsState = {
   outreachMaxContactsPerRun: number;
   outreachContactJids: string[];
   outreachStarterTemplate: string;
+  statusBuilderEnabled: boolean;
+  statusBuilderCadenceHours: number;
+  statusBuilderDailyMaxPosts: number;
+  statusBuilderTextPostRatio: number;
+  statusBuilderAudienceJids: string[];
+  statusBuilderAudienceSampleSize: number;
 };
 
 type KnownContact = {
@@ -173,6 +179,12 @@ function toState(source: Partial<SettingsState> | undefined): SettingsState {
     outreachMaxContactsPerRun: source?.outreachMaxContactsPerRun ?? 3,
     outreachContactJids: source?.outreachContactJids ?? [],
     outreachStarterTemplate: source?.outreachStarterTemplate ?? "Hey {{name}}, checking in on you today.",
+    statusBuilderEnabled: source?.statusBuilderEnabled ?? false,
+    statusBuilderCadenceHours: source?.statusBuilderCadenceHours ?? 8,
+    statusBuilderDailyMaxPosts: source?.statusBuilderDailyMaxPosts ?? 3,
+    statusBuilderTextPostRatio: source?.statusBuilderTextPostRatio ?? 0.4,
+    statusBuilderAudienceJids: source?.statusBuilderAudienceJids ?? [],
+    statusBuilderAudienceSampleSize: source?.statusBuilderAudienceSampleSize ?? 80,
   };
 }
 
@@ -236,7 +248,13 @@ function stateEquals(a: SettingsState, b: SettingsState) {
     nearlyEqual(a.outreachCadenceHours, b.outreachCadenceHours) &&
     nearlyEqual(a.outreachMaxContactsPerRun, b.outreachMaxContactsPerRun) &&
     a.outreachStarterTemplate === b.outreachStarterTemplate &&
-    a.outreachContactJids.join("\n") === b.outreachContactJids.join("\n")
+    a.outreachContactJids.join("\n") === b.outreachContactJids.join("\n") &&
+    a.statusBuilderEnabled === b.statusBuilderEnabled &&
+    nearlyEqual(a.statusBuilderCadenceHours, b.statusBuilderCadenceHours) &&
+    nearlyEqual(a.statusBuilderDailyMaxPosts, b.statusBuilderDailyMaxPosts) &&
+    nearlyEqual(a.statusBuilderTextPostRatio, b.statusBuilderTextPostRatio) &&
+    a.statusBuilderAudienceJids.join("\n") === b.statusBuilderAudienceJids.join("\n") &&
+    nearlyEqual(a.statusBuilderAudienceSampleSize, b.statusBuilderAudienceSampleSize)
   );
 }
 
@@ -472,6 +490,12 @@ export function LiveSettings() {
           outreachMaxContactsPerRun: Math.round(draft.outreachMaxContactsPerRun),
           outreachContactJids: draft.outreachContactJids,
           outreachStarterTemplate: draft.outreachStarterTemplate,
+          statusBuilderEnabled: draft.statusBuilderEnabled,
+          statusBuilderCadenceHours: Math.round(draft.statusBuilderCadenceHours),
+          statusBuilderDailyMaxPosts: Math.round(draft.statusBuilderDailyMaxPosts),
+          statusBuilderTextPostRatio: draft.statusBuilderTextPostRatio,
+          statusBuilderAudienceJids: draft.statusBuilderAudienceJids,
+          statusBuilderAudienceSampleSize: Math.round(draft.statusBuilderAudienceSampleSize),
         });
       },
       {
@@ -506,6 +530,30 @@ export function LiveSettings() {
     setDraft((prev) => ({
       ...prev,
       outreachContactJids: prev.outreachContactJids.filter((item) => item !== jid),
+    }));
+  };
+
+  const addStatusAudience = (jid: string) => {
+    const normalized = jid.trim();
+    if (!normalized) {
+      return;
+    }
+
+    setDraft((prev) => {
+      if (prev.statusBuilderAudienceJids.includes(normalized)) {
+        return prev;
+      }
+      return {
+        ...prev,
+        statusBuilderAudienceJids: [...prev.statusBuilderAudienceJids, normalized],
+      };
+    });
+  };
+
+  const removeStatusAudience = (jid: string) => {
+    setDraft((prev) => ({
+      ...prev,
+      statusBuilderAudienceJids: prev.statusBuilderAudienceJids.filter((item) => item !== jid),
     }));
   };
 
@@ -1656,6 +1704,167 @@ export function LiveSettings() {
             />
             <span className="queue-meta">Use {"{{name}}"} for contact name and optional {"{{icebreaker}}"} placeholder.</span>
           </label>
+        </div>
+      </article>
+
+      <article className="panel-card">
+        <h3>Auto Status Builder</h3>
+        <div className="stack compact">
+          <label className="stack compact">
+            <span className="queue-meta">Enable auto status posting</span>
+            <select
+              value={draft.statusBuilderEnabled ? "true" : "false"}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  statusBuilderEnabled: event.target.value === "true",
+                }))
+              }
+              disabled={record.pending}
+              aria-disabled={record.pending}
+            >
+              <option value="true">Yes</option>
+              <option value="false">No</option>
+            </select>
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Cadence (hours between posts)</span>
+            <input
+              type="number"
+              min={1}
+              max={168}
+              step={1}
+              value={draft.statusBuilderCadenceHours}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  statusBuilderCadenceHours: parseNumber(event.target.value, prev.statusBuilderCadenceHours),
+                }))
+              }
+              disabled={record.pending || !draft.statusBuilderEnabled}
+              aria-disabled={record.pending || !draft.statusBuilderEnabled}
+            />
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Max posts per 24 hours</span>
+            <input
+              type="number"
+              min={1}
+              max={24}
+              step={1}
+              value={draft.statusBuilderDailyMaxPosts}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  statusBuilderDailyMaxPosts: parseNumber(event.target.value, prev.statusBuilderDailyMaxPosts),
+                }))
+              }
+              disabled={record.pending || !draft.statusBuilderEnabled}
+              aria-disabled={record.pending || !draft.statusBuilderEnabled}
+            />
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">
+              Text-only share ratio: {Math.round(draft.statusBuilderTextPostRatio * 100)}%
+            </span>
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.05}
+              value={draft.statusBuilderTextPostRatio}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  statusBuilderTextPostRatio: parseNumber(event.target.value, prev.statusBuilderTextPostRatio),
+                }))
+              }
+              disabled={record.pending || !draft.statusBuilderEnabled}
+              aria-disabled={record.pending || !draft.statusBuilderEnabled}
+            />
+            <span className="queue-meta">Lower means more AI meme-image statuses. Higher means more text statuses.</span>
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Audience size cap per status post</span>
+            <input
+              type="number"
+              min={10}
+              max={256}
+              step={1}
+              value={draft.statusBuilderAudienceSampleSize}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  statusBuilderAudienceSampleSize: parseNumber(event.target.value, prev.statusBuilderAudienceSampleSize),
+                }))
+              }
+              disabled={record.pending || !draft.statusBuilderEnabled}
+              aria-disabled={record.pending || !draft.statusBuilderEnabled}
+            />
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Optional fixed audience JIDs (leave empty to auto-pick active contacts)</span>
+            <select
+              value=""
+              onChange={(event) => {
+                if (!event.target.value) {
+                  return;
+                }
+                addStatusAudience(event.target.value);
+              }}
+              disabled={record.pending || contactsLoading || !draft.statusBuilderEnabled}
+              aria-disabled={record.pending || contactsLoading || !draft.statusBuilderEnabled}
+            >
+              <option value="">{contactsLoading ? "Loading contacts..." : "Add from previous contacts"}</option>
+              {knownContacts.map((contact) => (
+                <option key={contact._id} value={contact.jid}>
+                  {contact.title ? `${contact.title} (${contact.jid})` : contact.jid}
+                </option>
+              ))}
+            </select>
+            <textarea
+              rows={5}
+              placeholder={"2348012345678@s.whatsapp.net\n2348098765432@s.whatsapp.net"}
+              value={draft.statusBuilderAudienceJids.join("\n")}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  statusBuilderAudienceJids: parseContactJids(event.target.value),
+                }))
+              }
+              disabled={record.pending || !draft.statusBuilderEnabled}
+              aria-disabled={record.pending || !draft.statusBuilderEnabled}
+            />
+            {draft.statusBuilderAudienceJids.length > 0 ? (
+              <div className="stack compact">
+                {draft.statusBuilderAudienceJids.map((jid) => (
+                  <div key={jid} className="queue-item">
+                    <p className="queue-body">{jid}</p>
+                    <div className="queue-actions">
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        onClick={() => removeStatusAudience(jid)}
+                        disabled={record.pending || !draft.statusBuilderEnabled}
+                        aria-disabled={record.pending || !draft.statusBuilderEnabled}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </label>
+
+          <p className="queue-meta">
+            The builder learns trend topics from recent inbound chats, segments by relationship mix, then alternates text and meme statuses.
+          </p>
         </div>
       </article>
 
