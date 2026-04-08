@@ -127,7 +127,7 @@ export function LiveStatus() {
             </Link>
             {statusThreadId ? (
               <Link href={`/conversations?threadId=${statusThreadId}`} className="btn btn-ghost">
-                Open In Conversations
+                Open in Conversations
               </Link>
             ) : null}
           </div>
@@ -157,7 +157,7 @@ export function LiveStatus() {
         {threadsLoading || statusLoading ? (
           <p className="empty-line">Loading statuses...</p>
         ) : !statusThread ? (
-          <p className="empty-line">No status thread yet. Post a status (or enable Auto Status Builder) to populate this tab.</p>
+          <p className="empty-line">No status thread yet.</p>
         ) : timeline.length === 0 ? (
           <p className="empty-line">No outbound status posts yet.</p>
         ) : (

@@ -375,7 +375,7 @@ function ThreadPersonalityForm({
   return (
     <div className="personality-config-block">
       <h3>Conversation Personality</h3>
-      <p className="queue-meta">Set how replies should sound for this specific conversation.</p>
+      <p className="queue-meta">Set reply style for this thread.</p>
 
       <label className="setup-input-group">
         <span className="queue-meta">Profile</span>
@@ -472,7 +472,7 @@ function PromptProfileForm({
   return (
     <div className="personality-config-block">
       <h3>Prompt Profile Builder</h3>
-      <p className="queue-meta">Auto-build this conversation profile from all available thread history, including WhatsApp synced history, then edit manually if needed.</p>
+      <p className="queue-meta">Build a prompt profile from thread history, then edit manually if needed.</p>
 
       <button
         type="button"
@@ -537,7 +537,7 @@ function GroundingForm({ initialMyName, initialTheirName, initialVibeNotes, auto
   return (
     <div className="personality-config-block">
       <h3>Conversation Grounding</h3>
-      <p className="queue-meta">Set preferred names and vibe notes for better nickname and tone grounding.</p>
+      <p className="queue-meta">Set preferred names and tone notes for this thread.</p>
       <label className="setup-input-group">
         <span className="queue-meta">My name in this conversation</span>
         <input type="text" value={myName} onChange={(event) => setMyName(event.target.value)} disabled={pending} aria-disabled={pending} />
@@ -550,7 +550,7 @@ function GroundingForm({ initialMyName, initialTheirName, initialVibeNotes, auto
         <span className="queue-meta">Vibe notes</span>
         <textarea rows={2} value={vibeNotes} onChange={(event) => setVibeNotes(event.target.value)} disabled={pending} aria-disabled={pending} />
       </label>
-      <p className="queue-meta">Auto aliases: {autoAliases.join(", ") || "None yet"}</p>
+      <p className="queue-meta">Detected aliases: {autoAliases.join(", ") || "None"}</p>
       <button
         type="button"
         className="btn btn-primary"
@@ -874,7 +874,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
         <h3>Timeline</h3>
         <div className="queue-actions">
           <button type="button" className="btn btn-ghost" onClick={() => setSettingsModalOpen(true)}>
-            Open Settings
+            Thread Settings
           </button>
         </div>
         {threadLoading ? (
@@ -998,7 +998,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
           open={settingsModalOpen}
           onClose={() => setSettingsModalOpen(false)}
           title={selectedThreadId ? "Conversation Settings" : "Workspace Settings"}
-          description="Manage thread-specific personality, prompt profile, and grounding."
+          description="Adjust personality, prompt profile, and grounding."
         >
           <div className="conversation-controls">
             {selectedThreadId && (threadPersonalityLoading || profilesLoading) ? (

@@ -29,8 +29,7 @@ export function LogWatcher() {
   return (
     <section className="logwatcher" aria-live="polite">
       <div className="logwatcher-header">
-        <p className="queue-meta">Live Runtime</p>
-        <h3>Log Watcher</h3>
+        <h3>Runtime Logs</h3>
       </div>
 
       <div className="logwatcher-list">

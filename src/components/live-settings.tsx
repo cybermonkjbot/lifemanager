@@ -1134,11 +1134,11 @@ export function LiveSettings() {
               disabled={record.pending || !draft.statusAutoReplyEnabled}
               aria-disabled={record.pending || !draft.statusAutoReplyEnabled}
             >
-              <option value="true">Funny/playful + science/tech/AI + NGX/crypto/forex news</option>
+              <option value="true">Playful + science/tech + market signals</option>
               <option value="false">Any status text</option>
             </select>
             {!draft.statusAutoReplyEnabled ? <span className="queue-meta">Enable status auto-replies to use this.</span> : null}
-            <span className="queue-meta">Safety rule: status replies are always skipped if the status contains a link or email address.</span>
+            <span className="queue-meta">Status replies are skipped when a status contains a link or email.</span>
           </label>
 
           <label className="stack compact">
@@ -1154,8 +1154,8 @@ export function LiveSettings() {
               disabled={record.pending}
               aria-disabled={record.pending}
             >
-              <option value="false">No (recommended for storage)</option>
-              <option value="true">Yes (store group media too)</option>
+              <option value="false">No (lower storage)</option>
+              <option value="true">Yes (capture group media)</option>
             </select>
           </label>
 
@@ -1171,7 +1171,7 @@ export function LiveSettings() {
               disabled={record.pending}
               aria-disabled={record.pending}
             />
-            <span className="queue-meta">Status messages/media older than this are removed.</span>
+            <span className="queue-meta">Older status entries are removed.</span>
           </label>
 
           <label className="stack compact">
@@ -1290,7 +1290,7 @@ export function LiveSettings() {
           </label>
 
           <label className="stack compact">
-            <span className="queue-meta">Target group JIDs for aggressive compaction (optional, one per line)</span>
+            <span className="queue-meta">Aggressive-compaction group JIDs (optional, one per line)</span>
             <textarea
               rows={4}
               placeholder={"1234567890-123456789@g.us\n9876543210-111222333@g.us"}
@@ -1304,7 +1304,7 @@ export function LiveSettings() {
               disabled={record.pending}
               aria-disabled={record.pending}
             />
-            <span className="queue-meta">Leave empty to compact all recent group chats automatically.</span>
+            <span className="queue-meta">Leave empty to include all recent groups.</span>
           </label>
 
           <label className="stack compact">
@@ -1322,7 +1322,7 @@ export function LiveSettings() {
               aria-disabled={record.pending}
             />
             <span className="queue-meta">
-              Used for playful detection. Status interest matching is always on for science/tech/AI and Nigerian markets (NGX), crypto, and forex.
+              Used by playful detection; market-interest matching runs separately.
             </span>
           </label>
 
@@ -1441,7 +1441,7 @@ export function LiveSettings() {
               aria-disabled={record.pending}
             />
             <span className="queue-meta">
-              New inbound messages in the same chat within this window update the pending unsent reply instead of creating another one.
+              Inbound messages in this window update the pending unsent reply instead of creating a new one.
             </span>
           </label>
 
@@ -1463,7 +1463,7 @@ export function LiveSettings() {
               aria-disabled={record.pending}
             />
             <span className="queue-meta">
-              After you manually reply in WhatsApp, auto-replies stay paused for this long in that chat.
+              After a manual WhatsApp reply, auto-replies pause for this duration in that chat.
             </span>
           </label>
 
@@ -1566,9 +1566,7 @@ export function LiveSettings() {
             />
           </label>
 
-          <p className="queue-meta">
-            Worker picks up these values live for generation and queue claims. Poll interval is read at worker start, so restart worker after changing it.
-          </p>
+          <p className="queue-meta">Most values apply live. Restart the worker after changing poll interval.</p>
 
           {record.error ? (
             <p className="queue-meta action-inline-error" role="alert">
@@ -1600,7 +1598,7 @@ export function LiveSettings() {
           </label>
 
           <label className="stack compact">
-            <span className="queue-meta">Cadence (hours between check-ins per contact)</span>
+            <span className="queue-meta">Cadence (hours per contact)</span>
             <input
               type="number"
               min={6}
@@ -1638,7 +1636,7 @@ export function LiveSettings() {
           </label>
 
           <label className="stack compact">
-            <span className="queue-meta">Predefined contacts (one WhatsApp JID per line)</span>
+            <span className="queue-meta">Fixed contacts (one WhatsApp JID per line)</span>
             <select
               value=""
               onChange={(event) => {
@@ -1706,7 +1704,7 @@ export function LiveSettings() {
               disabled={record.pending}
               aria-disabled={record.pending}
             />
-            <span className="queue-meta">Use {"{{name}}"} for contact name and optional {"{{icebreaker}}"} placeholder.</span>
+            <span className="queue-meta">Supports {"{{name}}"} and optional {"{{icebreaker}}"}.</span>
           </label>
         </div>
       </article>
@@ -1789,7 +1787,7 @@ export function LiveSettings() {
               disabled={record.pending || !draft.statusBuilderEnabled}
               aria-disabled={record.pending || !draft.statusBuilderEnabled}
             />
-            <span className="queue-meta">Lower means more AI meme-image statuses. Higher means more text statuses.</span>
+            <span className="queue-meta">Lower = more meme-image statuses; higher = more text statuses.</span>
           </label>
 
           <label className="stack compact">
@@ -1811,7 +1809,7 @@ export function LiveSettings() {
               disabled={record.pending || !draft.statusBuilderEnabled}
               aria-disabled={record.pending || !draft.statusBuilderEnabled}
             />
-            <span className="queue-meta">Only this sampled share of auto-statuses is staged for manual approval.</span>
+            <span className="queue-meta">Sampled share of auto-statuses routed to manual approval.</span>
           </label>
 
           <label className="stack compact">
@@ -1834,7 +1832,7 @@ export function LiveSettings() {
           </label>
 
           <label className="stack compact">
-            <span className="queue-meta">Optional fixed audience JIDs (leave empty to auto-pick active contacts)</span>
+            <span className="queue-meta">Fixed audience JIDs (optional; leave empty to auto-pick active contacts)</span>
             <select
               value=""
               onChange={(event) => {
@@ -1887,10 +1885,6 @@ export function LiveSettings() {
               </div>
             ) : null}
           </label>
-
-          <p className="queue-meta">
-            The builder learns trend topics from recent inbound chats, segments by relationship mix, then alternates text and meme statuses.
-          </p>
         </div>
       </article>
 
@@ -1901,7 +1895,7 @@ export function LiveSettings() {
         ) : profiles.length > 0 ? (
           <div className="stack compact">
             <div className="personality-config-block">
-              <p className="queue-meta">These profiles are global and apply across conversations.</p>
+              <p className="queue-meta">Profiles are global across all conversations.</p>
               <label className="setup-input-group">
                 <span className="queue-meta">Profile to Edit</span>
                 <select value={selectedEditorSlug} onChange={(event) => setEditorSlug(event.target.value)}>
@@ -2011,7 +2005,7 @@ export function LiveSettings() {
 
       <article className="panel-card">
         <h3>Media Library</h3>
-        <p className="queue-meta">Upload curated sticker and meme assets for outbound policy use.</p>
+        <p className="queue-meta">Upload sticker and meme assets for outbound use.</p>
         <div className="stack compact">
           <label className="setup-input-group">
             <span className="queue-meta">Kind</span>

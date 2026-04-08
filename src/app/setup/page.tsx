@@ -6,7 +6,7 @@ export default async function SetupPage() {
   const convexUrl = getConvexUrl();
 
   return (
-    <DashboardPage title="Setup Wizard" subtitle="Pair WhatsApp, verify connection, and get the worker ready.">
+    <DashboardPage title="Setup Wizard" subtitle="Pair WhatsApp and verify the worker connection.">
       <SetupWizard realtimeEnabled={Boolean(convexUrl)} />
     </DashboardPage>
   );

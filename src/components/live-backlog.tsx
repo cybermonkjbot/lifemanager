@@ -391,10 +391,10 @@ function BacklogContent() {
     <section className="panel-card">
       <ActionNotices notices={notices} onDismiss={dismissNotice} />
       <div className="backlog-intro">
-        <p className="backlog-intro-title">Draft style guide</p>
+        <p className="backlog-intro-title">Draft types</p>
         <p className="queue-meta">
           <strong>Reply Draft</strong> answers the latest unresolved message. <strong>Reconnect Draft</strong>{" "}
-          opens with a warm check-in for stale threads. Both create pending drafts for review before sending.
+          starts with a warm check-in for stale threads. Both are queued for review before sending.
         </p>
       </div>
       <div className="backlog-toolbar">

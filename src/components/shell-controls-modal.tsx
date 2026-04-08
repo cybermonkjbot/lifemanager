@@ -22,7 +22,7 @@ export function ShellControlsModal({ realtimeEnabled, fallbackPaused }: ShellCon
         open={open}
         onClose={() => setOpen(false)}
         title="Runtime Controls"
-        description="Pause or resume autonomy and manage worker actions without crowding the active view."
+        description="Pause or resume autonomy and manage worker actions."
       >
         <AutonomyControls realtimeEnabled={realtimeEnabled} fallbackPaused={fallbackPaused} />
       </UIModal>

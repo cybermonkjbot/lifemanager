@@ -374,10 +374,9 @@ function SetupWizardContent({
     <section className="setup-wizard" aria-busy={anyPending}>
       <div className="setup-wizard-card">
         <ActionNotices notices={notices} onDismiss={dismissNotice} />
-        <p className="queue-meta">Wizard Status</p>
         <h3>WhatsApp Connection Setup</h3>
         <p className="queue-body">
-          Use this wizard to pair WhatsApp and persist credentials for the worker. If QR keeps dropping, switch to pairing code mode.
+          Pair WhatsApp and persist worker credentials. If QR drops repeatedly, switch to pairing code mode.
         </p>
 
         <div className="setup-status-row">

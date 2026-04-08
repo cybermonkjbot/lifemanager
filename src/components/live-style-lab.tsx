@@ -540,7 +540,7 @@ function StyleLabContent() {
       <article className="panel-card">
         <h3>Persona Pack</h3>
         <p className="queue-meta">
-          Install or re-apply a persona pack. The active pack is used only when the thread personality matches its allowed profiles.
+          Install or re-apply a persona pack. Active packs run only on matching thread profiles.
         </p>
         <div className="stack">
           {personaPacks === undefined ? (

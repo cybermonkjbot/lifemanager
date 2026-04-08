@@ -374,8 +374,8 @@ export function LiveTools() {
     <section className="panel-grid two-col">
       <article className="panel-card">
         <ActionNotices notices={notices} onDismiss={dismissNotice} />
-        <h3>Tool Playground Inputs</h3>
-        <p className="queue-meta">Set shared inputs, then run any tool. Results stay visible per tool.</p>
+        <h3>Shared Inputs</h3>
+        <p className="queue-meta">Set common inputs once, then run any tool.</p>
 
         <div className="stack compact" style={{ marginTop: 10 }}>
           <label className="setup-input-group">
@@ -447,7 +447,7 @@ export function LiveTools() {
 
       <article className="panel-card">
         <h3>Tool Router</h3>
-        <p className="queue-meta">Runs `tool_router.plan` with current task and optional thread context.</p>
+        <p className="queue-meta">Plan tool usage for the current task and thread context.</p>
         <div className="queue-actions">
           <button type="button" className="btn btn-primary" onClick={runToolRouter} disabled={routerRecord.pending}>
             {routerRecord.pending ? "Running..." : "Run tool_router.plan"}
@@ -561,7 +561,7 @@ export function LiveTools() {
 
       <article className="panel-card">
         <h3>History Backfill</h3>
-        <p className="queue-meta">Runs `history_backfill.import` for WhatsApp export text or preloaded history snippets.</p>
+        <p className="queue-meta">Import WhatsApp export text or preloaded history snippets.</p>
 
         <label className="setup-input-group">
           <span className="queue-meta">Thread JID</span>

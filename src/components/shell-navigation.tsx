@@ -51,7 +51,7 @@ export function ShellNavigation({ items }: ShellNavigationProps) {
           })}
         </div>
         <button type="button" className="btn btn-ghost" onClick={() => setWorkspaceOpen(true)}>
-          Workspace
+          More
         </button>
       </div>
 
@@ -59,7 +59,7 @@ export function ShellNavigation({ items }: ShellNavigationProps) {
         open={workspaceOpen}
         onClose={() => setWorkspaceOpen(false)}
         title="All Workspaces"
-        description="Use tabs for primary flows and open any secondary workspace from here."
+        description="Primary tabs stay on top; all sections are listed here."
       >
         <div className="workspace-modal-list">
           {[...primaryItems, ...secondaryItems].map((item) => {

@@ -9,7 +9,7 @@ export default async function ConversationsPage({
   const params = await searchParams;
 
   return (
-    <DashboardPage title="Conversations" subtitle="Read full context and inspect generated replies.">
+    <DashboardPage title="Conversations" subtitle="Read thread history and inspect generated replies.">
       <LiveConversations initialThreadId={params.threadId} />
     </DashboardPage>
   );

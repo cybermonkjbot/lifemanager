@@ -3,7 +3,7 @@ import { LiveBacklog } from "@/components/live-backlog";
 
 export default async function BacklogPage() {
   return (
-    <DashboardPage title="Unread Backlog" subtitle="Reach back out to unresolved messages, rank by importance, and restart stale threads.">
+    <DashboardPage title="Unread Backlog" subtitle="Triage unresolved threads, rank priority, and draft reconnect openers.">
       <LiveBacklog />
     </DashboardPage>
   );
