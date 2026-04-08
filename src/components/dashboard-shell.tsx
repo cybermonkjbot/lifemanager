@@ -28,12 +28,6 @@ const navItems = [
     primary: true,
   },
   {
-    href: "/tools",
-    label: "Tool Playground",
-    description: "Run and inspect all chat-context tools with live thread data.",
-    primary: true,
-  },
-  {
     href: "/media",
     label: "Media",
     description: "Unified gallery for stickers and all captured message media.",
