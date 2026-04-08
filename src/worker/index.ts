@@ -68,6 +68,15 @@ import {
   shouldUseLaughReactionOnly,
 } from "./status-policy";
 import {
+  buildPdfAwareInboundText,
+  buildPdfReplyPolicyInstruction,
+  describePdfContextForLog,
+  enforcePdfReplyShape,
+  extractPdfTextContext,
+  isPdfInboundDocument,
+  type PdfTextContext,
+} from "./pdf";
+import {
   evaluateMemeTimingGate,
   evaluateProfessionalMemeGuard,
   resolveMemeAssetWithFallback,
@@ -2530,6 +2539,7 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
       const parsed = parseInboundMessage(message.message as Parameters<typeof parseInboundMessage>[0]);
       let effectiveParsed: ParsedInboundMessage = parsed;
       let audioTranscription: WhisperTranscriptionResult | null = null;
+      let pdfContext: PdfTextContext | null = null;
       const rawThreadJid = getThreadJid(message.key as Parameters<typeof getThreadJid>[0]);
       const senderJid = getSenderJid(message.key as Parameters<typeof getSenderJid>[0]);
       const isStatusBroadcast = rawThreadJid === "status@broadcast";
@@ -2698,6 +2708,53 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
               eventType: "inbound.audio.transcription_error",
               threadId: ingest.threadId as Id<"threads">,
               detail: `${audioKind} · ${duration} · ${compactLogText(audioTranscription.error, 260)}`,
+          })
+          .catch(() => undefined);
+        }
+      }
+
+      if (isPdfInboundDocument(parsed)) {
+        try {
+          const mediaBytes = await downloadMediaMessage(
+            message as Parameters<typeof downloadMediaMessage>[0],
+            "buffer",
+            {},
+            {
+              reuploadRequest: (msg) => sock.updateMediaMessage(msg),
+              logger,
+            },
+          );
+          pdfContext = await extractPdfTextContext({
+            pdfBytes: Buffer.from(mediaBytes),
+            fileName: parsed.fileName,
+            mimeType: parsed.mimeType,
+          });
+          await convex
+            .mutation(convexRefs.systemRecordEvent, {
+              source: "worker",
+              eventType: "inbound.pdf.processed",
+              threadId: ingest.threadId as Id<"threads">,
+              detail: describePdfContextForLog(pdfContext),
+            })
+            .catch(() => undefined);
+        } catch (error) {
+          const err = error instanceof Error ? error.message : String(error);
+          pdfContext = {
+            status: "error",
+            error: err,
+            text: "",
+            excerpt: "",
+            wordCount: 0,
+            isShort: false,
+            fileName: parsed.fileName,
+            mimeType: parsed.mimeType,
+          };
+          await convex
+            .mutation(convexRefs.systemRecordEvent, {
+              source: "worker",
+              eventType: "inbound.pdf.processed",
+              threadId: ingest.threadId as Id<"threads">,
+              detail: describePdfContextForLog(pdfContext),
             })
             .catch(() => undefined);
         }
@@ -2752,6 +2809,15 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
         typingMinMs: runtimeSettings?.humanTypingMinMs,
         typingMaxMs: runtimeSettings?.humanTypingMaxMs,
       };
+      const pdfReplyPolicyInstruction = pdfContext ? buildPdfReplyPolicyInstruction(pdfContext) : "";
+      const runtimeAiConfigForReply = pdfReplyPolicyInstruction
+        ? {
+            ...runtimeAiConfig,
+            replyPolicyInstruction: [runtimeAiConfig.replyPolicyInstruction || "", pdfReplyPolicyInstruction]
+              .filter(Boolean)
+              .join("\n"),
+          }
+        : runtimeAiConfig;
       let visualAnalysisPromise: Promise<Awaited<ReturnType<typeof describeInboundImageWithFallback>> | null> | null = null;
       const getVisualAnalysis = async () => {
         if (effectiveParsed.kind !== "image" && effectiveParsed.kind !== "sticker") {
@@ -3004,10 +3070,11 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
       }
 
       const forceNightWindDownReply = Boolean(nightWindDownUntil);
+      const forcePdfTextReply = Boolean(pdfContext);
       let personalitySetting: PersonalityThreadSetting = null;
       let threadContextForPolicy: ThreadContextSnapshot = null;
       let outboundPolicy: OutboundPolicy;
-      if (forceNightWindDownReply) {
+      if (forceNightWindDownReply || forcePdfTextReply) {
         personalitySetting = (await convex.query(convexRefs.personalityGetThreadSetting, {
           threadId: ingest.threadId,
         })) as PersonalityThreadSetting;
@@ -3110,6 +3177,13 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
             : `${effectiveParsed.text}\n\nVisual analysis: Media received, but visual details could not be analyzed.`;
         }
       }
+      if (pdfContext && shouldGenerateAiText) {
+        inboundTextForAi = buildPdfAwareInboundText({
+          fallbackInboundText: inboundTextForAi,
+          pdfContext,
+          caption: effectiveParsed.kind === "document" ? effectiveParsed.caption : undefined,
+        });
+      }
 
       if (shouldGenerateAiText && threadContext) {
         const olderContextDecision = decideOlderContextUsage({
@@ -3210,7 +3284,7 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
                   vibeNotes: threadContext.grounding.vibeNotes || "",
                 }
               : undefined,
-            runtime: runtimeAiConfig,
+            runtime: runtimeAiConfigForReply,
           })
         : null;
 
@@ -3274,7 +3348,7 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
                   vibeNotes: threadContext.grounding.vibeNotes || "",
                 }
               : undefined,
-            runtime: runtimeAiConfig,
+            runtime: runtimeAiConfigForReply,
           });
 
           if (!rewritten.guardrailBlocked) {
@@ -3376,6 +3450,24 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
           });
           return;
         }
+      }
+      if (ai && pdfContext) {
+        const shapedReplyText = enforcePdfReplyShape(ai.text, pdfContext);
+        if (shapedReplyText !== ai.text) {
+          await convex
+            .mutation(convexRefs.systemRecordEvent, {
+              source: "ai",
+              eventType: "ai.reply.pdf_shape_enforced",
+              threadId: ingest.threadId,
+              toolRunId,
+              detail: compactLogText(`Adjusted PDF reply shape to: ${shapedReplyText}`, 240),
+            })
+            .catch(() => undefined);
+        }
+        ai = {
+          ...ai,
+          text: shapedReplyText,
+        };
       }
 
       const rawTextForDraft =

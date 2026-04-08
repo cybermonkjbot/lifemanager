@@ -61,6 +61,7 @@ export default defineSchema({
     .index("by_isStatus_and_messageAt", ["isStatus", "messageAt"])
     .index("by_mediaAssetId", ["mediaAssetId"])
     .index("by_createdAt", ["createdAt"])
+    .index("by_messageType_and_createdAt", ["messageType", "createdAt"])
     .searchIndex("search_text", {
       searchField: "text",
       filterFields: ["threadId", "direction", "origin"],
