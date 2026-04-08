@@ -1,4 +1,5 @@
 import { v } from "convex/values";
+import { makeFunctionReference } from "convex/server";
 import { internal } from "./_generated/api";
 import { internalMutation, mutation, query } from "./_generated/server";
 import { detectFutureCommitment, hasRecentFollowupDuplicate } from "./lib/commitments";
@@ -19,6 +20,7 @@ import {
 
 const UNANSWERED_OUTBOUND_RECHECK_MS = 5 * 60 * 1000;
 const UNANSWERED_OUTBOUND_SCAN_LIMIT = 25;
+const refStyleLearnFromOutboundEmoji = makeFunctionReference<"mutation">("style:learnFromOutboundEmoji");
 
 function isWithinQuietHours(hour: number, startHour: number, endHour: number) {
   if (startHour === endHour) {
@@ -71,6 +73,13 @@ function normalizeTimestampMs(raw: number | undefined, fallbackMs: number) {
   return parsed;
 }
 
+function toStyleEmojiSendKind(messageType: string | undefined) {
+  if (messageType === "text" || messageType === "reaction" || messageType === "sticker" || messageType === "meme") {
+    return messageType;
+  }
+  return undefined;
+}
+
 export const claimDue = mutation({
   args: {
     workerId: v.string(),
@@ -119,6 +128,7 @@ export const claimDue = mutation({
       statusTrendTheme?: string;
       statusDemographicHint?: string;
       statusFormat?: "text" | "meme";
+      statusReviewRequired?: boolean;
       reactionEmoji?: string;
       reactionTargetWhatsAppMessageId?: string;
       preReactionEmoji?: string;
@@ -368,6 +378,7 @@ export const claimDue = mutation({
         statusTrendTheme: item.statusTrendTheme,
         statusDemographicHint: item.statusDemographicHint,
         statusFormat: item.statusFormat,
+        statusReviewRequired: item.statusReviewRequired,
         reactionEmoji: item.reactionEmoji,
         reactionTargetWhatsAppMessageId: item.reactionTargetWhatsAppMessageId,
         preReactionEmoji: item.preReactionEmoji,
@@ -527,6 +538,17 @@ export const suppressForManualIntervention = mutation({
       });
       recordedMessageId = inserted;
     }
+
+    await ctx
+      .runMutation(refStyleLearnFromOutboundEmoji, {
+        threadId: thread._id,
+        sendKind: toStyleEmojiSendKind(args.messageType),
+        text: args.text,
+        mediaCaption: args.mediaCaption,
+        reactionEmoji: args.reactionEmoji,
+        messageAt,
+      })
+      .catch(() => undefined);
 
     const pending = await ctx.db
       .query("outbox")
@@ -709,6 +731,53 @@ export const hydrateAiStatus = mutation({
   },
 });
 
+export const stageStatusReview = mutation({
+  args: {
+    outboxId: v.id("outbox"),
+    reason: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const outbox = await ctx.db.get(args.outboxId);
+    if (!outbox) {
+      return null;
+    }
+
+    const now = Date.now();
+    const reason = (args.reason?.trim() || "Auto status sampled for manual review before send.").slice(0, 280);
+
+    await ctx.db.patch(outbox._id, {
+      status: "failed",
+      error: reason,
+      workerId: undefined,
+      leaseExpiresAt: undefined,
+      updatedAt: now,
+    });
+
+    const draft = await ctx.db.get(outbox.draftId);
+    if (draft && draft.status !== "sent" && draft.status !== "rejected") {
+      await ctx.db.patch(draft._id, {
+        status: "pending",
+        updatedAt: now,
+      });
+    }
+
+    await ctx.db.insert("systemEvents", {
+      source: "worker",
+      eventType: "status_builder.staged_manual_review",
+      threadId: outbox.threadId,
+      outboxId: outbox._id,
+      detail: reason,
+      createdAt: now,
+    });
+
+    await ctx.scheduler.runAfter(0, internal.backlog.refreshThread, {
+      threadId: outbox.threadId,
+    });
+
+    return outbox._id;
+  },
+});
+
 export const rewriteClaimedMessage = mutation({
   args: {
     outboxId: v.id("outbox"),
@@ -798,7 +867,7 @@ export const markSent = mutation({
       isStatus: item.isStatusPost || sourceMessage?.isStatus ? true : undefined,
       senderJid: "me",
       whatsappMessageId: args.whatsappMessageId,
-      toolRunId: item.toolRunId,
+      toolRunId: item.toolRunId || `outbox:${item._id}`,
       text: item.messageText,
       messageType: item.sendKind || "text",
       reactionEmoji: item.reactionEmoji,

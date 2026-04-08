@@ -65,6 +65,7 @@ export type AppConfig = {
   statusBuilderCadenceHours: number;
   statusBuilderDailyMaxPosts: number;
   statusBuilderTextPostRatio: number;
+  statusBuilderReviewRatio: number;
   statusBuilderAudienceJids: string[];
   statusBuilderAudienceSampleSize: number;
 };
@@ -132,6 +133,7 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
   statusBuilderCadenceHours: 8,
   statusBuilderDailyMaxPosts: 3,
   statusBuilderTextPostRatio: 0.4,
+  statusBuilderReviewRatio: 0.35,
   statusBuilderAudienceJids: [],
   statusBuilderAudienceSampleSize: 80,
 };
@@ -328,6 +330,11 @@ export async function getConfig(ctx: QueryCtx | MutationCtx): Promise<AppConfig>
     ),
     statusBuilderTextPostRatio: clamp(
       parseNumber(map.get("statusBuilderTextPostRatio"), DEFAULT_APP_CONFIG.statusBuilderTextPostRatio),
+      0,
+      1,
+    ),
+    statusBuilderReviewRatio: clamp(
+      parseNumber(map.get("statusBuilderReviewRatio"), DEFAULT_APP_CONFIG.statusBuilderReviewRatio),
       0,
       1,
     ),

@@ -78,7 +78,12 @@ function sleep(ms: number) {
 function fallbackLinesFromCandidates(candidates: LexicalHit[], limit: number) {
   return candidates
     .slice(0, limit)
-    .map((hit) => `${hit.direction === "inbound" ? "Them" : "Me"}: ${hit.text}`.replace(/\s+/g, " ").trim())
+    .map((hit) =>
+      `${hit.direction === "inbound" ? "Them" : "Me"}: ${hit.text}`
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 320),
+    )
     .filter(Boolean);
 }
 
@@ -190,132 +195,160 @@ export async function buildHistorySearchOverride(args: {
   threadId: string;
   query: string;
   limit?: number;
+  fallbackHistoryLines?: string[];
 }) {
   const limit = Math.round(Math.max(2, Math.min(args.limit ?? 8, 20)));
-  const lexicalLimit = Math.round(Math.max(limit * 2, Math.min(limit * 6, 120)));
-  const lexical = await runLexicalSearch({
-    convex: args.convex,
-    threadId: args.threadId,
-    query: args.query,
-    limit: lexicalLimit,
-    lexicalLimit,
-  });
+  const fallbackRecent = (args.fallbackHistoryLines || [])
+    .slice(-limit)
+    .map((line) => line.replace(/\s+/g, " ").trim().slice(0, 320))
+    .filter(Boolean);
+  try {
+    const lexicalLimit = Math.round(Math.max(limit * 2, Math.min(limit * 6, 120)));
+    const lexical = await runLexicalSearch({
+      convex: args.convex,
+      threadId: args.threadId,
+      query: args.query,
+      limit: lexicalLimit,
+      lexicalLimit,
+    });
 
-  const lexicalCandidates = lexical.hits.slice(0, lexicalLimit);
-  if (lexicalCandidates.length === 0) {
-    return {
-      override: {
-        lines: [],
-        candidateCount: 0,
-        semanticRerankCount: 0,
-        confidence: 0,
-        retrievalStage: "lexical" as const,
-      },
-      diagnostics: {
-        lexicalCandidates: 0,
-        semanticRerankCount: 0,
-        degraded: false,
-        reason: "",
-      },
-    };
-  }
+    const lexicalCandidates = lexical.hits.slice(0, lexicalLimit);
+    if (lexicalCandidates.length === 0) {
+      return {
+        override: {
+          lines: fallbackRecent,
+          candidateCount: 0,
+          semanticRerankCount: 0,
+          confidence: 0,
+          retrievalStage: "lexical" as const,
+        },
+        diagnostics: {
+          lexicalCandidates: 0,
+          semanticRerankCount: 0,
+          degraded: fallbackRecent.length > 0,
+          reason: fallbackRecent.length > 0 ? "Using recent context fallback." : "",
+        },
+      };
+    }
 
-  const modelVersion = embeddingModelVersion();
-  const candidateMessageIds = lexicalCandidates.map((item) => item.messageId as Id<"messages">);
-  const existingRows = (await args.convex.query(convexRefs.contextGetMessageEmbeddings, {
-    messageIds: candidateMessageIds,
-    modelVersion,
-  })) as EmbeddingRow[];
-  const existingByMessage = new Map(existingRows.map((row) => [row.messageId, row]));
-  const missing = lexicalCandidates.filter((item) => !existingByMessage.has(item.messageId));
-
-  const queryEmbedding = await embedTexts([args.query]);
-  const missingEmbeddings = missing.length > 0 ? await embedTexts(missing.map((item) => item.text || item.snippet || "")) : null;
-
-  if (missingEmbeddings && !missingEmbeddings.degraded && missingEmbeddings.vectors.length === missing.length) {
-    const entries = missing.map((item, index) => ({
-      threadId: args.threadId as Id<"threads">,
-      messageId: item.messageId as Id<"messages">,
+    const modelVersion = embeddingModelVersion();
+    const candidateMessageIds = lexicalCandidates.map((item) => item.messageId as Id<"messages">);
+    const existingRows = (await args.convex.query(convexRefs.contextGetMessageEmbeddings, {
+      messageIds: candidateMessageIds,
       modelVersion,
-      contentHash: embeddingContentHash(item.text || ""),
-      vector: missingEmbeddings.vectors[index] || [],
-    }));
-    if (entries.length > 0) {
-      await args.convex.mutation(convexRefs.contextUpsertMessageEmbeddings, {
-        entries,
-      });
-      for (let index = 0; index < entries.length; index += 1) {
-        const entry = entries[index];
-        existingByMessage.set(entry.messageId, {
-          messageId: entry.messageId,
-          modelVersion: entry.modelVersion,
-          contentHash: entry.contentHash,
-          vector: entry.vector,
+    })) as EmbeddingRow[];
+    const existingByMessage = new Map(existingRows.map((row) => [row.messageId, row]));
+    const missing = lexicalCandidates.filter((item) => !existingByMessage.has(item.messageId));
+
+    const queryEmbedding = await embedTexts([args.query]);
+    const missingEmbeddings = missing.length > 0 ? await embedTexts(missing.map((item) => item.text || item.snippet || "")) : null;
+
+    if (missingEmbeddings && !missingEmbeddings.degraded && missingEmbeddings.vectors.length === missing.length) {
+      const entries = missing.map((item, index) => ({
+        threadId: args.threadId as Id<"threads">,
+        messageId: item.messageId as Id<"messages">,
+        modelVersion,
+        contentHash: embeddingContentHash(item.text || ""),
+        vector: missingEmbeddings.vectors[index] || [],
+      }));
+      if (entries.length > 0) {
+        await args.convex.mutation(convexRefs.contextUpsertMessageEmbeddings, {
+          entries,
         });
+        for (let index = 0; index < entries.length; index += 1) {
+          const entry = entries[index];
+          existingByMessage.set(entry.messageId, {
+            messageId: entry.messageId,
+            modelVersion: entry.modelVersion,
+            contentHash: entry.contentHash,
+            vector: entry.vector,
+          });
+        }
       }
     }
-  }
 
-  const canSemanticRerank =
-    !queryEmbedding.degraded &&
-    queryEmbedding.vectors.length === 1 &&
-    lexicalCandidates.some((item) => (existingByMessage.get(item.messageId)?.vector || []).length > 0);
+    const canSemanticRerank =
+      !queryEmbedding.degraded &&
+      queryEmbedding.vectors.length === 1 &&
+      lexicalCandidates.some((item) => (existingByMessage.get(item.messageId)?.vector || []).length > 0);
 
-  if (!canSemanticRerank) {
-    const lines = fallbackLinesFromCandidates(lexicalCandidates, limit);
-    const confidence = clamp((lexicalCandidates[0]?.score || lexicalCandidates[0]?.lexicalScore || 0), 0, 1);
+    if (!canSemanticRerank) {
+      const lines = fallbackLinesFromCandidates(lexicalCandidates, limit);
+      const confidence = clamp((lexicalCandidates[0]?.score || lexicalCandidates[0]?.lexicalScore || 0), 0, 1);
+      return {
+        override: {
+          lines,
+          candidateCount: lexical.candidateCount,
+          semanticRerankCount: 0,
+          confidence,
+          retrievalStage: "semantic_fallback" as const,
+        },
+        diagnostics: {
+          lexicalCandidates: lexicalCandidates.length,
+          semanticRerankCount: 0,
+          degraded: true,
+          reason: queryEmbedding.degraded ? queryEmbedding.reason : missingEmbeddings?.reason || "No semantic vectors available.",
+        },
+      };
+    }
+
+    const queryVector = queryEmbedding.vectors[0] || [];
+    const reranked = lexicalCandidates
+      .map((item) => {
+        const row = existingByMessage.get(item.messageId);
+        const semantic = row?.vector?.length ? clamp((cosineSimilarity(queryVector, row.vector) + 1) / 2, 0, 1) : 0;
+        const lexicalScore = clamp(item.lexicalScore ?? item.score ?? 0, 0, 1);
+        const combined = lexicalScore * 0.45 + semantic * 0.55;
+        return {
+          item,
+          semantic,
+          lexicalScore,
+          combined,
+        };
+      })
+      .sort((a, b) => b.combined - a.combined || b.item.messageAt - a.item.messageAt)
+      .slice(0, limit);
+
+    const lines = reranked.map((row) =>
+      `${row.item.direction === "inbound" ? "Them" : "Me"}: ${row.item.text}`
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 320),
+    );
+    const confidence = clamp(reranked[0]?.combined || 0, 0, 1);
+
     return {
       override: {
         lines,
         candidateCount: lexical.candidateCount,
-        semanticRerankCount: 0,
+        semanticRerankCount: reranked.length,
         confidence,
-        retrievalStage: "semantic_fallback" as const,
+        retrievalStage: "semantic" as const,
       },
       diagnostics: {
         lexicalCandidates: lexicalCandidates.length,
+        semanticRerankCount: reranked.length,
+        degraded: false,
+        reason: "",
+      },
+    };
+  } catch (error) {
+    return {
+      override: {
+        lines: fallbackRecent,
+        candidateCount: 0,
+        semanticRerankCount: 0,
+        confidence: 0,
+        retrievalStage: "semantic_fallback" as const,
+      },
+      diagnostics: {
+        lexicalCandidates: 0,
         semanticRerankCount: 0,
         degraded: true,
-        reason: queryEmbedding.degraded ? queryEmbedding.reason : missingEmbeddings?.reason || "No semantic vectors available.",
+        reason: error instanceof Error ? error.message : String(error),
       },
     };
   }
-
-  const queryVector = queryEmbedding.vectors[0] || [];
-  const reranked = lexicalCandidates
-    .map((item) => {
-      const row = existingByMessage.get(item.messageId);
-      const semantic = row?.vector?.length ? clamp((cosineSimilarity(queryVector, row.vector) + 1) / 2, 0, 1) : 0;
-      const lexicalScore = clamp(item.lexicalScore ?? item.score ?? 0, 0, 1);
-      const combined = lexicalScore * 0.45 + semantic * 0.55;
-      return {
-        item,
-        semantic,
-        lexicalScore,
-        combined,
-      };
-    })
-    .sort((a, b) => b.combined - a.combined || b.item.messageAt - a.item.messageAt)
-    .slice(0, limit);
-
-  const lines = reranked.map((row) => `${row.item.direction === "inbound" ? "Them" : "Me"}: ${row.item.text}`.replace(/\s+/g, " ").trim());
-  const confidence = clamp(reranked[0]?.combined || 0, 0, 1);
-
-  return {
-    override: {
-      lines,
-      candidateCount: lexical.candidateCount,
-      semanticRerankCount: reranked.length,
-      confidence,
-      retrievalStage: "semantic" as const,
-    },
-    diagnostics: {
-      lexicalCandidates: lexicalCandidates.length,
-      semanticRerankCount: reranked.length,
-      degraded: false,
-      reason: "",
-    },
-  };
 }
 
 export function readHistoryFetchConfigFromEnv(): HistoryFetchConfig {

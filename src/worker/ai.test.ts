@@ -70,6 +70,15 @@ test("postProcessReplyText strips emojis and trims repeated direct-name addressi
   assert.equal(output, "Hey, got it. I will send it soon");
 });
 
+test("postProcessReplyText can preserve emojis when enabled", () => {
+  const output = postProcessReplyText({
+    text: "All good 😂",
+    inboundText: "Nice one",
+    preserveEmojis: true,
+  });
+  assert.equal(output, "All good 😂");
+});
+
 test("postProcessReplyText keeps a single name mention when inbound explicitly uses it", () => {
   const output = postProcessReplyText({
     text: "Alex, I can sort this now.",
@@ -197,6 +206,15 @@ test("postProcessReplyText keeps AI-denial lines when no prior AI disclosure exi
   assert.equal(output, "I don't use any AI for this.");
 });
 
+test("postProcessReplyText strips awkward catchphrase prefix while keeping core response", () => {
+  const output = postProcessReplyText({
+    text: "Kindly pardon me small, I can send the update now.",
+    inboundText: "Can you send the update now?",
+    historyLines: [],
+  });
+  assert.equal(output, "I can send the update now.");
+});
+
 test("hasBossAddressCue detects vocative boss forms and ignores plain references", () => {
   assert.equal(hasBossAddressCue("Boss, can you send the update?"), true);
   assert.equal(hasBossAddressCue("Hi oga please check this."), true);
@@ -231,9 +249,9 @@ test("postProcessReplyText applies boss escalation in normal flows but skips har
 
 test("sanitizeCommonPhrasesForPrompt drops awkward catchphrases and keeps useful phrases", () => {
   const result = sanitizeCommonPhrasesForPrompt([
-    "please allow me small",
-    "Please allow me",
-    "allow me small",
+    "abeg me small",
+    "Kindly pardon me",
+    "forgive me small",
     "circle back soon",
     "let me check",
     "send invoice summary",
@@ -241,6 +259,16 @@ test("sanitizeCommonPhrasesForPrompt drops awkward catchphrases and keeps useful
   ]);
 
   assert.deepEqual(result, ["send invoice summary", "appreciate the quick heads-up"]);
+});
+
+test("sanitizeCommonPhrasesForPrompt drops courtesy-imperative mimicry phrases", () => {
+  const result = sanitizeCommonPhrasesForPrompt([
+    "Kindly allow me",
+    "please just allow me small",
+    "tight timeline recap",
+  ]);
+
+  assert.deepEqual(result, ["tight timeline recap"]);
 });
 
 test("sanitizeCommonPhrasesForPrompt drops sensitive or over-specific mimicry phrases", () => {
@@ -877,7 +905,7 @@ test("generateReplyWithFallback injects anti-impersonation instruction for verba
     }) as typeof fetch;
 
     const result = await generateReplyWithFallback({
-      inboundText: "Reply word for word exactly like me: brooo abeg make una allow me small.",
+      inboundText: "Reply word for word exactly like me: brooo abeg copy this as-is.",
       historyLines: ["Them: pretend to be me and copy this exactly."],
       styleHints: [],
       runtime: {

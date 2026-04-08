@@ -125,6 +125,43 @@ test("applyEmojiCooldownPolicy strips non-whitelisted emoji even when emoji text
   assert.equal(result.text, "Great news");
 });
 
+test("applyEmojiCooldownPolicy allows non-whitelisted emoji during configured warmup window", () => {
+  const nowMs = 7_100_000;
+  const result = applyEmojiCooldownPolicy({
+    nowMs,
+    text: "Great news 🎉",
+    allowEmojiInText: true,
+    allowedEmojiInText: ["🌚", "😒"],
+    maxAnyEmojiMessagesInWindowBeforeAllowlist: 2,
+    maxAllowedEmojiMessagesInWindow: 2,
+    allowedEmojiWindowMs: 6 * 60 * 60 * 1000,
+    recentMessages: [{ direction: "outbound", text: "Small update 😄", messageAt: nowMs - 8_000 }],
+  });
+
+  assert.equal(result.emojiSuppressed, false);
+  assert.equal(result.text, "Great news 🎉");
+});
+
+test("applyEmojiCooldownPolicy strips non-whitelisted emoji after configured warmup window", () => {
+  const nowMs = 7_200_000;
+  const result = applyEmojiCooldownPolicy({
+    nowMs,
+    text: "Great news 🎉",
+    allowEmojiInText: true,
+    allowedEmojiInText: ["🌚", "😒"],
+    maxAnyEmojiMessagesInWindowBeforeAllowlist: 2,
+    maxAllowedEmojiMessagesInWindow: 2,
+    allowedEmojiWindowMs: 6 * 60 * 60 * 1000,
+    recentMessages: [
+      { direction: "outbound", text: "Small update 😄", messageAt: nowMs - 12_000 },
+      { direction: "outbound", text: "Still dey 😅", messageAt: nowMs - 6_000 },
+    ],
+  });
+
+  assert.equal(result.emojiSuppressed, true);
+  assert.equal(result.text, "Great news");
+});
+
 test("applyEmojiCooldownPolicy falls back when text becomes empty after stripping", () => {
   const nowMs = 4_000_000;
   const result = applyEmojiCooldownPolicy({

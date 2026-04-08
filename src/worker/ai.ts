@@ -102,6 +102,8 @@ type StyleProfileContext = {
   punctuationStyle?: string[];
   humorNotes?: string[];
   spellingNotes?: string[];
+  learnedEmojiAllowlist?: string[];
+  learnedEmojiCategoryHints?: string[];
 };
 
 type PersonalityContext = {
@@ -260,7 +262,7 @@ const LOW_VALUE_GENERIC_PHRASE_PATTERNS = [
   /\bcircle back (?:soon|later|shortly)\b/i,
   /\b(?:update|details?) (?:soon|shortly)\b/i,
   /\blet me (?:sort|check|look into|get back)\b/i,
-  /\bplease allow me small\b/i,
+  /\b(?:allow|pardon)\s+me\s+small\b/i,
 ];
 const SALES_INVENTORY_CLAIM_PATTERNS = [
   /\bi\s+(?:have|got|get)\s+(?:small\s+)?stock\b/i,
@@ -292,7 +294,10 @@ const ROYAL_JOKE_TERMS = new Set(["king", "queen"]);
 const BLOCKED_REFUSAL_PATTERNS = [/\bi(?:'|’)m sorry,\s*but\s*i cannot assist with that request\.?\b/i];
 const BLOCKED_REFUSAL_ERROR = "Blocked refusal phrase detected.";
 const BLOCKED_REFUSAL_REPROMPT_LIMIT = 2;
-const AWKWARD_CATCHPHRASE_PATTERNS = [/\bplease allow me\b/i, /\ballow me small\b/i];
+const AWKWARD_CATCHPHRASE_PATTERNS = [
+  /\b(?:please|kindly|abeg)\s+(?:just\s+)?(?:allow|pardon)\s+me(?:\s+small)?\b/i,
+  /\b(?:allow|pardon)\s+me\s+small\b/i,
+];
 const MIMICRY_INJECTION_PATTERNS = [
   /\b(word for word|verbatim|exact(?:ly)?|copy(?:\s+and\s+paste)?)\b/i,
   /\b(reply|respond|say|write)\b[\s\S]{0,60}\b(exact(?:ly)?|verbatim|word for word|copy)\b/i,
@@ -381,6 +386,33 @@ const STOPWORDS = new Set([
   "we",
   "you",
   "your",
+]);
+const MIMICRY_LOW_SIGNAL_TOKENS = new Set([
+  "please",
+  "kindly",
+  "abeg",
+  "allow",
+  "pardon",
+  "me",
+  "small",
+  "just",
+  "okay",
+  "ok",
+  "alright",
+  "noted",
+  "got",
+  "it",
+  "understood",
+  "thanks",
+  "thank",
+  "you",
+  "let",
+  "im",
+  "my",
+  "we",
+  "our",
+  "soon",
+  "later",
 ]);
 
 const DEFAULT_SYSTEM_INSTRUCTION =
@@ -1764,15 +1796,12 @@ function buildPrompt(args: {
       : mimicryLevel >= 0.55
         ? "Use light mirroring of tone and rhythm while keeping wording original and clear."
         : "Use a friendly, clear baseline voice with only minimal mirroring.";
-  const hints = [
+  const hints = sanitizeStyleHintsForPrompt([
     ...args.styleHints,
     ...(args.styleProfile?.humorNotes || []),
     ...(args.styleProfile?.punctuationStyle || []),
     ...(args.styleProfile?.spellingNotes || []),
-  ]
-    .filter(Boolean)
-    .slice(0, 12)
-    .join(", ");
+  ]).join(", ");
   const phrases = sanitizeCommonPhrasesForPrompt(args.styleProfile?.commonPhrases || []).join(", ");
   const personalityIntensity = clamp01(args.personality?.intensity ?? 0.6);
   const personalityLevelInstruction =
@@ -1912,7 +1941,7 @@ function buildPrompt(args: {
       "Never send placeholder lines like 'Sounds good, I'll handle it and update you soon' or 'Got it, I'm on it.'",
       "Mirror style safely: borrow broad tone only, never exact catchphrases or signature phrasing.",
       "Do not imitate private identifiers, unusual typos, punctuation quirks, or language patterns that could feel like impersonation.",
-      "Never use awkward stock phrases like 'please allow me small'.",
+      "Never use awkward stock catchphrases or borrowed signature slogans.",
       "Do not imply you sell anything or hold inventory. Never use claims like 'I have stock', 'I get small stock', 'in stock', 'for sale', or order/promo language.",
       "Avoid gendered address terms (for example bro/sis/king/queen/handsome/beautiful) unless the contact explicitly self-identifies gender in this chat context.",
       soulInstruction,
@@ -2302,9 +2331,11 @@ export function postProcessReplyText(args: {
   historyLines?: string[];
   theirName?: string;
   fallbackText?: string;
+  preserveEmojis?: boolean;
 }) {
   const fallback = (args.fallbackText || "All good.").trim() || "All good.";
-  const withoutEmoji = stripEmojiCharacters(args.text || "");
+  const normalizedInput = normalizeOutboundText(args.text || "");
+  const withoutEmoji = args.preserveEmojis ? normalizedInput : stripEmojiCharacters(normalizedInput);
   const withoutNameOveruse = removeRepeatedDirectNameAddress(withoutEmoji, args.inboundText, args.theirName);
   const pidginMode = detectPidginSignal({
     inboundText: args.inboundText,
@@ -2342,7 +2373,9 @@ export function postProcessReplyText(args: {
     historyLines: args.historyLines || [],
   });
   const withoutGenderedWording = stripGenderedWording(withoutAiContradiction, knownGender, jokeContext);
-  return withoutGenderedWording || fallback;
+  const withoutAwkwardCatchphrase = stripAwkwardCatchphrases(withoutGenderedWording);
+  const finalText = withoutAwkwardCatchphrase || fallback;
+  return hasAwkwardCatchphrase(finalText) ? fallback : finalText;
 }
 
 function containsBlockedRefusalText(text: string) {
@@ -2463,6 +2496,103 @@ function normalizeLineForComparison(text: string) {
     .replace(/[^a-z0-9\s]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function tokenizePlainText(text: string) {
+  return normalizeLineForComparison(text)
+    .split(" ")
+    .map((token) => token.trim())
+    .filter(Boolean);
+}
+
+function hasAwkwardCatchphrase(text: string) {
+  const normalized = normalizeOutboundText(text || "");
+  if (!normalized) {
+    return false;
+  }
+  if (AWKWARD_CATCHPHRASE_PATTERNS.some((pattern) => pattern.test(normalized))) {
+    return true;
+  }
+
+  const tokens = tokenizePlainText(normalized);
+  if (tokens.length === 0) {
+    return false;
+  }
+
+  const startsPolite = tokens[0] === "please" || tokens[0] === "kindly" || tokens[0] === "abeg";
+  const hasAllowLikeVerb = tokens.includes("allow") || tokens.includes("pardon");
+  const hasMe = tokens.includes("me");
+  const hasSmall = tokens.includes("small");
+  return (startsPolite && hasAllowLikeVerb && hasMe) || (hasAllowLikeVerb && hasMe && hasSmall);
+}
+
+function isLowSignalMimicryPhrase(value: string) {
+  const tokens = tokenizePlainText(value);
+  if (tokens.length === 0) {
+    return true;
+  }
+  const contentTokens = tokens.filter(
+    (token) => token.length > 2 && !STOPWORDS.has(token) && !MIMICRY_LOW_SIGNAL_TOKENS.has(token),
+  );
+  if (contentTokens.length === 0) {
+    return true;
+  }
+  if (tokens.length <= 4 && contentTokens.length <= 1 && (tokens.includes("me") || tokens[0] === "please" || tokens[0] === "kindly" || tokens[0] === "abeg")) {
+    return true;
+  }
+  return false;
+}
+
+function sanitizeStyleHintsForPrompt(hints: string[]) {
+  const cleaned: string[] = [];
+  const seen = new Set<string>();
+  for (const rawHint of hints) {
+    const hint = normalizeTraitLikeText(rawHint);
+    if (!hint) {
+      continue;
+    }
+    const key = hint.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+    if (hint.length > 140) {
+      continue;
+    }
+    if (hasAwkwardCatchphrase(hint)) {
+      continue;
+    }
+    if (isLowSignalMimicryPhrase(hint)) {
+      continue;
+    }
+    if (STYLE_MIMICRY_BLOCK_PATTERNS.some((pattern) => pattern.test(hint))) {
+      continue;
+    }
+    seen.add(key);
+    cleaned.push(hint);
+    if (cleaned.length >= 12) {
+      break;
+    }
+  }
+  return cleaned;
+}
+
+function normalizeTraitLikeText(value: string) {
+  return normalizeOutboundText(value || "").replace(/\s+/g, " ").trim();
+}
+
+function stripAwkwardCatchphrases(text: string) {
+  const normalized = normalizeOutboundText(text || "");
+  if (!normalized) {
+    return "";
+  }
+  const stripped = normalized
+    .replace(/\b(?:please|kindly|abeg)\s+(?:just\s+)?(?:allow|pardon)\s+me(?:\s+small)?\b[\s,;:-]*/gi, "")
+    .replace(/\b(?:allow|pardon)\s+me\s+small\b[\s,;:-]*/gi, "")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\s+([,.;:!?])/g, "$1")
+    .replace(/^[,.;:!?-]\s*/, "")
+    .trim();
+  return normalizeOutboundText(stripped);
 }
 
 function keywordJaccardSimilarity(left: string, right: string) {
@@ -2790,6 +2920,9 @@ function isLowValueReply(text: string, inboundText?: string) {
   }
 
   const normalized = text.toLowerCase().replace(/\s+/g, " ").trim();
+  if (hasAwkwardCatchphrase(normalized)) {
+    return true;
+  }
   if (LOW_VALUE_REPLY_PATTERNS.some((pattern) => pattern.test(normalized))) {
     return true;
   }
@@ -2821,7 +2954,7 @@ export function sanitizeCommonPhrasesForPrompt(phrases: string[]) {
   const seen = new Set<string>();
 
   for (const rawPhrase of phrases) {
-    const phrase = rawPhrase.trim().replace(/\s+/g, " ");
+    const phrase = normalizeTraitLikeText(rawPhrase);
     const wordCount = phrase ? phrase.split(/\s+/).length : 0;
     if (!phrase) {
       continue;
@@ -2831,6 +2964,12 @@ export function sanitizeCommonPhrasesForPrompt(phrases: string[]) {
     }
     const normalized = phrase.toLowerCase();
     if (seen.has(normalized)) {
+      continue;
+    }
+    if (hasAwkwardCatchphrase(phrase)) {
+      continue;
+    }
+    if (isLowSignalMimicryPhrase(phrase)) {
       continue;
     }
     if (LOW_VALUE_GENERIC_PHRASE_PATTERNS.some((pattern) => pattern.test(normalized))) {

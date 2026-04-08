@@ -16,6 +16,7 @@ const refPersonalConnectorsSearch = makeFunctionReference<"action">("chatTools:p
 const refReplyStyleGuardrailCheck = makeFunctionReference<"query">("chatTools:replyStyleGuardrailCheck");
 const refPersonalConnectorsInternalSearch = makeFunctionReference<"query">("chatTools:personalConnectorsInternalSearch");
 const refExtractContactMemoryFacts = makeFunctionReference<"mutation">("chatTools:extractContactMemoryFacts");
+const refStyleGetEmojiProfile = makeFunctionReference<"query">("style:getEmojiProfile");
 
 const STOPWORDS = new Set([
   "a",
@@ -68,7 +69,8 @@ const LOW_VALUE_GENERIC_PHRASE_PATTERNS = [
   /\bcircle back (?:soon|later|shortly)\b/i,
   /\b(?:update|details?) (?:soon|shortly)\b/i,
   /\blet me (?:sort|check|look into|get back)\b/i,
-  /\bplease allow me small\b/i,
+  /\b(?:please|kindly|abeg)\s+(?:just\s+)?(?:allow|pardon)\s+me(?:\s+small)?\b/i,
+  /\b(?:allow|pardon)\s+me\s+small\b/i,
 ];
 
 type ThreadRow = Doc<"threads">;
@@ -87,6 +89,17 @@ type MemorySearchHit = {
   overlapScore: number;
   recencyScore: number;
 };
+
+function withEmojiLearningHints<T extends Record<string, unknown>>(
+  profile: T,
+  learnedEmojiProfile: { topEmojis?: string[]; categoryHints?: string[] } | null | undefined,
+) {
+  return {
+    ...profile,
+    learnedEmojiAllowlist: (learnedEmojiProfile?.topEmojis || []).slice(0, 12),
+    learnedEmojiCategoryHints: (learnedEmojiProfile?.categoryHints || []).slice(0, 6),
+  };
+}
 
 type MemorySearchCoreResult = {
   hits: MemorySearchHit[];
@@ -123,15 +136,34 @@ type ParsedExportEntry = {
 
 type RouterStep = {
   id: string;
-  tool:
-    | "conversation_recall.query"
-    | "memory.search"
-    | "thread_style.profile"
-    | "contact_memory.facts"
-    | "external_search.web"
-    | "personal_connectors.search"
-    | "reply_style_guardrail.check";
+  tool: RouterToolName;
   reason: string;
+  readOnly: boolean;
+  requiresTool?: RouterToolName;
+};
+
+type RouterToolName =
+  | "conversation_recall.query"
+  | "memory.search"
+  | "thread_style.profile"
+  | "contact_memory.extract"
+  | "contact_memory.facts"
+  | "external_search.web"
+  | "personal_connectors.search"
+  | "reply_style_guardrail.check";
+
+type RouterExecutionStatus = "success" | "error" | "timeout" | "skipped";
+
+type RouterStepEnvelope = {
+  stepId: string;
+  tool: RouterToolName;
+  status: RouterExecutionStatus;
+  latencyMs: number;
+  output: unknown;
+  outputSize: number;
+  outputSummary: string;
+  errorCode?: string;
+  error?: string;
 };
 
 function clamp(value: number, min: number, max: number) {
@@ -152,12 +184,271 @@ function normalizeSpace(value: string) {
   return value.replace(/\s+/g, " ").trim();
 }
 
+function isManualSelfAuthoredMessage(message: Pick<Doc<"messages">, "direction" | "senderJid" | "toolRunId">) {
+  return message.direction === "outbound" && message.senderJid === "me" && !message.toolRunId;
+}
+
 function compactText(value: string, maxChars: number) {
   const normalized = normalizeSpace(value);
   if (normalized.length <= maxChars) {
     return normalized;
   }
   return `${normalized.slice(0, Math.max(0, maxChars - 3)).trim()}...`;
+}
+
+const READ_ONLY_ROUTER_TOOLS = new Set<RouterToolName>([
+  "conversation_recall.query",
+  "memory.search",
+  "thread_style.profile",
+  "contact_memory.facts",
+  "external_search.web",
+  "personal_connectors.search",
+  "reply_style_guardrail.check",
+]);
+
+const HINT_ALLOWLIST_TOOLS = new Set<RouterToolName>([
+  "conversation_recall.query",
+  "memory.search",
+  "thread_style.profile",
+  "contact_memory.facts",
+  "external_search.web",
+  "personal_connectors.search",
+  "reply_style_guardrail.check",
+]);
+
+function isReadOnlyRouterTool(tool: RouterToolName) {
+  return READ_ONLY_ROUTER_TOOLS.has(tool);
+}
+
+function parseRouterHint(value: string): RouterToolName | null {
+  const normalized = normalizeSpace(value).toLowerCase();
+  const aliases: Record<string, RouterToolName> = {
+    "conversation_recall.query": "conversation_recall.query",
+    "conversation_recall": "conversation_recall.query",
+    recall: "conversation_recall.query",
+    "memory.search": "memory.search",
+    memory: "memory.search",
+    "thread_style.profile": "thread_style.profile",
+    style: "thread_style.profile",
+    "contact_memory.facts": "contact_memory.facts",
+    facts: "contact_memory.facts",
+    "external_search.web": "external_search.web",
+    web: "external_search.web",
+    search: "external_search.web",
+    "personal_connectors.search": "personal_connectors.search",
+    connectors: "personal_connectors.search",
+    "reply_style_guardrail.check": "reply_style_guardrail.check",
+    guardrail: "reply_style_guardrail.check",
+  };
+  return aliases[normalized] || null;
+}
+
+function classifyRouterError(error: unknown): { code: string; message: string } {
+  const message = error instanceof Error ? error.message : String(error || "Unknown error");
+  const lower = message.toLowerCase();
+  if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("deadline")) {
+    return { code: "timeout", message };
+  }
+  if (/http\s+5\d{2}/i.test(message) || /(502|503|504)/.test(message)) {
+    return { code: "upstream_5xx", message };
+  }
+  if (/(invalid|required|cannot|must|not found|threadid|contactjid)/i.test(message)) {
+    return { code: "validation", message };
+  }
+  if (/(empty|no results|no clear|no strong evidence)/i.test(message)) {
+    return { code: "empty_result", message };
+  }
+  return { code: "error", message };
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await new Promise<T>((resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(`timeout after ${timeoutMs}ms`)), timeoutMs);
+      promise
+        .then((value) => resolve(value))
+        .catch((error) => reject(error));
+    });
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+function summarizeRouterOutput(output: unknown) {
+  const asJson = JSON.stringify(output ?? null);
+  const outputSize = asJson.length;
+  const outputSummary = compactText(asJson, 260);
+  if (outputSize <= 12_000) {
+    return {
+      output,
+      outputSize,
+      outputSummary,
+    };
+  }
+  return {
+    output: {
+      truncated: true,
+      outputSize,
+      preview: compactText(asJson, 1200),
+    },
+    outputSize,
+    outputSummary: `output_truncated size=${outputSize}`,
+  };
+}
+
+type PlannedRouterResult = {
+  steps: RouterStep[];
+  plannerSource: "deterministic" | "hybrid";
+  plannerConfidence: number;
+  hintApplied: boolean;
+};
+
+export function planToolRouterSteps(args: {
+  task: string;
+  candidateReply?: string;
+  threadIdProvided: boolean;
+  plannerMode: "deterministic" | "hybrid";
+  modelHints?: string[];
+  includeExtraction: boolean;
+  maxToolsPerRun: number;
+}): PlannedRouterResult {
+  const task = normalizeSpace(args.task).slice(0, 320);
+  const deterministicSteps: RouterStep[] = [];
+  const pushStep = (step: RouterStep) => {
+    deterministicSteps.push({
+      ...step,
+      readOnly: isReadOnlyRouterTool(step.tool),
+    });
+  };
+
+  const wantsRecall = /(before|earlier|previous|discuss|discussed|remember|recall|mentioned)/i.test(task) || hasPidginRecallCue(task);
+  const wantsWeb = /(search|google|web|news|latest|price|weather|stock|crypto|market)/i.test(task);
+  const wantsStyle = /(style|tone|voice|sound like me|how i talk)/i.test(task) || hasPidginStyleCue(task);
+  const wantsFacts = /(fact|birthday|prefer|likes|call me|remember about|profile)/i.test(task);
+  const wantsConnectors = /(notes|calendar|email|docs|document|personal)/i.test(task);
+
+  if (wantsRecall) {
+    pushStep({ id: "recall", tool: "conversation_recall.query", reason: "Check if this was discussed before.", readOnly: true });
+    pushStep({ id: "memory", tool: "memory.search", reason: "Pull concrete evidence snippets.", readOnly: true });
+  }
+
+  if (wantsFacts) {
+    if (args.includeExtraction && args.threadIdProvided) {
+      pushStep({
+        id: "facts_extract",
+        tool: "contact_memory.extract",
+        reason: "Refresh contact memory facts from recent inbound messages.",
+        readOnly: false,
+      });
+    }
+    pushStep({
+      id: "facts",
+      tool: "contact_memory.facts",
+      reason: "Load remembered contact facts.",
+      readOnly: true,
+      requiresTool: args.includeExtraction && args.threadIdProvided ? "contact_memory.extract" : undefined,
+    });
+  }
+
+  if (wantsStyle) {
+    pushStep({ id: "style", tool: "thread_style.profile", reason: "Use thread-specific writing style.", readOnly: true });
+    if (args.candidateReply) {
+      pushStep({
+        id: "guardrail",
+        tool: "reply_style_guardrail.check",
+        reason: "Validate that draft sounds like you for this chat.",
+        readOnly: true,
+      });
+    }
+  }
+
+  if (wantsWeb) {
+    pushStep({ id: "web", tool: "external_search.web", reason: "Fetch up-to-date external info.", readOnly: true });
+  }
+
+  if (wantsConnectors) {
+    pushStep({
+      id: "connectors",
+      tool: "personal_connectors.search",
+      reason: "Search internal and connector sources.",
+      readOnly: true,
+    });
+  }
+
+  if (deterministicSteps.length === 0) {
+    pushStep({ id: "memory", tool: "memory.search", reason: "Default retrieval for chat context.", readOnly: true });
+  }
+
+  const deduped: RouterStep[] = [];
+  const seenTools = new Set<string>();
+  for (const step of deterministicSteps) {
+    if (seenTools.has(step.tool)) {
+      continue;
+    }
+    seenTools.add(step.tool);
+    deduped.push(step);
+  }
+
+  const hintTools =
+    args.plannerMode === "hybrid"
+      ? (args.modelHints || []).map(parseRouterHint).filter((tool): tool is RouterToolName => Boolean(tool))
+      : [];
+  const hintAllowlisted = hintTools.filter((tool) => HINT_ALLOWLIST_TOOLS.has(tool)).slice(0, 6);
+  const merged = [...deduped];
+  for (const hintTool of hintAllowlisted) {
+    if (merged.some((step) => step.tool === hintTool)) {
+      continue;
+    }
+    if (merged.length >= args.maxToolsPerRun) {
+      break;
+    }
+    merged.push({
+      id: `hint_${hintTool.replace(/[^\w]+/g, "_")}`,
+      tool: hintTool,
+      reason: "Model hint suggested this retrieval.",
+      readOnly: true,
+    });
+  }
+
+  const hintPriority = new Map(hintAllowlisted.map((tool, index) => [tool, index]));
+  const mergedSorted = merged
+    .map((step, index) => ({ step, index }))
+    .sort((left, right) => {
+      if (!left.step.readOnly || !right.step.readOnly) {
+        return left.index - right.index;
+      }
+      const leftRank = hintPriority.get(left.step.tool);
+      const rightRank = hintPriority.get(right.step.tool);
+      if (leftRank === undefined && rightRank === undefined) {
+        return left.index - right.index;
+      }
+      if (leftRank === undefined) {
+        return 1;
+      }
+      if (rightRank === undefined) {
+        return -1;
+      }
+      if (leftRank !== rightRank) {
+        return leftRank - rightRank;
+      }
+      return left.index - right.index;
+    })
+    .map((item) => item.step)
+    .slice(0, args.maxToolsPerRun);
+
+  const hintApplied =
+    args.plannerMode === "hybrid" && mergedSorted.some((step, index) => deduped[index]?.tool !== step.tool);
+  const signalCount = [wantsRecall, wantsWeb, wantsStyle, wantsFacts, wantsConnectors].filter(Boolean).length;
+  const plannerConfidence = clamp(0.54 + signalCount * 0.08 + (hintApplied ? 0.04 : 0), 0.5, 0.96);
+  return {
+    steps: mergedSorted,
+    plannerSource: hintApplied ? "hybrid" : "deterministic",
+    plannerConfidence,
+    hintApplied,
+  };
 }
 
 function extractKeywords(text: string) {
@@ -493,6 +784,9 @@ async function resolveStyleProfileCore(
   },
 ) {
   const fallbackToGlobal = args.fallbackToGlobal ?? true;
+  const learnedEmojiProfile = (await ctx
+    .runQuery(refStyleGetEmojiProfile, {})
+    .catch(() => null)) as { topEmojis?: string[]; categoryHints?: string[] } | null;
   const resolved = await resolveThreadByFilters(ctx, args);
   if (resolved.mismatch) {
     throw new Error("threadId and contactJid point to different threads.");
@@ -508,7 +802,7 @@ async function resolveStyleProfileCore(
         source: "thread" as const,
         threadId: resolved.thread._id,
         threadJid: resolved.thread.jid,
-        profile: threadProfile,
+        profile: withEmojiLearningHints(threadProfile, learnedEmojiProfile),
       };
     }
   }
@@ -523,7 +817,7 @@ async function resolveStyleProfileCore(
       source: "global" as const,
       threadId: resolved.thread?._id,
       threadJid: resolved.thread?.jid,
-      profile: globalProfile,
+      profile: withEmojiLearningHints(globalProfile, learnedEmojiProfile),
     };
   }
 
@@ -531,7 +825,7 @@ async function resolveStyleProfileCore(
     source: "default" as const,
     threadId: resolved.thread?._id,
     threadJid: resolved.thread?.jid,
-    profile: {
+    profile: withEmojiLearningHints({
       scope: resolved.thread ? "thread" : "global",
       threadId: resolved.thread?._id,
       mimicryLevel: DEFAULT_MIMICRY_LEVEL,
@@ -540,7 +834,7 @@ async function resolveStyleProfileCore(
       humorNotes: [],
       spellingNotes: [],
       updatedAt: Date.now(),
-    },
+    }, learnedEmojiProfile),
   };
 }
 
@@ -1049,7 +1343,7 @@ export const rebuildThreadStyleProfile = mutation({
       .take(lookback);
 
     const outboundTexts = rows
-      .filter((row) => row.direction === "outbound")
+      .filter((row) => isManualSelfAuthoredMessage(row))
       .map((row) => row.text)
       .filter(Boolean);
 
@@ -1603,7 +1897,10 @@ export const replyStyleGuardrailCheck = query({
           .take(24)
       : [];
 
-    const outboundTexts = recentOutbound.filter((row) => row.direction === "outbound").map((row) => normalizeSpace(row.text)).filter(Boolean);
+    const outboundTexts = recentOutbound
+      .filter((row) => isManualSelfAuthoredMessage(row))
+      .map((row) => normalizeSpace(row.text))
+      .filter(Boolean);
     const avgOutboundWords =
       outboundTexts.length > 0
         ? outboundTexts.reduce((sum, text) => sum + wordCount(text), 0) / outboundTexts.length
@@ -1701,154 +1998,249 @@ export const toolRouterPlan = action({
     contactJid: v.optional(v.string()),
     candidateReply: v.optional(v.string()),
     execute: v.optional(v.boolean()),
+    plannerMode: v.optional(v.union(v.literal("deterministic"), v.literal("hybrid"))),
+    modelHints: v.optional(v.array(v.string())),
+    allowSideEffects: v.optional(v.boolean()),
+    includeExtraction: v.optional(v.boolean()),
+    maxToolsPerRun: v.optional(v.number()),
+    timeoutMs: v.optional(v.number()),
+    maxResults: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const task = normalizeSpace(args.task).slice(0, 320);
-    const steps: RouterStep[] = [];
-
-    const wantsRecall = /(before|earlier|previous|discuss|discussed|remember|recall|mentioned)/i.test(task) || hasPidginRecallCue(task);
-    const wantsWeb = /(search|google|web|news|latest|price|weather|stock|crypto|market)/i.test(task);
-    const wantsStyle = /(style|tone|voice|sound like me|how i talk)/i.test(task) || hasPidginStyleCue(task);
-    const wantsFacts = /(fact|birthday|prefer|likes|call me|remember about|profile)/i.test(task);
-    const wantsConnectors = /(notes|calendar|email|docs|document|personal)/i.test(task);
-
-    if (wantsRecall) {
-      steps.push({ id: "recall", tool: "conversation_recall.query", reason: "Check if this was discussed before." });
-      steps.push({ id: "memory", tool: "memory.search", reason: "Pull concrete evidence snippets." });
-    }
-
-    if (wantsFacts) {
-      steps.push({ id: "facts", tool: "contact_memory.facts", reason: "Load remembered contact facts." });
-    }
-
-    if (wantsStyle) {
-      steps.push({ id: "style", tool: "thread_style.profile", reason: "Use thread-specific writing style." });
-      if (args.candidateReply) {
-        steps.push({
-          id: "guardrail",
-          tool: "reply_style_guardrail.check",
-          reason: "Validate that draft sounds like you for this chat.",
-        });
-      }
-    }
-
-    if (wantsWeb) {
-      steps.push({ id: "web", tool: "external_search.web", reason: "Fetch up-to-date external info." });
-    }
-
-    if (wantsConnectors) {
-      steps.push({ id: "connectors", tool: "personal_connectors.search", reason: "Search internal and connector sources." });
-    }
-
-    if (steps.length === 0) {
-      steps.push({ id: "memory", tool: "memory.search", reason: "Default retrieval for chat context." });
-    }
-
-    const deduped: RouterStep[] = [];
-    const seenTools = new Set<string>();
-    for (const step of steps) {
-      if (seenTools.has(step.tool)) {
-        continue;
-      }
-      seenTools.add(step.tool);
-      deduped.push(step);
-    }
-
+    const plannerMode = args.plannerMode === "deterministic" ? "deterministic" : "hybrid";
+    const allowSideEffects = Boolean(args.allowSideEffects);
+    const includeExtraction = Boolean(args.includeExtraction);
+    const maxToolsPerRun = clampRound(args.maxToolsPerRun, 6, 1, 12);
+    const timeoutMs = clampRound(args.timeoutMs, 8_000, 500, 30_000);
+    const maxResults = clampRound(args.maxResults, 8, 1, 40);
+    const planned = planToolRouterSteps({
+      task,
+      candidateReply: args.candidateReply,
+      threadIdProvided: Boolean(args.threadId),
+      plannerMode,
+      modelHints: args.modelHints,
+      includeExtraction,
+      maxToolsPerRun,
+    });
+    const mergedSorted = planned.steps;
+    const hintApplied = planned.hintApplied;
+    const plannerConfidence = planned.plannerConfidence;
     const execute = args.execute ?? false;
     if (!execute) {
       return {
         tool: "tool_router.plan",
         task,
-        steps: deduped,
+        plannerSource: planned.plannerSource,
+        plannerConfidence,
+        hintApplied,
+        steps: mergedSorted,
+        toolBudgets: {
+          timeoutMs,
+          maxToolsPerRun,
+          maxResults,
+          allowSideEffects,
+        },
       };
     }
 
-    const outputs: Array<{ stepId: string; tool: string; output: unknown }> = [];
+    const deadlineAt = Date.now() + timeoutMs * Math.max(1, mergedSorted.length) + 1_500;
+    const outputs: RouterStepEnvelope[] = [];
+    const completedTools = new Set<RouterToolName>();
+    const pending = [...mergedSorted];
 
-    for (const step of deduped) {
-      if (step.tool === "conversation_recall.query") {
-        const output = await ctx.runQuery(refConversationRecallQuery, {
-          query: task,
-          threadId: args.threadId,
-          contactJid: args.contactJid,
-          limit: 6,
-        });
-        outputs.push({ stepId: step.id, tool: step.tool, output });
-        continue;
+    const executeOne = async (step: RouterStep): Promise<RouterStepEnvelope> => {
+      const startedAt = Date.now();
+      if (step.requiresTool && !completedTools.has(step.requiresTool)) {
+        return {
+          stepId: step.id,
+          tool: step.tool,
+          status: "skipped",
+          latencyMs: Date.now() - startedAt,
+          output: null,
+          outputSize: 0,
+          outputSummary: `Skipped: requires ${step.requiresTool}`,
+          errorCode: "dependency_missing",
+        };
       }
 
-      if (step.tool === "memory.search") {
-        const output = await ctx.runQuery(refMemorySearch, {
-          query: task,
-          threadId: args.threadId,
-          contactJid: args.contactJid,
-          limit: 10,
-        });
-        outputs.push({ stepId: step.id, tool: step.tool, output });
-        continue;
+      if (!allowSideEffects && !step.readOnly) {
+        return {
+          stepId: step.id,
+          tool: step.tool,
+          status: "skipped",
+          latencyMs: Date.now() - startedAt,
+          output: null,
+          outputSize: 0,
+          outputSummary: "Skipped: side effects disabled.",
+          errorCode: "side_effects_disabled",
+        };
       }
 
-      if (step.tool === "thread_style.profile") {
-        const output = await ctx.runQuery(refGetThreadStyleProfile, {
-          threadId: args.threadId,
-          contactJid: args.contactJid,
-          fallbackToGlobal: true,
-        });
-        outputs.push({ stepId: step.id, tool: step.tool, output });
-        continue;
+      if (Date.now() >= deadlineAt) {
+        return {
+          stepId: step.id,
+          tool: step.tool,
+          status: "timeout",
+          latencyMs: Date.now() - startedAt,
+          output: null,
+          outputSize: 0,
+          outputSummary: "Skipped: global deadline exceeded.",
+          errorCode: "timeout",
+        };
       }
 
-      if (step.tool === "contact_memory.facts") {
-        if (args.threadId) {
-          await ctx.runMutation(refExtractContactMemoryFacts, {
-            threadId: args.threadId,
-            lookbackMessages: 120,
-          });
+      try {
+        const perStepTimeout = Math.max(250, Math.min(timeoutMs, deadlineAt - Date.now()));
+        let output: unknown = null;
+
+        if (step.tool === "conversation_recall.query") {
+          output = await withTimeout(
+            ctx.runQuery(refConversationRecallQuery, {
+              query: task,
+              threadId: args.threadId,
+              contactJid: args.contactJid,
+              limit: Math.max(1, Math.min(maxResults, 12)),
+            }),
+            perStepTimeout,
+          );
+        } else if (step.tool === "memory.search") {
+          output = await withTimeout(
+            ctx.runQuery(refMemorySearch, {
+              query: task,
+              threadId: args.threadId,
+              contactJid: args.contactJid,
+              limit: maxResults,
+            }),
+            perStepTimeout,
+          );
+        } else if (step.tool === "thread_style.profile") {
+          output = await withTimeout(
+            ctx.runQuery(refGetThreadStyleProfile, {
+              threadId: args.threadId,
+              contactJid: args.contactJid,
+              fallbackToGlobal: true,
+            }),
+            perStepTimeout,
+          );
+        } else if (step.tool === "contact_memory.extract") {
+          if (!args.threadId) {
+            output = { skipped: true, reason: "threadId_missing" };
+          } else {
+            output = await withTimeout(
+              ctx.runMutation(refExtractContactMemoryFacts, {
+                threadId: args.threadId,
+                lookbackMessages: 120,
+              }),
+              perStepTimeout,
+            );
+          }
+        } else if (step.tool === "contact_memory.facts") {
+          output = await withTimeout(
+            ctx.runQuery(refContactMemoryFactsList, {
+              threadId: args.threadId,
+              contactJid: args.contactJid,
+              limit: Math.max(1, Math.min(maxResults * 5, 200)),
+            }),
+            perStepTimeout,
+          );
+        } else if (step.tool === "external_search.web") {
+          output = await withTimeout(
+            ctx.runAction(refExternalWebSearch, {
+              query: task,
+              maxResults: Math.max(1, Math.min(maxResults, 10)),
+            }),
+            perStepTimeout,
+          );
+        } else if (step.tool === "personal_connectors.search") {
+          output = await withTimeout(
+            ctx.runAction(refPersonalConnectorsSearch, {
+              query: task,
+              maxResults,
+            }),
+            perStepTimeout,
+          );
+        } else if (step.tool === "reply_style_guardrail.check") {
+          output = await withTimeout(
+            ctx.runQuery(refReplyStyleGuardrailCheck, {
+              threadId: args.threadId,
+              candidateReply: args.candidateReply || "",
+              inboundText: task,
+              strictness: "balanced",
+            }),
+            perStepTimeout,
+          );
         }
-        const output = await ctx.runQuery(refContactMemoryFactsList, {
-          threadId: args.threadId,
-          contactJid: args.contactJid,
-          limit: 40,
-        });
-        outputs.push({ stepId: step.id, tool: step.tool, output });
+
+        const summarized = summarizeRouterOutput(output);
+        return {
+          stepId: step.id,
+          tool: step.tool,
+          status: "success",
+          latencyMs: Date.now() - startedAt,
+          ...summarized,
+        };
+      } catch (error) {
+        const classified = classifyRouterError(error);
+        return {
+          stepId: step.id,
+          tool: step.tool,
+          status: classified.code === "timeout" ? "timeout" : "error",
+          latencyMs: Date.now() - startedAt,
+          output: null,
+          outputSize: 0,
+          outputSummary: `error:${classified.code}`,
+          errorCode: classified.code,
+          error: compactText(classified.message, 280),
+        };
+      }
+    };
+
+    while (pending.length > 0) {
+      const runnableRead = pending.filter((step) => step.readOnly && (!step.requiresTool || completedTools.has(step.requiresTool)));
+      if (runnableRead.length > 0) {
+        for (const step of runnableRead) {
+          const index = pending.indexOf(step);
+          if (index >= 0) {
+            pending.splice(index, 1);
+          }
+        }
+        const settled = await Promise.all(runnableRead.map((step) => executeOne(step)));
+        for (const envelope of settled) {
+          outputs.push(envelope);
+          if (envelope.status === "success") {
+            completedTools.add(envelope.tool);
+          }
+        }
         continue;
       }
 
-      if (step.tool === "external_search.web") {
-        const output = await ctx.runAction(refExternalWebSearch, {
-          query: task,
-          maxResults: 6,
-        });
-        outputs.push({ stepId: step.id, tool: step.tool, output });
-        continue;
+      const step = pending.shift();
+      if (!step) {
+        break;
       }
-
-      if (step.tool === "personal_connectors.search") {
-        const output = await ctx.runAction(refPersonalConnectorsSearch, {
-          query: task,
-          maxResults: 12,
-        });
-        outputs.push({ stepId: step.id, tool: step.tool, output });
-        continue;
-      }
-
-      if (step.tool === "reply_style_guardrail.check") {
-        const output = await ctx.runQuery(refReplyStyleGuardrailCheck, {
-          threadId: args.threadId,
-          candidateReply: args.candidateReply || "",
-          inboundText: task,
-          strictness: "balanced",
-        });
-        outputs.push({ stepId: step.id, tool: step.tool, output });
+      const envelope = await executeOne(step);
+      outputs.push(envelope);
+      if (envelope.status === "success") {
+        completedTools.add(step.tool);
       }
     }
 
     return {
       tool: "tool_router.plan",
       task,
-      steps: deduped,
+      plannerSource: planned.plannerSource,
+      plannerConfidence,
+      hintApplied,
+      steps: mergedSorted,
       executed: true,
       outputs,
+      toolBudgets: {
+        timeoutMs,
+        maxToolsPerRun,
+        maxResults,
+        allowSideEffects,
+      },
     };
   },
 });

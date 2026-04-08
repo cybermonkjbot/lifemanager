@@ -292,6 +292,7 @@ export const run = internalMutation({
     const useTextPost = (stableHash(seed) % 1000) / 1000 < config.statusBuilderTextPostRatio;
     const statusFormat: "text" | "meme" = useTextPost ? "text" : "meme";
     const sendKind: "text" | "meme" = useTextPost ? "text" : "meme";
+    const requiresReview = (stableHash(`${seed}|review`) % 1000) / 1000 < config.statusBuilderReviewRatio;
 
     const sourceMessageId = await ctx.db.insert("messages", {
       threadId: statusThreadId,
@@ -320,7 +321,7 @@ export const run = internalMutation({
       provider: "heuristic",
       delayMs: 800,
       typingMs: 0,
-      reason: `Auto status (${statusFormat}) · trend=${trendTheme}`,
+      reason: `Auto status (${statusFormat}) · trend=${trendTheme} · review=${requiresReview ? "sampled" : "auto"}`,
       createdAt: now,
       updatedAt: now,
     });
@@ -335,6 +336,7 @@ export const run = internalMutation({
       statusTrendTheme: trendTheme,
       statusDemographicHint: dominantRelationship,
       statusFormat,
+      statusReviewRequired: requiresReview,
       sendAt: now + 1200,
       status: "pending",
       attempts: 0,
@@ -349,13 +351,14 @@ export const run = internalMutation({
       eventType: "status_builder.queued",
       threadId: statusThreadId,
       outboxId,
-      detail: `Queued ${statusFormat} status for ${audienceJids.length} audience members. trend=${trendTheme}. demographic=${dominantRelationship}. context=${trendSnippet.slice(0, 120)}`,
+      detail: `Queued ${statusFormat} status for ${audienceJids.length} audience members. review=${requiresReview ? "sampled" : "auto"}. trend=${trendTheme}. demographic=${dominantRelationship}. context=${trendSnippet.slice(0, 120)}`,
       createdAt: now,
     });
 
     return {
       queued: true,
       statusFormat,
+      requiresReview,
       outboxId,
       audienceCount: audienceJids.length,
       trendTheme,

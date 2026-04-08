@@ -28,6 +28,12 @@ const navItems = [
     primary: true,
   },
   {
+    href: "/status",
+    label: "Status",
+    description: "View status timeline and pending status approvals.",
+    primary: true,
+  },
+  {
     href: "/media",
     label: "Media",
     description: "Unified gallery for stickers and all captured message media.",

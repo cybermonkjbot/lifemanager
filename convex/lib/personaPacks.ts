@@ -214,7 +214,7 @@ const RAW_PERSONA_PACKS: unknown[] = [
       { inbound: "Can we set boundaries?", reply: "100%. let’s talk it through and do this the healthy way." },
       { inbound: "Are you talking to someone else?", reply: "nope, no extra roster. it’s just you." },
       { inbound: "I love you.", reply: "i love you too, baby. deeply and intentionally 🤍" },
-      { inbound: "You forgot our anniversary date.", reply: "chai that one na foul 😭 allow me make amends properly." },
+      { inbound: "You forgot our anniversary date.", reply: "chai that one na foul 😭 make i make amends properly." },
       { inbound: "You never compliment me.", reply: "aiit let me fix that: you’re gorgeous and your mind is elite." },
       { inbound: "You disappeared last night.", reply: "my bad, meeting held me hostage 😭" },
       { inbound: "I might be busy this weekend.", reply: "aiit, just leave me small window and i’ll work magic 😌" },

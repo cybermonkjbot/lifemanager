@@ -1,12 +1,18 @@
 import { v } from "convex/values";
 import { makeFunctionReference } from "convex/server";
 import type { Doc } from "./_generated/dataModel";
-import { action, mutation, query, type MutationCtx } from "./_generated/server";
+import { action, internalMutation, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { DEFAULT_MIMICRY_LEVEL } from "./lib/constants";
-import { getConfig } from "./lib/config";
+import { getConfig, setConfigValue } from "./lib/config";
+import {
+  applyEmojiUsageSignal,
+  parseLearnedEmojiProfile,
+  type LearnedEmojiProfile,
+} from "./lib/emojiLearning";
 
 const refThreadsList = makeFunctionReference<"query">("threads:list");
 const refSetMimicry = makeFunctionReference<"mutation">("style:setMimicry");
+const LEARNED_EMOJI_PROFILE_CONFIG_KEY = "style.learnedEmojiProfile.v1";
 const HUMOR_SIGNAL_PATTERN_GLOBAL = /\b(lol|lmao|lmfao|rofl|haha|hehe|banter|joke|meme|funny|roast|hilarious)\b/gi;
 const STATUS_BANTER_PATTERN = /\b(status|story|update)\b/i;
 const LAUGH_REACTION_EMOJIS = new Set(["😂", "🤣", "😹", "😆", "😄", "😁", "😅"]);
@@ -29,15 +35,114 @@ const STYLE_SENSITIVE_PHRASE_PATTERNS = [
 const STYLE_MAX_COMMON_PHRASE_WORDS = 6;
 const MAX_SAFE_MIMICRY_LEVEL = 0.82;
 const LOW_VALUE_STYLE_PHRASE_PATTERNS = [
-  /\bplease allow me small\b/i,
-  /\bplease allow me\b/i,
-  /\ballow me small\b/i,
+  /\b(?:please|kindly|abeg)\s+(?:just\s+)?(?:allow|pardon)\s+me(?:\s+small)?\b/i,
+  /\b(?:allow|pardon)\s+me\s+small\b/i,
   /\b(?:sounds good|noted|got it|understood)\b/i,
   /\bi(?:'|’)ll (?:handle|sort|check|look into|get (?:this )?done|circle back|follow up|update you)\b/i,
   /\bcircle back (?:soon|later|shortly)\b/i,
   /\b(?:update|details?) (?:soon|shortly)\b/i,
   /\blet me (?:sort|check|look into|get back)\b/i,
 ];
+const STYLE_STOPWORDS = new Set([
+  "a",
+  "an",
+  "and",
+  "as",
+  "at",
+  "be",
+  "for",
+  "from",
+  "i",
+  "im",
+  "is",
+  "it",
+  "just",
+  "me",
+  "my",
+  "of",
+  "on",
+  "or",
+  "so",
+  "that",
+  "the",
+  "this",
+  "to",
+  "we",
+  "you",
+  "your",
+]);
+const STYLE_LOW_SIGNAL_TOKENS = new Set([
+  "please",
+  "kindly",
+  "abeg",
+  "allow",
+  "pardon",
+  "me",
+  "small",
+  "just",
+  "okay",
+  "ok",
+  "alright",
+  "noted",
+  "got",
+  "it",
+  "understood",
+  "thanks",
+  "thank",
+  "you",
+  "soon",
+  "later",
+]);
+const STYLE_COMMON_PHRASE_GLUE_TOKENS = new Set([
+  "a",
+  "an",
+  "and",
+  "are",
+  "as",
+  "at",
+  "because",
+  "be",
+  "been",
+  "being",
+  "but",
+  "by",
+  "for",
+  "from",
+  "if",
+  "in",
+  "is",
+  "it",
+  "of",
+  "on",
+  "or",
+  "same",
+  "some",
+  "so",
+  "that",
+  "the",
+  "then",
+  "this",
+  "to",
+  "too",
+  "true",
+  "was",
+  "were",
+  "with",
+]);
+const STYLE_COMMON_PHRASE_BOUNDARY_FILLER_TOKENS = new Set([
+  "actually",
+  "basically",
+  "exactly",
+  "fair",
+  "honestly",
+  "literally",
+  "maybe",
+  "point",
+  "seriously",
+  "simply",
+  "sometimes",
+  "well",
+]);
 const LEARNED_TRAIT_LIMITS = {
   commonPhrases: 40,
   punctuationStyle: 30,
@@ -45,6 +150,10 @@ const LEARNED_TRAIT_LIMITS = {
   spellingNotes: 30,
 } as const;
 type LearnedTraitField = keyof typeof LEARNED_TRAIT_LIMITS;
+
+function isManualSelfAuthoredMessage(message: Pick<Doc<"messages">, "direction" | "senderJid" | "toolRunId">) {
+  return message.direction === "outbound" && message.senderJid === "me" && !message.toolRunId;
+}
 
 function mergeLimited(base: string[], additions: string[], limit: number) {
   const merged = [...new Set([...base, ...additions].map((item) => item.trim()).filter(Boolean))];
@@ -88,7 +197,86 @@ function isDiscardableCommonPhrase(value: string) {
   if (STYLE_SENSITIVE_PHRASE_PATTERNS.some((pattern) => pattern.test(value))) {
     return true;
   }
+  if (hasLowSignalStylePhrase(normalized)) {
+    return true;
+  }
   return LOW_VALUE_STYLE_PHRASE_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+function tokenizeStylePhrase(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9\s']/g, " ")
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter(Boolean);
+}
+
+function hasLowSignalStylePhrase(value: string) {
+  const tokens = tokenizeStylePhrase(value);
+  if (tokens.length === 0) {
+    return true;
+  }
+
+  const contentTokens = tokens.filter(
+    (token) => token.length > 2 && !STYLE_STOPWORDS.has(token) && !STYLE_LOW_SIGNAL_TOKENS.has(token),
+  );
+  if (contentTokens.length === 0) {
+    return true;
+  }
+
+  if (
+    tokens.length <= 4 &&
+    contentTokens.length <= 1 &&
+    (tokens.includes("me") || tokens[0] === "please" || tokens[0] === "kindly" || tokens[0] === "abeg")
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function containsTokenSequence(containerTokens: string[], candidateTokens: string[]) {
+  if (candidateTokens.length === 0 || containerTokens.length < candidateTokens.length) {
+    return false;
+  }
+  outer: for (let containerIndex = 0; containerIndex + candidateTokens.length <= containerTokens.length; containerIndex += 1) {
+    for (let candidateIndex = 0; candidateIndex < candidateTokens.length; candidateIndex += 1) {
+      if (containerTokens[containerIndex + candidateIndex] !== candidateTokens[candidateIndex]) {
+        continue outer;
+      }
+    }
+    return true;
+  }
+  return false;
+}
+
+function collapseContainedCommonPhrases(phrases: string[]) {
+  const entries = phrases.map((phrase, index) => ({
+    phrase,
+    index,
+    tokens: tokenizeStylePhrase(phrase),
+  }));
+  const bySpecificity = [...entries].sort((left, right) => {
+    if (right.tokens.length !== left.tokens.length) {
+      return right.tokens.length - left.tokens.length;
+    }
+    if (right.phrase.length !== left.phrase.length) {
+      return right.phrase.length - left.phrase.length;
+    }
+    return left.index - right.index;
+  });
+
+  const kept: typeof entries = [];
+  for (const entry of bySpecificity) {
+    if (kept.some((existing) => containsTokenSequence(existing.tokens, entry.tokens))) {
+      continue;
+    }
+    kept.push(entry);
+  }
+
+  return kept
+    .sort((left, right) => left.index - right.index)
+    .map((entry) => entry.phrase);
 }
 
 function arrayEquals(left: string[], right: string[]) {
@@ -129,6 +317,56 @@ function makeTraitPatch(trait: LearnedTraitField, values: string[]) {
   }
 }
 
+function isStrictDiscardableCommonPhrase(value: string) {
+  if (isDiscardableCommonPhrase(value)) {
+    return true;
+  }
+
+  const tokens = tokenizeStylePhrase(value);
+  if (tokens.length < 3) {
+    return true;
+  }
+  if (tokens.length === 3 && tokens.some((token) => STYLE_COMMON_PHRASE_GLUE_TOKENS.has(token))) {
+    return true;
+  }
+
+  const firstToken = tokens[0];
+  const lastToken = tokens[tokens.length - 1];
+  if (tokens.length <= 4 && (STYLE_COMMON_PHRASE_BOUNDARY_FILLER_TOKENS.has(firstToken) || STYLE_COMMON_PHRASE_BOUNDARY_FILLER_TOKENS.has(lastToken))) {
+    return true;
+  }
+  return false;
+}
+
+function looksLikeSlidingWindowFragment(phrase: string, phraseSet: Set<string>) {
+  const tokens = tokenizeStylePhrase(phrase);
+  if (tokens.length !== 3) {
+    return false;
+  }
+  const firstPair = `${tokens[0]} ${tokens[1]}`;
+  const lastPair = `${tokens[1]} ${tokens[2]}`;
+  return phraseSet.has(firstPair) || phraseSet.has(lastPair);
+}
+
+export function normalizeCommonPhraseList(
+  values: string[],
+  limit: number,
+  options: {
+    strict?: boolean;
+  } = {},
+) {
+  const normalized = normalizeTraitList(values, limit);
+  const strict = options.strict ?? false;
+  const phraseSet = new Set(normalized.map((phrase) => phrase.toLowerCase()));
+  const filtered = normalized.filter((phrase) => {
+    if (strict && looksLikeSlidingWindowFragment(phrase, phraseSet)) {
+      return false;
+    }
+    return strict ? !isStrictDiscardableCommonPhrase(phrase) : !isDiscardableCommonPhrase(phrase);
+  });
+  return collapseContainedCommonPhrases(filtered).slice(0, limit);
+}
+
 async function snapshotProfile(ctx: MutationCtx, profile: Doc<"styleProfiles">, reason: string, createdAt: number) {
   await ctx.db.insert("styleProfileHistory", {
     scope: profile.scope,
@@ -143,7 +381,7 @@ async function snapshotProfile(ctx: MutationCtx, profile: Doc<"styleProfiles">, 
   });
 }
 
-function extractReusablePhrases(text: string) {
+export function extractReusablePhrases(text: string) {
   const cleaned = text
     .toLowerCase()
     .replace(/[^a-z0-9\s']/g, " ")
@@ -165,13 +403,9 @@ function extractReusablePhrases(text: string) {
     if (trio.split(" ").length === 3) {
       phrases.push(trio);
     }
-    const pair = words.slice(i, i + 2).join(" ");
-    if (pair.split(" ").length === 2) {
-      phrases.push(pair);
-    }
   }
 
-  return [...new Set(phrases)].filter((phrase) => !isDiscardableCommonPhrase(phrase)).slice(0, 6);
+  return normalizeCommonPhraseList(phrases, 6, { strict: true });
 }
 
 function inferHumorNotes(args: {
@@ -294,19 +528,43 @@ function hasTextHumorSignal(text: string, funnyKeywords: string[], funnyEmojis: 
   return false;
 }
 
+async function getLearnedEmojiProfile(ctx: QueryCtx | MutationCtx): Promise<LearnedEmojiProfile> {
+  const row = await ctx.db
+    .query("appConfig")
+    .withIndex("by_key", (q) => q.eq("key", LEARNED_EMOJI_PROFILE_CONFIG_KEY))
+    .first();
+  return parseLearnedEmojiProfile(row?.value);
+}
+
+function withEmojiLearningHints<T extends Record<string, unknown>>(profile: T, learnedEmojiProfile: LearnedEmojiProfile) {
+  return {
+    ...profile,
+    learnedEmojiAllowlist: learnedEmojiProfile.topEmojis.slice(0, 12),
+    learnedEmojiCategoryHints: learnedEmojiProfile.categoryHints.slice(0, 6),
+  };
+}
+
+export const getEmojiProfile = query({
+  args: {},
+  handler: async (ctx) => {
+    return await getLearnedEmojiProfile(ctx);
+  },
+});
+
 export const getProfile = query({
   args: {},
   handler: async (ctx) => {
+    const learnedEmojiProfile = await getLearnedEmojiProfile(ctx);
     const profile = await ctx.db
       .query("styleProfiles")
       .withIndex("by_scope", (q) => q.eq("scope", "global"))
       .first();
 
     if (profile) {
-      return profile;
+      return withEmojiLearningHints(profile, learnedEmojiProfile);
     }
 
-    return {
+    return withEmojiLearningHints({
       scope: "global" as const,
       mimicryLevel: DEFAULT_MIMICRY_LEVEL,
       commonPhrases: [],
@@ -314,7 +572,7 @@ export const getProfile = query({
       humorNotes: [],
       spellingNotes: [],
       updatedAt: Date.now(),
-    };
+    }, learnedEmojiProfile);
   },
 });
 
@@ -433,7 +691,7 @@ export const updateLearnedTrait = mutation({
     const now = Date.now();
 
     if (!profile) {
-      const seedValues = normalizeTraitList([nextValue], limit);
+      const seedValues = trait === "commonPhrases" ? normalizeCommonPhraseList([nextValue], limit) : normalizeTraitList([nextValue], limit);
       const patch = makeTraitPatch(trait, seedValues);
       return await ctx.db.insert("styleProfiles", {
         scope: "global",
@@ -446,7 +704,10 @@ export const updateLearnedTrait = mutation({
       });
     }
 
-    const currentValues = normalizeTraitList(getTraitValues(profile, trait), limit);
+    const currentValues =
+      trait === "commonPhrases"
+        ? normalizeCommonPhraseList(getTraitValues(profile, trait), limit)
+        : normalizeTraitList(getTraitValues(profile, trait), limit);
     const previousValue = normalizeTraitValue(args.previousValue || "");
     let nextValues = currentValues;
 
@@ -466,7 +727,7 @@ export const updateLearnedTrait = mutation({
       nextValues = [...currentValues, nextValue];
     }
 
-    nextValues = normalizeTraitList(nextValues, limit);
+    nextValues = trait === "commonPhrases" ? normalizeCommonPhraseList(nextValues, limit) : normalizeTraitList(nextValues, limit);
     if (arrayEquals(currentValues, nextValues)) {
       return profile._id;
     }
@@ -501,11 +762,20 @@ export const removeLearnedTrait = mutation({
       return null;
     }
 
-    const currentValues = normalizeTraitList(getTraitValues(profile, trait), limit);
-    const nextValues = normalizeTraitList(
-      currentValues.filter((item) => item.toLowerCase() !== target.toLowerCase()),
-      limit,
-    );
+    const currentValues =
+      trait === "commonPhrases"
+        ? normalizeCommonPhraseList(getTraitValues(profile, trait), limit)
+        : normalizeTraitList(getTraitValues(profile, trait), limit);
+    const nextValues =
+      trait === "commonPhrases"
+        ? normalizeCommonPhraseList(
+            currentValues.filter((item) => item.toLowerCase() !== target.toLowerCase()),
+            limit,
+          )
+        : normalizeTraitList(
+            currentValues.filter((item) => item.toLowerCase() !== target.toLowerCase()),
+            limit,
+          );
     if (arrayEquals(currentValues, nextValues)) {
       return profile._id;
     }
@@ -535,7 +805,10 @@ export const clearLearnedTraitSection = mutation({
       return null;
     }
 
-    const currentValues = normalizeTraitList(getTraitValues(profile, trait), limit);
+    const currentValues =
+      trait === "commonPhrases"
+        ? normalizeCommonPhraseList(getTraitValues(profile, trait), limit)
+        : normalizeTraitList(getTraitValues(profile, trait), limit);
     if (currentValues.length === 0) {
       return profile._id;
     }
@@ -565,10 +838,7 @@ export const cleanupCommonPhrases = mutation({
     for (const profile of profiles) {
       scannedProfiles += 1;
       const currentPhrases = normalizeTraitList(profile.commonPhrases || [], LEARNED_TRAIT_LIMITS.commonPhrases);
-      const nextPhrases = normalizeTraitList(
-        currentPhrases.filter((phrase) => !isDiscardableCommonPhrase(phrase)),
-        LEARNED_TRAIT_LIMITS.commonPhrases,
-      );
+      const nextPhrases = normalizeCommonPhraseList(currentPhrases, LEARNED_TRAIT_LIMITS.commonPhrases, { strict: true });
       if (arrayEquals(currentPhrases, nextPhrases)) {
         continue;
       }
@@ -628,6 +898,44 @@ export const update = action({
   },
 });
 
+export const learnFromOutboundEmoji = internalMutation({
+  args: {
+    threadId: v.id("threads"),
+    sendKind: v.optional(v.union(v.literal("text"), v.literal("reaction"), v.literal("sticker"), v.literal("meme"))),
+    text: v.optional(v.string()),
+    mediaCaption: v.optional(v.string()),
+    reactionEmoji: v.optional(v.string()),
+    messageAt: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const messageAt = Number.isFinite(args.messageAt) ? Number(args.messageAt) : Date.now();
+    const baseProfile = await getLearnedEmojiProfile(ctx);
+    const nextProfile = applyEmojiUsageSignal(baseProfile, {
+      texts: [args.text || "", args.mediaCaption || ""],
+      reactionEmoji: args.reactionEmoji,
+      messageAt,
+    });
+
+    if (nextProfile.totalEmojiObservations === baseProfile.totalEmojiObservations) {
+      return {
+        learned: false,
+        reason: "no_emoji_signal",
+        threadId: args.threadId,
+        topEmojis: baseProfile.topEmojis.slice(0, 6),
+      } as const;
+    }
+
+    await setConfigValue(ctx, LEARNED_EMOJI_PROFILE_CONFIG_KEY, JSON.stringify(nextProfile));
+
+    return {
+      learned: true,
+      threadId: args.threadId,
+      topEmojis: nextProfile.topEmojis.slice(0, 6),
+      categoryHints: nextProfile.categoryHints.slice(0, 3),
+    } as const;
+  },
+});
+
 export const learnFromHumorSignal = mutation({
   args: {
     threadId: v.id("threads"),
@@ -669,7 +977,10 @@ export const learnFromHumorSignal = mutation({
       .order("desc")
       .take(24);
     const latestOutbound = recentMessages.find(
-      (message) => message.direction === "outbound" && (message.messageType || "text") === "text" && message.text.trim().length > 0,
+      (message) =>
+        isManualSelfAuthoredMessage(message) &&
+        (message.messageType || "text") === "text" &&
+        message.text.trim().length > 0,
     );
 
     if (!latestOutbound) {
@@ -699,7 +1010,7 @@ export const learnFromHumorSignal = mutation({
 
     if (existing) {
       await ctx.db.patch(existing._id, {
-        commonPhrases: mergeLimited(existing.commonPhrases || [], phrases, 40),
+        commonPhrases: normalizeCommonPhraseList(mergeLimited(existing.commonPhrases || [], phrases, 40), 40, { strict: true }),
         humorNotes: mergeLimited(existing.humorNotes || [], humorNotes, 30),
         updatedAt: now,
       });
@@ -707,7 +1018,7 @@ export const learnFromHumorSignal = mutation({
       await ctx.db.insert("styleProfiles", {
         scope: "global",
         mimicryLevel: DEFAULT_MIMICRY_LEVEL,
-        commonPhrases: mergeLimited([], phrases, 40),
+        commonPhrases: normalizeCommonPhraseList(mergeLimited([], phrases, 40), 40, { strict: true }),
         punctuationStyle: [],
         humorNotes: mergeLimited([], humorNotes, 30),
         spellingNotes: [],

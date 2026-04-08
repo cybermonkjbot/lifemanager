@@ -21,6 +21,7 @@ import type * as inbound from "../inbound.js";
 import type * as lib_commitments from "../lib/commitments.js";
 import type * as lib_config from "../lib/config.js";
 import type * as lib_constants from "../lib/constants.js";
+import type * as lib_emojiLearning from "../lib/emojiLearning.js";
 import type * as lib_heuristics from "../lib/heuristics.js";
 import type * as lib_memePolicy from "../lib/memePolicy.js";
 import type * as lib_outboundGuard from "../lib/outboundGuard.js";
@@ -64,6 +65,7 @@ declare const fullApi: ApiFromModules<{
   "lib/commitments": typeof lib_commitments;
   "lib/config": typeof lib_config;
   "lib/constants": typeof lib_constants;
+  "lib/emojiLearning": typeof lib_emojiLearning;
   "lib/heuristics": typeof lib_heuristics;
   "lib/memePolicy": typeof lib_memePolicy;
   "lib/outboundGuard": typeof lib_outboundGuard;

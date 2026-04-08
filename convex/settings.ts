@@ -80,6 +80,7 @@ export const save = mutation({
     statusBuilderCadenceHours: v.number(),
     statusBuilderDailyMaxPosts: v.number(),
     statusBuilderTextPostRatio: v.number(),
+    statusBuilderReviewRatio: v.optional(v.number()),
     statusBuilderAudienceJids: v.optional(v.array(v.string())),
     statusBuilderAudienceSampleSize: v.optional(v.number()),
   },
@@ -193,6 +194,11 @@ export const save = mutation({
       statusBuilderCadenceHours: clampInt(args.statusBuilderCadenceHours, 1, 24 * 7),
       statusBuilderDailyMaxPosts: clampInt(args.statusBuilderDailyMaxPosts, 1, 24),
       statusBuilderTextPostRatio: clamp(args.statusBuilderTextPostRatio, 0, 1),
+      statusBuilderReviewRatio: clamp(
+        args.statusBuilderReviewRatio ?? DEFAULT_APP_CONFIG.statusBuilderReviewRatio,
+        0,
+        1,
+      ),
       statusBuilderAudienceJids,
       statusBuilderAudienceSampleSize: clampInt(
         args.statusBuilderAudienceSampleSize ?? DEFAULT_APP_CONFIG.statusBuilderAudienceSampleSize,
@@ -274,6 +280,7 @@ export const save = mutation({
     await setConfigValue(ctx, "statusBuilderCadenceHours", String(normalized.statusBuilderCadenceHours));
     await setConfigValue(ctx, "statusBuilderDailyMaxPosts", String(normalized.statusBuilderDailyMaxPosts));
     await setConfigValue(ctx, "statusBuilderTextPostRatio", String(normalized.statusBuilderTextPostRatio));
+    await setConfigValue(ctx, "statusBuilderReviewRatio", String(normalized.statusBuilderReviewRatio));
     await setConfigValue(ctx, "statusBuilderAudienceJids", normalized.statusBuilderAudienceJids.join("\n"));
     await setConfigValue(ctx, "statusBuilderAudienceSampleSize", String(normalized.statusBuilderAudienceSampleSize));
 

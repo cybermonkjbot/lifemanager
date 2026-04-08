@@ -249,6 +249,32 @@ export const recordProviderRun = mutation({
   },
 });
 
+export const recordToolRun = mutation({
+  args: {
+    threadId: v.optional(v.id("threads")),
+    toolRunId: v.optional(v.string()),
+    plannerSource: v.optional(v.union(v.literal("deterministic"), v.literal("hybrid"))),
+    plannerConfidence: v.optional(v.number()),
+    hintApplied: v.optional(v.boolean()),
+    stepId: v.string(),
+    toolName: v.string(),
+    status: v.union(v.literal("success"), v.literal("error"), v.literal("timeout"), v.literal("skipped")),
+    latencyMs: v.number(),
+    errorCode: v.optional(v.string()),
+    errorMessage: v.optional(v.string()),
+    inputHash: v.optional(v.string()),
+    inputSize: v.optional(v.number()),
+    outputSize: v.optional(v.number()),
+    outputSummary: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    return await ctx.db.insert("toolRuns", {
+      ...args,
+      createdAt: Date.now(),
+    });
+  },
+});
+
 export const pauseAutonomy = mutation({
   args: {},
   handler: async (ctx) => {

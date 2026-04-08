@@ -98,6 +98,10 @@ function normalizeCompactText(value: string | undefined, maxChars: number) {
   return compact.slice(0, maxChars);
 }
 
+function isManualSelfAuthoredMessage(message: Pick<Doc<"messages">, "direction" | "senderJid" | "toolRunId">) {
+  return message.direction === "outbound" && message.senderJid === "me" && !message.toolRunId;
+}
+
 function mergeUniqueLimited(base: string[], additions: string[], limit: number) {
   const seen = new Set<string>();
   const merged: string[] = [];
@@ -361,8 +365,10 @@ function describeQuestionStyle(questionRate: number) {
 }
 
 function buildAutoPromptProfile(messages: Doc<"messages">[], syncedHistoryCount: number) {
-  const outbound = messages.filter((message) => message.direction === "outbound" && normalizeCompactText(message.text, 800));
-  const inboundCount = messages.length - outbound.length;
+  const outbound = messages.filter(
+    (message) => isManualSelfAuthoredMessage(message) && normalizeCompactText(message.text, 800),
+  );
+  const inboundCount = messages.filter((message) => message.direction === "inbound").length;
 
   if (outbound.length === 0) {
     const fallback = [

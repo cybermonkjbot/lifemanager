@@ -438,13 +438,52 @@ export const getToolEvents = query({
     }
 
     const limit = clampInt(args.limit, 220, 30, 500);
+    const toolRuns = await ctx.db
+      .query("toolRuns")
+      .withIndex("by_threadId_and_createdAt", (q) => q.eq("threadId", args.threadId))
+      .order("desc")
+      .take(limit);
     const events = await ctx.db
       .query("systemEvents")
       .withIndex("by_threadId_and_createdAt", (q) => q.eq("threadId", args.threadId))
       .order("desc")
       .take(limit);
 
+    const structuredToolItems = toolRuns.map((run) => {
+      const detailParts = [
+        `${run.toolName} ${run.latencyMs}ms`,
+        run.outputSummary ? `summary=${run.outputSummary}` : "",
+        run.errorCode ? `errorCode=${run.errorCode}` : "",
+        run.errorMessage ? `error=${run.errorMessage}` : "",
+      ].filter(Boolean);
+      return {
+        _id: run._id,
+        createdAt: run.createdAt,
+        eventType: `ai.context.tool.${run.toolName}`,
+        source: "ai" as const,
+        toolRunId: run.toolRunId,
+        phase: run.toolRunId?.startsWith("outreach_") ? ("outreach" as const) : ("reply" as const),
+        kind: "tool_call" as const,
+        toolName: run.toolName,
+        latencyMs: Number.isFinite(run.latencyMs) ? run.latencyMs : 0,
+        inputText: run.inputSize !== undefined ? `inputSize=${run.inputSize}` : undefined,
+        outputText: run.outputSummary || undefined,
+        parsedInput: null,
+        parsedOutput: null,
+        status: run.status,
+        errorCode: run.errorCode,
+        detail: compactDetail(detailParts.join(" | "), 900),
+      };
+    });
+
+    const preferStructuredToolRuns = structuredToolItems.length > 0;
     const filtered = events.filter((event) => {
+      if (
+        preferStructuredToolRuns &&
+        (event.eventType.startsWith("ai.context.tool.") || event.eventType.startsWith("outreach.ai.context.tool."))
+      ) {
+        return false;
+      }
       return (
         event.eventType.startsWith("ai.context.tool.") ||
         event.eventType.startsWith("outreach.ai.context.tool.") ||
@@ -455,7 +494,7 @@ export const getToolEvents = query({
       );
     });
 
-    return filtered.map((event) => {
+    const legacyItems = filtered.map((event) => {
       if (event.eventType.startsWith("ai.context.tool.") || event.eventType.startsWith("outreach.ai.context.tool.")) {
         const detailMatch = event.detail.match(/^([a-zA-Z0-9._-]+)\s+([0-9]+)ms\s+input=([\s\S]*?)\s+output=([\s\S]*)$/);
         const toolNameFromType = event.eventType.split(".tool.")[1] || "unknown";
@@ -521,6 +560,10 @@ export const getToolEvents = query({
         detail: compactDetail(event.detail, 900),
       };
     });
+
+    return [...structuredToolItems, ...legacyItems]
+      .sort((left, right) => right.createdAt - left.createdAt)
+      .slice(0, limit);
   },
 });
 

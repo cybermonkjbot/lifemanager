@@ -124,6 +124,7 @@ export function applyEmojiCooldownPolicy(args: {
   allowEmojiInText?: boolean;
   allowedEmojiInText?: string[];
   maxAllowedEmojiMessagesInWindow?: number;
+  maxAnyEmojiMessagesInWindowBeforeAllowlist?: number;
   allowedEmojiWindowMs?: number;
 }) {
   const nowMs = Number.isFinite(args.nowMs) ? Number(args.nowMs) : Date.now();
@@ -132,6 +133,10 @@ export function applyEmojiCooldownPolicy(args: {
   const allowedEmojis = Array.from(new Set((args.allowedEmojiInText || []).map((item) => item.trim()).filter(Boolean)));
   const enforceAllowlist = allowedEmojis.length > 0;
   const maxAllowedEmojiMessagesInWindow = Math.max(1, Math.min(5, Math.round(args.maxAllowedEmojiMessagesInWindow ?? 2)));
+  const maxAnyEmojiMessagesInWindowBeforeAllowlist = Math.max(
+    0,
+    Math.min(5, Math.round(args.maxAnyEmojiMessagesInWindowBeforeAllowlist ?? 0)),
+  );
   const allowedEmojiWindowMs = Math.max(60_000, args.allowedEmojiWindowMs ?? 6 * 60 * 60 * 1000);
   const hasRecentMessages = (args.recentMessages || []).length > 0;
   const recentAllowedEmojiCount = countRecentOutboundEmojiMessages({
@@ -139,6 +144,11 @@ export function applyEmojiCooldownPolicy(args: {
     nowMs,
     windowMs: allowedEmojiWindowMs,
     allowedEmojis: enforceAllowlist ? allowedEmojis : undefined,
+  });
+  const recentAnyEmojiCount = countRecentOutboundEmojiMessages({
+    messages: args.recentMessages,
+    nowMs,
+    windowMs: allowedEmojiWindowMs,
   });
   const historyEmojiAt = findRecentOutboundEmojiTimestamp({
     messages: args.recentMessages,
@@ -151,6 +161,7 @@ export function applyEmojiCooldownPolicy(args: {
   const hadEmoji = containsAnyEmoji(args.text);
   const hasAllowedEmoji = enforceAllowlist ? containsOneOf(args.text, allowedEmojis) : hadEmoji;
   const hasOnlyAllowedEmoji = enforceAllowlist ? !containsAnyEmoji(stripProvidedEmojiTokens(args.text, allowedEmojis)) : hadEmoji;
+  const hasDisallowedEmoji = enforceAllowlist && !hasOnlyAllowedEmoji;
 
   if (!hadEmoji) {
     return {
@@ -167,6 +178,20 @@ export function applyEmojiCooldownPolicy(args: {
     const belowWindowLimit = hasRecentMessages && recentAllowedEmojiCount < maxAllowedEmojiMessagesInWindow;
     const allowByFallbackCooldown = !hasRecentMessages && !cooldownActive;
     if (belowWindowLimit || allowByFallbackCooldown) {
+      return {
+        text: args.text,
+        hadEmoji,
+        cooldownActive,
+        emojiSuppressed: false,
+        shouldRecordEmojiSend: true,
+        activeSinceMs: undefined,
+      };
+    }
+  }
+
+  if (allowEmojiInText && hasDisallowedEmoji && maxAnyEmojiMessagesInWindowBeforeAllowlist > 0) {
+    const belowWarmupLimit = recentAnyEmojiCount < maxAnyEmojiMessagesInWindowBeforeAllowlist;
+    if (belowWarmupLimit) {
       return {
         text: args.text,
         hadEmoji,

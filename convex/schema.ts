@@ -157,6 +157,7 @@ export default defineSchema({
     statusTrendTheme: v.optional(v.string()),
     statusDemographicHint: v.optional(v.string()),
     statusFormat: v.optional(v.union(v.literal("text"), v.literal("meme"))),
+    statusReviewRequired: v.optional(v.boolean()),
     reactionEmoji: v.optional(v.string()),
     reactionTargetWhatsAppMessageId: v.optional(v.string()),
     preReactionEmoji: v.optional(v.string()),
@@ -342,6 +343,30 @@ export default defineSchema({
     pricingVersion: v.optional(v.string()),
     createdAt: v.number(),
   }).index("by_createdAt", ["createdAt"]),
+
+  toolRuns: defineTable({
+    threadId: v.optional(v.id("threads")),
+    toolRunId: v.optional(v.string()),
+    plannerSource: v.optional(v.union(v.literal("deterministic"), v.literal("hybrid"))),
+    plannerConfidence: v.optional(v.number()),
+    hintApplied: v.optional(v.boolean()),
+    stepId: v.string(),
+    toolName: v.string(),
+    status: v.union(v.literal("success"), v.literal("error"), v.literal("timeout"), v.literal("skipped")),
+    latencyMs: v.number(),
+    errorCode: v.optional(v.string()),
+    errorMessage: v.optional(v.string()),
+    inputHash: v.optional(v.string()),
+    inputSize: v.optional(v.number()),
+    outputSize: v.optional(v.number()),
+    outputSummary: v.optional(v.string()),
+    createdAt: v.number(),
+  })
+    .index("by_createdAt", ["createdAt"])
+    .index("by_threadId_and_createdAt", ["threadId", "createdAt"])
+    .index("by_threadId_and_toolRunId", ["threadId", "toolRunId"])
+    .index("by_toolName_and_createdAt", ["toolName", "createdAt"])
+    .index("by_status_and_createdAt", ["status", "createdAt"]),
 
   systemEvents: defineTable({
     source: v.union(

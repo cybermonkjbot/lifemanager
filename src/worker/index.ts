@@ -137,6 +137,7 @@ type RuntimeSettings = {
   statusBuilderCadenceHours: number;
   statusBuilderDailyMaxPosts: number;
   statusBuilderTextPostRatio: number;
+  statusBuilderReviewRatio: number;
   statusBuilderAudienceJids: string[];
   statusBuilderAudienceSampleSize: number;
   quietHoursStartHour: number;
@@ -149,6 +150,8 @@ type StyleProfileSnapshot = {
   punctuationStyle?: string[];
   humorNotes?: string[];
   spellingNotes?: string[];
+  learnedEmojiAllowlist?: string[];
+  learnedEmojiCategoryHints?: string[];
 } | null;
 
 type ContactMemoryFactSnapshot = {
@@ -161,6 +164,14 @@ type ContactMemoryFactSnapshot = {
 type ContactFactsSnapshot = {
   facts?: ContactMemoryFactSnapshot[];
 } | null;
+
+type HistorySearchOverrideSnapshot = {
+  lines: string[];
+  candidateCount: number;
+  semanticRerankCount: number;
+  confidence: number;
+  retrievalStage?: "lexical" | "semantic" | "semantic_fallback";
+};
 
 type OutboxClaimedItem = {
   outboxId: string;
@@ -176,6 +187,7 @@ type OutboxClaimedItem = {
   statusTrendTheme?: string;
   statusDemographicHint?: string;
   statusFormat?: "text" | "meme";
+  statusReviewRequired?: boolean;
   reactionEmoji?: string;
   reactionTargetWhatsAppMessageId?: string;
   preReactionEmoji?: string;
@@ -239,6 +251,7 @@ const DEFAULT_NIGHT_WIND_DOWN_START_HOUR = 23;
 const DEFAULT_NIGHT_WIND_DOWN_END_HOUR = 7;
 const TEXT_EMOJI_ALLOWLIST = ["🌚", "🙂‍↔️", "🥲", "😒"];
 const TEXT_EMOJI_MAX_PER_WINDOW = 2;
+const TEXT_EMOJI_NON_ALLOWLIST_WARMUP_MAX_PER_WINDOW = 2;
 const TEXT_EMOJI_WINDOW_MS = 6 * 60 * 60 * 1000;
 const STICKER_COMPANION_COOLDOWN_MS = 45 * 60 * 1000;
 const STATUS_RETENTION_MS = 40 * 60 * 1000;
@@ -718,10 +731,486 @@ function formatAttemptUsage(attempt: AiAttempt) {
   return parts.join(" · ");
 }
 
+function stableHash(input: string) {
+  let hash = 0;
+  for (let index = 0; index < input.length; index += 1) {
+    hash = (hash * 31 + input.charCodeAt(index)) >>> 0;
+  }
+  return hash;
+}
+
 function createToolRunId(scope: "reply" | "outreach" | "status", threadId: string, sourceMessageId?: string) {
   const randomToken = Math.random().toString(36).slice(2, 10);
   const sourceToken = sourceMessageId ? sourceMessageId.slice(-8) : "none";
   return `${scope}_${threadId.slice(-8)}_${sourceToken}_${Date.now()}_${randomToken}`;
+}
+
+type WorkerContextToolName = "history_search" | "contact_facts_extract" | "contact_facts_list";
+type WorkerContextToolStatus = "success" | "error" | "timeout" | "skipped";
+type WorkerContextToolStep = {
+  id: string;
+  tool: WorkerContextToolName;
+  reason: string;
+  readOnly: boolean;
+  requiresTool?: WorkerContextToolName;
+};
+type WorkerContextToolRunResult = {
+  stepId: string;
+  tool: WorkerContextToolName;
+  status: WorkerContextToolStatus;
+  latencyMs: number;
+  errorCode?: string;
+  errorMessage?: string;
+  outputSummary: string;
+};
+type WorkerContextOrchestrationResult = {
+  plannerSource: "deterministic" | "hybrid";
+  plannerConfidence: number;
+  hintApplied: boolean;
+  historySearchOverride?: HistorySearchOverrideSnapshot;
+  contactFacts: ContactMemoryFactSnapshot[];
+  runs: WorkerContextToolRunResult[];
+};
+
+const WORKER_CONTEXT_READ_ONLY_TOOLS = new Set<WorkerContextToolName>(["history_search", "contact_facts_list"]);
+const WORKER_CONTEXT_HINT_ALLOWLIST = new Set<WorkerContextToolName>(["history_search", "contact_facts_list"]);
+
+function parseBoundedInt(raw: string | undefined, fallback: number, min: number, max: number) {
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.round(Math.max(min, Math.min(parsed, max)));
+}
+
+function classifyToolError(error: unknown): { code: string; message: string } {
+  const message = error instanceof Error ? error.message : String(error || "Unknown error");
+  const lower = message.toLowerCase();
+  if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("deadline")) {
+    return { code: "timeout", message };
+  }
+  if (/http\s+5\d{2}/i.test(message) || /(502|503|504)/.test(message)) {
+    return { code: "upstream_5xx", message };
+  }
+  if (/(invalid|required|cannot|must|threadid|contactjid)/i.test(message)) {
+    return { code: "validation", message };
+  }
+  if (/(empty|no results|no clear|no strong evidence)/i.test(message)) {
+    return { code: "empty_result", message };
+  }
+  return { code: "error", message };
+}
+
+function inferWorkerContextHints(inboundText: string): WorkerContextToolName[] {
+  const normalized = inboundText.toLowerCase();
+  const hints: WorkerContextToolName[] = [];
+  if (/(before|earlier|previous|remember|recall|mentioned|as discussed)/i.test(normalized)) {
+    hints.push("history_search");
+  }
+  if (/(birthday|prefer|likes|profile|fact|call me|remember about)/i.test(normalized)) {
+    hints.push("contact_facts_list");
+  }
+  return [...new Set(hints)];
+}
+
+function mergeWorkerContextPlan(args: {
+  deterministic: WorkerContextToolStep[];
+  hints: WorkerContextToolName[];
+  maxToolsPerRun: number;
+}): { steps: WorkerContextToolStep[]; hintApplied: boolean; plannerSource: "deterministic" | "hybrid" } {
+  const merged = [...args.deterministic];
+  for (const hint of args.hints) {
+    if (!WORKER_CONTEXT_HINT_ALLOWLIST.has(hint)) {
+      continue;
+    }
+    if (merged.some((step) => step.tool === hint) || merged.length >= args.maxToolsPerRun) {
+      continue;
+    }
+    merged.push({
+      id: `hint_${hint}`,
+      tool: hint,
+      reason: "Hybrid hint suggested this read tool.",
+      readOnly: WORKER_CONTEXT_READ_ONLY_TOOLS.has(hint),
+    });
+  }
+  const hintPriority = new Map(args.hints.map((tool, index) => [tool, index]));
+  const sorted = merged
+    .map((step, index) => ({ step, index }))
+    .sort((left, right) => {
+      if (!left.step.readOnly || !right.step.readOnly) {
+        return left.index - right.index;
+      }
+      const leftRank = hintPriority.get(left.step.tool);
+      const rightRank = hintPriority.get(right.step.tool);
+      if (leftRank === undefined && rightRank === undefined) {
+        return left.index - right.index;
+      }
+      if (leftRank === undefined) {
+        return 1;
+      }
+      if (rightRank === undefined) {
+        return -1;
+      }
+      if (leftRank !== rightRank) {
+        return leftRank - rightRank;
+      }
+      return left.index - right.index;
+    })
+    .map((item) => item.step)
+    .slice(0, args.maxToolsPerRun);
+  const hintApplied =
+    args.hints.length > 0 && sorted.some((step, index) => args.deterministic[index]?.tool !== step.tool);
+  return {
+    steps: sorted,
+    hintApplied,
+    plannerSource: hintApplied ? "hybrid" : "deterministic",
+  };
+}
+
+async function runWithTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await new Promise<T>((resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(`timeout after ${timeoutMs}ms`)), timeoutMs);
+      promise
+        .then((value) => resolve(value))
+        .catch((error) => reject(error));
+    });
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+async function recordContextToolRunTelemetry(args: {
+  convex: ConvexHttpClient;
+  threadId: string;
+  toolRunId: string;
+  plannerSource: "deterministic" | "hybrid";
+  plannerConfidence: number;
+  hintApplied: boolean;
+  stepId: string;
+  toolName: string;
+  status: "success" | "error" | "timeout" | "skipped";
+  latencyMs: number;
+  errorCode?: string;
+  errorMessage?: string;
+  input: unknown;
+  outputSummary: string;
+  output?: unknown;
+}) {
+  const inputJson = JSON.stringify(args.input ?? null);
+  const outputJson = JSON.stringify(args.output ?? null);
+  await args.convex
+    .mutation(convexRefs.systemRecordToolRun, {
+      threadId: args.threadId as Id<"threads">,
+      toolRunId: args.toolRunId,
+      plannerSource: args.plannerSource,
+      plannerConfidence: args.plannerConfidence,
+      hintApplied: args.hintApplied,
+      stepId: args.stepId,
+      toolName: args.toolName,
+      status: args.status,
+      latencyMs: args.latencyMs,
+      errorCode: args.errorCode,
+      errorMessage: args.errorMessage ? compactLogText(args.errorMessage, 260) : undefined,
+      inputHash: createHash("sha256").update(inputJson).digest("hex"),
+      inputSize: inputJson.length,
+      outputSize: outputJson.length,
+      outputSummary: compactLogText(args.outputSummary, 260),
+    })
+    .catch(() => undefined);
+}
+
+function fallbackHistoryOverride(args: { historyLines: string[]; limit: number }): HistorySearchOverrideSnapshot {
+  const lines = args.historyLines
+    .slice(-Math.max(1, args.limit))
+    .map((line) => line.replace(/\s+/g, " ").trim().slice(0, 320))
+    .filter(Boolean);
+  return {
+    lines,
+    candidateCount: lines.length,
+    semanticRerankCount: 0,
+    confidence: lines.length > 0 ? 0.18 : 0,
+    retrievalStage: "semantic_fallback",
+  };
+}
+
+async function runWorkerContextToolOrchestration(args: {
+  convex: ConvexHttpClient;
+  threadId: string;
+  toolRunId: string;
+  inboundText: string;
+  historyLines: string[];
+  allowHistorySearch: boolean;
+  includeContactFacts: boolean;
+  allowFactExtraction: boolean;
+  historySearchLimit: number;
+  factsLimit: number;
+}) : Promise<WorkerContextOrchestrationResult> {
+  const timeoutMs = parseBoundedInt(process.env.SLM_TOOL_TIMEOUT_MS, 8_000, 500, 30_000);
+  const maxToolsPerRun = parseBoundedInt(process.env.SLM_TOOL_MAX_TOOLS_PER_RUN, 4, 1, 8);
+  const globalDeadlineMs = parseBoundedInt(process.env.SLM_TOOL_GLOBAL_DEADLINE_MS, 20_000, 2_000, 120_000);
+  const deadlineAt = Date.now() + globalDeadlineMs;
+  const deterministic: WorkerContextToolStep[] = [];
+  if (args.allowHistorySearch) {
+    deterministic.push({
+      id: "history_search",
+      tool: "history_search",
+      reason: "Retrieve relevant historical snippets for current inbound message.",
+      readOnly: true,
+    });
+  }
+  if (args.includeContactFacts) {
+    if (args.allowFactExtraction) {
+      deterministic.push({
+        id: "contact_facts_extract",
+        tool: "contact_facts_extract",
+        reason: "Refresh contact memory facts from recent inbound messages.",
+        readOnly: false,
+      });
+    }
+    deterministic.push({
+      id: "contact_facts_list",
+      tool: "contact_facts_list",
+      reason: "Load contact memory facts for style/context hints.",
+      readOnly: true,
+      requiresTool: args.allowFactExtraction ? "contact_facts_extract" : undefined,
+    });
+  }
+  if (deterministic.length === 0) {
+    return {
+      plannerSource: "deterministic",
+      plannerConfidence: 0.5,
+      hintApplied: false,
+      historySearchOverride: undefined,
+      contactFacts: [],
+      runs: [],
+    };
+  }
+  const hints = inferWorkerContextHints(args.inboundText);
+  const merged = mergeWorkerContextPlan({
+    deterministic,
+    hints,
+    maxToolsPerRun,
+  });
+  const plannerConfidence = clamp(0.56 + deterministic.length * 0.08 + (merged.hintApplied ? 0.04 : 0), 0.5, 0.95);
+  let historySearchOverride: HistorySearchOverrideSnapshot | undefined;
+  let contactFacts: ContactMemoryFactSnapshot[] = [];
+  const runs: WorkerContextToolRunResult[] = [];
+  const completedTools = new Set<WorkerContextToolName>();
+  const pending = [...merged.steps];
+
+  const executeOne = async (step: WorkerContextToolStep): Promise<WorkerContextToolRunResult> => {
+    const startedAt = Date.now();
+    if (step.requiresTool && !completedTools.has(step.requiresTool)) {
+      const skipped: WorkerContextToolRunResult = {
+        stepId: step.id,
+        tool: step.tool,
+        status: "skipped",
+        latencyMs: Date.now() - startedAt,
+        errorCode: "dependency_missing",
+        outputSummary: `Skipped: requires ${step.requiresTool}`,
+      };
+      await recordContextToolRunTelemetry({
+        convex: args.convex,
+        threadId: args.threadId,
+        toolRunId: args.toolRunId,
+        plannerSource: merged.plannerSource,
+        plannerConfidence,
+        hintApplied: merged.hintApplied,
+        stepId: skipped.stepId,
+        toolName: skipped.tool,
+        status: skipped.status,
+        latencyMs: skipped.latencyMs,
+        errorCode: skipped.errorCode,
+        input: {},
+        outputSummary: skipped.outputSummary,
+      });
+      return skipped;
+    }
+    if (Date.now() >= deadlineAt) {
+      const timedOut: WorkerContextToolRunResult = {
+        stepId: step.id,
+        tool: step.tool,
+        status: "timeout",
+        latencyMs: Date.now() - startedAt,
+        errorCode: "timeout",
+        outputSummary: "Skipped: global deadline exceeded.",
+      };
+      await recordContextToolRunTelemetry({
+        convex: args.convex,
+        threadId: args.threadId,
+        toolRunId: args.toolRunId,
+        plannerSource: merged.plannerSource,
+        plannerConfidence,
+        hintApplied: merged.hintApplied,
+        stepId: timedOut.stepId,
+        toolName: timedOut.tool,
+        status: timedOut.status,
+        latencyMs: timedOut.latencyMs,
+        errorCode: timedOut.errorCode,
+        input: {},
+        outputSummary: timedOut.outputSummary,
+      });
+      return timedOut;
+    }
+
+    try {
+      const stepTimeoutMs = Math.max(250, Math.min(timeoutMs, deadlineAt - Date.now()));
+      let output: unknown = null;
+      let input: unknown = {};
+      if (step.tool === "history_search") {
+        input = {
+          threadId: args.threadId,
+          query: args.inboundText,
+          limit: args.historySearchLimit,
+        };
+        output = await runWithTimeout(
+          buildHistorySearchOverride({
+            convex: args.convex,
+            threadId: args.threadId,
+            query: args.inboundText,
+            limit: args.historySearchLimit,
+            fallbackHistoryLines: args.historyLines,
+          }),
+          stepTimeoutMs,
+        );
+        const override = (output as { override?: HistorySearchOverrideSnapshot }).override;
+        if (override) {
+          historySearchOverride = {
+            ...override,
+            lines: (override.lines || []).map((line) => line.replace(/\s+/g, " ").trim().slice(0, 320)).slice(0, args.historySearchLimit),
+          };
+        }
+      } else if (step.tool === "contact_facts_extract") {
+        input = {
+          threadId: args.threadId,
+          lookbackMessages: 120,
+        };
+        output = await runWithTimeout(
+          args.convex.mutation(convexRefs.chatExtractContactMemoryFacts, {
+            threadId: args.threadId as Id<"threads">,
+            lookbackMessages: 120,
+          }),
+          stepTimeoutMs,
+        );
+      } else if (step.tool === "contact_facts_list") {
+        input = {
+          threadId: args.threadId,
+          limit: args.factsLimit,
+        };
+        output = await runWithTimeout(
+          args.convex.query(convexRefs.chatContactMemoryFactsList, {
+            threadId: args.threadId as Id<"threads">,
+            limit: args.factsLimit,
+          }),
+          stepTimeoutMs,
+        );
+        const facts = (output as ContactFactsSnapshot)?.facts || [];
+        contactFacts = facts.slice(0, args.factsLimit);
+      }
+      const outputSummary = compactLogText(JSON.stringify(output ?? null), 260);
+      const success: WorkerContextToolRunResult = {
+        stepId: step.id,
+        tool: step.tool,
+        status: "success",
+        latencyMs: Date.now() - startedAt,
+        outputSummary,
+      };
+      await recordContextToolRunTelemetry({
+        convex: args.convex,
+        threadId: args.threadId,
+        toolRunId: args.toolRunId,
+        plannerSource: merged.plannerSource,
+        plannerConfidence,
+        hintApplied: merged.hintApplied,
+        stepId: success.stepId,
+        toolName: success.tool,
+        status: success.status,
+        latencyMs: success.latencyMs,
+        input,
+        outputSummary,
+        output,
+      });
+      return success;
+    } catch (error) {
+      const classified = classifyToolError(error);
+      const failed: WorkerContextToolRunResult = {
+        stepId: step.id,
+        tool: step.tool,
+        status: classified.code === "timeout" ? "timeout" : "error",
+        latencyMs: Date.now() - startedAt,
+        errorCode: classified.code,
+        errorMessage: compactLogText(classified.message, 260),
+        outputSummary: `error:${classified.code}`,
+      };
+      await recordContextToolRunTelemetry({
+        convex: args.convex,
+        threadId: args.threadId,
+        toolRunId: args.toolRunId,
+        plannerSource: merged.plannerSource,
+        plannerConfidence,
+        hintApplied: merged.hintApplied,
+        stepId: failed.stepId,
+        toolName: failed.tool,
+        status: failed.status,
+        latencyMs: failed.latencyMs,
+        errorCode: failed.errorCode,
+        errorMessage: failed.errorMessage,
+        input: {},
+        outputSummary: failed.outputSummary,
+      });
+      return failed;
+    }
+  };
+
+  while (pending.length > 0) {
+    const runnableRead = pending.filter((step) => step.readOnly && (!step.requiresTool || completedTools.has(step.requiresTool)));
+    if (runnableRead.length > 0) {
+      for (const step of runnableRead) {
+        const index = pending.indexOf(step);
+        if (index >= 0) {
+          pending.splice(index, 1);
+        }
+      }
+      const settled = await Promise.all(runnableRead.map((step) => executeOne(step)));
+      for (const result of settled) {
+        runs.push(result);
+        if (result.status === "success") {
+          completedTools.add(result.tool);
+        }
+      }
+      continue;
+    }
+
+    const step = pending.shift();
+    if (!step) {
+      break;
+    }
+    const result = await executeOne(step);
+    runs.push(result);
+    if (result.status === "success") {
+      completedTools.add(step.tool);
+    }
+  }
+
+  if (args.allowHistorySearch && !historySearchOverride) {
+    historySearchOverride = fallbackHistoryOverride({
+      historyLines: args.historyLines,
+      limit: args.historySearchLimit,
+    });
+  }
+
+  return {
+    plannerSource: merged.plannerSource,
+    plannerConfidence,
+    hintApplied: merged.hintApplied,
+    historySearchOverride,
+    contactFacts,
+    runs,
+  };
 }
 
 function createConvexClient() {
@@ -984,6 +1473,10 @@ const MEME_PREWARM_COOLDOWN_MS = 25 * 60 * 1000;
 const MEME_GENERATION_FAILURE_RETRY_MS = 10 * 60 * 1000;
 const MEDIA_ASSET_BUFFER_CACHE_TTL_MS = 5 * 60 * 1000;
 const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
+
+function resolveTextEmojiAllowlist() {
+  return TEXT_EMOJI_ALLOWLIST;
+}
 
   const getRuntimeSettings = async () => {
     const settings = await resolveTtlCache(runtimeSettingsCache, SETTINGS_CACHE_TTL_MS, async () => {
@@ -3189,35 +3682,8 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
         });
         styleHints = threadContext?.memory?.styleNotes || [];
         styleProfile = await getStyleProfileForThread(ingest.threadId);
-        await convex
-          .mutation(convexRefs.chatExtractContactMemoryFacts, {
-            threadId: ingest.threadId,
-            lookbackMessages: 120,
-          })
-          .catch(() => undefined);
-        const factsBundle = (await convex
-          .query(convexRefs.chatContactMemoryFactsList, {
-            threadId: ingest.threadId,
-            limit: 8,
-          })
-          .catch(() => null)) as ContactFactsSnapshot;
-        contactFacts = factsBundle?.facts || [];
-        if (contactFacts.length > 0) {
-          styleHints = [
-            ...styleHints,
-            ...contactFacts.map((fact) => `Known contact fact (${fact.factType}): ${fact.factValue}`),
-          ];
-        }
       }
-      let historySearchOverride:
-        | {
-            lines: string[];
-            candidateCount: number;
-            semanticRerankCount: number;
-            confidence: number;
-            retrievalStage?: "lexical" | "semantic" | "semantic_fallback";
-          }
-        | undefined;
+      let historySearchOverride: HistorySearchOverrideSnapshot | undefined;
 
       let inboundTextForAi =
         effectiveParsed.kind === "sticker"
@@ -3263,53 +3729,89 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
         if (!olderContextDecision.allowOlderContext) {
           // Chat was resumed without an explicit callback cue: keep only the latest line as context.
           historyLines = historyLines.slice(-1);
-        } else {
-          const initialSearch = await buildHistorySearchOverride({
+        }
+
+        const historySearchLimit = Math.max(8, Math.min(runtimeSettings?.aiHistoryLineLimit ?? 12, 20));
+        const shouldRefreshFacts = olderContextDecision.explicitRecallCue || /(birthday|prefer|likes|profile|fact|call me)/i.test(inboundTextForAi);
+        const orchestration = await runWorkerContextToolOrchestration({
+          convex,
+          threadId: ingest.threadId,
+          toolRunId,
+          inboundText: inboundTextForAi,
+          historyLines,
+          allowHistorySearch: olderContextDecision.allowOlderContext,
+          includeContactFacts: true,
+          allowFactExtraction: shouldRefreshFacts,
+          historySearchLimit,
+          factsLimit: 8,
+        });
+        historySearchOverride = orchestration.historySearchOverride;
+        contactFacts = orchestration.contactFacts;
+        if (contactFacts.length > 0) {
+          styleHints = [
+            ...styleHints,
+            ...contactFacts.map((fact) => `Known contact fact (${fact.factType}): ${fact.factValue}`),
+          ];
+        }
+        await convex
+          .mutation(convexRefs.systemRecordEvent, {
+            source: "ai",
+            eventType: "ai.context.tool_orchestration",
+            threadId: ingest.threadId,
+            toolRunId,
+            detail: compactLogText(
+              `planner=${orchestration.plannerSource} confidence=${orchestration.plannerConfidence.toFixed(2)} hintApplied=${orchestration.hintApplied} runs=${orchestration.runs.length}`,
+              280,
+            ),
+          })
+          .catch(() => undefined);
+
+        const needsHistoryFetch =
+          olderContextDecision.allowOlderContext &&
+          historyFetchConfig.enabled &&
+          Boolean(historySearchOverride) &&
+          ((historySearchOverride?.lines.length || 0) < 3 || (historySearchOverride?.confidence || 0) < 0.38);
+        if (needsHistoryFetch) {
+          const fetchResult = await maybeFetchOlderHistoryForThread({
+            socket: sock,
             convex,
             threadId: ingest.threadId,
-            query: inboundTextForAi,
-            limit: Math.max(8, Math.min(runtimeSettings?.aiHistoryLineLimit ?? 12, 20)),
+            threadJid,
+            threadMessages: threadContext.messages,
+            stateByThread: historyFetchStateByThread,
+            config: historyFetchConfig,
           });
-          historySearchOverride = initialSearch.override;
-          const needsHistoryFetch =
-            historyFetchConfig.enabled &&
-            (historySearchOverride.lines.length < 3 || historySearchOverride.confidence < 0.38);
-          if (needsHistoryFetch) {
-            const fetchResult = await maybeFetchOlderHistoryForThread({
-              socket: sock,
+          await convex
+            .mutation(convexRefs.systemRecordEvent, {
+              source: "ai",
+              eventType: fetchResult.requested ? "ai.context.history_fetch.requested" : "ai.context.history_fetch.skipped",
+              threadId: ingest.threadId,
+              toolRunId,
+              detail: compactLogText(JSON.stringify(fetchResult), 280),
+            })
+            .catch(() => undefined);
+
+          if (fetchResult.requested) {
+            threadContext = (await convex.query(convexRefs.threadGet, {
+              threadId: ingest.threadId,
+            })) as ThreadContextSnapshot;
+            historyLines = (threadContext?.messages || []).map((m) => {
+              return `${m.direction === "inbound" ? "Them" : "Me"}: ${m.text}`;
+            });
+
+            const refreshedOrchestration = await runWorkerContextToolOrchestration({
               convex,
               threadId: ingest.threadId,
-              threadJid,
-              threadMessages: threadContext.messages,
-              stateByThread: historyFetchStateByThread,
-              config: historyFetchConfig,
+              toolRunId,
+              inboundText: inboundTextForAi,
+              historyLines,
+              allowHistorySearch: true,
+              includeContactFacts: false,
+              allowFactExtraction: false,
+              historySearchLimit,
+              factsLimit: 8,
             });
-            await convex
-              .mutation(convexRefs.systemRecordEvent, {
-                source: "ai",
-                eventType: fetchResult.requested ? "ai.context.history_fetch.requested" : "ai.context.history_fetch.skipped",
-                threadId: ingest.threadId,
-                toolRunId,
-                detail: compactLogText(JSON.stringify(fetchResult), 280),
-              })
-              .catch(() => undefined);
-
-            if (fetchResult.requested) {
-              threadContext = (await convex.query(convexRefs.threadGet, {
-                threadId: ingest.threadId,
-              })) as ThreadContextSnapshot;
-              historyLines = (threadContext?.messages || []).map((m) => {
-                return `${m.direction === "inbound" ? "Them" : "Me"}: ${m.text}`;
-              });
-
-              const refreshedSearch = await buildHistorySearchOverride({
-                convex,
-                threadId: ingest.threadId,
-                query: inboundTextForAi,
-                limit: Math.max(8, Math.min(runtimeSettings?.aiHistoryLineLimit ?? 12, 20)),
-              });
-              historySearchOverride = refreshedSearch.override;
-            }
+            historySearchOverride = refreshedOrchestration.historySearchOverride || historySearchOverride;
           }
         }
       }
@@ -3542,8 +4044,9 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
               lastEmojiSentAtMs: getRecentEmojiOutboundAt(threadJid),
               fallbackText: "All good.",
               allowEmojiInText: true,
-              allowedEmojiInText: TEXT_EMOJI_ALLOWLIST,
+              allowedEmojiInText: resolveTextEmojiAllowlist(),
               maxAllowedEmojiMessagesInWindow: TEXT_EMOJI_MAX_PER_WINDOW,
+              maxAnyEmojiMessagesInWindowBeforeAllowlist: TEXT_EMOJI_NON_ALLOWLIST_WARMUP_MAX_PER_WINDOW,
               allowedEmojiWindowMs: TEXT_EMOJI_WINDOW_MS,
             })
           : null;
@@ -3892,17 +4395,24 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
       .filter(Boolean)
       .join("\n");
 
+    const outreachContextTools = await runWorkerContextToolOrchestration({
+      convex,
+      threadId: item.threadId,
+      toolRunId,
+      inboundText: promptSeed,
+      historyLines,
+      allowHistorySearch: true,
+      includeContactFacts: false,
+      allowFactExtraction: false,
+      historySearchLimit: Math.max(8, Math.min(runtimeSettings?.aiHistoryLineLimit ?? 12, 20)),
+      factsLimit: 8,
+    });
+    const outreachHistoryOverride = outreachContextTools.historySearchOverride;
+
     const ai = await generateReplyWithFallback({
       inboundText: promptSeed,
       historyLines,
-      historySearchOverride: (
-        await buildHistorySearchOverride({
-          convex,
-          threadId: item.threadId,
-          query: promptSeed,
-          limit: Math.max(8, Math.min(runtimeSettings?.aiHistoryLineLimit ?? 12, 20)),
-        })
-      ).override,
+      historySearchOverride: outreachHistoryOverride,
       styleHints,
       styleProfile: styleProfile || undefined,
       personality: personalitySetting
@@ -4041,8 +4551,9 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
       lastEmojiSentAtMs: getRecentEmojiOutboundAt(item.jid),
       fallbackText,
       allowEmojiInText: true,
-      allowedEmojiInText: TEXT_EMOJI_ALLOWLIST,
+      allowedEmojiInText: resolveTextEmojiAllowlist(),
       maxAllowedEmojiMessagesInWindow: TEXT_EMOJI_MAX_PER_WINDOW,
+      maxAnyEmojiMessagesInWindowBeforeAllowlist: TEXT_EMOJI_NON_ALLOWLIST_WARMUP_MAX_PER_WINDOW,
       allowedEmojiWindowMs: TEXT_EMOJI_WINDOW_MS,
     });
     const safeText = emojiAdjusted.text;
@@ -4389,6 +4900,21 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
                 return;
               }
 
+              const reviewRatio = clamp(runtimeSettings?.statusBuilderReviewRatio ?? 0, 0, 1);
+              const legacySampledForReview =
+                item.statusReviewRequired === undefined &&
+                item.isStatusPost === true &&
+                item.messageText === AI_STATUS_PLACEHOLDER &&
+                (stableHash(`${item.outboxId}|status-review`) % 1000) / 1000 < reviewRatio;
+              const requiresStatusReview = Boolean(item.statusReviewRequired) || legacySampledForReview;
+              if (requiresStatusReview && item.isStatusPost === true && item.messageText === AI_STATUS_PLACEHOLDER) {
+                await convex.mutation(convexRefs.outboxStageStatusReview, {
+                  outboxId: item.outboxId as Id<"outbox">,
+                  reason: "Auto status sampled for manual review before send.",
+                });
+                return;
+              }
+
               if (hydrated.reactionEmoji && hydrated.reactionTargetWhatsAppMessageId && hydrated.sendKind === "text") {
                 rememberAutomatedThreadSend(item.jid);
                 const preReactionSent = await sock.sendMessage(item.jid, {
@@ -4424,8 +4950,9 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
                   lastEmojiSentAtMs: getRecentEmojiOutboundAt(item.jid),
                   fallbackText: hydrated.sendKind === "meme" ? "Checking in with you." : "All good.",
                   allowEmojiInText: true,
-                  allowedEmojiInText: TEXT_EMOJI_ALLOWLIST,
+                  allowedEmojiInText: resolveTextEmojiAllowlist(),
                   maxAllowedEmojiMessagesInWindow: TEXT_EMOJI_MAX_PER_WINDOW,
+                  maxAnyEmojiMessagesInWindowBeforeAllowlist: TEXT_EMOJI_NON_ALLOWLIST_WARMUP_MAX_PER_WINDOW,
                   allowedEmojiWindowMs: TEXT_EMOJI_WINDOW_MS,
                 });
                 emojiPolicyApplied = emojiAdjusted.emojiSuppressed;

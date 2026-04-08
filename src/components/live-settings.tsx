@@ -68,6 +68,7 @@ type SettingsState = {
   statusBuilderCadenceHours: number;
   statusBuilderDailyMaxPosts: number;
   statusBuilderTextPostRatio: number;
+  statusBuilderReviewRatio: number;
   statusBuilderAudienceJids: string[];
   statusBuilderAudienceSampleSize: number;
 };
@@ -183,6 +184,7 @@ function toState(source: Partial<SettingsState> | undefined): SettingsState {
     statusBuilderCadenceHours: source?.statusBuilderCadenceHours ?? 8,
     statusBuilderDailyMaxPosts: source?.statusBuilderDailyMaxPosts ?? 3,
     statusBuilderTextPostRatio: source?.statusBuilderTextPostRatio ?? 0.4,
+    statusBuilderReviewRatio: source?.statusBuilderReviewRatio ?? 0.35,
     statusBuilderAudienceJids: source?.statusBuilderAudienceJids ?? [],
     statusBuilderAudienceSampleSize: source?.statusBuilderAudienceSampleSize ?? 80,
   };
@@ -253,6 +255,7 @@ function stateEquals(a: SettingsState, b: SettingsState) {
     nearlyEqual(a.statusBuilderCadenceHours, b.statusBuilderCadenceHours) &&
     nearlyEqual(a.statusBuilderDailyMaxPosts, b.statusBuilderDailyMaxPosts) &&
     nearlyEqual(a.statusBuilderTextPostRatio, b.statusBuilderTextPostRatio) &&
+    nearlyEqual(a.statusBuilderReviewRatio, b.statusBuilderReviewRatio) &&
     a.statusBuilderAudienceJids.join("\n") === b.statusBuilderAudienceJids.join("\n") &&
     nearlyEqual(a.statusBuilderAudienceSampleSize, b.statusBuilderAudienceSampleSize)
   );
@@ -494,6 +497,7 @@ export function LiveSettings() {
           statusBuilderCadenceHours: Math.round(draft.statusBuilderCadenceHours),
           statusBuilderDailyMaxPosts: Math.round(draft.statusBuilderDailyMaxPosts),
           statusBuilderTextPostRatio: draft.statusBuilderTextPostRatio,
+          statusBuilderReviewRatio: draft.statusBuilderReviewRatio,
           statusBuilderAudienceJids: draft.statusBuilderAudienceJids,
           statusBuilderAudienceSampleSize: Math.round(draft.statusBuilderAudienceSampleSize),
         });
@@ -1786,6 +1790,28 @@ export function LiveSettings() {
               aria-disabled={record.pending || !draft.statusBuilderEnabled}
             />
             <span className="queue-meta">Lower means more AI meme-image statuses. Higher means more text statuses.</span>
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">
+              Manual-review sampling: {Math.round(draft.statusBuilderReviewRatio * 100)}%
+            </span>
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.05}
+              value={draft.statusBuilderReviewRatio}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  statusBuilderReviewRatio: parseNumber(event.target.value, prev.statusBuilderReviewRatio),
+                }))
+              }
+              disabled={record.pending || !draft.statusBuilderEnabled}
+              aria-disabled={record.pending || !draft.statusBuilderEnabled}
+            />
+            <span className="queue-meta">Only this sampled share of auto-statuses is staged for manual approval.</span>
           </label>
 
           <label className="stack compact">
