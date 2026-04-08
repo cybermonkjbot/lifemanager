@@ -143,17 +143,42 @@ export const run = internalMutation({
     const now = Date.now();
     const config = await getConfig(ctx);
     const nowHour = new Date(now).getHours();
+    const shouldLogSkip = async (reason: string) => {
+      const recentEvents = await ctx.db
+        .query("systemEvents")
+        .withIndex("by_createdAt")
+        .order("desc")
+        .take(50);
+      const alreadyLogged = recentEvents.some(
+        (event) =>
+          event.eventType === "status_builder.skipped" &&
+          event.detail.startsWith(`reason=${reason}`) &&
+          event.createdAt >= now - 90 * 60 * 1000,
+      );
+      if (alreadyLogged) {
+        return;
+      }
+      await ctx.db.insert("systemEvents", {
+        source: "convex",
+        eventType: "status_builder.skipped",
+        detail: `reason=${reason}`,
+        createdAt: now,
+      });
+    };
 
     if (!config.statusBuilderEnabled) {
+      await shouldLogSkip("status_builder_disabled");
       return { queued: false, reason: "status_builder_disabled" as const };
     }
     if (config.autonomyPaused) {
+      await shouldLogSkip("autonomy_paused");
       return { queued: false, reason: "autonomy_paused" as const };
     }
     if (
       config.quietHoursEnabled &&
       isWithinHourWindow(nowHour, config.quietHoursStartHour, config.quietHoursEndHour)
     ) {
+      await shouldLogSkip("quiet_hours");
       return { queued: false, reason: "quiet_hours" as const };
     }
 
@@ -168,6 +193,7 @@ export const run = internalMutation({
       .withIndex("by_thread_and_status", (q) => q.eq("threadId", statusThreadId).eq("status", "pending"))
       .first();
     if (existingPending?.isStatusPost) {
+      await shouldLogSkip("already_queued_pending");
       return { queued: false, reason: "already_queued_pending" as const };
     }
     const existingClaimed = await ctx.db
@@ -175,6 +201,7 @@ export const run = internalMutation({
       .withIndex("by_thread_and_status", (q) => q.eq("threadId", statusThreadId).eq("status", "claimed"))
       .first();
     if (existingClaimed?.isStatusPost) {
+      await shouldLogSkip("already_queued_claimed");
       return { queued: false, reason: "already_queued_claimed" as const };
     }
 
@@ -187,12 +214,14 @@ export const run = internalMutation({
     const dailyCount = recentOutboundStatus.filter((message) => message.messageAt >= now - STATUS_OUTREACH_WINDOW_MS).length;
 
     if (dailyCount >= config.statusBuilderDailyMaxPosts) {
+      await shouldLogSkip("daily_limit");
       return { queued: false, reason: "daily_limit" as const, dailyCount };
     }
 
     const lastStatusAt = recentOutboundStatus[0]?.messageAt || 0;
     const cadenceMs = Math.max(60_000, Math.round(config.statusBuilderCadenceHours * 60 * 60 * 1000));
     if (lastStatusAt > 0 && now - lastStatusAt < cadenceMs) {
+      await shouldLogSkip("too_soon");
       return { queued: false, reason: "too_soon" as const, waitMs: cadenceMs - (now - lastStatusAt) };
     }
 
@@ -236,6 +265,7 @@ export const run = internalMutation({
 
     audienceJids = [...new Set(audienceJids)].slice(0, config.statusBuilderAudienceSampleSize);
     if (audienceJids.length === 0) {
+      await shouldLogSkip("no_audience");
       return { queued: false, reason: "no_audience" as const };
     }
 

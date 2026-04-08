@@ -28,6 +28,8 @@ export const save = mutation({
     memeThreadCooldownMs: v.number(),
     memeSendProbability: v.number(),
     soulModeEnabled: v.boolean(),
+    // Compatibility: some clients still send this key in save payloads.
+    autonomyPaused: v.optional(v.boolean()),
     humorLearningEnabled: v.boolean(),
     statusAutoReplyEnabled: v.boolean(),
     statusReplyRequireFunny: v.boolean(),
