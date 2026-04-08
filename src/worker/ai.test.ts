@@ -178,6 +178,24 @@ test("postProcessReplyText strips king/queen outside joke context when gender is
   assert.equal(output, "Thanks, noted.");
 });
 
+test("postProcessReplyText strips AI-denial lines when AI was previously disclosed", () => {
+  const output = postProcessReplyText({
+    text: "I don't use any AI for this. I can check and get back.",
+    inboundText: "Is that your AI helping again?",
+    historyLines: ["Me: I have an AI assistant that works for me on replies."],
+  });
+  assert.equal(output, "I can check and get back.");
+});
+
+test("postProcessReplyText keeps AI-denial lines when no prior AI disclosure exists", () => {
+  const output = postProcessReplyText({
+    text: "I don't use any AI for this.",
+    inboundText: "Who wrote this?",
+    historyLines: [],
+  });
+  assert.equal(output, "I don't use any AI for this.");
+});
+
 test("hasBossAddressCue detects vocative boss forms and ignores plain references", () => {
   assert.equal(hasBossAddressCue("Boss, can you send the update?"), true);
   assert.equal(hasBossAddressCue("Hi oga please check this."), true);
@@ -1133,6 +1151,45 @@ test("generateReplyWithFallback injects clarify reply-mode instruction for ambig
     assert.equal(result.provider, "azure");
     assert.ok(requestBodies.some((body) => /Reply mode is CLARIFY/i.test(body)));
     assert.ok(requestBodies.some((body) => /Pre-response workbench/i.test(body)));
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback injects AI-disclosure consistency instruction when prior disclosure exists", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  const requestBodies: string[] = [];
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      requestBodies.push(typeof init?.body === "string" ? init.body : "");
+      return new Response(JSON.stringify({ output_text: "Noted, I'll check and update you." }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "Is your AI still running this thing?",
+      historyLines: ["Me: I have an AI assistant that works for me for some replies."],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "log_only",
+      },
+    });
+
+    assert.equal(result.provider, "azure");
+    assert.ok(
+      requestBodies.some((body) => /already disclosed in this chat that an AI assistant helps you/i.test(body)),
+    );
+    assert.ok(requestBodies.some((body) => /Do not deny or contradict that/i.test(body)));
   } finally {
     globalThis.fetch = originalFetch;
     restoreAiEnv(snapshot);

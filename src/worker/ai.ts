@@ -256,6 +256,21 @@ const SALES_INVENTORY_CLAIM_PATTERNS = [
   /\bfor\s+sale\b/i,
   /\bavailable\s+for\s+orders?\b/i,
 ];
+const AI_DISCLOSURE_PATTERNS = [
+  /\bi\s+(?:have|use|run)\s+(?:an?\s+)?(?:ai|assistant|bot|automation)\b/i,
+  /\b(?:my|an?|the)\s+(?:ai|assistant|bot|automation)\b.*\b(?:work(?:s|ing)?|help(?:s)?|handle(?:s)?|manag(?:e|es)|run(?:s)?)\b.*\b(?:for me|my)\b/i,
+  /\b(?:work(?:s|ing)?\s+for\s+me)\b.*\b(?:ai|assistant|bot|automation)\b/i,
+  /\bmy\s+(?:ai|assistant|bot|automation)\b/i,
+  /\bi\s+use\s+(?:an?\s+)?(?:ai|assistant|bot|automation)\b/i,
+];
+const AI_DENIAL_PATTERNS = [
+  /\bi\s+(?:do\s+not|don't|dont)\s+(?:use|have)\s+(?:an?\s+|any\s+)?(?:ai|assistant|bot|automation)\b/i,
+  /\bi(?:'|’)m\s+not\s+using\s+(?:an?\s+)?(?:ai|assistant|bot|automation)\b/i,
+  /\bno\s+(?:ai|assistant|bot|automation)\s+(?:here|involved)\b/i,
+  /\b(?:just|only)\s+me\b/i,
+  /\bi\s+reply\s+myself(?:\s+only)?\b/i,
+  /\bmanual(?:ly)?\s+only\b/i,
+];
 const MALE_GENDERED_TERMS = ["bro", "broski", "brother", "dude", "guy", "boy", "king", "sir", "mr", "handsome", "gentleman"];
 const FEMALE_GENDERED_TERMS = ["sis", "sister", "girl", "queen", "maam", "madam", "mrs", "miss", "lady", "beautiful", "princess"];
 const ROYAL_JOKE_TERMS = new Set(["king", "queen"]);
@@ -1642,6 +1657,10 @@ function buildPrompt(args: {
     inboundText: args.inboundText,
     historyLines: recentHistory.map((line) => line.line),
   });
+  const aiDisclosureContext = hasDeclaredAiAssistantContext({
+    inboundText: args.inboundText,
+    historyLines: args.historyLines,
+  });
   const steeringInstruction = steeringInstructionForMode(steeringMode);
   const insultHandlingInstruction = hasAggressiveInsultCue(args.inboundText)
     ? "The latest message includes insulting or aggressive language. Ignore the insult and do not attempt de-escalation, conflict coaching, or tone policing. Respond only to the concrete request/topic. If there is no concrete request, send one short neutral acknowledgment and stop."
@@ -1696,7 +1715,9 @@ function buildPrompt(args: {
       "Prefer one concise line. Only use a second short line when it clearly adds needed context.",
       "Sound conversational and specific, never stiff or corporate.",
       "Directly react to something concrete in the latest inbound message (topic, emotion, or request).",
-      "Do not mention AI, policies, prompt rules, or internal reasoning.",
+      aiDisclosureContext
+        ? "You have already disclosed in this chat that an AI assistant helps you. Do not deny or contradict that. Keep references brief and only when relevant."
+        : "Do not mention AI, policies, prompt rules, or internal reasoning.",
       "Do not overpromise. If timing is uncertain, say you'll confirm shortly.",
       "Do not prolong the conversation unnecessarily. If the intent is complete, close gracefully in one short line.",
       "Do not use emoji characters.",
@@ -1918,6 +1939,36 @@ function stripSalesInventoryClaims(text: string) {
   return normalizeOutboundText(kept.join(" "));
 }
 
+function hasDeclaredAiAssistantContext(args: { inboundText: string; historyLines?: string[] }) {
+  const inbound = normalizeOutboundText(args.inboundText || "");
+  const history = (args.historyLines || []).join(" ");
+  const context = normalizeOutboundText(`${inbound} ${history}`.trim());
+  if (!context) {
+    return false;
+  }
+  return AI_DISCLOSURE_PATTERNS.some((pattern) => pattern.test(context));
+}
+
+function stripAiDisclosureContradictions(text: string, aiDeclared: boolean) {
+  if (!aiDeclared) {
+    return normalizeOutboundText(text);
+  }
+
+  const parts = normalizeOutboundText(text)
+    .split(/(?<=[.!?])\s+|\n+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (parts.length === 0) {
+    return "";
+  }
+
+  const kept = parts.filter((part) => !AI_DENIAL_PATTERNS.some((pattern) => pattern.test(part)));
+  if (kept.length === 0) {
+    return "";
+  }
+  return normalizeOutboundText(kept.join(" "));
+}
+
 function inferKnownGenderFromContext(args: { inboundText: string; historyLines?: string[] }): "male" | "female" | null {
   const inbound = normalizeOutboundText(args.inboundText || "");
   const themHistory = (args.historyLines || [])
@@ -2087,6 +2138,11 @@ export function postProcessReplyText(args: {
   });
   const withOldEnglishMirror = applyOldEnglishMirror(withBossEscalation, oldEnglishMode);
   const withoutSalesClaims = stripSalesInventoryClaims(withOldEnglishMirror);
+  const aiDeclared = hasDeclaredAiAssistantContext({
+    inboundText: args.inboundText,
+    historyLines: args.historyLines || [],
+  });
+  const withoutAiContradiction = stripAiDisclosureContradictions(withoutSalesClaims, aiDeclared);
   const jokeContext = hasJokeContextCue({
     inboundText: args.inboundText,
     historyLines: args.historyLines || [],
@@ -2096,7 +2152,7 @@ export function postProcessReplyText(args: {
     inboundText: args.inboundText,
     historyLines: args.historyLines || [],
   });
-  const withoutGenderedWording = stripGenderedWording(withoutSalesClaims, knownGender, jokeContext);
+  const withoutGenderedWording = stripGenderedWording(withoutAiContradiction, knownGender, jokeContext);
   return withoutGenderedWording || fallback;
 }
 
