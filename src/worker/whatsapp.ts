@@ -175,13 +175,6 @@ export function parseInboundMessage(message: proto.IMessage | null | undefined):
     return { kind: "text", text };
   }
 
-  if (unwrapped.videoMessage || unwrapped.documentMessage || unwrapped.ptvMessage) {
-    return {
-      kind: "text",
-      text: "[Media message]",
-    };
-  }
-
   return { kind: "unsupported", text: "" };
 }
 

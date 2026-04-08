@@ -8,6 +8,8 @@
     "dev:convex": "convex dev",
     "worker": "bun run src/worker/index.ts",
     "pidgin:refresh": "bun run scripts/pidgin-lexicon-refresh.ts",
+    "pidgin:promote": "bun run scripts/pidgin-lexicon-promote.ts",
+    "pidgin:refresh-and-promote": "bun run scripts/pidgin-lexicon-refresh.ts --write --out data/pidgin-lexicon-candidates.json && bun run scripts/pidgin-lexicon-promote.ts --write",
     "self-improve": "bun run scripts/self-improvement-cycle.ts once",
     "self-improve:daemon": "bun run scripts/self-improvement-cycle.ts daemon",
     "dev:all": "concurrently -n next,convex,worker -c cyan,magenta,yellow \"bun run dev:next\" \"bun run dev:convex\" \"bun run worker\"",

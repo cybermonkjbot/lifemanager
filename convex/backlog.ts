@@ -4,12 +4,13 @@ import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { internalMutation, mutation, query } from "./_generated/server";
 import { detectPromiseOrPlan, detectTodoCandidate, estimateHumanTiming, evaluateGuardrail, looksLikeQuestion } from "./lib/heuristics";
+import { classifyThreadKind } from "./lib/threadEligibility";
 
 type RelationshipKind = "girlfriend" | "relationship" | "friendship" | "casual" | "family" | "business";
 type ImportanceKind = "critical" | "high" | "medium" | "low";
 type RecommendationKind = "answer" | "answer_with_ack" | "restart" | "already_queued";
 
-type ThreadLike = Pick<Doc<"threads">, "_id" | "jid" | "title" | "isIgnored" | "lastMessageAt" | "isGroup">;
+type ThreadLike = Pick<Doc<"threads">, "_id" | "jid" | "title" | "isIgnored" | "lastMessageAt" | "isGroup" | "threadKind">;
 
 type LiveSignals = {
   unresolvedCount: number;
@@ -78,6 +79,14 @@ function clamp(value: number, min: number, max: number) {
 
 function msToHours(ms: number) {
   return ms / (60 * 60 * 1000);
+}
+
+function resolveThreadKind(thread: Pick<Doc<"threads">, "jid" | "isGroup" | "threadKind">) {
+  return thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup });
+}
+
+function resolveIgnoreTargetType(thread: Pick<Doc<"threads">, "jid" | "isGroup" | "threadKind">): "contact" | "group" {
+  return resolveThreadKind(thread) === "group" ? "group" : "contact";
 }
 
 function resolveRelationship(args: {
@@ -570,7 +579,7 @@ export const list = query({
     const rows = await Promise.all(
       stateRows.map(async (state) => {
         const thread = await ctx.db.get(state.threadId);
-        if (!thread || thread.isGroup) {
+        if (!thread || resolveThreadKind(thread) === "group") {
           return null;
         }
 
@@ -900,9 +909,10 @@ export const ignoreThread = mutation({
       updatedAt: now,
     });
 
+    const targetType = resolveIgnoreTargetType(thread);
     const existingRule = await ctx.db
       .query("ignoreRules")
-      .withIndex("by_target", (q) => q.eq("targetType", thread.isGroup ? "group" : "contact").eq("targetValue", thread.jid))
+      .withIndex("by_target", (q) => q.eq("targetType", targetType).eq("targetValue", thread.jid))
       .first();
 
     if (existingRule) {
@@ -912,7 +922,7 @@ export const ignoreThread = mutation({
       });
     } else {
       await ctx.db.insert("ignoreRules", {
-        targetType: thread.isGroup ? "group" : "contact",
+        targetType,
         targetValue: thread.jid,
         enabled: args.enabled,
         createdAt: now,
@@ -1036,7 +1046,7 @@ export const refreshRecent = mutation({
 
     let refreshed = 0;
     for (const thread of threads) {
-      if (thread.isGroup) {
+      if (resolveThreadKind(thread) === "group") {
         continue;
       }
       await refreshThreadSnapshot(ctx, thread._id);
@@ -1086,7 +1096,7 @@ export const refreshRecentInternal = internalMutation({
 
     let refreshed = 0;
     for (const thread of threads) {
-      if (thread.isGroup) {
+      if (resolveThreadKind(thread) === "group") {
         continue;
       }
       await refreshThreadSnapshot(ctx, thread._id);

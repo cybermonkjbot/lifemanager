@@ -551,6 +551,23 @@ a {
   color: #eaf2ff;
 }
 
+.message-media-open {
+  margin-top: 9px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: zoom-in;
+}
+
+.message-media-open .message-media-image {
+  margin-top: 0;
+}
+
+.modal-preview-image {
+  width: min(560px, 100%);
+  max-height: min(72vh, 820px);
+}
+
 .message-tool-summary-trigger {
   padding: 5px 10px;
   font-size: 0.74rem;
@@ -568,6 +585,32 @@ a {
 .message-bubble.inbound {
   border-color: rgba(255, 255, 255, 0.3);
   background: rgba(255, 255, 255, 0.06);
+}
+
+.media-filter-tabs {
+  margin-top: 12px;
+}
+
+.media-dashboard-item {
+  padding: 14px 0;
+}
+
+.media-dashboard-main {
+  display: grid;
+  grid-template-columns: minmax(180px, 340px) minmax(0, 1fr);
+  gap: 14px;
+  align-items: flex-start;
+}
+
+.media-dashboard-content {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.media-dashboard-preview {
+  display: block;
 }
 
 .conversation-controls {
@@ -1515,6 +1558,10 @@ input:focus-visible,
 
   .chat-row {
     max-width: 100%;
+  }
+
+  .media-dashboard-main {
+    grid-template-columns: 1fr;
   }
 
   .activity-core-stage {

@@ -73,13 +73,26 @@ export async function createTodoFromCandidate(candidateId: string) {
   return await client.mutation(convexRefs.todosFromCandidate, { candidateId });
 }
 
-export async function upsertIgnoreContact(targetValue: string, enabled: boolean) {
+type IgnoreTargetType = "contact" | "group" | "keyword";
+
+export async function upsertIgnoreTarget(targetValue: string, enabled: boolean, targetType?: IgnoreTargetType) {
   const client = createConvexClient();
-  return await client.mutation(convexRefs.rulesUpsertIgnoreRule, {
-    targetType: "contact",
+  const payload: {
+    targetValue: string;
+    enabled: boolean;
+    targetType?: IgnoreTargetType;
+  } = {
     targetValue,
     enabled,
-  });
+  };
+  if (targetType) {
+    payload.targetType = targetType;
+  }
+  return await client.mutation(convexRefs.rulesUpsertIgnoreRule, payload);
+}
+
+export async function upsertIgnoreContact(targetValue: string, enabled: boolean) {
+  return await upsertIgnoreTarget(targetValue, enabled, "contact");
 }
 
 export async function pauseAutonomy() {

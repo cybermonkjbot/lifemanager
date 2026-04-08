@@ -14,6 +14,14 @@ export type StatusOutreachLimitResult = {
 export const STATUS_OUTREACH_WINDOW_MS = 24 * 60 * 60 * 1000;
 export const STATUS_OUTREACH_MAX_PER_WINDOW = 2;
 export const STATUS_OUTREACH_MIN_GAP_MS = 3 * 60 * 60 * 1000;
+const MARKETING_STRONG_PATTERN =
+  /\b(link in bio|order now|buy now|book now|promo code|use code|limited offer|while stocks? last|for sale|available for (booking|bookings|order|orders|sale))\b/i;
+const MARKETING_INTENT_PATTERN =
+  /\b(sale|discount|promo|promotion|offer|deal|clearance|pre[- ]?order|order|orders|buy|selling|sell|book|booking|bookings|subscribe|register|apply|price|pricing|rates?|slot|slots|available)\b/i;
+const MARKETING_CTA_PATTERN = /\b(dm|dms|inbox|message|whatsapp|call|text|tap|click|contact)\b/i;
+const MARKETING_TAG_PATTERN = /#(?:ad|ads|advert|advertisement|sponsored|promo)\b/i;
+const MARKETING_PRICE_PATTERN = /(?:[$£€₦]|usd|ngn|naira)\s?\d|\b\d{2,}\s?(?:usd|ngn|naira|bucks)\b/i;
+const MARKETING_DISCOUNT_PATTERN = /\b\d{1,3}\s?%\s?off\b/i;
 
 function finiteTimestamp(value: unknown): number | undefined {
   const parsed = Number(value);
@@ -119,4 +127,20 @@ export function shouldUseLaughReactionOnly(args: {
 
   const hash = computeStableHash(`${normalized}:${Math.round(args.messageAt / 60_000)}`);
   return hash % 3 === 0;
+}
+
+export function isLikelyMarketingStatus(text: string): boolean {
+  const normalized = text.replace(/\s+/g, " ").trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  if (MARKETING_TAG_PATTERN.test(normalized) || MARKETING_STRONG_PATTERN.test(normalized)) {
+    return true;
+  }
+
+  const hasIntent = MARKETING_INTENT_PATTERN.test(normalized);
+  const hasCta = MARKETING_CTA_PATTERN.test(normalized);
+  const hasPrice = MARKETING_PRICE_PATTERN.test(normalized) || MARKETING_DISCOUNT_PATTERN.test(normalized);
+  return (hasIntent && hasCta) || (hasIntent && hasPrice);
 }

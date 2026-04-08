@@ -46,6 +46,7 @@ export const list = query({
 
     return await Promise.all(
       threads.map(async (thread) => {
+        const threadKind = thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup });
         const drafts = await ctx.db
           .query("replyDrafts")
           .withIndex("by_thread", (q) => q.eq("threadId", thread._id))
@@ -54,6 +55,8 @@ export const list = query({
 
         return {
           ...thread,
+          isGroup: threadKind === "group",
+          threadKind,
           latestDraft: drafts[0] ?? null,
         };
       }),
@@ -67,11 +70,15 @@ export const listContacts = query({
   },
   handler: async (ctx, args) => {
     const limit = Math.min(args.limit ?? 200, 500);
-    const directThreads = await ctx.db
+    const directCandidates = await ctx.db
       .query("threads")
       .withIndex("by_threadKind_and_lastMessageAt", (q) => q.eq("threadKind", "direct"))
       .order("desc")
       .take(limit);
+    const directThreads = directCandidates.filter((thread) => {
+      const kind = thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup });
+      return kind === "direct";
+    });
 
     if (directThreads.length >= limit) {
       return directThreads.map((thread) => ({
@@ -81,6 +88,8 @@ export const listContacts = query({
         lastMessageAt: thread.lastMessageAt,
         isIgnored: thread.isIgnored,
         isArchived: thread.isArchived || false,
+        isGroup: false,
+        threadKind: "direct" as const,
       }));
     }
 
@@ -118,6 +127,8 @@ export const listContacts = query({
         lastMessageAt: thread.lastMessageAt,
         isIgnored: thread.isIgnored,
         isArchived: thread.isArchived || false,
+        isGroup: false,
+        threadKind: "direct" as const,
       }));
   },
 });
@@ -325,6 +336,7 @@ export const get = query({
     if (!thread) {
       return null;
     }
+    const threadKind = thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup });
 
     const messages = await ctx.db
       .query("messages")
@@ -396,7 +408,11 @@ export const get = query({
       .first();
 
     return {
-      thread,
+      thread: {
+        ...thread,
+        isGroup: threadKind === "group",
+        threadKind,
+      },
       messages: messages
         .reverse()
         .map((message) => ({

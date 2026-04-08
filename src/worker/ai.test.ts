@@ -3,10 +3,12 @@ import test from "node:test";
 import {
   applyBossAddressEscalation,
   detectPidginSignal,
+  detectOldEnglishSignal,
   describeInboundImageWithFallback,
   detectConversationSteeringMode,
   evaluateJokeGuardrail,
   generateReplyWithFallback,
+  hasAggressiveInsultCue,
   hasBossAddressCue,
   normalizeOutboundText,
   postProcessReplyText,
@@ -332,6 +334,25 @@ test("detectConversationSteeringMode flags pidgin hard stop no-disturb variants"
   assert.equal(mode, "hard_stop");
 });
 
+test("detectConversationSteeringMode does not treat plain insults as hard stop", () => {
+  const mode = detectConversationSteeringMode({
+    inboundText: "you are stupid",
+    historyLines: [],
+  });
+  assert.equal(mode, "none");
+});
+
+test("hasAggressiveInsultCue detects direct aggressive insults", () => {
+  assert.equal(hasAggressiveInsultCue("You are useless and stupid."), true);
+  assert.equal(hasAggressiveInsultCue("abeg mumu, rest"), true);
+  assert.equal(hasAggressiveInsultCue("wtf is wrong with you"), true);
+});
+
+test("hasAggressiveInsultCue ignores normal frustration language", () => {
+  assert.equal(hasAggressiveInsultCue("This week was stressful and weird."), false);
+  assert.equal(hasAggressiveInsultCue("I'm frustrated with this delay."), false);
+});
+
 test("detectConversationSteeringMode treats social acknowledgement tails as wrap-up", () => {
   const mode = detectConversationSteeringMode({
     inboundText: "thx bro",
@@ -444,6 +465,39 @@ test("detectPidginSignal does not trigger on weak family-token-only text", () =>
   assert.equal(signal, false);
 });
 
+test("detectOldEnglishSignal detects archaic phrasing from inbound text", () => {
+  const signal = detectOldEnglishSignal({
+    inboundText: "Thou art kind; canst thou send it anon?",
+    historyLines: [],
+  });
+  assert.equal(signal, true);
+});
+
+test("detectOldEnglishSignal detects archaic phrasing from recent history", () => {
+  const signal = detectOldEnglishSignal({
+    inboundText: "Can you send that update later?",
+    historyLines: ["Them: good morrow", "Me: I shall send it anon."],
+  });
+  assert.equal(signal, true);
+});
+
+test("detectOldEnglishSignal stays off for modern plain English", () => {
+  const signal = detectOldEnglishSignal({
+    inboundText: "Can you send the update later today?",
+    historyLines: ["Them: thanks for the quick update", "Me: sure, I will send it by 4pm"],
+  });
+  assert.equal(signal, false);
+});
+
+test("postProcessReplyText lightly mirrors old-English tone when conversation uses it", () => {
+  const output = postProcessReplyText({
+    text: "Understood. I will send it shortly.",
+    inboundText: "Thou art kind; canst thou send it anon?",
+    historyLines: [],
+  });
+  assert.equal(output, "Aye, Understood. I will send it shortly.");
+});
+
 test("evaluateJokeGuardrail allows common slang that is not forced meme humor", () => {
   const result = evaluateJokeGuardrail("lol no cap your timing was elite", [
     "Me: I sent the first draft this morning.",
@@ -488,6 +542,47 @@ test("generateReplyWithFallback short-circuits wrap-up messages locally", async 
     assert.ok(result.contextToolCalls && result.contextToolCalls.some((call) => call.name === "context_window_detection"));
     assert.ok(result.contextWindow);
   } finally {
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback injects insult-ignore instruction into prompt when aggression is detected", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  const requestBodies: string[] = [];
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      requestBodies.push(typeof init?.body === "string" ? init.body : "");
+      return new Response(JSON.stringify({ output_text: "I can send it now." }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "you are stupid, can you send the invoice now?",
+      historyLines: [],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "log_only",
+      },
+    });
+
+    assert.equal(result.provider, "azure");
+    assert.ok(
+      requestBodies.some((body) => /Ignore the insult and do not attempt de-escalation/i.test(body)),
+    );
+    assert.ok(
+      requestBodies.some((body) => /Respond only to the concrete request\/topic/i.test(body)),
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
     restoreAiEnv(snapshot);
   }
 });

@@ -2,6 +2,7 @@ import { internalMutation } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import { getConfig } from "./lib/config";
 import { estimateHumanTiming } from "./lib/heuristics";
+import { classifyThreadKind } from "./lib/threadEligibility";
 
 const MAX_CONFIGURED_CONTACTS = 100;
 const MAX_DRAFT_LOOKBACK = 20;
@@ -118,7 +119,12 @@ export const run = internalMutation({
         .withIndex("by_jid", (q) => q.eq("jid", jid))
         .first();
 
-      if (!thread || thread.isGroup || thread.isIgnored) {
+      if (!thread || thread.isIgnored) {
+        continue;
+      }
+
+      const threadKind = thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup });
+      if (threadKind === "group") {
         continue;
       }
 

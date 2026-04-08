@@ -63,6 +63,7 @@ import {
 import { transcribeWithWhisperCpp, type WhisperTranscriptionResult } from "./stt";
 import {
   evaluateStatusOutreachLimit,
+  isLikelyMarketingStatus,
   pickLaughReactionEmoji,
   shouldUseLaughReactionOnly,
 } from "./status-policy";
@@ -2711,6 +2712,17 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
               eventType: "inbound.status.skipped",
               threadId: ingest.threadId as Id<"threads">,
               detail: "Status update skipped because it contains a link or email address.",
+            })
+            .catch(() => undefined);
+          return;
+        }
+        if (isLikelyMarketingStatus(statusSignalText)) {
+          await convex
+            .mutation(convexRefs.systemRecordEvent, {
+              source: "worker",
+              eventType: "inbound.status.skipped",
+              threadId: ingest.threadId as Id<"threads">,
+              detail: "Status update skipped because it looks promotional/marketing.",
             })
             .catch(() => undefined);
           return;

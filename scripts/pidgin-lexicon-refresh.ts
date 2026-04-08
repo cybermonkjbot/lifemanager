@@ -6,6 +6,11 @@ import {
   PIDGIN_WEAK_TOKENS,
   classifyPidginCandidateTerm,
 } from "../shared/pidgin-lexicon";
+import {
+  GENERATED_PIDGIN_EXTENDED_TOKENS,
+  GENERATED_PIDGIN_STRONG_TOKENS,
+  GENERATED_PIDGIN_WEAK_TOKENS,
+} from "../shared/pidgin-lexicon-generated";
 
 type WikiCategoryResponse = {
   query?: {
@@ -58,6 +63,52 @@ const SUBCATEGORY_EXCLUDE_PATTERNS = [
 ];
 
 const SENSITIVE_CATEGORY_PATTERN = /\b(offensive|derogatory)\b/i;
+const MAX_FETCH_RETRIES = 2;
+const BASE_RETRY_DELAY_MS = 300;
+const FETCH_TIMEOUT_MS = 8_000;
+const MAX_BACKOFF_MS = 3_000;
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchJsonWithRetry(url: URL, label: string) {
+  let attempt = 0;
+  let lastStatus = 0;
+
+  while (attempt <= MAX_FETCH_RETRIES) {
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+      if (response.ok) {
+        return (await response.json()) as WikiCategoryResponse;
+      }
+      lastStatus = response.status;
+      if (response.status !== 429 && response.status < 500) {
+        break;
+      }
+      attempt += 1;
+      if (attempt > MAX_FETCH_RETRIES) {
+        break;
+      }
+      const retryAfter = Number(response.headers.get("retry-after")) || 0;
+      const suggestedBackoff = retryAfter > 0 ? retryAfter * 1000 : BASE_RETRY_DELAY_MS * 2 ** (attempt - 1);
+      const backoffMs = Math.min(MAX_BACKOFF_MS, suggestedBackoff);
+      await sleep(backoffMs);
+      continue;
+    } catch {
+      lastStatus = 0;
+      attempt += 1;
+      if (attempt > MAX_FETCH_RETRIES) {
+        break;
+      }
+      const backoffMs = Math.min(MAX_BACKOFF_MS, BASE_RETRY_DELAY_MS * 2 ** (attempt - 1));
+      await sleep(backoffMs);
+      continue;
+    }
+  }
+
+  throw new Error(`Failed to fetch ${label}: ${lastStatus}`);
+}
 
 function parseArgs(argv: string[]): CliArgs {
   let write = false;
@@ -162,11 +213,7 @@ async function fetchCategoryMembers(category: string, cmtype: "page" | "subcat")
       url.searchParams.set("cmcontinue", cmcontinue);
     }
 
-    const response = await fetch(url);
-    if (!response.ok) {
-      throw new Error(`Failed to fetch ${category}: ${response.status}`);
-    }
-    const payload = (await response.json()) as WikiCategoryResponse;
+    const payload = await fetchJsonWithRetry(url, category);
     for (const row of payload.query?.categorymembers || []) {
       titles.push(row.title);
     }
@@ -187,27 +234,31 @@ async function discoverCategories(maxDepth: number) {
     }
 
     const nextFrontier = new Set<string>();
-    await Promise.all(
-      [...frontier].map(async (category) => {
-        if (visited.has(category)) {
-          return;
-        }
-        visited.add(category);
-        discovered.add(category);
+    for (const category of frontier) {
+      if (visited.has(category)) {
+        continue;
+      }
+      visited.add(category);
+      discovered.add(category);
 
-        const subcategories = await fetchCategoryMembers(category, "subcat");
-        for (const rawName of subcategories) {
-          const normalized = normalizeCategory(rawName);
-          if (!/\bNigerian Pidgin\b/i.test(normalized) || shouldExcludeSubcategory(normalized)) {
-            continue;
-          }
-          discovered.add(normalized);
-          if (depth < maxDepth) {
-            nextFrontier.add(normalized);
-          }
+      let subcategories: string[] = [];
+      try {
+        subcategories = await fetchCategoryMembers(category, "subcat");
+      } catch (error) {
+        console.warn(`Skipping subcategories for ${category}: ${error instanceof Error ? error.message : String(error)}`);
+        continue;
+      }
+      for (const rawName of subcategories) {
+        const normalized = normalizeCategory(rawName);
+        if (!/\bNigerian Pidgin\b/i.test(normalized) || shouldExcludeSubcategory(normalized)) {
+          continue;
         }
-      }),
-    );
+        discovered.add(normalized);
+        if (depth < maxDepth) {
+          nextFrontier.add(normalized);
+        }
+      }
+    }
     frontier = nextFrontier;
   }
 
@@ -217,28 +268,39 @@ async function discoverCategories(maxDepth: number) {
 async function run() {
   const args = parseArgs(process.argv.slice(2));
   const known = new Set<string>(
-    [...PIDGIN_STRONG_TOKENS, ...PIDGIN_WEAK_TOKENS, ...PIDGIN_EXTENDED_TOKENS].map((token) => token.toLowerCase()),
+    [
+      ...PIDGIN_STRONG_TOKENS,
+      ...PIDGIN_WEAK_TOKENS,
+      ...PIDGIN_EXTENDED_TOKENS,
+      ...GENERATED_PIDGIN_STRONG_TOKENS,
+      ...GENERATED_PIDGIN_WEAK_TOKENS,
+      ...GENERATED_PIDGIN_EXTENDED_TOKENS,
+    ].map((token) => token.toLowerCase()),
   );
 
   const categories = await discoverCategories(args.maxDepth);
   const termSources = new Map<string, Set<string>>();
   let totalRawPages = 0;
 
-  await Promise.all(
-    categories.map(async (category) => {
-      const titles = await fetchCategoryMembers(category, "page");
-      totalRawPages += titles.length;
-      for (const title of titles) {
-        const normalizedTerm = normalizeTerm(title);
-        if (!isUsefulCandidate(normalizedTerm)) {
-          continue;
-        }
-        const sourceSet = termSources.get(normalizedTerm) || new Set<string>();
-        sourceSet.add(category);
-        termSources.set(normalizedTerm, sourceSet);
+  for (const category of categories) {
+    let titles: string[] = [];
+    try {
+      titles = await fetchCategoryMembers(category, "page");
+    } catch (error) {
+      console.warn(`Skipping ${category}: ${error instanceof Error ? error.message : String(error)}`);
+      continue;
+    }
+    totalRawPages += titles.length;
+    for (const title of titles) {
+      const normalizedTerm = normalizeTerm(title);
+      if (!isUsefulCandidate(normalizedTerm)) {
+        continue;
       }
-    }),
-  );
+      const sourceSet = termSources.get(normalizedTerm) || new Set<string>();
+      sourceSet.add(category);
+      termSources.set(normalizedTerm, sourceSet);
+    }
+  }
 
   const normalized = [...termSources.keys()].sort((a, b) => a.localeCompare(b));
   const classified = normalized

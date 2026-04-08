@@ -117,7 +117,7 @@ type GroundingContext = {
 
 type AzureApiStyle = "auto" | "chat_completions" | "responses";
 type FallbackMode = "all" | "azure_only";
-export type ConversationSteeringMode = "none" | "hard_stop" | "pause" | "wrap_up" | "loop";
+export type ConversationSteeringMode = "none" | "hard_stop" | "pause" | "wrap_up" | "loop" | "anti_beggi_beggi";
 export type ContextToolName = "context_window_detection" | "context_window_cleaning" | "conversation_history_search";
 
 export type ContextToolCall = {
@@ -330,12 +330,25 @@ const PAUSE_PATTERNS = [
   /\b(outside rn|outside right now|on the road|in transit)\b/i,
   /\b(i('|’)m busy|in a meeting|driving right now|about to sleep|heading out)\b/i,
 ];
+const MONEY_REQUEST_PATTERNS = [
+  /\b(?:abeg|please|pls)\b[\s,]*(?:you\s+)?(?:fit|go\s+fit|can|could)?[\s,]*(?:send|borrow|lend|loan|dash|transfer|help|assist)\b.*\b(?:me|my)\b.*\b(?:\d+(?:\.\d+)?\s*[km]?|money|cash|naira|funds?|airtime|transport|fare)\b/i,
+  /\b(?:can|could|fit)\s+you\b.*\b(?:send|borrow|lend|loan|dash|transfer|help|assist)\b.*\b(?:me|my)\b.*\b(?:\d+(?:\.\d+)?\s*[km]?|money|cash|naira|funds?|airtime|transport|fare)\b/i,
+  /\b(?:send|borrow|lend|loan|dash|transfer)\s+me\s+(?:like\s+|just\s+|small\s+)?(?:\d+(?:\.\d+)?\s*[km]?|money|cash|naira|funds?|airtime)\b/i,
+  /\bhelp\s+me\b.*\b(?:with|for)\b.*\b(?:\d+(?:\.\d+)?\s*[km]?|money|cash|naira|funds?|airtime|transport|fare)\b/i,
+];
 const WRAP_UP_PATTERNS = [
   /^(ok|okay|cool|great|nice|perfect|all good|all gud|sounds good|done|resolved|all set|we good|we gud|bet+|say less+|k{1,4}|o+k+|works|copy|solid|valid|for sure|fs|fasho|word|heard|copy that|copy dat|sharp sharp|na so|ehen)[.!]*$/i,
   /^(thanks|thank you|thx|ty|tnx|thnks|tysm|that helps|got it|noted|understood|appreciate it|appreciate you)[.!]*$/i,
   /^(safe|safee|we move|we mov|no wahala|nwahala|sharp|copy o|na true|alright na|alrighty|alryt|all good sha|we good abeg|noted boss|thanks o|thank you o+|thx abeg|na so|ehen|sharp sharp)[.!]*$/i,
   /^(thanks|thank you|thx|ty|appreciate it|appreciate you)\s*,\s*(all good|we good|sounds good|got it|that helps|done|resolved|all set)[.!]*$/i,
   /^(bet+|say less+|kk|k|works|copy|solid|valid|all set|we good|for sure|fs|fasho|word|heard|copy that)[.!]*$/i,
+];
+const AGGRESSIVE_INSULT_PATTERNS = [
+  /\b(fuck you|f\*+\s*you|go to hell|shut up|idiot|stupid|moron|loser|useless|trash|piece of shit|nonsense)\b/i,
+  /\b(you(?:'re| are)\s+(?:so\s+)?(?:an?\s+)?(idiot|stupid|dumb|moron|useless|trash|mad|crazy))\b/i,
+  /\b(dumbass|jackass|asshole)\b/i,
+  /\b(mumu|werey|olodo|thunder fire you)\b/i,
+  /\bwtf\b/i,
 ];
 const BOSS_ADDRESS_VOCATIVE_PATTERNS = [
   /^(?:hi|hey|hello|yo|dear|good\s+(?:morning|afternoon|evening))[\s,!.-]*(?:boss|oga|chairman)\b/i,
@@ -364,6 +377,16 @@ const BOSS_ESCALATION_TITLES_PIDGIN = [
 const BOSS_ESCALATION_PROMPT_TITLES = [...BOSS_ESCALATION_TITLES_EN, ...BOSS_ESCALATION_TITLES_PIDGIN]
   .slice(0, 10)
   .join(", ");
+const OLD_ENGLISH_CORE_TOKENS_PATTERN =
+  /\b(thou|thee|thy|thine|hath|doth|dost|hast|shalt|wilt|wherefore|whence|hither|forsooth|verily|beseech|mayhap|methinks|canst)\b/i;
+const OLD_ENGLISH_LIGHT_TOKENS_PATTERN = /\b(aye|nay|anon|tis|'tis)\b/i;
+const OLD_ENGLISH_CORE_TOKENS_PATTERN_GLOBAL =
+  /\b(thou|thee|thy|thine|hath|doth|dost|hast|shalt|wilt|wherefore|whence|hither|forsooth|verily|beseech|mayhap|methinks|canst)\b/gi;
+const OLD_ENGLISH_LIGHT_TOKENS_PATTERN_GLOBAL = /\b(aye|nay|anon|tis|'tis)\b/gi;
+const OLD_ENGLISH_PHRASE_PATTERN = /\b(good morrow|pray tell|i beseech(?: thee)?|if it please thee|thou art)\b/i;
+const OLD_ENGLISH_VERB_ENDING_PATTERN = /\b[a-z]{3,}eth\b/i;
+const OLD_ENGLISH_MIRRORABLE_REPLY_PREFIX_PATTERN =
+  /^(understood|got it|all good|no worries|sure|okay|ok|yes|yeah|yep|thanks|thank you|i can|i will|i'll|we can|let's|no problem)\b/i;
 const ACK_ONLY_PATTERNS = [
   /^(ok|okay|sure|cool|great|perfect|nice|done|noted|got it|understood|alright|aight|ight|alrighty|alryt|k{1,4}|o+k+|bet+|say less+|works|copy|copy dat|solid|valid|all set|we good|we gud|for sure|fs|sounds good|all good|all gud|fasho|word|heard|copy that|na so|ehen|sharp sharp)[.!]*$/i,
   /^(thanks|thank you|thx|ty|tnx|thnks|tysm|appreciate it|appreciate you)[.!]*$/i,
@@ -464,6 +487,14 @@ function looksLoopingConversation(historyLines: string[]) {
   return outboundQuestions >= 2 && maxInboundAckStreak >= 2;
 }
 
+function hasMoneyRequestCue(text: string) {
+  const normalized = normalizeOutboundText(text || "");
+  if (!normalized) {
+    return false;
+  }
+  return MONEY_REQUEST_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
 export function detectConversationSteeringMode(args: {
   inboundText: string;
   historyLines: string[];
@@ -475,6 +506,10 @@ export function detectConversationSteeringMode(args: {
 
   if (HARD_STOP_PATTERNS.some((pattern) => pattern.test(inbound)) || hasPidginHardStopCue(inbound)) {
     return "hard_stop";
+  }
+
+  if (hasMoneyRequestCue(inbound)) {
+    return "anti_beggi_beggi";
   }
 
   if (PAUSE_PATTERNS.some((pattern) => pattern.test(inbound)) || hasPidginPauseCue(inbound)) {
@@ -498,6 +533,72 @@ export function detectPidginSignal(args: { inboundText: string; historyLines: st
     historyLines: args.historyLines,
     threshold: 1.2,
   });
+}
+
+export function hasAggressiveInsultCue(text: string) {
+  const normalized = normalizeOutboundText(text || "");
+  if (!normalized) {
+    return false;
+  }
+  return AGGRESSIVE_INSULT_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+function scoreOldEnglishSample(sample: string) {
+  const normalized = normalizeOutboundText(sample).toLowerCase();
+  if (!normalized) {
+    return 0;
+  }
+
+  const coreHits = normalized.match(OLD_ENGLISH_CORE_TOKENS_PATTERN_GLOBAL)?.length ?? 0;
+  const lightHits = normalized.match(OLD_ENGLISH_LIGHT_TOKENS_PATTERN_GLOBAL)?.length ?? 0;
+  const phraseBoost = OLD_ENGLISH_PHRASE_PATTERN.test(normalized) ? 0.9 : 0;
+  const verbEndingBoost = OLD_ENGLISH_VERB_ENDING_PATTERN.test(normalized) ? 0.45 : 0;
+  const score = Math.min(coreHits, 3) * 0.75 + Math.min(lightHits, 2) * 0.35 + phraseBoost + verbEndingBoost;
+  return Number(score.toFixed(3));
+}
+
+export function detectOldEnglishSignal(args: { inboundText: string; historyLines: string[] }) {
+  const inbound = normalizeOutboundText(args.inboundText || "");
+  const historySample = normalizeOutboundText(
+    (args.historyLines || [])
+      .slice(-8)
+      .map((line) => line.replace(/^(Me|Them):\s*/i, ""))
+      .join(" "),
+  );
+  const inboundScore = scoreOldEnglishSample(inbound);
+  const historyScore = historySample ? scoreOldEnglishSample(historySample) : 0;
+  if (inboundScore >= 1.05) {
+    return true;
+  }
+  if (historyScore >= 1.2) {
+    return true;
+  }
+  return inboundScore + historyScore * 0.35 >= 1.05;
+}
+
+function buildOldEnglishReplyInstruction(oldEnglishMode: boolean) {
+  if (oldEnglishMode) {
+    return "Old-English tone is active in this chat. Mirror lightly with at most one archaic touch (for example: 'aye', 'thou', or 'shall') while keeping the message clear and modern-readable. Do not overdo it or roleplay unless asked.";
+  }
+  return "Use modern conversational English unless the contact clearly uses old-English phrasing.";
+}
+
+function applyOldEnglishMirror(text: string, enabled: boolean) {
+  const normalized = normalizeOutboundText(text || "");
+  if (!enabled || !normalized) {
+    return normalized;
+  }
+
+  if (
+    OLD_ENGLISH_CORE_TOKENS_PATTERN.test(normalized) ||
+    OLD_ENGLISH_LIGHT_TOKENS_PATTERN.test(normalized) ||
+    normalized.length > 160 ||
+    !OLD_ENGLISH_MIRRORABLE_REPLY_PREFIX_PATTERN.test(normalized)
+  ) {
+    return normalized;
+  }
+
+  return normalizeOutboundText(`Aye, ${normalized}`);
 }
 
 export function hasBossAddressCue(inboundText: string) {
@@ -540,6 +641,9 @@ function steeringInstructionForMode(mode: ConversationSteeringMode) {
   if (mode === "hard_stop") {
     return "The latest message asks to end contact. Reply with one short, respectful acknowledgment and end the conversation. Do not ask follow-up questions.";
   }
+  if (mode === "anti_beggi_beggi") {
+    return "The latest message is asking you for money/transfer support. Decline politely in one short line, explain that money is tight, and do not over-explain or ask follow-up questions.";
+  }
   if (mode === "pause") {
     return "The latest message signals they are busy or want to continue later. Send a short sign-off that confirms the pause. Do not introduce new topics.";
   }
@@ -558,18 +662,35 @@ function heuristicReply(input: string, historyLines: string[] = []) {
     historyLines,
   });
   const pidginMode = detectPidginSignal({ inboundText: input, historyLines });
+  const allowBossEscalation = steeringMode !== "hard_stop" && steeringMode !== "anti_beggi_beggi";
   const finalize = (candidate: string) =>
     applyBossAddressEscalation({
       inboundText: input,
       replyText: candidate,
       pidginMode,
-      allow: steeringMode !== "hard_stop",
+      allow: allowBossEscalation,
     });
   if (steeringMode === "hard_stop") {
     return finalize(
       pidginMode
         ? pickVariant(input, ["I hear you. I no go text again.", "Understood. I go leave am here.", "Okay, I go step back now."])
         : pickVariant(input, ["Understood. I'll leave it here.", "Got it, I'll step back now.", "Understood. I won't push this further."]),
+    );
+  }
+
+  if (steeringMode === "anti_beggi_beggi") {
+    return finalize(
+      pidginMode
+        ? pickVariant(input, [
+            "Omohhh, things no really dey easy for me now mehn. Money tight well well, I no fit send now.",
+            "Omoh, e no easy for my side right now. Money tight, I no fit help with cash now.",
+            "Omo, things tight for my end mehn. Money tight, I no fit do transfer now.",
+          ])
+        : pickVariant(input, [
+            "Omoh, things are really tight on my side right now. Money is tight, so I cannot send anything now.",
+            "Things are tight for me at the moment and money is really stretched, so I cannot help financially right now.",
+            "I am not in a good place financially right now. Money is tight, so I cannot send anything at the moment.",
+          ]),
     );
   }
 
@@ -628,6 +749,10 @@ function heuristicReply(input: string, historyLines: string[] = []) {
             "That works. Give me a little time and I'll send the details.",
           ]),
     );
+  }
+
+  if (hasAggressiveInsultCue(input)) {
+    return finalize(pidginMode ? pickVariant(input, ["Sharp.", "Noted.", "Seen."]) : pickVariant(input, ["Noted.", "Seen.", "Okay."]));
   }
 
   if (/\b(thanks|thank you)\b/i.test(input)) {
@@ -1143,11 +1268,19 @@ function buildPrompt(args: {
     historyLines: recentHistory.map((line) => line.line),
   });
   const steeringInstruction = steeringInstructionForMode(steeringMode);
+  const insultHandlingInstruction = hasAggressiveInsultCue(args.inboundText)
+    ? "The latest message includes insulting or aggressive language. Ignore the insult and do not attempt de-escalation, conflict coaching, or tone policing. Respond only to the concrete request/topic. If there is no concrete request, send one short neutral acknowledgment and stop."
+    : "";
   const pidginMode = detectPidginSignal({
     inboundText: args.inboundText,
     historyLines: recentHistory.map((line) => line.line),
   });
   const pidginInstruction = buildPidginReplyInstruction(pidginMode);
+  const oldEnglishMode = detectOldEnglishSignal({
+    inboundText: args.inboundText,
+    historyLines: recentHistory.map((line) => line.line),
+  });
+  const oldEnglishInstruction = buildOldEnglishReplyInstruction(oldEnglishMode);
   const bossEscalationInstruction = hasBossAddressCue(args.inboundText)
     ? `If the latest message addresses you as boss/oga/chairman, treat it as friendly local banter, not hierarchy. Lightly mirror once by calling them a playful upgraded title (examples: ${BOSS_ESCALATION_PROMPT_TITLES}). Keep it subtle, respectful, and use it at most once in the reply.`
     : "";
@@ -1173,7 +1306,9 @@ function buildPrompt(args: {
       jokeSafetyInstruction,
       antiJokeChainInstruction,
       steeringInstruction,
+      insultHandlingInstruction,
       pidginInstruction,
+      oldEnglishInstruction,
       bossEscalationInstruction,
       replyPolicyInstruction ? `Additional reply policy: ${replyPolicyInstruction}` : "",
       mimicryInstruction,
@@ -1366,9 +1501,14 @@ export function postProcessReplyText(args: {
     inboundText: args.inboundText,
     replyText: normalized,
     pidginMode,
-    allow: steeringMode !== "hard_stop",
+    allow: steeringMode !== "hard_stop" && steeringMode !== "anti_beggi_beggi",
   });
-  return withBossEscalation || fallback;
+  const oldEnglishMode = detectOldEnglishSignal({
+    inboundText: args.inboundText,
+    historyLines: args.historyLines || [],
+  });
+  const withOldEnglishMirror = applyOldEnglishMirror(withBossEscalation, oldEnglishMode);
+  return withOldEnglishMirror || fallback;
 }
 
 function containsBlockedRefusalText(text: string) {
@@ -3170,7 +3310,11 @@ export async function generateReplyWithFallback(args: {
     historyLines: args.historyLines,
   });
   const shouldUseHeuristicOnly =
-    steeringMode === "hard_stop" || steeringMode === "pause" || steeringMode === "loop" || steeringMode === "wrap_up";
+    steeringMode === "hard_stop" ||
+    steeringMode === "anti_beggi_beggi" ||
+    steeringMode === "pause" ||
+    steeringMode === "loop" ||
+    steeringMode === "wrap_up";
   if (shouldUseHeuristicOnly) {
     return finalizeResult({
       text: normalizeOutboundText(heuristicReply(args.inboundText, args.historyLines)),

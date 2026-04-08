@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   STATUS_OUTREACH_MIN_GAP_MS,
   evaluateStatusOutreachLimit,
+  isLikelyMarketingStatus,
   pickLaughReactionEmoji,
   shouldUseLaughReactionOnly,
 } from "./status-policy";
@@ -74,4 +75,14 @@ test("shouldUseLaughReactionOnly is stable for same input", () => {
   const first = shouldUseLaughReactionOnly(args);
   const second = shouldUseLaughReactionOnly(args);
   assert.equal(first, second);
+});
+
+test("isLikelyMarketingStatus flags status promotions with CTA", () => {
+  const result = isLikelyMarketingStatus("Weekend offer: 20% off all cakes. DM to order now.");
+  assert.equal(result, true);
+});
+
+test("isLikelyMarketingStatus ignores normal personal updates", () => {
+  const result = isLikelyMarketingStatus("Gym done. Back home and cooking jollof now.");
+  assert.equal(result, false);
 });

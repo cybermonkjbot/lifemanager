@@ -99,7 +99,7 @@ type ProfileEditorFormProps = {
 
 type MediaAsset = {
   _id: string;
-  kind: "sticker" | "meme";
+  kind: "sticker" | "meme" | "image" | "video" | "audio" | "document";
   label: string;
   tags: string[];
   enabled: boolean;
@@ -336,6 +336,7 @@ export function LiveSettings() {
   const contacts = useQuery(api.threads.listContacts, { limit: 300 }) as KnownContact[] | undefined;
   const profilesQuery = useQuery(api.personality.listProfiles, {}) as PersonalityProfile[] | undefined;
   const mediaAssets = useQuery(api.media.listAssets, {}) as MediaAsset[] | undefined;
+  const curatedMediaAssets = (mediaAssets || []).filter((asset) => asset.kind === "sticker" || asset.kind === "meme");
   const settingsLoading = settings === undefined || defaults === undefined;
   const contactsLoading = contacts === undefined;
   const profilesLoading = profilesQuery === undefined;
@@ -1623,7 +1624,7 @@ export function LiveSettings() {
             {mediaRecord.pending ? "Uploading..." : "Upload Asset"}
           </button>
           <div className="stack">
-            {(mediaAssets || []).map((asset) => (
+            {curatedMediaAssets.map((asset) => (
               <div key={asset._id} className="queue-item">
                 <p className="queue-title">
                   {asset.label} ({asset.kind})
@@ -1676,7 +1677,7 @@ export function LiveSettings() {
                 </div>
               </div>
             ))}
-            {(mediaAssets || []).length === 0 ? <p className="empty-line">No media assets yet.</p> : null}
+            {curatedMediaAssets.length === 0 ? <p className="empty-line">No media assets yet.</p> : null}
           </div>
         </div>
       </article>

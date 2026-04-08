@@ -1,3 +1,9 @@
+import {
+  GENERATED_PIDGIN_EXTENDED_TOKENS,
+  GENERATED_PIDGIN_STRONG_TOKENS,
+  GENERATED_PIDGIN_WEAK_TOKENS,
+} from "./pidgin-lexicon-generated";
+
 export type PidginIntent = "hard_stop" | "pause" | "wrap_up" | "recall" | "style" | "casual";
 
 export type PidginDetection = {
@@ -275,9 +281,9 @@ const TRADEMARK_CATEGORY_PATTERN = /\btrademark\b/i;
 
 type CandidateBucket = PidginCandidateBucket;
 
-const STRONG_SET = new Set<string>(PIDGIN_STRONG_TOKENS as readonly string[]);
-const WEAK_SET = new Set<string>(PIDGIN_WEAK_TOKENS as readonly string[]);
-const EXTENDED_SET = new Set<string>(PIDGIN_EXTENDED_TOKENS as readonly string[]);
+const STRONG_SET = new Set<string>([...PIDGIN_STRONG_TOKENS, ...GENERATED_PIDGIN_STRONG_TOKENS]);
+const WEAK_SET = new Set<string>([...PIDGIN_WEAK_TOKENS, ...GENERATED_PIDGIN_WEAK_TOKENS]);
+const EXTENDED_SET = new Set<string>([...PIDGIN_EXTENDED_TOKENS, ...GENERATED_PIDGIN_EXTENDED_TOKENS]);
 
 const TOKEN_WEIGHTS: Array<[Set<string>, number]> = [
   [STRONG_SET, 0.7],
