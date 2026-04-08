@@ -199,6 +199,20 @@ type OutboxClaimedItem = {
   replyTargetMessageAt?: number;
 };
 
+type ExternalWebTrendSearchPayload = {
+  tool?: "external_search.web";
+  query?: string;
+  provider?: string;
+  results?: Array<{
+    title?: string;
+    snippet?: string;
+    url?: string;
+    source?: string;
+    confidence?: number;
+  }>;
+  warnings?: string[];
+};
+
 type StickerAssetSnapshot = {
   _id: string;
   label: string;
@@ -4616,12 +4630,73 @@ function resolveTextEmojiAllowlist() {
     const demographic = (item.statusDemographicHint || "mixed").trim();
     const audienceCount = Math.max(0, item.statusAudienceJids?.length || 0);
     const requestedFormat: "text" | "meme" = item.statusFormat === "meme" ? "meme" : "text";
+    const internetTrendQuery = compactLogText(
+      `latest social media and pop-culture trends ${new Date().getFullYear()} for ${trendTheme} audience`,
+      220,
+    );
+    let internetTrendLines: string[] = [];
+    let internetTrendTheme = "";
+
+    try {
+      const webSearch = (await convex.action(convexRefs.chatExternalWebSearch, {
+        query: internetTrendQuery,
+        maxResults: 4,
+      })) as ExternalWebTrendSearchPayload;
+
+      const internetRows = (webSearch.results || [])
+        .map((row) => {
+          const title = compactLogText((row.title || "").replace(/\s+/g, " ").trim(), 90);
+          const snippet = compactLogText((row.snippet || "").replace(/\s+/g, " ").trim(), 120);
+          const confidence = clamp(Number(row.confidence ?? 0), 0, 1);
+          return {
+            title,
+            snippet,
+            confidence,
+          };
+        })
+        .filter((row) => row.title && (row.snippet || row.confidence >= 0.45))
+        .slice(0, 3);
+
+      internetTrendTheme = internetRows
+        .map((row) => row.title)
+        .filter((value): value is string => Boolean(value))
+        .slice(0, 2)
+        .join(", ");
+
+      internetTrendLines = internetRows.map((row, index) =>
+        compactLogText(`Web trend ${index + 1}: ${row.title}${row.snippet ? ` — ${row.snippet}` : ""}`, 180),
+      );
+
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "ai",
+          eventType: "status_builder.internet_trends.loaded",
+          threadId: item.threadId as Id<"threads">,
+          toolRunId,
+          detail: `query="${internetTrendQuery}" provider=${webSearch.provider || "unknown"} results=${internetRows.length}`,
+        })
+        .catch(() => undefined);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "ai",
+          eventType: "status_builder.internet_trends.failed",
+          threadId: item.threadId as Id<"threads">,
+          toolRunId,
+          detail: compactLogText(errorMessage, 220),
+        })
+        .catch(() => undefined);
+    }
+
+    const blendedTrendTheme = [trendTheme, internetTrendTheme].filter(Boolean).join(", ");
 
     const promptSeed = [
       "Generate one WhatsApp status update designed to spark genuine conversation replies.",
       `Audience size: ${audienceCount}.`,
       `Audience mix: ${demographic}.`,
       `Trending topics from my chats: ${trendTheme}.`,
+      ...(internetTrendLines.length > 0 ? [`Internet trend pulse: ${internetTrendLines.join(" | ")}.`] : []),
       `Required format: ${requestedFormat === "meme" ? "short meme caption" : "text-only status"}.`,
       "Style: concise, playful, human, and natural.",
       "Do not sound like marketing, spam, or clickbait.",
@@ -4631,14 +4706,16 @@ function resolveTextEmojiAllowlist() {
     const ai = await generateReplyWithFallback({
       inboundText: promptSeed,
       historyLines: [
-        `Trend keywords: ${trendTheme}`,
+        `Trend keywords: ${blendedTrendTheme || trendTheme}`,
         `Demographic mix: ${demographic}`,
         `Audience count: ${audienceCount}`,
+        ...internetTrendLines,
       ],
       styleHints: [
         "status",
         "engagement",
         `demographic:${demographic}`,
+        ...(internetTrendTheme ? [`internet:${internetTrendTheme}`] : []),
       ],
       runtime: {
         temperature: runtimeSettings?.aiTemperature,
@@ -4711,12 +4788,13 @@ function resolveTextEmojiAllowlist() {
         threadJid: "status@broadcast",
         inboundText: promptSeed,
         recentHistoryLines: [
-          `Trend: ${trendTheme}`,
+          `Trend: ${blendedTrendTheme || trendTheme}`,
           `Demographic: ${demographic}`,
           `Audience: ${audienceCount}`,
+          ...internetTrendLines,
         ],
         styleHints: [
-          trendTheme,
+          blendedTrendTheme || trendTheme,
           demographic,
           "status update",
         ],
@@ -4746,7 +4824,7 @@ function resolveTextEmojiAllowlist() {
       statusFormat: resolvedFormat,
       mediaAssetId,
       mediaCaption,
-      statusTrendTheme: trendTheme,
+      statusTrendTheme: blendedTrendTheme || trendTheme,
       statusDemographicHint: demographic,
     });
 
