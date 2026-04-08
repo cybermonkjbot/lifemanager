@@ -160,6 +160,24 @@ test("postProcessReplyText allows female-gendered wording when contact self-iden
   assert.equal(output, "You got this queen.");
 });
 
+test("postProcessReplyText allows king/queen in joke context when gender is unknown", () => {
+  const output = postProcessReplyText({
+    text: "lol relax king, you dey do too much.",
+    inboundText: "haha you funny.",
+    historyLines: [],
+  });
+  assert.equal(output, "lol relax king, you dey do too much.");
+});
+
+test("postProcessReplyText strips king/queen outside joke context when gender is unknown", () => {
+  const output = postProcessReplyText({
+    text: "Thanks queen, noted.",
+    inboundText: "Please check this.",
+    historyLines: [],
+  });
+  assert.equal(output, "Thanks, noted.");
+});
+
 test("hasBossAddressCue detects vocative boss forms and ignores plain references", () => {
   assert.equal(hasBossAddressCue("Boss, can you send the update?"), true);
   assert.equal(hasBossAddressCue("Hi oga please check this."), true);

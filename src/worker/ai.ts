@@ -251,6 +251,7 @@ const SALES_INVENTORY_CLAIM_PATTERNS = [
 ];
 const MALE_GENDERED_TERMS = ["bro", "broski", "brother", "dude", "guy", "boy", "king", "sir", "mr", "handsome", "gentleman"];
 const FEMALE_GENDERED_TERMS = ["sis", "sister", "girl", "queen", "maam", "madam", "mrs", "miss", "lady", "beautiful", "princess"];
+const ROYAL_JOKE_TERMS = new Set(["king", "queen"]);
 const BLOCKED_REFUSAL_PATTERNS = [/\bi(?:'|’)m sorry,\s*but\s*i cannot assist with that request\.?\b/i];
 const BLOCKED_REFUSAL_ERROR = "Blocked refusal phrase detected.";
 const BLOCKED_REFUSAL_REPROMPT_LIMIT = 2;
@@ -1943,13 +1944,22 @@ function inferKnownGenderFromContext(args: { inboundText: string; historyLines?:
   return male ? "male" : "female";
 }
 
-function stripGenderedWording(text: string, knownGender: "male" | "female" | null) {
-  const terms =
+function hasJokeContextCue(args: { inboundText: string; historyLines?: string[]; replyText: string }) {
+  const context = `${args.inboundText || ""} ${(args.historyLines || []).join(" ")} ${args.replyText || ""}`.toLowerCase();
+  if (!context.trim()) {
+    return false;
+  }
+  return /\b(lol|lmao|lmfao|haha|hehe|joke|jokes|banter|roast|tease|teasing|playful|cruise)\b/i.test(context) || /[😂🤣😅😆😄😁😜🤪🙃]/u.test(context);
+}
+
+function stripGenderedWording(text: string, knownGender: "male" | "female" | null, allowRoyalJokeTerms: boolean) {
+  const baseTerms =
     knownGender === "male"
       ? FEMALE_GENDERED_TERMS
       : knownGender === "female"
         ? MALE_GENDERED_TERMS
         : [...MALE_GENDERED_TERMS, ...FEMALE_GENDERED_TERMS];
+  const terms = allowRoyalJokeTerms ? baseTerms.filter((term) => !ROYAL_JOKE_TERMS.has(term.toLowerCase())) : baseTerms;
 
   if (terms.length === 0) {
     return normalizeOutboundText(text);
@@ -2070,11 +2080,16 @@ export function postProcessReplyText(args: {
   });
   const withOldEnglishMirror = applyOldEnglishMirror(withBossEscalation, oldEnglishMode);
   const withoutSalesClaims = stripSalesInventoryClaims(withOldEnglishMirror);
+  const jokeContext = hasJokeContextCue({
+    inboundText: args.inboundText,
+    historyLines: args.historyLines || [],
+    replyText: args.text || "",
+  });
   const knownGender = inferKnownGenderFromContext({
     inboundText: args.inboundText,
     historyLines: args.historyLines || [],
   });
-  const withoutGenderedWording = stripGenderedWording(withoutSalesClaims, knownGender);
+  const withoutGenderedWording = stripGenderedWording(withoutSalesClaims, knownGender, jokeContext);
   return withoutGenderedWording || fallback;
 }
 
