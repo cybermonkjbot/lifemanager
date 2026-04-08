@@ -1,7 +1,9 @@
 "use client";
 
+import { SharedMediaPreview } from "@/components/media-preview";
 import { UIModal } from "@/components/ui-modal";
 import { formatDateTime, trim } from "@/lib/format";
+import type { UnifiedMediaItem } from "@/lib/ui/media";
 import { api } from "../../convex/_generated/api";
 import { useQuery } from "convex/react";
 import Link from "next/link";
@@ -9,39 +11,11 @@ import { useState } from "react";
 
 type MediaFilter = "all" | "stickers" | "memes" | "images" | "video" | "audio" | "documents";
 
-type UnifiedMediaItem = {
-  id: string;
-  assetId: string;
-  source: "message" | "library";
-  createdAt: number;
-  kind: "sticker" | "meme" | "image" | "video" | "audio" | "document";
-  mimeType: string;
-  label: string;
-  url: string | null;
-  enabled: boolean;
-  tags: string[];
-  contextSummary?: string;
-  contextTags?: string[];
-  contextTriggers?: string[];
-  contextAvoid?: string[];
-  contextConfidence?: number;
-  thread?: { _id: string; jid: string; title?: string } | null;
-  message?:
-    | {
-        _id: string;
-        direction: "inbound" | "outbound";
-        text: string;
-        messageType: string;
-        mediaCaption?: string;
-        messageAt: number;
-      }
-    | null;
-};
-
 type MediaPreview = {
   url: string;
   label: string;
   mimeType: string;
+  kind: UnifiedMediaItem["kind"];
 };
 
 const FILTERS: Array<{ id: MediaFilter; label: string }> = [
@@ -53,38 +27,6 @@ const FILTERS: Array<{ id: MediaFilter; label: string }> = [
   { id: "audio", label: "Audio" },
   { id: "documents", label: "Documents" },
 ];
-
-function renderMediaPreview(item: UnifiedMediaItem, onOpenPreview: (preview: MediaPreview) => void) {
-  if (!item.url) {
-    return <p className="queue-meta">Media URL unavailable.</p>;
-  }
-
-  const mimeType = item.mimeType.toLowerCase();
-  if (mimeType.startsWith("image/") || item.kind === "sticker" || item.kind === "meme" || item.kind === "image") {
-    return (
-      <button
-        type="button"
-        className="message-media-open media-dashboard-preview"
-        onClick={() => onOpenPreview({ url: item.url!, label: item.label, mimeType: item.mimeType })}
-        aria-label={`Open ${item.label || item.kind}`}
-      >
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src={item.url} alt={item.label || item.kind} className="message-media-image" loading="lazy" />
-      </button>
-    );
-  }
-  if (mimeType.startsWith("video/") || item.kind === "video") {
-    return <video src={item.url} controls preload="metadata" className="message-media-video" />;
-  }
-  if (mimeType.startsWith("audio/") || item.kind === "audio") {
-    return <audio src={item.url} controls preload="none" className="message-media-audio" />;
-  }
-  return (
-    <a href={item.url} target="_blank" rel="noreferrer" className="message-media-link">
-      Open attachment
-    </a>
-  );
-}
 
 export function LiveMedia() {
   const [filter, setFilter] = useState<MediaFilter>("all");
@@ -125,7 +67,7 @@ export function LiveMedia() {
           </button>
         </div>
 
-        {loading ? <p className="empty-line">Loading media dashboard...</p> : null}
+        {loading ? <p className="empty-line">Loading media dashboard…</p> : null}
         {!loading && (mediaItems || []).length === 0 ? <p className="empty-line">No media found for this filter yet.</p> : null}
 
         <div className="stack">
@@ -138,7 +80,25 @@ export function LiveMedia() {
             return (
               <div key={item.id} className="queue-item media-dashboard-item">
                 <div className="media-dashboard-main">
-                  {renderMediaPreview(item, setMediaPreview)}
+                  <SharedMediaPreview
+                    preview={{
+                      assetId: item.assetId || item.id,
+                      kind: item.kind,
+                      mimeType: item.mimeType,
+                      label: item.label,
+                      url: item.url,
+                    }}
+                    mediaAssetId={item.assetId || item.id}
+                    onOpenImagePreview={(preview) =>
+                      setMediaPreview({
+                        url: preview.url,
+                        label: preview.label,
+                        mimeType: preview.mimeType,
+                        kind: preview.kind,
+                      })
+                    }
+                    imageButtonClassName="message-media-open media-dashboard-preview"
+                  />
                   <div className="media-dashboard-content">
                     <p className="queue-title">
                       {item.label || item.kind} · {item.kind}
@@ -189,8 +149,18 @@ export function LiveMedia() {
       >
         {mediaPreview?.url ? (
           <div className="stack compact">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={mediaPreview.url} alt={mediaPreview.label || "Media preview"} className="message-media-image modal-preview-image" />
+            <SharedMediaPreview
+              preview={{
+                assetId: "modal-preview",
+                kind: mediaPreview.kind,
+                mimeType: mediaPreview.mimeType,
+                label: mediaPreview.label,
+                url: mediaPreview.url,
+              }}
+              mediaAssetId="modal-preview"
+              imageClassName="message-media-image modal-preview-image"
+              attachmentText="Open full size"
+            />
             <a href={mediaPreview.url} target="_blank" rel="noreferrer" className="message-media-link">
               Open full size
             </a>

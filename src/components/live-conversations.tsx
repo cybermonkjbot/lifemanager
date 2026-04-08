@@ -1,8 +1,10 @@
 "use client";
 
 import { ActionNotices } from "@/components/action-notices";
+import { SharedMediaPreview } from "@/components/media-preview";
 import { UIModal } from "@/components/ui-modal";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
+import type { MediaPreviewResource } from "@/lib/ui/media";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { useMutation, useQuery } from "convex/react";
@@ -83,13 +85,7 @@ type ThreadGrounding = {
   vibeNotes?: string;
 };
 
-type MessageMediaPreview = {
-  assetId: string;
-  kind: "sticker" | "meme" | "image" | "video" | "audio" | "document";
-  mimeType: string;
-  label: string;
-  url: string | null;
-};
+type MessageMediaPreview = MediaPreviewResource;
 
 type ConversationMessageType = "text" | "reaction" | "sticker" | "meme" | "image" | "video" | "audio" | "document";
 
@@ -245,37 +241,12 @@ function messageDisplayText(message: {
 }
 
 function renderMessageMediaPreview(message: ThreadMessage, onOpenImagePreview?: (preview: MessageMediaPreview) => void) {
-  const preview = message.mediaPreview;
-  if (!preview?.url) {
-    return message.mediaAssetId ? <p className="queue-meta">Media preview unavailable.</p> : null;
-  }
-
-  const mimeType = preview.mimeType.toLowerCase();
-  const altText = preview.label || (preview.kind === "meme" ? "Meme" : preview.kind === "sticker" ? "Sticker" : "Media");
-  if (mimeType.startsWith("image/") || preview.kind === "meme" || preview.kind === "sticker") {
-    return (
-      <button
-        type="button"
-        className="message-media-open"
-        onClick={() => (onOpenImagePreview ? onOpenImagePreview(preview) : undefined)}
-        aria-label={`Open ${altText}`}
-      >
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src={preview.url} alt={altText} className="message-media-image" loading="lazy" />
-      </button>
-    );
-  }
-  if (mimeType.startsWith("video/")) {
-    return <video src={preview.url} controls preload="metadata" className="message-media-video" />;
-  }
-  if (mimeType.startsWith("audio/")) {
-    return <audio src={preview.url} controls preload="none" className="message-media-audio" />;
-  }
-
   return (
-    <a href={preview.url} target="_blank" rel="noreferrer" className="message-media-link">
-      Open media attachment
-    </a>
+    <SharedMediaPreview
+      preview={message.mediaPreview}
+      mediaAssetId={message.mediaAssetId}
+      onOpenImagePreview={onOpenImagePreview}
+    />
   );
 }
 

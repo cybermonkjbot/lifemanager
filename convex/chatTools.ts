@@ -644,7 +644,7 @@ function buildThreadStyleProfileFromMessages(args: {
     spellingNotes.push("Sometimes uses short-form texting abbreviations.");
   }
 
-  const mimicryLevel = clamp(0.58 + shortRate * 0.14 + contractionRate * 0.1 + (humorNotes.length > 0 ? 0.04 : 0), 0.45, 0.92);
+  const mimicryLevel = clamp(0.58 + shortRate * 0.14 + contractionRate * 0.1 + (humorNotes.length > 0 ? 0.04 : 0), 0.45, 0.82);
 
   return {
     scope: "thread" as const,

@@ -235,9 +235,17 @@ const STATUS_CLEANUP_BATCH_LIMIT = 160;
 const CONTEXT_COMPACTION_INTERVAL_MS = 12 * 60 * 1000;
 const CONTEXT_COMPACTION_MAX_THREADS = 24;
 const CONTEXT_COMPACTION_MAX_DELETES = 260;
-const CORE_HUMOR_PATTERN = /\b(lol|lmao|lmfao|rofl|haha|hehe|funny|joke|banter|meme|roast|hilarious)\b/i;
+const CORE_HUMOR_PATTERN_GLOBAL = /\b(lol|lmao|lmfao|rofl|haha|hehe|funny|joke|banter|meme|roast|hilarious)\b/gi;
 const CORE_HUMOR_EMOJI_PATTERN = /[😂🤣😹😆😄😁😅😜🤪🙃]/u;
+const CORE_HUMOR_EMOJI_PATTERN_GLOBAL = /[😂🤣😹😆😄😁😅😜🤪🙃]/gu;
 const LOW_SIGNAL_HUMOR_KEYWORDS = new Set(["status", "story", "update", "wild", "dead"]);
+const HUMOR_SINGLE_TOKEN_ONLY_PATTERN = /^\s*(?:lol|lmao|lmfao|rofl|haha|hehe|😂|🤣|😹|😆|😄|😁|😅|😜|🤪|🙃)\s*[.!?]*\s*$/i;
+const HUMOR_CONTEXT_BLOCK_PATTERNS = [
+  /\b(death|died|funeral|burial|rip|hospital|surgery|diagnosis|cancer|emergency|accident|abuse|assault|suicid|depress(?:ed|ion)?)\b/i,
+  /\b(password|otp|pin|social security|bank account|wire transfer|routing number|sort code|scam|fraud)\b/i,
+  /\b(court|lawyer|legal|lawsuit|arrestd?|police report)\b/i,
+  /\b(rent|salary|debt|loan|invoice overdue|payment issue)\b/i,
+];
 const VISION_FILTER_MODE = readVisionFilterModeFromEnv();
 const VISION_FILTER_UNCAPTIONED_COOLDOWN_MS = readVisionFilterUncaptionedCooldownMsFromEnv();
 
@@ -299,12 +307,49 @@ function hasConfiguredHumorEmojiHit(text: string, emojis: string[]) {
   return emojis.some((emoji) => emoji && CORE_HUMOR_EMOJI_PATTERN.test(emoji) && text.includes(emoji));
 }
 
+function countCoreHumorKeywordHits(text: string) {
+  return text.match(CORE_HUMOR_PATTERN_GLOBAL)?.length ?? 0;
+}
+
+function countCoreHumorEmojiHits(text: string) {
+  return text.match(CORE_HUMOR_EMOJI_PATTERN_GLOBAL)?.length ?? 0;
+}
+
+function hasHumorContextBlock(text: string) {
+  return HUMOR_CONTEXT_BLOCK_PATTERNS.some((pattern) => pattern.test(text));
+}
+
 function hasHumorSignal(text: string, funnyKeywords: string[], funnyEmojis: string[]) {
-  const coreKeywordHit = CORE_HUMOR_PATTERN.test(text);
-  const coreEmojiHit = CORE_HUMOR_EMOJI_PATTERN.test(text);
-  const configuredKeywordHits = countConfiguredHumorKeywordHits(text, funnyKeywords);
-  const configuredEmojiHit = hasConfiguredHumorEmojiHit(text, funnyEmojis);
-  return coreKeywordHit || coreEmojiHit || configuredKeywordHits >= 2 || (configuredKeywordHits >= 1 && configuredEmojiHit);
+  const normalized = text.trim();
+  if (normalized.length < 10) {
+    return false;
+  }
+  if (HUMOR_SINGLE_TOKEN_ONLY_PATTERN.test(normalized)) {
+    return false;
+  }
+  if (hasHumorContextBlock(normalized)) {
+    return false;
+  }
+
+  const coreKeywordHits = countCoreHumorKeywordHits(normalized);
+  const coreEmojiHits = countCoreHumorEmojiHits(normalized);
+  const configuredKeywordHits = countConfiguredHumorKeywordHits(normalized, funnyKeywords);
+  const configuredEmojiHit = hasConfiguredHumorEmojiHit(normalized, funnyEmojis);
+  const hasPlayfulCue = /\b(joke|banter|roast|meme|tease|playful|hilarious|comic|funny)\b/i.test(normalized);
+
+  if (coreKeywordHits >= 2 || configuredKeywordHits >= 2) {
+    return true;
+  }
+  if ((coreEmojiHits >= 1 || configuredEmojiHit) && (coreKeywordHits >= 1 || configuredKeywordHits >= 1 || hasPlayfulCue)) {
+    return true;
+  }
+  if ((coreKeywordHits >= 1 || configuredKeywordHits >= 1) && hasPlayfulCue) {
+    return true;
+  }
+  if ((coreKeywordHits >= 1 || configuredKeywordHits >= 1) && normalized.length >= 28 && !/\b(status|story)\b/i.test(normalized)) {
+    return true;
+  }
+  return false;
 }
 
 function looksLikeAckOnly(text: string) {

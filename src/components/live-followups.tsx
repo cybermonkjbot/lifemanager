@@ -3,33 +3,15 @@
 import { ActionNotices } from "@/components/action-notices";
 import { formatDateTimeWithRelative, trim } from "@/lib/format";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
+import { createFollowupActionHandlers, followupCommitmentLabel, followupStatusLabel, type FollowupItem } from "@/lib/ui/followups";
 import { api } from "../../convex/_generated/api";
-import type { Id } from "../../convex/_generated/dataModel";
 import { useMutation, useQuery } from "convex/react";
 import Link from "next/link";
 import { useMemo, useState } from "react";
 
 type TimelineFilter = "all" | "needs_review" | "confirmed" | "queued_sent" | "failed" | "dismissed";
 
-type TimelineItem = {
-  _id: string;
-  threadId: string;
-  reason: string;
-  dueAt: number;
-  status: "suggested" | "confirmed" | "queued" | "sent" | "failed" | "cancelled";
-  kind?: "promise" | "request" | "plan";
-  direction?: "inbound" | "outbound";
-  confidence?: number;
-  sourceSnippet?: string;
-  thread?: { _id?: string; title?: string; jid?: string } | null;
-  sourceMessage?:
-    | {
-        text?: string;
-        messageAt?: number;
-        direction?: "inbound" | "outbound";
-      }
-    | null;
-};
+type TimelineItem = FollowupItem;
 
 type TimelinePayload = {
   now: number;
@@ -47,38 +29,6 @@ type TimelinePayload = {
     upcoming: TimelineItem[];
   };
 };
-
-function statusLabel(status: TimelineItem["status"]) {
-  if (status === "suggested") {
-    return "Needs review";
-  }
-  if (status === "confirmed") {
-    return "Confirmed";
-  }
-  if (status === "queued") {
-    return "Queued";
-  }
-  if (status === "sent") {
-    return "Sent";
-  }
-  if (status === "failed") {
-    return "Failed";
-  }
-  return "Dismissed";
-}
-
-function commitmentLabel(item: TimelineItem) {
-  if (item.direction === "outbound" && item.kind !== "request") {
-    return "You promised";
-  }
-  if (item.direction === "inbound" && item.kind === "request") {
-    return "They requested";
-  }
-  if (item.kind === "plan") {
-    return "Shared plan";
-  }
-  return "Commitment";
-}
 
 function TimelineCard(args: {
   item: TimelineItem;
@@ -103,7 +53,7 @@ function TimelineCard(args: {
     <div className="queue-item" aria-busy={busy}>
       <p className="queue-title">{item.thread?.title || item.thread?.jid || "Unknown thread"}</p>
       <p className="queue-meta">
-        {commitmentLabel(item)} · {statusLabel(item.status)} · Due {formatDateTimeWithRelative(item.dueAt, now)}
+        {followupCommitmentLabel(item)} · {followupStatusLabel(item.status)} · Due {formatDateTimeWithRelative(item.dueAt, now)}
       </p>
       <p className="queue-body">{item.reason}</p>
       {sourceText ? <p className="queue-meta">Source: {trim(sourceText, 220)}</p> : null}
@@ -118,7 +68,7 @@ function TimelineCard(args: {
             disabled={confirmRecord.pending}
             aria-disabled={confirmRecord.pending}
           >
-            {confirmRecord.pending ? "Confirming..." : "Confirm"}
+            {confirmRecord.pending ? "Confirming…" : "Confirm"}
           </button>
         ) : null}
         <button
@@ -211,64 +161,15 @@ function FollowupsContent() {
     };
   }, [sections.overdue.length, sections.today.length, sections.upcoming.length, timeline?.totals.visible]);
 
-  const onConfirm = (followUpId: string) => {
-    const key = `followup:${followUpId}`;
-    void runAction(
-      key,
-      async () => {
-        await confirmFollowup({ followUpId: followUpId as Id<"followUps"> });
-      },
-      {
-        pendingLabel: "Confirming...",
-        successMessage: "Follow-up confirmed.",
-      },
-    );
-  };
-
-  const onSnooze = (followUpId: string, minutes: number) => {
-    const key = `followup:snooze:${followUpId}`;
-    void runAction(
-      key,
-      async () => {
-        await snoozeFollowup({ followUpId: followUpId as Id<"followUps">, minutes });
-      },
-      {
-        pendingLabel: "Snoozing...",
-        successMessage: "Follow-up snoozed.",
-      },
-    );
-  };
-
-  const onReschedule = (followUpId: string, hoursAhead: number) => {
-    const key = `followup:reschedule:${followUpId}`;
-    void runAction(
-      key,
-      async () => {
-        await rescheduleFollowup({
-          followUpId: followUpId as Id<"followUps">,
-          dueAt: Date.now() + Math.max(1, Math.round(hoursAhead)) * 60 * 60 * 1000,
-        });
-      },
-      {
-        pendingLabel: "Rescheduling...",
-        successMessage: "Follow-up rescheduled.",
-      },
-    );
-  };
-
-  const onDismiss = (followUpId: string) => {
-    const key = `followup:cancel:${followUpId}`;
-    void runAction(
-      key,
-      async () => {
-        await cancelFollowup({ followUpId: followUpId as Id<"followUps"> });
-      },
-      {
-        pendingLabel: "Dismissing...",
-        successMessage: "Follow-up dismissed.",
-      },
-    );
-  };
+  const { onConfirm, onSnooze, onReschedule, onDismiss } = createFollowupActionHandlers({
+    runAction,
+    mutations: {
+      confirmFollowup: async (args) => await confirmFollowup(args),
+      snoozeFollowup: async (args) => await snoozeFollowup(args),
+      rescheduleFollowup: async (args) => await rescheduleFollowup(args),
+      cancelFollowup: async (args) => await cancelFollowup(args),
+    },
+  });
 
   const renderSection = (title: string, items: TimelineItem[]) => (
     <article className="panel-card">

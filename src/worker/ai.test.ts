@@ -242,6 +242,18 @@ test("sanitizeCommonPhrasesForPrompt drops awkward catchphrases and keeps useful
   assert.deepEqual(result, ["send invoice summary", "appreciate the quick heads-up"]);
 });
 
+test("sanitizeCommonPhrasesForPrompt drops sensitive or over-specific mimicry phrases", () => {
+  const result = sanitizeCommonPhrasesForPrompt([
+    "Use this OTP 839102",
+    "my bank account is 0123456789",
+    "https://example.com/checkout",
+    "my signature line right here forever and always",
+    "tight timeline, send the clean recap",
+  ]);
+
+  assert.deepEqual(result, ["tight timeline, send the clean recap"]);
+});
+
 test("evaluateJokeGuardrail blocks similar jokes already sent in chat history", () => {
   const result = evaluateJokeGuardrail("LOL I run on coffee and chaos before noon.", [
     "Them: Morning, how are you?",
@@ -284,6 +296,18 @@ test("evaluateJokeGuardrail allows jokes when prior humor is outside cooldown wi
     "Me: Let me know if anything is missing.",
   ]);
   assert.equal(result.blocked, false);
+});
+
+test("evaluateJokeGuardrail blocks jokes when inbound context is not playful enough", () => {
+  const result = evaluateJokeGuardrail(
+    "Haha this deadline is doing MMA with me.",
+    ["Them: Can you send the invoice summary now?", "Me: I can share in 10 minutes."],
+    {
+      inboundText: "Can you send the invoice summary now?",
+    },
+  );
+  assert.equal(result.blocked, true);
+  assert.equal(result.code, "unsupported_context");
 });
 
 test("detectConversationSteeringMode flags hard stop requests", () => {
@@ -919,6 +943,77 @@ test("generateReplyWithFallback skips joke similarity matching when AI humor jud
   }
 });
 
+test("generateReplyWithFallback rewrites humor when inbound context is not playful", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  let generationCalls = 0;
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      const bodyText = typeof init?.body === "string" ? init.body : "";
+      const isHumorJudgeCall = /strict humor classifier|Candidate reply/i.test(bodyText);
+      if (isHumorJudgeCall) {
+        if (bodyText.includes("I can send the update in 10 minutes.")) {
+          return new Response(
+            JSON.stringify({
+              output_text: '{"isJokeAttempt":false,"isFunny":false,"confidence":0.9,"reason":"direct reply"}',
+            }),
+            {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            },
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            output_text: '{"isJokeAttempt":true,"isFunny":true,"confidence":0.88,"reason":"playful and natural"}',
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      generationCalls += 1;
+      if (/Inbound context is not strongly playful enough to justify humor/i.test(bodyText)) {
+        return new Response(JSON.stringify({ output_text: "I can send the update in 10 minutes." }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ output_text: "Haha this update is pure cinema today." }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "Can you send the update now?",
+      historyLines: [
+        "Them: Can you send the update now?",
+        "Me: Sure, give me a sec.",
+      ],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "log_only",
+      },
+    });
+
+    assert.equal(result.guardrailBlocked, false);
+    assert.equal(result.text, "I can send the update in 10 minutes.");
+    assert.ok(generationCalls >= 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
 test("generateReplyWithFallback rewrites joke-chain stretching into a direct non-joke reply", async () => {
   const snapshot = clearAiEnv();
   const originalFetch = globalThis.fetch;
@@ -1048,7 +1143,7 @@ test("generateReplyWithFallback sends manual review when joke-chain rewrite stil
     });
 
     assert.equal(result.guardrailBlocked, true);
-    assert.match(result.guardrailReason || "", /joke-chain rewrite/i);
+    assert.match(result.guardrailReason || "", /guardrail rewrite/i);
     assert.match(result.guardrailReason || "", /last 2 outbound replies/i);
     assert.ok(generationCalls >= 2);
   } finally {

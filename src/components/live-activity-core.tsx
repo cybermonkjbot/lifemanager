@@ -1,6 +1,7 @@
 "use client";
 
 import { formatDateTime, trim } from "@/lib/format";
+import { isImageLikeMedia, type UnifiedMediaItem } from "@/lib/ui/media";
 import { UIModal } from "@/components/ui-modal";
 import { api } from "../../convex/_generated/api";
 import { useQuery } from "convex/react";
@@ -18,34 +19,6 @@ type ActivityLogRow = {
   eventType: string;
   detail: string;
   createdAt: number;
-};
-
-type UnifiedMediaItem = {
-  id: string;
-  source: "message" | "library";
-  createdAt: number;
-  kind: "sticker" | "meme" | "image" | "video" | "audio" | "document";
-  mimeType: string;
-  label: string;
-  url: string | null;
-  enabled: boolean;
-  tags: string[];
-  contextSummary?: string;
-  contextTags?: string[];
-  contextTriggers?: string[];
-  contextAvoid?: string[];
-  contextConfidence?: number;
-  thread?: { _id: string; jid: string; title?: string } | null;
-  message?:
-    | {
-        _id: string;
-        direction: "inbound" | "outbound";
-        text: string;
-        messageType: string;
-        mediaCaption?: string;
-        messageAt: number;
-      }
-    | null;
 };
 
 type ActivityCoreNode = {
@@ -182,13 +155,11 @@ function mediaNodeDetail(item: UnifiedMediaItem) {
 }
 
 function canRenderInlineMediaPreview(item: UnifiedMediaItem) {
-  const mimeType = item.mimeType.toLowerCase();
-  return Boolean(item.url) && (mimeType.startsWith("image/") || item.kind === "sticker" || item.kind === "meme" || item.kind === "image");
+  return Boolean(item.url) && isImageLikeMedia(item.kind, item.mimeType);
 }
 
 function isZoomableMediaImage(kind: UnifiedMediaItem["kind"], mimeType: string) {
-  const normalizedMime = mimeType.toLowerCase();
-  return normalizedMime.startsWith("image/") || kind === "sticker" || kind === "meme" || kind === "image";
+  return isImageLikeMedia(kind, mimeType);
 }
 
 function resolveSplineSource(rawUrl: string): { kind: "scene"; url: string } | { kind: "iframe"; url: string } | null {

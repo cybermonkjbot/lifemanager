@@ -7,11 +7,27 @@ import { getConfig } from "./lib/config";
 
 const refThreadsList = makeFunctionReference<"query">("threads:list");
 const refSetMimicry = makeFunctionReference<"mutation">("style:setMimicry");
-const HUMOR_SIGNAL_PATTERN = /\b(lol|lmao|lmfao|rofl|haha|hehe|banter|joke|meme|funny|roast|hilarious)\b/i;
+const HUMOR_SIGNAL_PATTERN_GLOBAL = /\b(lol|lmao|lmfao|rofl|haha|hehe|banter|joke|meme|funny|roast|hilarious)\b/gi;
 const STATUS_BANTER_PATTERN = /\b(status|story|update)\b/i;
 const LAUGH_REACTION_EMOJIS = new Set(["😂", "🤣", "😹", "😆", "😄", "😁", "😅"]);
 const LAUGH_SIGNAL_EMOJIS = new Set(["😂", "🤣", "😹", "😆", "😄", "😁", "😅", "😜", "🤪", "🙃"]);
+const LAUGH_SIGNAL_EMOJIS_PATTERN_GLOBAL = /[😂🤣😹😆😄😁😅😜🤪🙃]/gu;
 const LOW_SIGNAL_HUMOR_KEYWORDS = new Set(["status", "story", "update", "wild", "dead"]);
+const HUMOR_SINGLE_TOKEN_ONLY_PATTERN = /^\s*(?:lol|lmao|lmfao|rofl|haha|hehe|😂|🤣|😹|😆|😄|😁|😅|😜|🤪|🙃)\s*[.!?]*\s*$/i;
+const HUMOR_CONTEXT_BLOCK_PATTERNS = [
+  /\b(death|died|funeral|burial|rip|hospital|surgery|diagnosis|cancer|emergency|accident|abuse|assault|suicid|depress(?:ed|ion)?)\b/i,
+  /\b(password|otp|pin|social security|bank account|wire transfer|routing number|sort code|scam|fraud)\b/i,
+  /\b(court|lawyer|legal|lawsuit|arrestd?|police report)\b/i,
+  /\b(rent|salary|debt|loan|invoice overdue|payment issue)\b/i,
+];
+const STYLE_SENSITIVE_PHRASE_PATTERNS = [
+  /\b(?:https?:\/\/|www\.)\S+\b/i,
+  /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i,
+  /\b(?:\+?\d[\d\s-]{7,}\d)\b/,
+  /\b(password|passcode|otp|pin|bank|account|routing|sort code|wire transfer|social security|api key|access token|secret)\b/i,
+];
+const STYLE_MAX_COMMON_PHRASE_WORDS = 6;
+const MAX_SAFE_MIMICRY_LEVEL = 0.82;
 const LOW_VALUE_STYLE_PHRASE_PATTERNS = [
   /\bplease allow me small\b/i,
   /\bplease allow me\b/i,
@@ -59,10 +75,17 @@ function normalizeTraitList(values: string[], limit: number) {
 
 function isDiscardableCommonPhrase(value: string) {
   const normalized = normalizeTraitValue(value).toLowerCase();
+  const wordCount = normalized ? normalized.split(/\s+/).length : 0;
   if (!normalized) {
     return true;
   }
   if (normalized.length < 8) {
+    return true;
+  }
+  if (wordCount > STYLE_MAX_COMMON_PHRASE_WORDS) {
+    return true;
+  }
+  if (STYLE_SENSITIVE_PHRASE_PATTERNS.some((pattern) => pattern.test(value))) {
     return true;
   }
   return LOW_VALUE_STYLE_PHRASE_PATTERNS.some((pattern) => pattern.test(normalized));
@@ -226,12 +249,49 @@ function hasConfiguredHumorEmojiHit(text: string, emojis: string[]) {
   return emojis.some((emoji) => emoji && LAUGH_SIGNAL_EMOJIS.has(emoji) && text.includes(emoji));
 }
 
+function countCoreHumorKeywordHits(text: string) {
+  return text.match(HUMOR_SIGNAL_PATTERN_GLOBAL)?.length ?? 0;
+}
+
+function countCoreHumorEmojiHits(text: string) {
+  return text.match(LAUGH_SIGNAL_EMOJIS_PATTERN_GLOBAL)?.length ?? 0;
+}
+
+function hasHumorContextBlock(text: string) {
+  return HUMOR_CONTEXT_BLOCK_PATTERNS.some((pattern) => pattern.test(text));
+}
+
 function hasTextHumorSignal(text: string, funnyKeywords: string[], funnyEmojis: string[]) {
-  const coreKeywordHit = HUMOR_SIGNAL_PATTERN.test(text);
-  const coreEmojiHit = [...LAUGH_SIGNAL_EMOJIS].some((emoji) => text.includes(emoji));
-  const configuredKeywordHits = countConfiguredHumorKeywordHits(text, funnyKeywords);
-  const configuredEmojiHit = hasConfiguredHumorEmojiHit(text, funnyEmojis);
-  return coreKeywordHit || coreEmojiHit || configuredKeywordHits >= 2 || (configuredKeywordHits >= 1 && configuredEmojiHit);
+  const normalized = text.trim();
+  if (normalized.length < 10) {
+    return false;
+  }
+  if (HUMOR_SINGLE_TOKEN_ONLY_PATTERN.test(normalized)) {
+    return false;
+  }
+  if (hasHumorContextBlock(normalized)) {
+    return false;
+  }
+
+  const coreKeywordHits = countCoreHumorKeywordHits(normalized);
+  const coreEmojiHits = countCoreHumorEmojiHits(normalized);
+  const configuredKeywordHits = countConfiguredHumorKeywordHits(normalized, funnyKeywords);
+  const configuredEmojiHit = hasConfiguredHumorEmojiHit(normalized, funnyEmojis);
+  const hasPlayfulCue = /\b(joke|banter|roast|meme|tease|playful|hilarious|comic|funny)\b/i.test(normalized);
+
+  if (coreKeywordHits >= 2 || configuredKeywordHits >= 2) {
+    return true;
+  }
+  if ((coreEmojiHits >= 1 || configuredEmojiHit) && (coreKeywordHits >= 1 || configuredKeywordHits >= 1 || hasPlayfulCue)) {
+    return true;
+  }
+  if ((coreKeywordHits >= 1 || configuredKeywordHits >= 1) && hasPlayfulCue) {
+    return true;
+  }
+  if ((coreKeywordHits >= 1 || configuredKeywordHits >= 1) && normalized.length >= 28 && !/\b(status|story)\b/i.test(normalized)) {
+    return true;
+  }
+  return false;
 }
 
 export const getProfile = query({
@@ -263,7 +323,7 @@ export const setMimicry = mutation({
     mimicryLevel: v.number(),
   },
   handler: async (ctx, args) => {
-    const bounded = Math.max(0, Math.min(args.mimicryLevel, 1));
+    const bounded = Math.max(0, Math.min(args.mimicryLevel, MAX_SAFE_MIMICRY_LEVEL));
     const existing = await ctx.db
       .query("styleProfiles")
       .withIndex("by_scope", (q) => q.eq("scope", "global"))
@@ -584,6 +644,18 @@ export const learnFromHumorSignal = mutation({
     const contextText = args.contextText?.trim() || "";
     const reactionEmoji = args.reactionEmoji?.trim();
     const signalInputText = [inboundText, contextText].filter(Boolean).join("\n");
+    if (signalInputText && hasHumorContextBlock(signalInputText)) {
+      return {
+        learned: false,
+        reason: "sensitive_context",
+      } as const;
+    }
+    if (args.signalKind === "text" && HUMOR_SINGLE_TOKEN_ONLY_PATTERN.test(signalInputText)) {
+      return {
+        learned: false,
+        reason: "weak_humor_signal",
+      } as const;
+    }
     if (!hasHumorSignal({ inboundText: signalInputText, signalKind: args.signalKind, reactionEmoji, funnyKeywords, funnyEmojis })) {
       return {
         learned: false,
@@ -607,12 +679,14 @@ export const learnFromHumorSignal = mutation({
       } as const;
     }
 
-    const phrases = extractReusablePhrases(latestOutbound.text);
+    const outboundText = latestOutbound.text.trim();
+    const safeToLearnPhrases = !hasHumorContextBlock(outboundText) && hasTextHumorSignal(outboundText, funnyKeywords, funnyEmojis);
+    const phrases = safeToLearnPhrases ? extractReusablePhrases(outboundText).slice(0, 3) : [];
     const humorNotes = inferHumorNotes({
       inboundText,
       contextText,
       reactionEmoji,
-      outboundText: latestOutbound.text,
+      outboundText,
       funnyKeywords,
       funnyEmojis,
     });

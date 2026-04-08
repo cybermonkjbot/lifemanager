@@ -199,7 +199,7 @@ type HumorJudgment = {
   model: string;
 };
 
-type JokeGuardrailCode = "none" | "cringe" | "similar_prior_joke" | "recent_joke_chain";
+type JokeGuardrailCode = "none" | "cringe" | "similar_prior_joke" | "recent_joke_chain" | "unsupported_context";
 
 type JokeGuardrailResult = {
   blocked: boolean;
@@ -278,6 +278,14 @@ const BLOCKED_REFUSAL_PATTERNS = [/\bi(?:'|’)m sorry,\s*but\s*i cannot assist 
 const BLOCKED_REFUSAL_ERROR = "Blocked refusal phrase detected.";
 const BLOCKED_REFUSAL_REPROMPT_LIMIT = 2;
 const AWKWARD_CATCHPHRASE_PATTERNS = [/\bplease allow me\b/i, /\ballow me small\b/i];
+const STYLE_MIMICRY_BLOCK_PATTERNS = [
+  /\b(?:https?:\/\/|www\.)\S+\b/i,
+  /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i,
+  /\b(?:\+?\d[\d\s-]{7,}\d)\b/,
+  /\b(password|passcode|otp|pin|bank|account|routing|sort code|wire transfer|social security)\b/i,
+  /\b(api key|access token|secret|auth token)\b/i,
+];
+const STYLE_MAX_PROMPT_PHRASE_WORDS = 6;
 const JOKE_INTENT_PATTERNS = [
   /\b(joke|banter|roast|pun|punchline)\b/i,
   /\b(lol|lmao|haha|hehe|lmfao)\b/i,
@@ -297,8 +305,19 @@ const CRINGE_JOKE_PATTERNS = [
 const JOKE_SIMILARITY_THRESHOLD = 0.62;
 const JOKE_CHAIN_OUTBOUND_COOLDOWN = 2;
 const CORE_HUMOR_PATTERN = /\b(lol|lmao|lmfao|rofl|haha|hehe|funny|joke|banter|meme|roast|hilarious)\b/i;
+const CORE_HUMOR_PATTERN_GLOBAL = /\b(lol|lmao|lmfao|rofl|haha|hehe|funny|joke|banter|meme|roast|hilarious)\b/gi;
 const CORE_HUMOR_EMOJI_PATTERN = /[😂🤣😹😆😄😁😅😜🤪🙃]/u;
+const CORE_HUMOR_EMOJI_PATTERN_GLOBAL = /[😂🤣😹😆😄😁😅😜🤪🙃]/gu;
 const LOW_SIGNAL_HUMOR_KEYWORDS = new Set(["status", "story", "update", "wild", "dead"]);
+const HUMOR_SINGLE_TOKEN_ONLY_PATTERN = /^\s*(?:lol|lmao|lmfao|rofl|haha|hehe|😂|🤣|😹|😆|😄|😁|😅|😜|🤪|🙃)\s*[.!?]*\s*$/i;
+const HUMOR_CONTEXT_BLOCK_PATTERNS = [
+  /\b(death|died|funeral|burial|rip|hospital|surgery|diagnosis|cancer|emergency|accident|abuse|assault|suicid|depress(?:ed|ion)?)\b/i,
+  /\b(password|otp|pin|social security|bank account|wire transfer|routing number|sort code|scam|fraud)\b/i,
+  /\b(court|lawyer|legal|lawsuit|arrestd?|police report)\b/i,
+  /\b(rent|salary|debt|loan|invoice overdue|payment issue)\b/i,
+];
+const HUMOR_CONTEXT_MIN_CHARS = 10;
+const MAX_SAFE_MIMICRY_LEVEL = 0.82;
 const HUMOR_JUDGE_SYSTEM_INSTRUCTION =
   "You are a strict humor classifier for WhatsApp drafts. Output JSON only with: isJokeAttempt (boolean), isFunny (boolean), confidence (0..1), reason (string <= 140 chars).";
 
@@ -538,12 +557,49 @@ function hasConfiguredHumorEmojiHit(text: string, emojis: string[]) {
   return emojis.some((emoji) => emoji && CORE_HUMOR_EMOJI_PATTERN.test(emoji) && text.includes(emoji));
 }
 
+function countCoreHumorKeywordHits(text: string) {
+  return text.match(CORE_HUMOR_PATTERN_GLOBAL)?.length ?? 0;
+}
+
+function countCoreHumorEmojiHits(text: string) {
+  return text.match(CORE_HUMOR_EMOJI_PATTERN_GLOBAL)?.length ?? 0;
+}
+
+function hasHumorContextBlock(text: string) {
+  return HUMOR_CONTEXT_BLOCK_PATTERNS.some((pattern) => pattern.test(text));
+}
+
 function hasHumorSignal(text: string, keywords: string[], emojis: string[]) {
-  const coreKeywordHit = CORE_HUMOR_PATTERN.test(text);
-  const coreEmojiHit = CORE_HUMOR_EMOJI_PATTERN.test(text);
-  const configuredKeywordHits = countConfiguredHumorKeywordHits(text, keywords);
-  const configuredEmojiHit = hasConfiguredHumorEmojiHit(text, emojis);
-  return coreKeywordHit || coreEmojiHit || configuredKeywordHits >= 2 || (configuredKeywordHits >= 1 && configuredEmojiHit);
+  const normalized = normalizeOutboundText(text || "");
+  if (normalized.length < HUMOR_CONTEXT_MIN_CHARS) {
+    return false;
+  }
+  if (HUMOR_SINGLE_TOKEN_ONLY_PATTERN.test(normalized)) {
+    return false;
+  }
+  if (hasHumorContextBlock(normalized)) {
+    return false;
+  }
+
+  const coreKeywordHits = countCoreHumorKeywordHits(normalized);
+  const coreEmojiHits = countCoreHumorEmojiHits(normalized);
+  const configuredKeywordHits = countConfiguredHumorKeywordHits(normalized, keywords);
+  const configuredEmojiHit = hasConfiguredHumorEmojiHit(normalized, emojis);
+  const hasPlayfulCue = /\b(joke|banter|roast|meme|tease|playful|hilarious|comic|funny)\b/i.test(normalized);
+
+  if (coreKeywordHits >= 2 || configuredKeywordHits >= 2) {
+    return true;
+  }
+  if ((coreEmojiHits >= 1 || configuredEmojiHit) && (coreKeywordHits >= 1 || configuredKeywordHits >= 1 || hasPlayfulCue)) {
+    return true;
+  }
+  if ((coreKeywordHits >= 1 || configuredKeywordHits >= 1) && hasPlayfulCue) {
+    return true;
+  }
+  if ((coreKeywordHits >= 1 || configuredKeywordHits >= 1) && normalized.length >= 28 && !/\b(status|story)\b/i.test(normalized)) {
+    return true;
+  }
+  return false;
 }
 
 function isAckLike(text: string) {
@@ -1590,13 +1646,13 @@ function buildPrompt(args: {
     .map((line) => line.line.replace(/^Me:\s*/, "").trim())
     .filter(Boolean)
     .join(" | ");
-  const mimicryLevel = clamp01(args.styleProfile?.mimicryLevel ?? 0.72);
+  const mimicryLevel = Math.min(clamp01(args.styleProfile?.mimicryLevel ?? 0.72), MAX_SAFE_MIMICRY_LEVEL);
   const mimicryInstruction =
-    mimicryLevel >= 0.85
-      ? "Strongly mirror the user's wording, rhythm, and punctuation."
-      : mimicryLevel >= 0.6
-        ? "Moderately mirror the user's wording and rhythm while staying clear."
-        : "Use a friendly, clear baseline voice with light mirroring.";
+    mimicryLevel >= 0.72
+      ? "Mirror style carefully at a medium level: reflect tone and pacing, but never copy exact catchphrases, punctuation stacks, or signature wording."
+      : mimicryLevel >= 0.55
+        ? "Use light mirroring of tone and rhythm while keeping wording original and clear."
+        : "Use a friendly, clear baseline voice with only minimal mirroring.";
   const hints = [
     ...args.styleHints,
     ...(args.styleProfile?.humorNotes || []),
@@ -1724,7 +1780,8 @@ function buildPrompt(args: {
       "Avoid direct name address by default. Only use the contact's name if they used your name first in the latest message or disambiguation is required.",
       "Avoid generic fillers like 'Noted', 'As an AI', 'I hope this message finds you well', or repetitive templates.",
       "Never send placeholder lines like 'Sounds good, I'll handle it and update you soon' or 'Got it, I'm on it.'",
-      "Mimic style lightly: borrow tone, not exact catchphrases. If a remembered phrase sounds awkward, rewrite it in plain natural wording.",
+      "Mirror style safely: borrow broad tone only, never exact catchphrases or signature phrasing.",
+      "Do not imitate private identifiers, unusual typos, punctuation quirks, or language patterns that could feel like impersonation.",
       "Never use awkward stock phrases like 'please allow me small'.",
       "Do not imply you sell anything or hold inventory. Never use claims like 'I have stock', 'I get small stock', 'in stock', 'for sale', or order/promo language.",
       "Avoid gendered address terms (for example bro/sis/king/queen/handsome/beautiful) unless the contact explicitly self-identifies gender in this chat context.",
@@ -2351,13 +2408,60 @@ function isCringeJoke(text: string) {
   return CRINGE_JOKE_PATTERNS.some((pattern) => pattern.test(text));
 }
 
-export function evaluateJokeGuardrail(text: string, historyLines: string[] = []): JokeGuardrailResult {
+type JokeGuardrailOptions = {
+  inboundText?: string;
+  funnyKeywords?: string[];
+  funnyEmojis?: string[];
+};
+
+function hasHumorEligibleContext(args: {
+  inboundText?: string;
+  historyLines: string[];
+  funnyKeywords: string[];
+  funnyEmojis: string[];
+}) {
+  const inbound = normalizeOutboundText(args.inboundText || "");
+  if (inbound && hasHumorSignal(inbound, args.funnyKeywords, args.funnyEmojis)) {
+    return true;
+  }
+
+  const recentInboundSample = args.historyLines
+    .slice(-8)
+    .map((line) => parseHistoryLine(line))
+    .filter((line) => line.label === "Them")
+    .map((line) => line.body)
+    .join(" ");
+  if (recentInboundSample && hasHumorSignal(recentInboundSample, args.funnyKeywords, args.funnyEmojis)) {
+    return true;
+  }
+  return false;
+}
+
+export function evaluateJokeGuardrail(text: string, historyLines: string[] = [], options?: JokeGuardrailOptions): JokeGuardrailResult {
   if (!isJokeLike(text)) {
     return {
       blocked: false,
       reason: "",
       code: "none",
     };
+  }
+  if (options?.inboundText !== undefined) {
+    const funnyKeywords = (options.funnyKeywords || DEFAULT_FUNNY_STATUS_KEYWORDS).slice(0, 30);
+    const funnyEmojis = (options.funnyEmojis || DEFAULT_FUNNY_STATUS_EMOJIS).slice(0, 30);
+    if (
+      !hasHumorEligibleContext({
+        inboundText: options.inboundText,
+        historyLines,
+        funnyKeywords,
+        funnyEmojis,
+      })
+    ) {
+      return {
+        blocked: true,
+        reason: "Humor blocked because inbound context is not strongly playful.",
+        code: "unsupported_context",
+      };
+    }
   }
   if (isCringeJoke(text)) {
     return {
@@ -2425,7 +2529,11 @@ export function sanitizeCommonPhrasesForPrompt(phrases: string[]) {
 
   for (const rawPhrase of phrases) {
     const phrase = rawPhrase.trim().replace(/\s+/g, " ");
+    const wordCount = phrase ? phrase.split(/\s+/).length : 0;
     if (!phrase) {
+      continue;
+    }
+    if (wordCount > STYLE_MAX_PROMPT_PHRASE_WORDS) {
       continue;
     }
     const normalized = phrase.toLowerCase();
@@ -2436,6 +2544,9 @@ export function sanitizeCommonPhrasesForPrompt(phrases: string[]) {
       continue;
     }
     if (AWKWARD_CATCHPHRASE_PATTERNS.some((pattern) => pattern.test(normalized))) {
+      continue;
+    }
+    if (STYLE_MIMICRY_BLOCK_PATTERNS.some((pattern) => pattern.test(phrase))) {
       continue;
     }
 
@@ -2869,11 +2980,15 @@ async function rewriteJokeChainReplyOnce(args: {
   historyLines: string[];
   basePrompt: string;
   runtime?: RuntimeAiTuning;
+  guardrailInstruction?: string;
 }) {
+  const guardrailInstruction =
+    args.guardrailInstruction ||
+    `The last ${JOKE_CHAIN_OUTBOUND_COOLDOWN} outbound replies already include humor. Rewrite this into a direct, non-joke response.`;
   const rewritePrompt = [
     args.basePrompt,
     `Current draft reply: ${args.candidateText}`,
-    `The last ${JOKE_CHAIN_OUTBOUND_COOLDOWN} outbound replies already include humor. Rewrite this into a direct, non-joke response.`,
+    guardrailInstruction,
     "Do not use banter, punchlines, meme slang, or playful callbacks in the rewrite.",
     "Stay concise, specific to the latest inbound message, and natural.",
     "Return only the revised reply text.",
@@ -4023,18 +4138,27 @@ async function applyQualityGate(args: {
   }
 
   if (humorEvaluation.judgment?.isJokeAttempt && humorEvaluation.judgment.isFunny) {
-    const jokeGuardrail = evaluateJokeGuardrail(selected.text, args.historyLines);
+    const jokeGuardrail = evaluateJokeGuardrail(selected.text, args.historyLines, {
+      inboundText: args.inboundText,
+      funnyKeywords: args.runtime?.funnyStatusKeywords,
+      funnyEmojis: args.runtime?.funnyStatusEmojis,
+    });
     if (jokeGuardrail.blocked) {
-      if (jokeGuardrail.code !== "recent_joke_chain") {
+      if (jokeGuardrail.code !== "recent_joke_chain" && jokeGuardrail.code !== "unsupported_context") {
         return manualReviewResult(jokeGuardrail.reason);
       }
 
+      const guardrailInstruction =
+        jokeGuardrail.code === "unsupported_context"
+          ? "Inbound context is not strongly playful enough to justify humor. Rewrite into a direct, non-joke reply."
+          : `The last ${JOKE_CHAIN_OUTBOUND_COOLDOWN} outbound replies already include humor. Rewrite this into a direct, non-joke response.`;
       const antiStretchRewrite = await rewriteJokeChainReplyOnce({
         candidateText: selected.text,
         inboundText: args.inboundText,
         historyLines: args.historyLines,
         basePrompt: args.basePrompt,
         runtime: args.runtime,
+        guardrailInstruction,
       });
       selectedAttempts = [...selectedAttempts, ...antiStretchRewrite.attempts];
       if (!antiStretchRewrite.result) {
@@ -4060,19 +4184,23 @@ async function applyQualityGate(args: {
       selectedAttempts = [...selectedAttempts, ...rewrittenHumorEvaluation.attempts];
 
       if (rewrittenHumorEvaluation.required && !rewrittenHumorEvaluation.judgment) {
-        return manualReviewResult("Joke-chain rewrite produced a humor candidate but AI humor judge was unavailable.");
+        return manualReviewResult("Humor-guardrail rewrite produced a humor candidate but AI humor judge was unavailable.");
       }
 
       if (rewrittenHumorEvaluation.judgment?.isJokeAttempt && !rewrittenHumorEvaluation.judgment.isFunny) {
         return manualReviewResult(
-          `Joke-chain rewrite was still humor but judged not funny (${Math.round(rewrittenHumorEvaluation.judgment.confidence * 100)}%): ${rewrittenHumorEvaluation.judgment.reason}`,
+          `Humor-guardrail rewrite was still humor but judged not funny (${Math.round(rewrittenHumorEvaluation.judgment.confidence * 100)}%): ${rewrittenHumorEvaluation.judgment.reason}`,
         );
       }
 
       if (rewrittenHumorEvaluation.judgment?.isJokeAttempt && rewrittenHumorEvaluation.judgment.isFunny) {
-        const rewrittenGuardrail = evaluateJokeGuardrail(selected.text, args.historyLines);
+        const rewrittenGuardrail = evaluateJokeGuardrail(selected.text, args.historyLines, {
+          inboundText: args.inboundText,
+          funnyKeywords: args.runtime?.funnyStatusKeywords,
+          funnyEmojis: args.runtime?.funnyStatusEmojis,
+        });
         if (rewrittenGuardrail.blocked) {
-          return manualReviewResult(`Joke-chain rewrite still violated guardrail: ${rewrittenGuardrail.reason}`);
+          return manualReviewResult(`Humor-guardrail rewrite still violated guardrail: ${rewrittenGuardrail.reason}`);
         }
       }
     }

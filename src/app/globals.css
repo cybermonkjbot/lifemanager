@@ -907,6 +907,22 @@ textarea {
   flex-wrap: wrap;
 }
 
+.backlog-intro {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.03));
+}
+
+.backlog-intro-title {
+  margin: 0 0 4px;
+  font-size: 0.84rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #f4f4f4;
+}
+
 .backlog-tabs {
   display: flex;
   gap: 8px;
@@ -965,6 +981,69 @@ textarea {
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+.backlog-item {
+  transition: border-color 0.18s ease, background 0.18s ease, padding-left 0.18s ease;
+}
+
+.backlog-item:hover {
+  border-color: rgba(255, 255, 255, 0.36);
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.02));
+  padding-left: 8px;
+}
+
+.backlog-item-reconnect {
+  background: linear-gradient(90deg, rgba(255, 216, 170, 0.08), transparent 32%);
+}
+
+.backlog-item-reply {
+  background: linear-gradient(90deg, rgba(170, 225, 255, 0.08), transparent 32%);
+}
+
+.backlog-item-queued {
+  opacity: 0.86;
+}
+
+.backlog-recommendation-line {
+  margin-top: 4px;
+}
+
+.backlog-actions {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 7px;
+}
+
+.backlog-primary-actions,
+.backlog-secondary-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.backlog-draft-help {
+  margin: 0;
+}
+
+@media (max-width: 760px) {
+  .backlog-row-head {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .backlog-badges {
+    justify-content: flex-start;
+  }
+
+  .backlog-toolbar,
+  .backlog-filters {
+    align-items: stretch;
+  }
+
+  .backlog-filters .setup-input-group.inline {
+    min-width: 100%;
+  }
 }
 
 .pairing-code {

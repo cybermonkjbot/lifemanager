@@ -1,9 +1,12 @@
 "use client";
 
 import { ActionNotices } from "@/components/action-notices";
+import { SharedMediaPreview } from "@/components/media-preview";
 import { UIModal } from "@/components/ui-modal";
 import { formatDateTime, formatDateTimeWithRelative, trim } from "@/lib/format";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
+import { createFollowupActionHandlers, type FollowupItem } from "@/lib/ui/followups";
+import type { MediaPreviewResource } from "@/lib/ui/media";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { useMutation, useQuery } from "convex/react";
@@ -19,48 +22,19 @@ type NeedsReplyItem = {
   sendKind?: "text" | "reaction" | "sticker" | "meme";
   mediaAssetId?: string;
   mediaCaption?: string;
-  mediaPreview?: {
-    assetId: string;
-    kind: "sticker" | "meme" | "image" | "video" | "audio" | "document";
-    mimeType: string;
-    label: string;
-    url: string | null;
-  } | null;
+  mediaPreview?: MediaPreviewResource | null;
   sourceMessage?:
     | {
         text?: string;
         mediaAssetId?: string;
         mediaCaption?: string;
-        mediaPreview?: {
-          assetId: string;
-          kind: "sticker" | "meme" | "image" | "video" | "audio" | "document";
-          mimeType: string;
-          label: string;
-          url: string | null;
-        } | null;
+        mediaPreview?: MediaPreviewResource | null;
       }
     | null;
   thread?: { _id?: string; title?: string; jid?: string } | null;
 };
 
-type FollowupConfirmationItem = {
-  _id: string;
-  reason: string;
-  dueAt: number;
-  status: "suggested" | "confirmed" | "queued" | "sent" | "failed" | "cancelled";
-  kind?: "promise" | "request" | "plan";
-  direction?: "inbound" | "outbound";
-  confidence?: number;
-  sourceSnippet?: string;
-  thread?: { _id?: string; title?: string; jid?: string } | null;
-  sourceMessage?:
-    | {
-        text?: string;
-        messageAt?: number;
-        direction?: "inbound" | "outbound";
-      }
-    | null;
-};
+type FollowupConfirmationItem = FollowupItem;
 
 type TodoCandidateItem = {
   _id: string;
@@ -90,41 +64,6 @@ type QueueReviewState =
   | { kind: "todos"; item: TodoCandidateItem }
   | { kind: "guardrails"; item: GuardrailFlagItem }
   | null;
-
-function renderQueueMediaPreview(args: {
-  mediaPreview?: {
-    assetId: string;
-    kind: "sticker" | "meme" | "image" | "video" | "audio" | "document";
-    mimeType: string;
-    label: string;
-    url: string | null;
-  } | null;
-  mediaAssetId?: string;
-}) {
-  const preview = args.mediaPreview;
-  if (!preview?.url) {
-    return args.mediaAssetId ? <p className="queue-meta">Media preview unavailable.</p> : null;
-  }
-
-  const mimeType = preview.mimeType.toLowerCase();
-  const altText = preview.label || (preview.kind === "meme" ? "Meme" : "Sticker");
-  if (mimeType.startsWith("image/") || preview.kind === "meme" || preview.kind === "sticker") {
-    // eslint-disable-next-line @next/next/no-img-element
-    return <img src={preview.url} alt={altText} className="message-media-image" loading="lazy" />;
-  }
-  if (mimeType.startsWith("video/")) {
-    return <video src={preview.url} controls preload="metadata" className="message-media-video" />;
-  }
-  if (mimeType.startsWith("audio/")) {
-    return <audio src={preview.url} controls preload="none" className="message-media-audio" />;
-  }
-
-  return (
-    <a href={preview.url} target="_blank" rel="noreferrer" className="message-media-link">
-      Open media attachment
-    </a>
-  );
-}
 
 function QueueContent() {
   const approveDraft = useMutation(api.draft.approve);
@@ -187,64 +126,19 @@ function QueueContent() {
     );
   };
 
-  const onConfirmFollowup = (followUpId: string) => {
-    const key = `followup:${followUpId}`;
-    void runAction(
-      key,
-      async () => {
-        await confirmFollowup({ followUpId: followUpId as Id<"followUps"> });
-      },
-      {
-        pendingLabel: "Confirming...",
-        successMessage: "Follow-up confirmed.",
-      },
-    );
-  };
-
-  const onSnoozeFollowup = (followUpId: string, minutes: number) => {
-    const key = `followup:snooze:${followUpId}`;
-    void runAction(
-      key,
-      async () => {
-        await snoozeFollowup({ followUpId: followUpId as Id<"followUps">, minutes });
-      },
-      {
-        pendingLabel: "Snoozing...",
-        successMessage: "Follow-up snoozed.",
-      },
-    );
-  };
-
-  const onRescheduleFollowup = (followUpId: string, hoursAhead: number) => {
-    const key = `followup:reschedule:${followUpId}`;
-    void runAction(
-      key,
-      async () => {
-        await rescheduleFollowup({
-          followUpId: followUpId as Id<"followUps">,
-          dueAt: Date.now() + Math.max(1, Math.round(hoursAhead)) * 60 * 60 * 1000,
-        });
-      },
-      {
-        pendingLabel: "Rescheduling...",
-        successMessage: "Follow-up rescheduled.",
-      },
-    );
-  };
-
-  const onDismissFollowup = (followUpId: string) => {
-    const key = `followup:cancel:${followUpId}`;
-    void runAction(
-      key,
-      async () => {
-        await cancelFollowup({ followUpId: followUpId as Id<"followUps"> });
-      },
-      {
-        pendingLabel: "Dismissing...",
-        successMessage: "Follow-up dismissed.",
-      },
-    );
-  };
+  const followupActions = createFollowupActionHandlers({
+    runAction,
+    mutations: {
+      confirmFollowup: async (args) => await confirmFollowup(args),
+      snoozeFollowup: async (args) => await snoozeFollowup(args),
+      rescheduleFollowup: async (args) => await rescheduleFollowup(args),
+      cancelFollowup: async (args) => await cancelFollowup(args),
+    },
+  });
+  const onConfirmFollowup = followupActions.onConfirm;
+  const onSnoozeFollowup = followupActions.onSnooze;
+  const onRescheduleFollowup = followupActions.onReschedule;
+  const onDismissFollowup = followupActions.onDismiss;
 
   const onConvertTodo = (candidateId: string) => {
     const key = `todo:${candidateId}`;
@@ -535,84 +429,86 @@ function QueueContent() {
         }
       >
         {reviewState?.kind === "needsReply" ? (
-          <div className="stack compact">
-            <p className="queue-title">{reviewState.item.thread?.title || reviewState.item.thread?.jid || "Unknown contact"}</p>
-            <p className="queue-body">{trim(reviewState.item.sourceMessage?.text || reviewState.item.text || "")}</p>
-            {renderQueueMediaPreview({
-              mediaPreview: reviewState.item.sourceMessage?.mediaPreview,
-              mediaAssetId: reviewState.item.sourceMessage?.mediaAssetId,
-            })}
-            <p className="queue-meta">Draft mode: {reviewState.item.sendKind || "text"}</p>
-            {reviewState.item.text ? <p className="queue-body">{trim(reviewState.item.text, 240)}</p> : null}
-            {renderQueueMediaPreview({
-              mediaPreview: reviewState.item.mediaPreview,
-              mediaAssetId: reviewState.item.mediaAssetId,
-            })}
-            {reviewState.item.mediaCaption?.trim() ? (
-              <p className="queue-meta">Media caption: {trim(reviewState.item.mediaCaption.trim(), 240)}</p>
-            ) : null}
-            <p className="queue-meta">
-              Provider: {reviewState.item.provider} · Delay: {Math.round(reviewState.item.delayMs / 1000)}s · Typing: {Math.round(reviewState.item.typingMs / 1000)}s
-            </p>
-            <div className="queue-actions">
-              <button
-                type="button"
-                className="btn btn-primary"
-                onClick={() => onSend(reviewState.item._id)}
-                disabled={isPending(`send:${reviewState.item._id}`) || isPending(`snooze:${reviewState.item._id}`)}
-                aria-disabled={isPending(`send:${reviewState.item._id}`) || isPending(`snooze:${reviewState.item._id}`)}
-              >
-                Send
-              </button>
-              <button
-                type="button"
-                className="btn btn-ghost"
-                onClick={() => onSnooze(reviewState.item._id)}
-                disabled={isPending(`send:${reviewState.item._id}`) || isPending(`snooze:${reviewState.item._id}`)}
-                aria-disabled={isPending(`send:${reviewState.item._id}`) || isPending(`snooze:${reviewState.item._id}`)}
-              >
-                Snooze 30m
-              </button>
-              <button
-                type="button"
-                className="btn btn-ghost"
-                onClick={() => onEdit(reviewState.item._id, reviewState.item.text)}
-                disabled={isPending(`edit:${reviewState.item._id}`)}
-                aria-disabled={isPending(`edit:${reviewState.item._id}`)}
-              >
-                Edit
-              </button>
-              <button
-                type="button"
-                className="btn btn-ghost"
-                onClick={() => onReject(reviewState.item._id)}
-                disabled={isPending(`reject:${reviewState.item._id}`)}
-                aria-disabled={isPending(`reject:${reviewState.item._id}`)}
-              >
-                Reject
-              </button>
-              {reviewState.item.thread?._id ? (
-                <Link href={`/conversations?threadId=${reviewState.item.thread._id}`} className="btn btn-ghost">
-                  Open Thread
-                </Link>
-              ) : null}
-            </div>
-            {getRecord(`send:${reviewState.item._id}`).error || getRecord(`snooze:${reviewState.item._id}`).error ? (
-              <p className="queue-meta action-inline-error" role="alert">
-                {getRecord(`send:${reviewState.item._id}`).error || getRecord(`snooze:${reviewState.item._id}`).error}
-              </p>
-            ) : null}
-            {getRecord(`edit:${reviewState.item._id}`).error ? (
-              <p className="queue-meta action-inline-error" role="alert">
-                {getRecord(`edit:${reviewState.item._id}`).error}
-              </p>
-            ) : null}
-            {getRecord(`reject:${reviewState.item._id}`).error ? (
-              <p className="queue-meta action-inline-error" role="alert">
-                {getRecord(`reject:${reviewState.item._id}`).error}
-              </p>
-            ) : null}
-          </div>
+          (() => {
+            const sendOrSnoozePending = isPending(`send:${reviewState.item._id}`) || isPending(`snooze:${reviewState.item._id}`);
+            return (
+              <div className="stack compact">
+                <p className="queue-title">{reviewState.item.thread?.title || reviewState.item.thread?.jid || "Unknown contact"}</p>
+                <p className="queue-body">{trim(reviewState.item.sourceMessage?.text || reviewState.item.text || "")}</p>
+                <SharedMediaPreview
+                  preview={reviewState.item.sourceMessage?.mediaPreview}
+                  mediaAssetId={reviewState.item.sourceMessage?.mediaAssetId}
+                />
+                <p className="queue-meta">Draft mode: {reviewState.item.sendKind || "text"}</p>
+                {reviewState.item.text ? <p className="queue-body">{trim(reviewState.item.text, 240)}</p> : null}
+                <SharedMediaPreview preview={reviewState.item.mediaPreview} mediaAssetId={reviewState.item.mediaAssetId} />
+                {reviewState.item.mediaCaption?.trim() ? (
+                  <p className="queue-meta">Media caption: {trim(reviewState.item.mediaCaption.trim(), 240)}</p>
+                ) : null}
+                <p className="queue-meta">
+                  Provider: {reviewState.item.provider} · Delay: {Math.round(reviewState.item.delayMs / 1000)}s · Typing: {Math.round(reviewState.item.typingMs / 1000)}s
+                </p>
+                <div className="queue-actions">
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={() => onSend(reviewState.item._id)}
+                    disabled={sendOrSnoozePending}
+                    aria-disabled={sendOrSnoozePending}
+                  >
+                    Send
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    onClick={() => onSnooze(reviewState.item._id)}
+                    disabled={sendOrSnoozePending}
+                    aria-disabled={sendOrSnoozePending}
+                  >
+                    Snooze 30m
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    onClick={() => onEdit(reviewState.item._id, reviewState.item.text)}
+                    disabled={isPending(`edit:${reviewState.item._id}`)}
+                    aria-disabled={isPending(`edit:${reviewState.item._id}`)}
+                  >
+                    Edit
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    onClick={() => onReject(reviewState.item._id)}
+                    disabled={isPending(`reject:${reviewState.item._id}`)}
+                    aria-disabled={isPending(`reject:${reviewState.item._id}`)}
+                  >
+                    Reject
+                  </button>
+                  {reviewState.item.thread?._id ? (
+                    <Link href={`/conversations?threadId=${reviewState.item.thread._id}`} className="btn btn-ghost">
+                      Open Thread
+                    </Link>
+                  ) : null}
+                </div>
+                {getRecord(`send:${reviewState.item._id}`).error || getRecord(`snooze:${reviewState.item._id}`).error ? (
+                  <p className="queue-meta action-inline-error" role="alert">
+                    {getRecord(`send:${reviewState.item._id}`).error || getRecord(`snooze:${reviewState.item._id}`).error}
+                  </p>
+                ) : null}
+                {getRecord(`edit:${reviewState.item._id}`).error ? (
+                  <p className="queue-meta action-inline-error" role="alert">
+                    {getRecord(`edit:${reviewState.item._id}`).error}
+                  </p>
+                ) : null}
+                {getRecord(`reject:${reviewState.item._id}`).error ? (
+                  <p className="queue-meta action-inline-error" role="alert">
+                    {getRecord(`reject:${reviewState.item._id}`).error}
+                  </p>
+                ) : null}
+              </div>
+            );
+          })()
         ) : null}
 
         {reviewState?.kind === "followups" ? (

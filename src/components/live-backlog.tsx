@@ -14,6 +14,15 @@ type SortMode = "importance" | "oldest" | "newest" | "relationship" | "activity"
 type RelationshipValue = "girlfriend" | "relationship" | "friendship" | "casual" | "family" | "business";
 type ImportanceValue = "critical" | "high" | "medium" | "low";
 
+const RELATIONSHIP_OPTIONS: Array<{ value: RelationshipValue; label: string }> = [
+  { value: "girlfriend", label: "Girlfriend/Boyfriend" },
+  { value: "relationship", label: "Romantic" },
+  { value: "friendship", label: "Friendship" },
+  { value: "family", label: "Family" },
+  { value: "business", label: "Business" },
+  { value: "casual", label: "Casual" },
+];
+
 type BacklogItem = {
   threadId: string;
   stateId: string;
@@ -59,15 +68,48 @@ function formatPendingAge(ms: number) {
 
 function recommendationLabel(value: BacklogItem["recommendation"]) {
   if (value === "restart") {
-    return "Kickstart";
+    return "Reconnect";
   }
   if (value === "answer_with_ack") {
-    return "Answer (with ack)";
+    return "Reply with acknowledgement";
   }
   if (value === "already_queued") {
     return "Already queued";
   }
-  return "Answer now";
+  return "Reply now";
+}
+
+function draftModeLabel(mode: "answer" | "restart") {
+  return mode === "restart" ? "Reconnect Draft" : "Reply Draft";
+}
+
+function recommendationHint(item: BacklogItem) {
+  if (item.recommendation === "restart") {
+    return "Use a gentle check-in to reopen the thread before diving into details.";
+  }
+  if (item.recommendation === "answer_with_ack") {
+    return "A short delay acknowledgement is added before the direct reply.";
+  }
+  if (item.recommendation === "already_queued") {
+    return "There is already a pending send for this thread.";
+  }
+  return "A direct response is likely the fastest way to resolve this thread.";
+}
+
+function emptyStateMessage(tab: BacklogTab) {
+  if (tab === "critical") {
+    return "No critical backlog threads right now.";
+  }
+  if (tab === "answer") {
+    return "No threads need direct replies in this view.";
+  }
+  if (tab === "restart") {
+    return "No threads need a reconnect draft right now.";
+  }
+  if (tab === "snoozed") {
+    return "Nothing is snoozed right now.";
+  }
+  return "No active backlog threads match these filters.";
 }
 
 function tabFromCounts(items: BacklogItem[]) {
@@ -201,8 +243,9 @@ function BacklogContent() {
         });
       },
       {
-        pendingLabel: mode === "restart" ? "Creating kickstart draft..." : "Creating answer draft...",
-        successMessage: mode === "restart" ? "Kickstart draft added to queue." : "Answer draft added to queue.",
+        pendingLabel: mode === "restart" ? "Creating reconnect draft..." : "Creating reply draft...",
+        successMessage:
+          mode === "restart" ? "Reconnect draft added to review queue." : "Reply draft added to review queue.",
       },
     );
   };
@@ -347,6 +390,13 @@ function BacklogContent() {
   return (
     <section className="panel-card">
       <ActionNotices notices={notices} onDismiss={dismissNotice} />
+      <div className="backlog-intro">
+        <p className="backlog-intro-title">Draft style guide</p>
+        <p className="queue-meta">
+          <strong>Reply Draft</strong> answers the latest unresolved message. <strong>Reconnect Draft</strong>{" "}
+          opens with a warm check-in for stale threads. Both create pending drafts for review before sending.
+        </p>
+      </div>
       <div className="backlog-toolbar">
         <div className="backlog-tabs">
           <button type="button" className={`btn ${tab === "all" ? "btn-primary" : "btn-ghost"}`} onClick={() => setTab("all")}>
@@ -356,10 +406,10 @@ function BacklogContent() {
             Critical ({counts.critical})
           </button>
           <button type="button" className={`btn ${tab === "answer" ? "btn-primary" : "btn-ghost"}`} onClick={() => setTab("answer")}>
-            Answer ({counts.answer})
+            Reply ({counts.answer})
           </button>
           <button type="button" className={`btn ${tab === "restart" ? "btn-primary" : "btn-ghost"}`} onClick={() => setTab("restart")}>
-            Kickstart ({counts.restart})
+            Reconnect ({counts.restart})
           </button>
           <button type="button" className={`btn ${tab === "snoozed" ? "btn-primary" : "btn-ghost"}`} onClick={() => setTab("snoozed")}>
             Snoozed ({counts.snoozed})
@@ -372,7 +422,7 @@ function BacklogContent() {
             <input
               type="text"
               value={search}
-              placeholder="Search contact or message..."
+              placeholder="Search contact, JID, or latest message..."
               onChange={(event) => {
                 setSearch(event.target.value);
                 setLimit(120);
@@ -384,12 +434,11 @@ function BacklogContent() {
             <span className="queue-meta">Relationship</span>
             <select value={relationshipFilter} onChange={(event) => setRelationshipFilter(event.target.value as "all" | RelationshipValue)}>
               <option value="all">All</option>
-              <option value="girlfriend">Girlfriend/Boyfriend</option>
-              <option value="relationship">Romantic</option>
-              <option value="friendship">Friendship</option>
-              <option value="family">Family</option>
-              <option value="business">Business</option>
-              <option value="casual">Casual</option>
+              {RELATIONSHIP_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
             </select>
           </label>
 
@@ -429,24 +478,24 @@ function BacklogContent() {
               setSelectedThreadIds(event.target.checked ? visibleItems.map((item) => item.threadId) : [])
             }
           />{" "}
-          Select visible
+          Select visible threads
         </label>
         <label className="setup-input-group inline">
-          <span className="queue-meta">Snooze (minutes)</span>
+          <span className="queue-meta">Snooze for (minutes)</span>
           <input type="number" min={5} step={5} value={snoozeMinutes} onChange={(event) => setSnoozeMinutes(Number(event.target.value) || 5)} />
         </label>
         <label className="setup-input-group inline">
-          <span className="queue-meta">Reason</span>
-          <input type="text" value={snoozeReason} onChange={(event) => setSnoozeReason(event.target.value)} placeholder="Optional note" />
+          <span className="queue-meta">Snooze note</span>
+          <input type="text" value={snoozeReason} onChange={(event) => setSnoozeReason(event.target.value)} placeholder="Optional context" />
         </label>
         <button type="button" className="btn btn-ghost" onClick={bulkSnooze} disabled={selectedThreadIds.length === 0}>
-          Snooze Selected
+          Snooze Selection
         </button>
         <button type="button" className="btn btn-ghost" onClick={() => bulkIgnore(true)} disabled={selectedThreadIds.length === 0}>
-          Ignore Selected
+          Ignore Selection
         </button>
         <button type="button" className="btn btn-ghost" onClick={() => bulkIgnore(false)} disabled={selectedThreadIds.length === 0}>
-          Unignore Selected
+          Unignore Selection
         </button>
       </div>
 
@@ -472,9 +521,17 @@ function BacklogContent() {
             getRecord(relationshipKey).pending;
 
           const recommendedMode = item.recommendation === "restart" ? "restart" : "answer";
+          const recommendedLabel = draftModeLabel(recommendedMode);
+          const alreadyQueued = item.recommendation === "already_queued";
 
           return (
-            <div key={item.stateId} className="queue-item" aria-busy={isPending}>
+            <div
+              key={item.stateId}
+              className={`queue-item backlog-item ${
+                recommendedMode === "restart" ? "backlog-item-reconnect" : "backlog-item-reply"
+              } ${alreadyQueued ? "backlog-item-queued" : ""}`}
+              aria-busy={isPending}
+            >
               <label className="queue-meta">
                 <input
                   type="checkbox"
@@ -497,6 +554,11 @@ function BacklogContent() {
               <p className="queue-meta">
                 Pending: {formatPendingAge(item.pendingAgeMs)} · Unresolved: {item.unresolvedCount} · Last inbound: {formatDateTime(item.latestUnresolvedAt)} · Score: {item.score}
               </p>
+              <p className="queue-meta backlog-recommendation-line">
+                {alreadyQueued
+                  ? "A draft is already queued for this thread. Review it in Queue before adding another."
+                  : `Recommended: ${recommendedLabel}. ${recommendationHint(item)}`}
+              </p>
 
               {item.isSnoozed ? (
                 <p className="queue-meta">
@@ -504,55 +566,63 @@ function BacklogContent() {
                 </p>
               ) : null}
 
-              <div className="queue-actions">
-                <button
-                  type="button"
-                  className={`btn ${recommendedMode === "answer" ? "btn-primary" : "btn-ghost"}`}
-                  onClick={() => onCreateDraft(item.threadId, "answer")}
-                  disabled={isPending || item.recommendation === "already_queued"}
-                  aria-disabled={isPending || item.recommendation === "already_queued"}
-                >
-                  Answer Draft
-                </button>
-                <button
-                  type="button"
-                  className={`btn ${recommendedMode === "restart" ? "btn-primary" : "btn-ghost"}`}
-                  onClick={() => onCreateDraft(item.threadId, "restart")}
-                  disabled={isPending || item.recommendation === "already_queued"}
-                  aria-disabled={isPending || item.recommendation === "already_queued"}
-                >
-                  Kickstart Draft
-                </button>
-
-                {item.isSnoozed ? (
-                  <button type="button" className="btn btn-ghost" onClick={() => onUnsnooze(item.threadId)} disabled={isPending} aria-disabled={isPending}>
-                    Unsnooze
+              <div className="queue-actions backlog-actions">
+                <div className="backlog-primary-actions">
+                  <button
+                    type="button"
+                    className={`btn ${recommendedMode === "answer" ? "btn-primary" : "btn-ghost"}`}
+                    onClick={() => onCreateDraft(item.threadId, "answer")}
+                    disabled={isPending || alreadyQueued}
+                    aria-disabled={isPending || alreadyQueued}
+                    title="Reply directly to the latest unresolved message."
+                  >
+                    Reply Draft
                   </button>
-                ) : (
+                  <button
+                    type="button"
+                    className={`btn ${recommendedMode === "restart" ? "btn-primary" : "btn-ghost"}`}
+                    onClick={() => onCreateDraft(item.threadId, "restart")}
+                    disabled={isPending || alreadyQueued}
+                    aria-disabled={isPending || alreadyQueued}
+                    title="Start with a warm reconnection opener for stale threads."
+                  >
+                    Reconnect Draft
+                  </button>
+                </div>
+                <p className="queue-meta backlog-draft-help">
+                  Reply Draft responds directly. Reconnect Draft reopens the conversation gently.
+                </p>
+                <div className="backlog-secondary-actions">
+                  {item.isSnoozed ? (
+                    <button type="button" className="btn btn-ghost" onClick={() => onUnsnooze(item.threadId)} disabled={isPending} aria-disabled={isPending}>
+                      Unsnooze
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      onClick={() => onSnooze(item.threadId, Math.max(5, Math.round(snoozeMinutes)))}
+                      disabled={isPending}
+                      aria-disabled={isPending}
+                    >
+                      Snooze
+                    </button>
+                  )}
+
                   <button
                     type="button"
                     className="btn btn-ghost"
-                    onClick={() => onSnooze(item.threadId, Math.max(5, Math.round(snoozeMinutes)))}
+                    onClick={() => onIgnoreToggle(item.threadId, !item.isIgnored)}
                     disabled={isPending}
                     aria-disabled={isPending}
                   >
-                    Snooze
+                    {item.isIgnored ? "Unignore" : "Ignore"}
                   </button>
-                )}
 
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  onClick={() => onIgnoreToggle(item.threadId, !item.isIgnored)}
-                  disabled={isPending}
-                  aria-disabled={isPending}
-                >
-                  {item.isIgnored ? "Unignore" : "Ignore"}
-                </button>
-
-                <Link href={`/conversations?threadId=${item.threadId}`} className="btn btn-ghost">
-                  Open
-                </Link>
+                  <Link href={`/conversations?threadId=${item.threadId}`} className="btn btn-ghost">
+                    Open Thread
+                  </Link>
+                </div>
               </div>
 
               <div className="backlog-overrides">
@@ -581,12 +651,11 @@ function BacklogContent() {
                     aria-disabled={isPending}
                   >
                     <option value="__auto">Auto</option>
-                    <option value="girlfriend">Girlfriend/Boyfriend</option>
-                    <option value="relationship">Romantic</option>
-                    <option value="friendship">Friendship</option>
-                    <option value="family">Family</option>
-                    <option value="business">Business</option>
-                    <option value="casual">Casual</option>
+                    {RELATIONSHIP_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
                   </select>
                 </label>
               </div>
@@ -594,7 +663,7 @@ function BacklogContent() {
           );
         })}
 
-        {!loading && visibleItems.length === 0 ? <p className="empty-line">No backlog threads match this view.</p> : null}
+        {!loading && visibleItems.length === 0 ? <p className="empty-line">{emptyStateMessage(tab)}</p> : null}
       </div>
     </section>
   );
