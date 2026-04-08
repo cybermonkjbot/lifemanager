@@ -38,6 +38,17 @@ export const health = query({
     const fallbackRate = successCount > 0 ? fallbackCount / successCount : 0;
     const latencies = providerWindow.map((row) => row.latencyMs).sort((a, b) => a - b);
     const p95LatencyMs = latencies.length > 0 ? latencies[Math.floor((latencies.length - 1) * 0.95)] : 0;
+    const inputTokens = providerWindow.reduce((sum, row) => sum + (row.inputTokens || 0), 0);
+    const outputTokens = providerWindow.reduce((sum, row) => sum + (row.outputTokens || 0), 0);
+    const totalTokens = providerWindow.reduce(
+      (sum, row) => sum + (row.totalTokens ?? (row.inputTokens || 0) + (row.outputTokens || 0)),
+      0,
+    );
+    const estimatedCostUsd = Number(providerWindow.reduce((sum, row) => sum + (row.estimatedCostUsd || 0), 0).toFixed(8));
+    const tokenizedRuns = providerWindow.filter(
+      (row) => row.totalTokens !== undefined || row.inputTokens !== undefined || row.outputTokens !== undefined,
+    ).length;
+    const pricedRuns = providerWindow.filter((row) => row.estimatedCostUsd !== undefined).length;
 
     const openGuardrails = await ctx.db
       .query("guardrailEvents")
@@ -108,6 +119,12 @@ export const health = query({
         providerErrorRate: errorRate,
         providerFallbackRate: fallbackRate,
         providerP95LatencyMs: p95LatencyMs,
+        providerInputTokens: inputTokens,
+        providerOutputTokens: outputTokens,
+        providerTotalTokens: totalTokens,
+        providerTokenizedRuns: tokenizedRuns,
+        providerEstimatedCostUsd: estimatedCostUsd,
+        providerPricedRuns: pricedRuns,
         openGuardrails: openGuardrails.length,
         pendingOutbox: pendingOutbox.length,
         dueOutbox: dueNow,
@@ -178,8 +195,8 @@ export const logFeed = query({
       source: "ai" as const,
       eventType: `provider.${run.provider}.${run.status}`,
       detail: run.error
-        ? `${run.model} · ${run.latencyMs}ms · ${run.error.slice(0, 180)}`
-        : `${run.model} · ${run.latencyMs}ms`,
+        ? `${run.model} · ${run.latencyMs}ms${run.totalTokens !== undefined ? ` · ${run.totalTokens} tok` : ""}${run.estimatedCostUsd !== undefined ? ` · $${run.estimatedCostUsd.toFixed(6)}` : ""} · ${run.error.slice(0, 180)}`
+        : `${run.model} · ${run.latencyMs}ms${run.totalTokens !== undefined ? ` · ${run.totalTokens} tok` : ""}${run.estimatedCostUsd !== undefined ? ` · $${run.estimatedCostUsd.toFixed(6)}` : ""}`,
       createdAt: run.createdAt,
       kind: "provider" as const,
     }));
@@ -216,6 +233,13 @@ export const recordProviderRun = mutation({
     latencyMs: v.number(),
     status: v.union(v.literal("success"), v.literal("error")),
     error: v.optional(v.string()),
+    inputTokens: v.optional(v.number()),
+    outputTokens: v.optional(v.number()),
+    totalTokens: v.optional(v.number()),
+    usageSource: v.optional(v.union(v.literal("provider"), v.literal("estimated"))),
+    estimatedCostUsd: v.optional(v.number()),
+    costCurrency: v.optional(v.literal("USD")),
+    pricingVersion: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     return await ctx.db.insert("providerRuns", {

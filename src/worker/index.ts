@@ -635,6 +635,23 @@ function compactLogText(value: string, maxChars: number) {
   return `${normalized.slice(0, Math.max(0, maxChars - 3))}...`;
 }
 
+function formatAttemptUsage(attempt: AiAttempt) {
+  const parts: string[] = [];
+  if (attempt.inputTokens !== undefined || attempt.outputTokens !== undefined || attempt.totalTokens !== undefined) {
+    const input = attempt.inputTokens ?? 0;
+    const output = attempt.outputTokens ?? 0;
+    const total = attempt.totalTokens ?? input + output;
+    parts.push(`tokens in/out/total ${input}/${output}/${total}`);
+  }
+  if (attempt.estimatedCostUsd !== undefined) {
+    parts.push(`est. cost $${attempt.estimatedCostUsd.toFixed(6)}`);
+  }
+  if (attempt.usageSource) {
+    parts.push(`usage ${attempt.usageSource}`);
+  }
+  return parts.join(" · ");
+}
+
 function createToolRunId(scope: "reply" | "outreach", threadId: string, sourceMessageId?: string) {
   const randomToken = Math.random().toString(36).slice(2, 10);
   const sourceToken = sourceMessageId ? sourceMessageId.slice(-8) : "none";
@@ -1652,6 +1669,15 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
   };
 
   const chatArchiveState = new Map<string, { isArchived: boolean; archivedAt: number }>();
+  const threadTitleByJid = new Map<string, string>();
+  const contactNameByJid = new Map<
+    string,
+    {
+      savedName?: string;
+      whatsappName?: string;
+      verifiedName?: string;
+    }
+  >();
   const inboundThreadLanes = new Map<string, Promise<void>>();
   const outboxThreadLanes = new Map<string, Promise<void>>();
   const automatedOutboundIds = new Map<string, number>();
@@ -1838,6 +1864,118 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
     return normalizeIncomingMessageTimestamp(raw, Date.now());
   };
 
+  const normalizeDisplayName = (value: unknown): string | undefined => {
+    if (typeof value !== "string") {
+      return undefined;
+    }
+    const trimmed = value.trim();
+    return trimmed || undefined;
+  };
+
+  const normalizeJidKey = (jid: string | null | undefined): string | undefined => {
+    const trimmed = (jid || "").trim().toLowerCase();
+    return trimmed || undefined;
+  };
+
+  const jidLookupKeys = (jid: string | null | undefined): string[] => {
+    const normalized = normalizeJidKey(jid);
+    if (!normalized) {
+      return [];
+    }
+    const accountKey = normalizeAccountJid(normalized);
+    if (accountKey && accountKey !== normalized) {
+      return [normalized, accountKey];
+    }
+    return [normalized];
+  };
+
+  const rememberThreadTitle = (threadJid: string | null | undefined, title: unknown) => {
+    const normalizedTitle = normalizeDisplayName(title);
+    if (!normalizedTitle) {
+      return;
+    }
+    for (const key of jidLookupKeys(threadJid)) {
+      threadTitleByJid.set(key, normalizedTitle);
+    }
+  };
+
+  const rememberContactName = (contactLike: {
+    id?: string;
+    lid?: string;
+    phoneNumber?: string;
+    name?: string;
+    notify?: string;
+    verifiedName?: string;
+  }) => {
+    const keys = new Set<string>();
+    for (const candidate of [contactLike.id, contactLike.lid, contactLike.phoneNumber]) {
+      for (const key of jidLookupKeys(candidate)) {
+        keys.add(key);
+      }
+    }
+    if (keys.size === 0) {
+      return;
+    }
+
+    const savedName = normalizeDisplayName(contactLike.name);
+    const whatsappName = normalizeDisplayName(contactLike.notify);
+    const verifiedName = normalizeDisplayName(contactLike.verifiedName);
+
+    if (!savedName && !whatsappName && !verifiedName) {
+      return;
+    }
+
+    for (const key of keys) {
+      const existing = contactNameByJid.get(key);
+      contactNameByJid.set(key, {
+        savedName: savedName ?? existing?.savedName,
+        whatsappName: whatsappName ?? existing?.whatsappName,
+        verifiedName: verifiedName ?? existing?.verifiedName,
+      });
+    }
+  };
+
+  const syncContactMetadata = (contactLike: unknown) => {
+    if (!contactLike || typeof contactLike !== "object") {
+      return;
+    }
+    const row = contactLike as {
+      id?: string;
+      lid?: string;
+      phoneNumber?: string;
+      name?: string;
+      notify?: string;
+      verifiedName?: string;
+    };
+    rememberContactName(row);
+  };
+
+  const resolveSenderTitle = (args: {
+    threadJid: string;
+    threadKind: "direct" | "group" | "broadcast_or_system";
+    pushName?: string | null;
+  }): string | undefined => {
+    let savedName: string | undefined;
+    let whatsappName: string | undefined;
+    let verifiedName: string | undefined;
+    let chatTitle: string | undefined;
+    for (const key of jidLookupKeys(args.threadJid)) {
+      const contact = contactNameByJid.get(key);
+      if (contact) {
+        savedName = savedName || contact.savedName;
+        whatsappName = whatsappName || contact.whatsappName;
+        verifiedName = verifiedName || contact.verifiedName;
+      }
+      chatTitle = chatTitle || threadTitleByJid.get(key);
+    }
+
+    if (args.threadKind === "group") {
+      return chatTitle;
+    }
+
+    return savedName || chatTitle || whatsappName || normalizeDisplayName(args.pushName) || verifiedName;
+  };
+
   const syncThreadMetadata = async (chatLike: unknown) => {
     if (!chatLike || typeof chatLike !== "object") {
       return;
@@ -1853,6 +1991,8 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
     if (!threadJid) {
       return;
     }
+    const threadTitle = normalizeDisplayName(row.subject || row.name || row.conversationName);
+    rememberThreadTitle(threadJid, threadTitle);
 
     const isArchived = extractArchivedFlag(chatLike);
     const archivedAt = isArchived ? Date.now() : undefined;
@@ -1867,7 +2007,7 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
     await convex
       .mutation(convexRefs.threadsUpsertMetadata, {
         threadJid,
-        title: row.subject || row.name || row.conversationName,
+        title: threadTitle,
         isGroup: isGroupJid(threadJid),
         threadKind,
         isArchived,
@@ -2315,6 +2455,7 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
 
       const direction = message.key.fromMe ? "outbound" : "inbound";
       const senderJid = direction === "outbound" ? "me" : senderJidFromKey;
+      const threadKind = classifyThreadKindFromJid(threadJid);
       const messageType = resolveMessageTypeFromParsed(parsed);
       const mediaKind = resolveCapturableMediaKind(parsed);
       const messageAt = normalizeIncomingMessageTimestamp(message.messageTimestamp, Date.now());
@@ -2328,7 +2469,11 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
         direction,
         threadJid,
         senderJid,
-        senderTitle: message.pushName || undefined,
+        senderTitle: resolveSenderTitle({
+          threadJid,
+          threadKind,
+          pushName: message.pushName,
+        }),
         text: parsed.text,
         messageType,
         reactionEmoji: parsed.kind === "reaction" ? parsed.emoji : undefined,
@@ -2336,7 +2481,7 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
         mediaCaption: resolveMediaCaptionFromParsed(parsed),
         isStatus: isStatusBroadcast,
         isGroup: isGroupJid(threadJid),
-        threadKind: classifyThreadKindFromJid(threadJid),
+        threadKind,
         whatsappMessageId: message.key.id || undefined,
         messageAt,
       })) as {
@@ -2451,7 +2596,11 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
       const ingest = (await convex.mutation(convexRefs.inboundIngest, {
         threadJid,
         senderJid,
-        senderTitle: message.pushName || undefined,
+        senderTitle: resolveSenderTitle({
+          threadJid,
+          threadKind,
+          pushName: message.pushName,
+        }),
         text: effectiveParsed.text,
         messageType: resolveMessageTypeFromParsed(effectiveParsed),
         reactionEmoji: effectiveParsed.kind === "reaction" ? effectiveParsed.emoji : undefined,
@@ -3147,9 +3296,10 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
         for (let index = 0; index < ai.attempts.length; index += 1) {
           const attempt = ai.attempts[index];
           const label = attemptStageLabel(attempt.stage);
+          const usageSuffix = formatAttemptUsage(attempt);
           const detail = attempt.error
-            ? `Attempt ${index + 1}/${ai.attempts.length} · ${label} · ${attempt.model} · ${attempt.latencyMs}ms · ${attempt.error.slice(0, 220)}`
-            : `Attempt ${index + 1}/${ai.attempts.length} · ${label} · ${attempt.model} · ${attempt.latencyMs}ms`;
+            ? `Attempt ${index + 1}/${ai.attempts.length} · ${label} · ${attempt.model} · ${attempt.latencyMs}ms${usageSuffix ? ` · ${usageSuffix}` : ""} · ${attempt.error.slice(0, 220)}`
+            : `Attempt ${index + 1}/${ai.attempts.length} · ${label} · ${attempt.model} · ${attempt.latencyMs}ms${usageSuffix ? ` · ${usageSuffix}` : ""}`;
 
           await convex
             .mutation(convexRefs.systemRecordProviderRun, {
@@ -3159,6 +3309,13 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
               latencyMs: attempt.latencyMs,
               status: attempt.status,
               ...(attempt.error ? { error: attempt.error.slice(0, 300) } : {}),
+              ...(attempt.inputTokens === undefined ? {} : { inputTokens: attempt.inputTokens }),
+              ...(attempt.outputTokens === undefined ? {} : { outputTokens: attempt.outputTokens }),
+              ...(attempt.totalTokens === undefined ? {} : { totalTokens: attempt.totalTokens }),
+              ...(attempt.usageSource ? { usageSource: attempt.usageSource } : {}),
+              ...(attempt.estimatedCostUsd === undefined ? {} : { estimatedCostUsd: attempt.estimatedCostUsd }),
+              ...(attempt.costCurrency ? { costCurrency: attempt.costCurrency } : {}),
+              ...(attempt.pricingVersion ? { pricingVersion: attempt.pricingVersion } : {}),
             })
             .catch(() => undefined);
 
@@ -3408,6 +3565,24 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
       }
     });
 
+    socket.ev.on("contacts.upsert", (contacts) => {
+      if (socket !== sock || !Array.isArray(contacts)) {
+        return;
+      }
+      for (const contact of contacts) {
+        syncContactMetadata(contact);
+      }
+    });
+
+    socket.ev.on("contacts.update", (updates) => {
+      if (socket !== sock || !Array.isArray(updates)) {
+        return;
+      }
+      for (const update of updates) {
+        syncContactMetadata(update);
+      }
+    });
+
     socket.ev.on("messaging-history.set", async (event) => {
       if (socket !== sock || !event) {
         return;
@@ -3416,6 +3591,11 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
       if (Array.isArray(event.chats)) {
         for (const chat of event.chats) {
           await syncThreadMetadata(chat);
+        }
+      }
+      if (Array.isArray(event.contacts)) {
+        for (const contact of event.contacts) {
+          syncContactMetadata(contact);
         }
       }
       if (!Array.isArray(event.messages)) {
@@ -3620,9 +3800,10 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
     for (let index = 0; index < ai.attempts.length; index += 1) {
       const attempt = ai.attempts[index];
       const label = attemptStageLabel(attempt.stage);
+      const usageSuffix = formatAttemptUsage(attempt);
       const detail = attempt.error
-        ? `Outreach attempt ${index + 1}/${ai.attempts.length} · ${label} · ${attempt.model} · ${attempt.latencyMs}ms · ${attempt.error.slice(0, 220)}`
-        : `Outreach attempt ${index + 1}/${ai.attempts.length} · ${label} · ${attempt.model} · ${attempt.latencyMs}ms`;
+        ? `Outreach attempt ${index + 1}/${ai.attempts.length} · ${label} · ${attempt.model} · ${attempt.latencyMs}ms${usageSuffix ? ` · ${usageSuffix}` : ""} · ${attempt.error.slice(0, 220)}`
+        : `Outreach attempt ${index + 1}/${ai.attempts.length} · ${label} · ${attempt.model} · ${attempt.latencyMs}ms${usageSuffix ? ` · ${usageSuffix}` : ""}`;
 
       await convex
         .mutation(convexRefs.systemRecordProviderRun, {
@@ -3632,6 +3813,13 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
           latencyMs: attempt.latencyMs,
           status: attempt.status,
           ...(attempt.error ? { error: attempt.error.slice(0, 300) } : {}),
+          ...(attempt.inputTokens === undefined ? {} : { inputTokens: attempt.inputTokens }),
+          ...(attempt.outputTokens === undefined ? {} : { outputTokens: attempt.outputTokens }),
+          ...(attempt.totalTokens === undefined ? {} : { totalTokens: attempt.totalTokens }),
+          ...(attempt.usageSource ? { usageSource: attempt.usageSource } : {}),
+          ...(attempt.estimatedCostUsd === undefined ? {} : { estimatedCostUsd: attempt.estimatedCostUsd }),
+          ...(attempt.costCurrency ? { costCurrency: attempt.costCurrency } : {}),
+          ...(attempt.pricingVersion ? { pricingVersion: attempt.pricingVersion } : {}),
         })
         .catch(() => undefined);
 

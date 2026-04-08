@@ -322,6 +322,13 @@ export default defineSchema({
     latencyMs: v.number(),
     status: v.union(v.literal("success"), v.literal("error")),
     error: v.optional(v.string()),
+    inputTokens: v.optional(v.number()),
+    outputTokens: v.optional(v.number()),
+    totalTokens: v.optional(v.number()),
+    usageSource: v.optional(v.union(v.literal("provider"), v.literal("estimated"))),
+    estimatedCostUsd: v.optional(v.number()),
+    costCurrency: v.optional(v.literal("USD")),
+    pricingVersion: v.optional(v.string()),
     createdAt: v.number(),
   }).index("by_createdAt", ["createdAt"]),
 

@@ -22,6 +22,13 @@ type TestAttempt = {
   status: "success" | "error";
   latencyMs: number;
   error?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+  usageSource?: "provider" | "estimated";
+  estimatedCostUsd?: number;
+  costCurrency?: "USD";
+  pricingVersion?: string;
 };
 
 type TestResult = {
@@ -200,6 +207,16 @@ function AiTestBench() {
               <p className="queue-meta">
                 {attempt.provider.toUpperCase()} · {attempt.model} · {attempt.status} · {attempt.latencyMs}ms
               </p>
+              {attempt.totalTokens !== undefined || attempt.inputTokens !== undefined || attempt.outputTokens !== undefined ? (
+                <p className="queue-meta">
+                  Tokens in/out/total: {attempt.inputTokens ?? 0}/{attempt.outputTokens ?? 0}/
+                  {attempt.totalTokens ?? (attempt.inputTokens ?? 0) + (attempt.outputTokens ?? 0)}
+                  {attempt.usageSource ? ` · ${attempt.usageSource}` : ""}
+                </p>
+              ) : null}
+              {attempt.estimatedCostUsd !== undefined ? (
+                <p className="queue-meta">Estimated cost: ${attempt.estimatedCostUsd.toFixed(6)}</p>
+              ) : null}
               {attempt.error ? <p className="queue-body">{trim(attempt.error, 220)}</p> : null}
             </div>
           ))}
@@ -221,6 +238,12 @@ function SystemContent() {
           providerErrorRate: number;
           providerFallbackRate: number;
           providerP95LatencyMs: number;
+          providerInputTokens: number;
+          providerOutputTokens: number;
+          providerTotalTokens: number;
+          providerTokenizedRuns: number;
+          providerEstimatedCostUsd: number;
+          providerPricedRuns: number;
           openGuardrails: number;
           pendingOutbox: number;
           dueOutbox: number;
@@ -244,6 +267,13 @@ function SystemContent() {
           status: string;
           model: string;
           latencyMs: number;
+          inputTokens?: number;
+          outputTokens?: number;
+          totalTokens?: number;
+          usageSource?: "provider" | "estimated";
+          estimatedCostUsd?: number;
+          costCurrency?: "USD";
+          pricingVersion?: string;
           createdAt: number;
           error?: string;
         }>;
@@ -284,10 +314,16 @@ function SystemContent() {
             <p className="queue-meta">
               Provider success/error: {metrics.providerSuccess}/{metrics.providerErrors} (window {metrics.providerRunsWindow})
             </p>
-            <p className="queue-meta">Provider error rate: {(metrics.providerErrorRate * 100).toFixed(1)}%</p>
-            <p className="queue-meta">Fallback rate: {(metrics.providerFallbackRate * 100).toFixed(1)}%</p>
-            <p className="queue-meta">P95 provider latency: {Math.round(metrics.providerP95LatencyMs)}ms</p>
-            <p className="queue-meta">Open guardrails: {metrics.openGuardrails}</p>
+              <p className="queue-meta">Provider error rate: {(metrics.providerErrorRate * 100).toFixed(1)}%</p>
+              <p className="queue-meta">Fallback rate: {(metrics.providerFallbackRate * 100).toFixed(1)}%</p>
+              <p className="queue-meta">P95 provider latency: {Math.round(metrics.providerP95LatencyMs)}ms</p>
+              <p className="queue-meta">
+                Provider tokens (in/out/total): {metrics.providerInputTokens}/{metrics.providerOutputTokens}/{metrics.providerTotalTokens}
+              </p>
+              <p className="queue-meta">
+                Estimated AI cost (window): ${metrics.providerEstimatedCostUsd.toFixed(6)} ({metrics.providerPricedRuns} priced runs)
+              </p>
+              <p className="queue-meta">Open guardrails: {metrics.openGuardrails}</p>
             <p className="queue-meta">Outbox pending/due: {metrics.pendingOutbox}/{metrics.dueOutbox}</p>
             <p className="queue-meta">Recent failed outbox items: {metrics.failedOutboxRecent}</p>
             <p className="queue-meta">Follow-up detections: {metrics.followupDetections}</p>
@@ -326,6 +362,14 @@ function SystemContent() {
               <p className="queue-meta">
                 Model: {run.model} · Latency: {run.latencyMs}ms · {formatDateTime(run.createdAt)}
               </p>
+              {run.totalTokens !== undefined || run.inputTokens !== undefined || run.outputTokens !== undefined ? (
+                <p className="queue-meta">
+                  Tokens in/out/total: {run.inputTokens ?? 0}/{run.outputTokens ?? 0}/
+                  {run.totalTokens ?? (run.inputTokens ?? 0) + (run.outputTokens ?? 0)}
+                  {run.usageSource ? ` · ${run.usageSource}` : ""}
+                </p>
+              ) : null}
+              {run.estimatedCostUsd !== undefined ? <p className="queue-meta">Estimated cost: ${run.estimatedCostUsd.toFixed(6)}</p> : null}
               {run.error ? <p className="queue-body">{trim(run.error, 180)}</p> : null}
             </div>
           ))}

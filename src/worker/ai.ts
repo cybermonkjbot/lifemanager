@@ -55,6 +55,13 @@ export type AiAttempt = {
   status: "success" | "error";
   latencyMs: number;
   error?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+  usageSource?: "provider" | "estimated";
+  estimatedCostUsd?: number;
+  costCurrency?: "USD";
+  pricingVersion?: string;
 };
 
 export type QualityCheck = {
@@ -2558,6 +2565,7 @@ async function runHumorJudgeWithAzure(args: {
   const startedAt = Date.now();
   try {
     let rawText = "";
+    let tokenUsage: ReturnType<typeof extractTokenUsageFromProviderPayload> = null;
     if (cfg.apiStyle === "responses") {
       const response = await fetch(buildAzureResponsesEndpoint(cfg.endpoint), {
         method: "POST",
@@ -2578,7 +2586,9 @@ async function runHumorJudgeWithAzure(args: {
         const text = await response.text();
         throw new Error(`Azure humor judge failed (${response.status}): ${text.slice(0, 240)}`);
       }
-      rawText = extractAzureResponsesText(await response.json());
+      const payload = await response.json();
+      tokenUsage = extractTokenUsageFromProviderPayload(payload);
+      rawText = extractAzureResponsesText(payload);
     } else {
       const response = await fetch(buildAzureChatCompletionsEndpoint(cfg.endpoint), {
         method: "POST",
@@ -2607,7 +2617,9 @@ async function runHumorJudgeWithAzure(args: {
         const text = await response.text();
         throw new Error(`Azure humor judge failed (${response.status}): ${text.slice(0, 240)}`);
       }
-      rawText = extractAzureChatCompletionText(await response.json());
+      const payload = await response.json();
+      tokenUsage = extractTokenUsageFromProviderPayload(payload);
+      rawText = extractAzureChatCompletionText(payload);
     }
 
     const parsed = parseHumorJudgeOutput(rawText);
@@ -2620,6 +2632,12 @@ async function runHumorJudgeWithAzure(args: {
       model: cfg.model,
       status: "success",
       latencyMs: Date.now() - startedAt,
+      ...enrichAttemptWithUsage({
+        provider: "azure",
+        model: cfg.model,
+        usageSource: "provider",
+        ...(tokenUsage || {}),
+      }),
     });
     return {
       judgment: {
@@ -2677,6 +2695,13 @@ async function runHumorJudgeWithCodex(args: {
           model,
           status: "success",
           latencyMs: Date.now() - startedAt,
+          ...enrichAttemptWithUsage({
+            provider: "codex",
+            model,
+            usageSource: "estimated",
+            inputTokens: estimateTextTokens(prompt),
+            outputTokens: estimateTextTokens(rawText),
+          }),
         },
       ],
     };
@@ -2931,6 +2956,155 @@ function toErrorMessage(error: unknown) {
   return String(error).slice(0, 300);
 }
 
+function toTokenCount(value: unknown) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return undefined;
+  }
+  return Math.round(parsed);
+}
+
+function normalizeTokenUsage(args: {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+}) {
+  const inputTokens = toTokenCount(args.inputTokens);
+  const outputTokens = toTokenCount(args.outputTokens);
+  const fallbackTotal = (inputTokens ?? 0) + (outputTokens ?? 0);
+  const totalTokens = toTokenCount(args.totalTokens) ?? (fallbackTotal > 0 ? fallbackTotal : undefined);
+  if (inputTokens === undefined && outputTokens === undefined && totalTokens === undefined) {
+    return null;
+  }
+  return {
+    inputTokens,
+    outputTokens,
+    totalTokens,
+  };
+}
+
+function readUsageValue(usage: Record<string, unknown>, keys: string[]) {
+  for (const key of keys) {
+    const value = toTokenCount(usage[key]);
+    if (value !== undefined) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function extractTokenUsageFromProviderPayload(payload: unknown) {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+  const usage = (payload as { usage?: unknown }).usage;
+  if (!usage || typeof usage !== "object") {
+    return null;
+  }
+  const usageRecord = usage as Record<string, unknown>;
+  return normalizeTokenUsage({
+    inputTokens: readUsageValue(usageRecord, ["input_tokens", "prompt_tokens", "inputTokens", "promptTokens"]),
+    outputTokens: readUsageValue(usageRecord, ["output_tokens", "completion_tokens", "outputTokens", "completionTokens"]),
+    totalTokens: readUsageValue(usageRecord, ["total_tokens", "totalTokens"]),
+  });
+}
+
+function normalizeModelEnvKey(model: string) {
+  return model
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function readCostPerMillion(args: {
+  provider: "azure" | "codex" | "heuristic";
+  model: string;
+  direction: "input" | "output";
+}) {
+  const normalizedModel = normalizeModelEnvKey(args.model);
+  const perModelKey = `SLM_AI_COST_${normalizedModel}_${args.direction.toUpperCase()}_PER_1M_USD`;
+  const perProviderKey = `SLM_AI_COST_${args.provider.toUpperCase()}_${args.direction.toUpperCase()}_PER_1M_USD`;
+  const globalKey = `SLM_AI_COST_DEFAULT_${args.direction.toUpperCase()}_PER_1M_USD`;
+  const raw = process.env[perModelKey] || process.env[perProviderKey] || process.env[globalKey];
+  if (!raw) {
+    return undefined;
+  }
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return undefined;
+  }
+  return parsed;
+}
+
+function estimateCostUsd(args: {
+  provider: "azure" | "codex" | "heuristic";
+  model: string;
+  inputTokens?: number;
+  outputTokens?: number;
+}) {
+  const inputRate = readCostPerMillion({
+    provider: args.provider,
+    model: args.model,
+    direction: "input",
+  });
+  const outputRate = readCostPerMillion({
+    provider: args.provider,
+    model: args.model,
+    direction: "output",
+  });
+  if (inputRate === undefined || outputRate === undefined) {
+    return undefined;
+  }
+  const inputCost = ((args.inputTokens || 0) / 1_000_000) * inputRate;
+  const outputCost = ((args.outputTokens || 0) / 1_000_000) * outputRate;
+  return Number((inputCost + outputCost).toFixed(8));
+}
+
+function enrichAttemptWithUsage(args: {
+  provider: "azure" | "codex" | "heuristic";
+  model: string;
+  usageSource: "provider" | "estimated";
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+}) {
+  const usage = normalizeTokenUsage({
+    inputTokens: args.inputTokens,
+    outputTokens: args.outputTokens,
+    totalTokens: args.totalTokens,
+  });
+  if (!usage) {
+    return {};
+  }
+  const estimatedCostUsd = estimateCostUsd({
+    provider: args.provider,
+    model: args.model,
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+  });
+  return {
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    totalTokens: usage.totalTokens,
+    usageSource: args.usageSource,
+    ...(estimatedCostUsd === undefined
+      ? {}
+      : {
+          estimatedCostUsd,
+          costCurrency: "USD" as const,
+          pricingVersion: (process.env.SLM_AI_PRICING_VERSION || "").trim() || "env-config",
+        }),
+  };
+}
+
+function estimateTextTokens(text: string) {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return 0;
+  }
+  return Math.max(1, Math.round(trimmed.length / 4));
+}
+
 async function runAzure(
   prompt: string,
   inboundText: string,
@@ -2990,6 +3164,7 @@ async function runAzure(
       }
 
       const raw = await response.json();
+      const tokenUsage = extractTokenUsageFromProviderPayload(raw);
       const cleaned = sanitizeReplyText(extractAzureResponsesText(raw), runtime?.maxReplyChars);
       if (!cleaned) {
         throw new Error("Azure Responses returned empty response.");
@@ -3007,6 +3182,12 @@ async function runAzure(
         model: cfg.model,
         status: "success",
         latencyMs: Date.now() - responsesStart,
+        ...enrichAttemptWithUsage({
+          provider: "azure",
+          model: cfg.model,
+          usageSource: "provider",
+          ...(tokenUsage || {}),
+        }),
       });
 
       return {
@@ -3048,6 +3229,7 @@ async function runAzure(
       throw new Error(`Azure AI SDK error: ${response.body.error?.message || response.status}`);
     }
 
+    const tokenUsage = extractTokenUsageFromProviderPayload(response.body);
     const content = response.body.choices?.[0]?.message?.content as unknown;
     let text = "";
     if (typeof content === "string") {
@@ -3080,6 +3262,12 @@ async function runAzure(
       model: cfg.model,
       status: "success",
       latencyMs: Date.now() - sdkStart,
+      ...enrichAttemptWithUsage({
+        provider: "azure",
+        model: cfg.model,
+        usageSource: "provider",
+        ...(tokenUsage || {}),
+      }),
     });
 
     return {
@@ -3125,11 +3313,13 @@ async function runAzure(
       throw new Error(`Azure AI failed (${response.status}): ${text.slice(0, 300)}`);
     }
 
-    const data = (await response.json()) as {
+    const data = await response.json();
+    const tokenUsage = extractTokenUsageFromProviderPayload(data);
+    const parsedData = data as {
       choices?: Array<{ message?: { content?: string | Array<{ text?: string }> } }>;
     };
 
-    const content = data.choices?.[0]?.message?.content;
+    const content = parsedData.choices?.[0]?.message?.content;
     const text =
       typeof content === "string"
         ? content
@@ -3154,6 +3344,12 @@ async function runAzure(
       model: cfg.model,
       status: "success",
       latencyMs: Date.now() - httpStart,
+      ...enrichAttemptWithUsage({
+        provider: "azure",
+        model: cfg.model,
+        usageSource: "provider",
+        ...(tokenUsage || {}),
+      }),
     });
 
     return {
@@ -3604,6 +3800,13 @@ async function runCodex(
           model,
           status: "success",
           latencyMs,
+          ...enrichAttemptWithUsage({
+            provider: "codex",
+            model,
+            usageSource: "estimated",
+            inputTokens: estimateTextTokens(prompt),
+            outputTokens: estimateTextTokens(text),
+          }),
         },
       ],
     };

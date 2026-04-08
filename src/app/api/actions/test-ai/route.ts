@@ -195,9 +195,14 @@ export async function POST(request: Request) {
 
     for (let index = 0; index < aiResult.attempts.length; index += 1) {
       const attempt = aiResult.attempts[index];
+      const usageSuffix =
+        attempt.inputTokens !== undefined || attempt.outputTokens !== undefined || attempt.totalTokens !== undefined
+          ? ` · tokens ${attempt.inputTokens ?? 0}/${attempt.outputTokens ?? 0}/${attempt.totalTokens ?? (attempt.inputTokens ?? 0) + (attempt.outputTokens ?? 0)}`
+          : "";
+      const costSuffix = attempt.estimatedCostUsd === undefined ? "" : ` · est. cost $${attempt.estimatedCostUsd.toFixed(6)}`;
       const detail = attempt.error
-        ? `Dashboard test attempt ${index + 1}/${aiResult.attempts.length} · ${attempt.stage} · ${attempt.model} · ${attempt.latencyMs}ms · ${compactText(attempt.error, 180)}`
-        : `Dashboard test attempt ${index + 1}/${aiResult.attempts.length} · ${attempt.stage} · ${attempt.model} · ${attempt.latencyMs}ms`;
+        ? `Dashboard test attempt ${index + 1}/${aiResult.attempts.length} · ${attempt.stage} · ${attempt.model} · ${attempt.latencyMs}ms${usageSuffix}${costSuffix} · ${compactText(attempt.error, 180)}`
+        : `Dashboard test attempt ${index + 1}/${aiResult.attempts.length} · ${attempt.stage} · ${attempt.model} · ${attempt.latencyMs}ms${usageSuffix}${costSuffix}`;
 
       await convex
         .mutation(convexRefs.systemRecordProviderRun, {
@@ -207,6 +212,13 @@ export async function POST(request: Request) {
           status: attempt.status,
           ...(threadId ? { threadId } : {}),
           ...(attempt.error ? { error: compactText(attempt.error, 300) } : {}),
+          ...(attempt.inputTokens === undefined ? {} : { inputTokens: attempt.inputTokens }),
+          ...(attempt.outputTokens === undefined ? {} : { outputTokens: attempt.outputTokens }),
+          ...(attempt.totalTokens === undefined ? {} : { totalTokens: attempt.totalTokens }),
+          ...(attempt.usageSource ? { usageSource: attempt.usageSource } : {}),
+          ...(attempt.estimatedCostUsd === undefined ? {} : { estimatedCostUsd: attempt.estimatedCostUsd }),
+          ...(attempt.costCurrency ? { costCurrency: attempt.costCurrency } : {}),
+          ...(attempt.pricingVersion ? { pricingVersion: attempt.pricingVersion } : {}),
         })
         .catch(() => undefined);
 
