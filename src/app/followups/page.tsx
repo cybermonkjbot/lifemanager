@@ -3,7 +3,7 @@ import { LiveFollowups } from "@/components/live-followups";
 
 export default async function FollowupsPage() {
   return (
-    <DashboardPage title="Follow-ups" subtitle="Timeline-first commitment tracking with quick confirm, snooze, and dismiss.">
+    <DashboardPage title="Follow-ups" subtitle="Track commitments with quick confirm, snooze, and dismiss actions.">
       <LiveFollowups />
     </DashboardPage>
   );

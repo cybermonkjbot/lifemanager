@@ -109,7 +109,7 @@ export function LiveStatus() {
   return (
     <section className="panel-grid split-view">
       <article className="panel-card">
-        <h3>Status Queue</h3>
+        <h3>Queue</h3>
         <div className="stack compact">
           <p className="queue-meta">
             Pending review: <strong>{pendingStatusDrafts.length}</strong>
@@ -153,7 +153,7 @@ export function LiveStatus() {
       </article>
 
       <article className="panel-card">
-        <h3>Status Timeline</h3>
+        <h3>Timeline</h3>
         {threadsLoading || statusLoading ? (
           <p className="empty-line">Loading statuses...</p>
         ) : !statusThread ? (
@@ -179,4 +179,3 @@ export function LiveStatus() {
     </section>
   );
 }
-

@@ -107,8 +107,8 @@ export function DashboardShell({
           <header className="shell-topbar">
             <div className="brand-block">
               <p className="brand-kicker">Social Life Manager</p>
-              <h1 className="brand-title">WhatsApp Brain</h1>
-              <p className="brand-note">Focused workspace: one active job at a time.</p>
+              <p className="brand-title">WhatsApp Brain</p>
+              <p className="brand-note">Operational console for conversations, queueing, and follow-through.</p>
             </div>
             <ShellControlsModal realtimeEnabled={realtimeEnabled} fallbackPaused={autonomyPaused} />
           </header>
@@ -116,8 +116,7 @@ export function DashboardShell({
           <ShellNavigation items={navItems} />
 
           <section className="view-header">
-            <p className="panel-kicker">Focused Workspace</p>
-            <h2 className="panel-title">{title}</h2>
+            <h1 className="panel-title">{title}</h1>
             <p className="panel-subtitle">{subtitle}</p>
           </section>
 

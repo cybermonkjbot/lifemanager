@@ -197,7 +197,7 @@ function FollowupsContent() {
       <ActionNotices notices={notices} onDismiss={dismissNotice} />
 
       <article className="panel-card">
-        <h3>Follow-up Timeline</h3>
+        <h3>Timeline Overview</h3>
         <p className="queue-meta">
           Visible: {headerCounts.visible} · Overdue: {headerCounts.overdue} · Today: {headerCounts.today} · Upcoming: {headerCounts.upcoming}
         </p>

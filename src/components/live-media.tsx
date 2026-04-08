@@ -43,9 +43,9 @@ export function LiveMedia() {
   return (
     <section className="panel-grid">
       <article className="panel-card">
-        <h3>Unified Media Dashboard</h3>
+        <h3>Library Feed</h3>
         <p className="queue-meta">
-          Browse captured stickers and media from message threads, preview/play inline, and jump directly to where each item appears.
+          Browse captured media, preview inline, and jump to the source thread.
         </p>
 
         <div className="queue-focus-tabs media-filter-tabs">
@@ -67,7 +67,7 @@ export function LiveMedia() {
           </button>
         </div>
 
-        {loading ? <p className="empty-line">Loading media dashboard…</p> : null}
+        {loading ? <p className="empty-line">Loading media…</p> : null}
         {!loading && (mediaItems || []).length === 0 ? <p className="empty-line">No media found for this filter yet.</p> : null}
 
         <div className="stack">

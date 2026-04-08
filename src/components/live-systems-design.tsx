@@ -391,9 +391,9 @@ export function LiveSystemsDesign() {
   return (
     <section className="systems-design-shell">
       <article className="panel-card">
-        <h3>Systems Design Canvas</h3>
+        <h3>Topology Canvas</h3>
         <p className="queue-meta">
-          Live topology view of the app stack. Click any node to inspect its role and latest runtime logs.
+          Click any node to inspect its role and latest runtime logs.
         </p>
       </article>
 

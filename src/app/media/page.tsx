@@ -3,7 +3,7 @@ import { LiveMedia } from "@/components/live-media";
 
 export default async function MediaPage() {
   return (
-    <DashboardPage title="Media" subtitle="Unified dashboard for stickers, images, video, audio, and documents across conversation threads.">
+    <DashboardPage title="Media" subtitle="Review captured assets and jump back to source conversations.">
       <LiveMedia />
     </DashboardPage>
   );

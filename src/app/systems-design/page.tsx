@@ -3,7 +3,7 @@ import { LiveSystemsDesign } from "@/components/live-systems-design";
 
 export default async function SystemsDesignPage() {
   return (
-    <DashboardPage title="Systems Design" subtitle="Topology canvas of every runtime service, connection flow, and per-service logs." showLogWatcher>
+    <DashboardPage title="Systems Design" subtitle="Inspect runtime topology, service links, and recent logs." showLogWatcher>
       <LiveSystemsDesign />
     </DashboardPage>
   );
