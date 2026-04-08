@@ -3,8 +3,9 @@ import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { mutation } from "./_generated/server";
+import { detectFutureCommitment, hasRecentFollowupDuplicate } from "./lib/commitments";
 import { getConfig } from "./lib/config";
-import { detectPromiseOrPlan, detectTodoCandidate } from "./lib/heuristics";
+import { detectTodoCandidate } from "./lib/heuristics";
 import {
   classifyThreadKind,
   eligibilityReasonLabel,
@@ -419,18 +420,64 @@ export const ingest = mutation({
     let todoDetected = false;
 
     if (!isHistoryIngest && !stale && messageType === "text") {
-      const promise = detectPromiseOrPlan(normalizedText);
-      if (promise) {
-        promiseDetected = true;
-        await ctx.db.insert("followUps", {
+      const commitment = detectFutureCommitment({
+        text: normalizedText,
+        direction: "inbound",
+        now,
+      });
+      if (commitment.outcome === "actionable") {
+        const duplicate = await hasRecentFollowupDuplicate(ctx, {
           threadId: thread._id,
-          sourceMessageId: messageId,
-          reason: promise.reason,
-          draftText: "Following up on this so we stay aligned.",
-          dueAt: promise.dueAt,
-          status: "suggested",
+          normalizedKey: commitment.candidate.normalizedKey,
+          dueAt: commitment.candidate.dueAt,
+          now,
+        });
+
+        if (duplicate) {
+          await ctx.db.insert("systemEvents", {
+            source: "worker",
+            eventType: "followup.detected.duplicate_skipped",
+            threadId: thread._id,
+            detail: `${commitment.candidate.reason} [key=${commitment.candidate.normalizedKey}]`,
+            createdAt: now,
+          });
+        } else {
+          promiseDetected = true;
+          await ctx.db.insert("followUps", {
+            threadId: thread._id,
+            sourceMessageId: messageId,
+            reason: commitment.candidate.reason,
+            draftText:
+              commitment.candidate.kind === "request"
+                ? "Checking back on your request from earlier."
+                : commitment.candidate.kind === "plan"
+                  ? "Following up on the plan we discussed."
+                  : "Following up on what I promised earlier.",
+            dueAt: commitment.candidate.dueAt,
+            kind: commitment.candidate.kind,
+            direction: commitment.candidate.direction,
+            confidence: commitment.candidate.confidence,
+            normalizedKey: commitment.candidate.normalizedKey,
+            sourceSnippet: commitment.candidate.sourceSnippet,
+            status: "suggested",
+            createdAt: now,
+            updatedAt: now,
+          });
+          await ctx.db.insert("systemEvents", {
+            source: "worker",
+            eventType: "followup.detected",
+            threadId: thread._id,
+            detail: `${commitment.candidate.reason} [${Math.round(commitment.candidate.confidence * 100)}%]`,
+            createdAt: now,
+          });
+        }
+      } else if (commitment.outcome === "non_actionable") {
+        await ctx.db.insert("systemEvents", {
+          source: "worker",
+          eventType: "followup.detected.non_actionable",
+          threadId: thread._id,
+          detail: `${commitment.reason} · ${commitment.sourceSnippet}`.slice(0, 240),
           createdAt: now,
-          updatedAt: now,
         });
       }
 
@@ -606,5 +653,26 @@ export const ingestHistorical = mutation({
       duplicate: false,
       ingestMode: args.ingestMode,
     };
+  },
+});
+
+export const attachMediaAsset = mutation({
+  args: {
+    messageId: v.id("messages"),
+    mediaAssetId: v.id("mediaAssets"),
+  },
+  handler: async (ctx, args) => {
+    const message = await ctx.db.get(args.messageId);
+    if (!message) {
+      return null;
+    }
+    if (message.mediaAssetId) {
+      return message.mediaAssetId;
+    }
+
+    await ctx.db.patch(message._id, {
+      mediaAssetId: args.mediaAssetId,
+    });
+    return args.mediaAssetId;
   },
 });

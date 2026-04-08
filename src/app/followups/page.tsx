@@ -7,7 +7,7 @@ export default async function FollowupsPage() {
   return (
     <DashboardShell
       title="Follow-ups"
-      subtitle="Track promise-based outreach and confirm before send."
+      subtitle="Timeline-first commitment tracking with quick confirm, snooze, and dismiss."
       convexUrl={convexUrl}
     >
       <LiveFollowups />

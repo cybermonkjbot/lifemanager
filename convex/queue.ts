@@ -103,9 +103,30 @@ export const list = query({
       }),
     );
 
+    const enrichedFollowups = await Promise.all(
+      followupConfirmations.map(async (followup) => {
+        const [thread, sourceMessage] = await Promise.all([
+          ctx.db.get(followup.threadId),
+          ctx.db.get(followup.sourceMessageId),
+        ]);
+        return {
+          ...followup,
+          thread,
+          sourceMessage: sourceMessage
+            ? {
+                _id: sourceMessage._id,
+                text: sourceMessage.text,
+                messageAt: sourceMessage.messageAt,
+                direction: sourceMessage.direction,
+              }
+            : null,
+        };
+      }),
+    );
+
     return {
       needsReply: enrichedDrafts,
-      followupConfirmations,
+      followupConfirmations: enrichedFollowups,
       todoCandidates,
       guardrailFlags,
     };

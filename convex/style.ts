@@ -7,9 +7,21 @@ import { getConfig } from "./lib/config";
 
 const refThreadsList = makeFunctionReference<"query">("threads:list");
 const refSetMimicry = makeFunctionReference<"mutation">("style:setMimicry");
-const HUMOR_SIGNAL_PATTERN = /\b(lol|lmao|rofl|haha|hehe|banter|joke|meme|funny|dead)\b/i;
+const HUMOR_SIGNAL_PATTERN = /\b(lol|lmao|lmfao|rofl|haha|hehe|banter|joke|meme|funny|roast|hilarious)\b/i;
 const STATUS_BANTER_PATTERN = /\b(status|story|update)\b/i;
 const LAUGH_REACTION_EMOJIS = new Set(["😂", "🤣", "😹", "😆", "😄", "😁", "😅"]);
+const LAUGH_SIGNAL_EMOJIS = new Set(["😂", "🤣", "😹", "😆", "😄", "😁", "😅", "😜", "🤪", "🙃"]);
+const LOW_SIGNAL_HUMOR_KEYWORDS = new Set(["status", "story", "update", "wild", "dead"]);
+const LOW_VALUE_STYLE_PHRASE_PATTERNS = [
+  /\bplease allow me small\b/i,
+  /\bplease allow me\b/i,
+  /\ballow me small\b/i,
+  /\b(?:sounds good|noted|got it|understood)\b/i,
+  /\bi(?:'|’)ll (?:handle|sort|check|look into|get (?:this )?done|circle back|follow up|update you)\b/i,
+  /\bcircle back (?:soon|later|shortly)\b/i,
+  /\b(?:update|details?) (?:soon|shortly)\b/i,
+  /\blet me (?:sort|check|look into|get back)\b/i,
+];
 const LEARNED_TRAIT_LIMITS = {
   commonPhrases: 40,
   punctuationStyle: 30,
@@ -43,6 +55,17 @@ function normalizeTraitList(values: string[], limit: number) {
     }
   }
   return normalized;
+}
+
+function isDiscardableCommonPhrase(value: string) {
+  const normalized = normalizeTraitValue(value).toLowerCase();
+  if (!normalized) {
+    return true;
+  }
+  if (normalized.length < 8) {
+    return true;
+  }
+  return LOW_VALUE_STYLE_PHRASE_PATTERNS.some((pattern) => pattern.test(normalized));
 }
 
 function arrayEquals(left: string[], right: string[]) {
@@ -125,11 +148,12 @@ function extractReusablePhrases(text: string) {
     }
   }
 
-  return [...new Set(phrases)].slice(0, 6);
+  return [...new Set(phrases)].filter((phrase) => !isDiscardableCommonPhrase(phrase)).slice(0, 6);
 }
 
 function inferHumorNotes(args: {
   inboundText: string;
+  contextText?: string;
   reactionEmoji?: string;
   outboundText: string;
   funnyKeywords: string[];
@@ -137,18 +161,27 @@ function inferHumorNotes(args: {
 }) {
   const notes: string[] = ["Warm, playful replies are welcome when the moment is light."];
   const inbound = args.inboundText.trim();
+  const context = (args.contextText || "").trim();
+  const combinedSignal = [inbound, context].filter(Boolean).join("\n");
   const outbound = args.outboundText.trim();
 
-  const hasConfiguredSignal = args.funnyKeywords.some((keyword) => new RegExp(`\\b${keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(inbound));
-  const hasConfiguredEmoji = args.funnyEmojis.some((emoji) => emoji && inbound.includes(emoji));
-  if (HUMOR_SIGNAL_PATTERN.test(inbound) || /\p{Extended_Pictographic}/u.test(inbound) || hasConfiguredSignal || hasConfiguredEmoji) {
+  if (hasTextHumorSignal(combinedSignal || inbound, args.funnyKeywords, args.funnyEmojis)) {
     notes.push("Lean into light jokes when they start with laughter or playful language.");
   }
-  if (STATUS_BANTER_PATTERN.test(inbound)) {
+  if (STATUS_BANTER_PATTERN.test(combinedSignal || inbound)) {
     notes.push("Status/story banter can be playful and witty, but stay respectful.");
   }
   if (args.reactionEmoji && LAUGH_REACTION_EMOJIS.has(args.reactionEmoji)) {
     notes.push("Laugh reactions are a positive signal that the humor landed.");
+  }
+  if (/\?/.test(combinedSignal)) {
+    notes.push("When humor appears with a question, answer clearly first and keep jokes short.");
+  }
+  if (/\b(again|still|remember|like before|as usual|same as last time|callback)\b/i.test(combinedSignal)) {
+    notes.push("Callback humor works best when tied to a specific earlier thread moment.");
+  }
+  if (/\b(image|photo|video|caption|sticker|meme|status|story)\b/i.test(combinedSignal)) {
+    notes.push("For media/status humor cues, react to the concrete visual/context detail before joking.");
   }
   if (/\b(lol|haha|lmao)\b/i.test(outbound) || /[😂🤣😅😄😁]/u.test(outbound)) {
     notes.push("Use concise one-liner humor with a human tone, not forced jokes.");
@@ -165,14 +198,40 @@ function hasHumorSignal(args: {
   funnyEmojis: string[];
 }) {
   if (args.signalKind === "reaction") {
+    const reactionEmoji = args.reactionEmoji?.trim();
     return Boolean(
-      (args.reactionEmoji && LAUGH_REACTION_EMOJIS.has(args.reactionEmoji)) ||
-        (args.reactionEmoji && args.funnyEmojis.includes(args.reactionEmoji)),
+      (reactionEmoji && LAUGH_REACTION_EMOJIS.has(reactionEmoji)) ||
+        (reactionEmoji && args.funnyEmojis.includes(reactionEmoji) && LAUGH_SIGNAL_EMOJIS.has(reactionEmoji)),
     );
   }
-  const hasKeyword = args.funnyKeywords.some((keyword) => new RegExp(`\\b${keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(args.inboundText));
-  const hasEmoji = args.funnyEmojis.some((emoji) => emoji && args.inboundText.includes(emoji));
-  return HUMOR_SIGNAL_PATTERN.test(args.inboundText) || /[😂🤣😹😆😄😁😅]/u.test(args.inboundText) || hasKeyword || hasEmoji;
+  return hasTextHumorSignal(args.inboundText, args.funnyKeywords, args.funnyEmojis);
+}
+
+function countConfiguredHumorKeywordHits(text: string, keywords: string[]) {
+  let hits = 0;
+  for (const keyword of keywords) {
+    const normalized = keyword.trim().toLowerCase();
+    if (!normalized || LOW_SIGNAL_HUMOR_KEYWORDS.has(normalized)) {
+      continue;
+    }
+    const pattern = new RegExp(`\\b${normalized.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
+    if (pattern.test(text)) {
+      hits += 1;
+    }
+  }
+  return hits;
+}
+
+function hasConfiguredHumorEmojiHit(text: string, emojis: string[]) {
+  return emojis.some((emoji) => emoji && LAUGH_SIGNAL_EMOJIS.has(emoji) && text.includes(emoji));
+}
+
+function hasTextHumorSignal(text: string, funnyKeywords: string[], funnyEmojis: string[]) {
+  const coreKeywordHit = HUMOR_SIGNAL_PATTERN.test(text);
+  const coreEmojiHit = [...LAUGH_SIGNAL_EMOJIS].some((emoji) => text.includes(emoji));
+  const configuredKeywordHits = countConfiguredHumorKeywordHits(text, funnyKeywords);
+  const configuredEmojiHit = hasConfiguredHumorEmojiHit(text, funnyEmojis);
+  return coreKeywordHit || coreEmojiHit || configuredKeywordHits >= 2 || (configuredKeywordHits >= 1 && configuredEmojiHit);
 }
 
 export const getProfile = query({
@@ -303,6 +362,9 @@ export const updateLearnedTrait = mutation({
     if (!nextValue) {
       throw new Error("Trait value cannot be empty.");
     }
+    if (trait === "commonPhrases" && isDiscardableCommonPhrase(nextValue)) {
+      throw new Error("Trait phrase is too generic or awkward to save.");
+    }
 
     const profile = await ctx.db
       .query("styleProfiles")
@@ -428,6 +490,59 @@ export const clearLearnedTraitSection = mutation({
   },
 });
 
+export const cleanupCommonPhrases = mutation({
+  args: {
+    dryRun: v.optional(v.boolean()),
+  },
+  handler: async (ctx, args) => {
+    const dryRun = args.dryRun ?? false;
+    const profiles = await ctx.db.query("styleProfiles").collect();
+    const now = Date.now();
+    let scannedProfiles = 0;
+    let updatedProfiles = 0;
+    let removedPhraseCount = 0;
+
+    for (const profile of profiles) {
+      scannedProfiles += 1;
+      const currentPhrases = normalizeTraitList(profile.commonPhrases || [], LEARNED_TRAIT_LIMITS.commonPhrases);
+      const nextPhrases = normalizeTraitList(
+        currentPhrases.filter((phrase) => !isDiscardableCommonPhrase(phrase)),
+        LEARNED_TRAIT_LIMITS.commonPhrases,
+      );
+      if (arrayEquals(currentPhrases, nextPhrases)) {
+        continue;
+      }
+
+      updatedProfiles += 1;
+      removedPhraseCount += Math.max(0, currentPhrases.length - nextPhrases.length);
+
+      if (!dryRun) {
+        await snapshotProfile(ctx, profile, "pre-common-phrases-cleanup", now);
+        await ctx.db.patch(profile._id, {
+          commonPhrases: nextPhrases,
+          updatedAt: now,
+        });
+      }
+    }
+
+    if (!dryRun) {
+      await ctx.db.insert("systemEvents", {
+        source: "convex",
+        eventType: "style.commonPhrases.cleanup",
+        detail: `Cleaned common phrases across ${updatedProfiles}/${scannedProfiles} style profiles, removed ${removedPhraseCount} phrases.`,
+        createdAt: now,
+      });
+    }
+
+    return {
+      dryRun,
+      scannedProfiles,
+      updatedProfiles,
+      removedPhraseCount,
+    } as const;
+  },
+});
+
 export const update = action({
   args: {},
   handler: async (ctx) => {
@@ -459,14 +574,17 @@ export const learnFromHumorSignal = mutation({
     inboundText: v.string(),
     signalKind: v.union(v.literal("text"), v.literal("reaction")),
     reactionEmoji: v.optional(v.string()),
+    contextText: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const config = await getConfig(ctx);
     const funnyKeywords = config.funnyStatusKeywords || [];
     const funnyEmojis = config.funnyStatusEmojis || [];
     const inboundText = args.inboundText.trim();
+    const contextText = args.contextText?.trim() || "";
     const reactionEmoji = args.reactionEmoji?.trim();
-    if (!hasHumorSignal({ inboundText, signalKind: args.signalKind, reactionEmoji, funnyKeywords, funnyEmojis })) {
+    const signalInputText = [inboundText, contextText].filter(Boolean).join("\n");
+    if (!hasHumorSignal({ inboundText: signalInputText, signalKind: args.signalKind, reactionEmoji, funnyKeywords, funnyEmojis })) {
       return {
         learned: false,
         reason: "no_humor_signal",
@@ -492,6 +610,7 @@ export const learnFromHumorSignal = mutation({
     const phrases = extractReusablePhrases(latestOutbound.text);
     const humorNotes = inferHumorNotes({
       inboundText,
+      contextText,
       reactionEmoji,
       outboundText: latestOutbound.text,
       funnyKeywords,
@@ -526,7 +645,7 @@ export const learnFromHumorSignal = mutation({
       source: "convex",
       eventType: "style.humor.learned",
       threadId: args.threadId,
-      detail: `Learned humor signal (${args.signalKind}) from inbound: ${(inboundText || reactionEmoji || "signal").slice(0, 180)}`,
+      detail: `Learned humor signal (${args.signalKind}) from inbound: ${(inboundText || reactionEmoji || "signal").slice(0, 160)}${contextText ? ` | context: ${contextText.slice(0, 120)}` : ""}`,
       createdAt: now,
     });
 

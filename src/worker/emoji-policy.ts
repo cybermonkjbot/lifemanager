@@ -9,6 +9,21 @@ type ThreadMessageLike = {
   messageAt?: number;
 };
 
+function containsOneOf(text: string, tokens: string[]) {
+  return tokens.some((token) => token && text.includes(token));
+}
+
+function stripProvidedEmojiTokens(text: string, tokens: string[]) {
+  let next = text;
+  for (const token of tokens) {
+    if (!token) {
+      continue;
+    }
+    next = next.split(token).join("");
+  }
+  return next;
+}
+
 export function containsAnyEmoji(text: string) {
   return EMOJI_DETECTION_REGEX.test(text);
 }
@@ -59,6 +74,46 @@ export function findRecentOutboundEmojiTimestamp(args: {
   return latest;
 }
 
+function countRecentOutboundEmojiMessages(args: {
+  messages?: ThreadMessageLike[] | null;
+  nowMs: number;
+  windowMs: number;
+  allowedEmojis?: string[];
+}) {
+  const messages = args.messages || [];
+  const windowMs = Math.max(60_000, args.windowMs);
+  const cutoff = args.nowMs - windowMs;
+  const allowed = args.allowedEmojis?.filter(Boolean) || [];
+  const enforceAllowlist = allowed.length > 0;
+  let count = 0;
+
+  for (const message of messages) {
+    if (message.direction !== "outbound") {
+      continue;
+    }
+    const text = (message.text || "").trim();
+    if (!text) {
+      continue;
+    }
+    if (Number.isFinite(message.messageAt)) {
+      const messageAt = Number(message.messageAt);
+      if (messageAt > args.nowMs) {
+        continue;
+      }
+      if (messageAt < cutoff) {
+        continue;
+      }
+    }
+    const matches = enforceAllowlist ? containsOneOf(text, allowed) : containsAnyEmoji(text);
+    if (!matches) {
+      continue;
+    }
+    count += 1;
+  }
+
+  return count;
+}
+
 export function applyEmojiCooldownPolicy(args: {
   text: string;
   nowMs?: number;
@@ -66,9 +121,25 @@ export function applyEmojiCooldownPolicy(args: {
   fallbackText?: string;
   recentMessages?: ThreadMessageLike[] | null;
   lastEmojiSentAtMs?: number | null;
+  allowEmojiInText?: boolean;
+  allowedEmojiInText?: string[];
+  maxAllowedEmojiMessagesInWindow?: number;
+  allowedEmojiWindowMs?: number;
 }) {
   const nowMs = Number.isFinite(args.nowMs) ? Number(args.nowMs) : Date.now();
   const cooldownMs = Math.max(1_000, args.cooldownMs ?? EMOJI_COOLDOWN_MS);
+  const allowEmojiInText = args.allowEmojiInText === true;
+  const allowedEmojis = Array.from(new Set((args.allowedEmojiInText || []).map((item) => item.trim()).filter(Boolean)));
+  const enforceAllowlist = allowedEmojis.length > 0;
+  const maxAllowedEmojiMessagesInWindow = Math.max(1, Math.min(5, Math.round(args.maxAllowedEmojiMessagesInWindow ?? 2)));
+  const allowedEmojiWindowMs = Math.max(60_000, args.allowedEmojiWindowMs ?? 6 * 60 * 60 * 1000);
+  const hasRecentMessages = (args.recentMessages || []).length > 0;
+  const recentAllowedEmojiCount = countRecentOutboundEmojiMessages({
+    messages: args.recentMessages,
+    nowMs,
+    windowMs: allowedEmojiWindowMs,
+    allowedEmojis: enforceAllowlist ? allowedEmojis : undefined,
+  });
   const historyEmojiAt = findRecentOutboundEmojiTimestamp({
     messages: args.recentMessages,
     nowMs,
@@ -78,6 +149,8 @@ export function applyEmojiCooldownPolicy(args: {
   const latestEmojiAt = Math.max(historyEmojiAt ?? -1, liveEmojiAt ?? -1);
   const cooldownActive = latestEmojiAt >= 0 && nowMs - latestEmojiAt < cooldownMs;
   const hadEmoji = containsAnyEmoji(args.text);
+  const hasAllowedEmoji = enforceAllowlist ? containsOneOf(args.text, allowedEmojis) : hadEmoji;
+  const hasOnlyAllowedEmoji = enforceAllowlist ? !containsAnyEmoji(stripProvidedEmojiTokens(args.text, allowedEmojis)) : hadEmoji;
 
   if (!hadEmoji) {
     return {
@@ -90,15 +163,19 @@ export function applyEmojiCooldownPolicy(args: {
     };
   }
 
-  if (!cooldownActive) {
-    return {
-      text: args.text,
-      hadEmoji,
-      cooldownActive,
-      emojiSuppressed: false,
-      shouldRecordEmojiSend: true,
-      activeSinceMs: undefined,
-    };
+  if (allowEmojiInText && hasAllowedEmoji && hasOnlyAllowedEmoji) {
+    const belowWindowLimit = hasRecentMessages && recentAllowedEmojiCount < maxAllowedEmojiMessagesInWindow;
+    const allowByFallbackCooldown = !hasRecentMessages && !cooldownActive;
+    if (belowWindowLimit || allowByFallbackCooldown) {
+      return {
+        text: args.text,
+        hadEmoji,
+        cooldownActive,
+        emojiSuppressed: false,
+        shouldRecordEmojiSend: true,
+        activeSinceMs: undefined,
+      };
+    }
   }
 
   const fallback = (args.fallbackText || "All good.").trim() || "All good.";

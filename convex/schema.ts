@@ -32,6 +32,7 @@ export default defineSchema({
     direction: v.union(v.literal("inbound"), v.literal("outbound")),
     origin: v.optional(v.union(v.literal("live"), v.literal("history_sync"), v.literal("history_fetch"))),
     whatsappMessageId: v.optional(v.string()),
+    toolRunId: v.optional(v.string()),
     senderJid: v.string(),
     text: v.string(),
     messageType: v.optional(v.union(v.literal("text"), v.literal("reaction"), v.literal("sticker"), v.literal("meme"))),
@@ -71,9 +72,34 @@ export default defineSchema({
     updatedAt: v.number(),
   }).index("by_thread", ["threadId"]),
 
+  contactMemoryFacts: defineTable({
+    threadId: v.id("threads"),
+    factKey: v.string(),
+    factValue: v.string(),
+    factType: v.union(
+      v.literal("preference"),
+      v.literal("profile"),
+      v.literal("schedule"),
+      v.literal("relationship"),
+      v.literal("promise"),
+      v.literal("other"),
+    ),
+    confidence: v.number(),
+    sourceMessageId: v.optional(v.id("messages")),
+    sourceMessageAt: v.optional(v.number()),
+    sourceExcerpt: v.optional(v.string()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_thread_and_key", ["threadId", "factKey"])
+    .index("by_thread_and_updatedAt", ["threadId", "updatedAt"])
+    .index("by_thread_and_type_and_updatedAt", ["threadId", "factType", "updatedAt"])
+    .index("by_updatedAt", ["updatedAt"]),
+
   replyDrafts: defineTable({
     threadId: v.id("threads"),
     sourceMessageId: v.id("messages"),
+    toolRunId: v.optional(v.string()),
     text: v.string(),
     sendKind: v.optional(v.union(v.literal("text"), v.literal("reaction"), v.literal("sticker"), v.literal("meme"))),
     reactionEmoji: v.optional(v.string()),
@@ -102,6 +128,7 @@ export default defineSchema({
   outbox: defineTable({
     threadId: v.id("threads"),
     draftId: v.id("replyDrafts"),
+    toolRunId: v.optional(v.string()),
     followUpId: v.optional(v.id("followUps")),
     messageText: v.string(),
     sendKind: v.optional(v.union(v.literal("text"), v.literal("reaction"), v.literal("sticker"), v.literal("meme"))),
@@ -138,6 +165,11 @@ export default defineSchema({
     reason: v.string(),
     draftText: v.string(),
     dueAt: v.number(),
+    kind: v.optional(v.union(v.literal("promise"), v.literal("request"), v.literal("plan"))),
+    direction: v.optional(v.union(v.literal("inbound"), v.literal("outbound"))),
+    confidence: v.optional(v.number()),
+    normalizedKey: v.optional(v.string()),
+    sourceSnippet: v.optional(v.string()),
     status: v.union(
       v.literal("suggested"),
       v.literal("confirmed"),
@@ -232,6 +264,7 @@ export default defineSchema({
     profileSlug: v.string(),
     intensity: v.number(),
     customPrompt: v.optional(v.string()),
+    memePolicyMode: v.optional(v.union(v.literal("auto"), v.literal("always_allow"), v.literal("always_block"))),
     threadPromptProfile: v.optional(v.string()),
     threadPromptProfileSource: v.optional(v.union(v.literal("manual"), v.literal("auto"))),
     threadPromptProfileLookbackDays: v.optional(v.number()),
@@ -287,12 +320,15 @@ export default defineSchema({
     ),
     eventType: v.string(),
     threadId: v.optional(v.id("threads")),
+    toolRunId: v.optional(v.string()),
     outboxId: v.optional(v.id("outbox")),
     detail: v.string(),
     createdAt: v.number(),
   })
     .index("by_createdAt", ["createdAt"])
-    .index("by_type", ["eventType"]),
+    .index("by_type", ["eventType"])
+    .index("by_threadId_and_createdAt", ["threadId", "createdAt"])
+    .index("by_threadId_and_toolRunId", ["threadId", "toolRunId"]),
 
   setupRuntime: defineTable({
     key: v.string(),
@@ -336,13 +372,28 @@ export default defineSchema({
     label: v.string(),
     tags: v.array(v.string()),
     enabled: v.boolean(),
+    source: v.optional(v.union(v.literal("uploaded"), v.literal("generated"))),
+    threadId: v.optional(v.id("threads")),
     fileId: v.id("_storage"),
     mimeType: v.string(),
+    contentHash: v.optional(v.string()),
+    generationPromptHash: v.optional(v.string()),
+    generationContextSnippet: v.optional(v.string()),
+    lastUsedAt: v.optional(v.number()),
+    contextSummary: v.optional(v.string()),
+    contextTags: v.optional(v.array(v.string())),
+    contextTriggers: v.optional(v.array(v.string())),
+    contextAvoid: v.optional(v.array(v.string())),
+    contextConfidence: v.optional(v.number()),
+    contextSource: v.optional(v.union(v.literal("vision_ai"), v.literal("heuristic"))),
+    contextUpdatedAt: v.optional(v.number()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
     .index("by_kind_and_enabled", ["kind", "enabled"])
-    .index("by_kind", ["kind"]),
+    .index("by_kind", ["kind"])
+    .index("by_kind_and_contentHash", ["kind", "contentHash"])
+    .index("by_kind_and_source_and_threadId_and_enabled", ["kind", "source", "threadId", "enabled"]),
 
   threadGrounding: defineTable({
     threadId: v.id("threads"),

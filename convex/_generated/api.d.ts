@@ -9,6 +9,7 @@
  */
 
 import type * as backlog from "../backlog.js";
+import type * as chatTools from "../chatTools.js";
 import type * as contextTools from "../contextTools.js";
 import type * as crons from "../crons.js";
 import type * as draft from "../draft.js";
@@ -17,9 +18,12 @@ import type * as followupsMarkQueued from "../followupsMarkQueued.js";
 import type * as followupsPromoter from "../followupsPromoter.js";
 import type * as grounding from "../grounding.js";
 import type * as inbound from "../inbound.js";
+import type * as lib_commitments from "../lib/commitments.js";
 import type * as lib_config from "../lib/config.js";
 import type * as lib_constants from "../lib/constants.js";
 import type * as lib_heuristics from "../lib/heuristics.js";
+import type * as lib_memePolicy from "../lib/memePolicy.js";
+import type * as lib_outboundGuard from "../lib/outboundGuard.js";
 import type * as lib_personaPacks from "../lib/personaPacks.js";
 import type * as lib_threadEligibility from "../lib/threadEligibility.js";
 import type * as lib_time from "../lib/time.js";
@@ -47,6 +51,7 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   backlog: typeof backlog;
+  chatTools: typeof chatTools;
   contextTools: typeof contextTools;
   crons: typeof crons;
   draft: typeof draft;
@@ -55,9 +60,12 @@ declare const fullApi: ApiFromModules<{
   followupsPromoter: typeof followupsPromoter;
   grounding: typeof grounding;
   inbound: typeof inbound;
+  "lib/commitments": typeof lib_commitments;
   "lib/config": typeof lib_config;
   "lib/constants": typeof lib_constants;
   "lib/heuristics": typeof lib_heuristics;
+  "lib/memePolicy": typeof lib_memePolicy;
+  "lib/outboundGuard": typeof lib_outboundGuard;
   "lib/personaPacks": typeof lib_personaPacks;
   "lib/threadEligibility": typeof lib_threadEligibility;
   "lib/time": typeof lib_time;

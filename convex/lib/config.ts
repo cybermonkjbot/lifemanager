@@ -8,6 +8,10 @@ export type AppConfig = {
   reactionsEnabled: boolean;
   stickersEnabled: boolean;
   memesEnabled: boolean;
+  generatedMemesEnabled: boolean;
+  generatedMemesAutoSendEnabled: boolean;
+  memeThreadCooldownMs: number;
+  memeSendProbability: number;
   soulModeEnabled: boolean;
   humorLearningEnabled: boolean;
   statusAutoReplyEnabled: boolean;
@@ -55,12 +59,16 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
   reactionsEnabled: true,
   stickersEnabled: true,
   memesEnabled: true,
+  generatedMemesEnabled: true,
+  generatedMemesAutoSendEnabled: false,
+  memeThreadCooldownMs: 3 * 60 * 60 * 1000,
+  memeSendProbability: 0.3,
   soulModeEnabled: true,
   humorLearningEnabled: true,
   statusAutoReplyEnabled: true,
   statusReplyRequireFunny: true,
-  funnyStatusKeywords: ["lol", "lmao", "haha", "funny", "joke", "banter", "meme", "wild", "roast", "status", "story", "dead"],
-  funnyStatusEmojis: ["😂", "🤣", "😹", "😆", "😅", "😄", "😁", "😜", "🤪", "🙃", "🔥", "💀"],
+  funnyStatusKeywords: ["lol", "lmao", "haha", "funny", "joke", "banter", "meme", "roast"],
+  funnyStatusEmojis: ["😂", "🤣", "😹", "😆", "😅", "😄", "😁", "😜", "🤪", "🙃"],
   aiFallbackMode: "all",
   aiTemperature: 0.7,
   aiMaxOutputTokens: 140,
@@ -157,6 +165,19 @@ export async function getConfig(ctx: QueryCtx | MutationCtx): Promise<AppConfig>
     reactionsEnabled: parseBoolean(map.get("reactionsEnabled"), DEFAULT_APP_CONFIG.reactionsEnabled),
     stickersEnabled: parseBoolean(map.get("stickersEnabled"), DEFAULT_APP_CONFIG.stickersEnabled),
     memesEnabled: parseBoolean(map.get("memesEnabled"), DEFAULT_APP_CONFIG.memesEnabled),
+    generatedMemesEnabled: parseBoolean(map.get("generatedMemesEnabled"), DEFAULT_APP_CONFIG.generatedMemesEnabled),
+    generatedMemesAutoSendEnabled: parseBoolean(
+      map.get("generatedMemesAutoSendEnabled"),
+      DEFAULT_APP_CONFIG.generatedMemesAutoSendEnabled,
+    ),
+    memeThreadCooldownMs: Math.round(
+      clamp(parseNumber(map.get("memeThreadCooldownMs"), DEFAULT_APP_CONFIG.memeThreadCooldownMs), 5 * 60 * 1000, 7 * 24 * 60 * 60 * 1000),
+    ),
+    memeSendProbability: clamp(
+      parseNumber(map.get("memeSendProbability"), DEFAULT_APP_CONFIG.memeSendProbability),
+      0,
+      1,
+    ),
     soulModeEnabled: parseBoolean(map.get("soulModeEnabled"), DEFAULT_APP_CONFIG.soulModeEnabled),
     humorLearningEnabled: parseBoolean(map.get("humorLearningEnabled"), DEFAULT_APP_CONFIG.humorLearningEnabled),
     statusAutoReplyEnabled: parseBoolean(map.get("statusAutoReplyEnabled"), DEFAULT_APP_CONFIG.statusAutoReplyEnabled),

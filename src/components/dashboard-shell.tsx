@@ -28,6 +28,12 @@ const navItems = [
     primary: true,
   },
   {
+    href: "/tools",
+    label: "Tool Playground",
+    description: "Run and inspect all chat-context tools with live thread data.",
+    primary: true,
+  },
+  {
     href: "/backlog",
     label: "Backlog",
     description: "Triage unread threads and restart stale relationships.",
@@ -43,6 +49,12 @@ const navItems = [
     href: "/activity-core",
     label: "Activity Core",
     description: "Visual activity sphere with glowing runtime status.",
+    primary: true,
+  },
+  {
+    href: "/systems-design",
+    label: "Systems Design",
+    description: "Canvas map of connected services and runtime links.",
     primary: true,
   },
   {

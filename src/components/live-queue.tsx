@@ -2,7 +2,7 @@
 
 import { ActionNotices } from "@/components/action-notices";
 import { UIModal } from "@/components/ui-modal";
-import { formatDateTime, trim } from "@/lib/format";
+import { formatDateTime, formatDateTimeWithRelative, trim } from "@/lib/format";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
@@ -47,6 +47,19 @@ type FollowupConfirmationItem = {
   _id: string;
   reason: string;
   dueAt: number;
+  status: "suggested" | "confirmed" | "queued" | "sent" | "failed" | "cancelled";
+  kind?: "promise" | "request" | "plan";
+  direction?: "inbound" | "outbound";
+  confidence?: number;
+  sourceSnippet?: string;
+  thread?: { _id?: string; title?: string; jid?: string } | null;
+  sourceMessage?:
+    | {
+        text?: string;
+        messageAt?: number;
+        direction?: "inbound" | "outbound";
+      }
+    | null;
 };
 
 type TodoCandidateItem = {
@@ -119,6 +132,9 @@ function QueueContent() {
   const rejectDraft = useMutation(api.draft.reject);
   const updateDraftContent = useMutation(api.draft.updateDraftContent);
   const confirmFollowup = useMutation(api.followups.confirm);
+  const snoozeFollowup = useMutation(api.followups.snooze);
+  const rescheduleFollowup = useMutation(api.followups.reschedule);
+  const cancelFollowup = useMutation(api.followups.cancel);
   const createTodoFromCandidate = useMutation(api.todos.fromCandidate);
   const resolveGuardrail = useMutation(api.queue.resolveGuardrail);
 
@@ -181,6 +197,51 @@ function QueueContent() {
       {
         pendingLabel: "Confirming...",
         successMessage: "Follow-up confirmed.",
+      },
+    );
+  };
+
+  const onSnoozeFollowup = (followUpId: string, minutes: number) => {
+    const key = `followup:snooze:${followUpId}`;
+    void runAction(
+      key,
+      async () => {
+        await snoozeFollowup({ followUpId: followUpId as Id<"followUps">, minutes });
+      },
+      {
+        pendingLabel: "Snoozing...",
+        successMessage: "Follow-up snoozed.",
+      },
+    );
+  };
+
+  const onRescheduleFollowup = (followUpId: string, hoursAhead: number) => {
+    const key = `followup:reschedule:${followUpId}`;
+    void runAction(
+      key,
+      async () => {
+        await rescheduleFollowup({
+          followUpId: followUpId as Id<"followUps">,
+          dueAt: Date.now() + Math.max(1, Math.round(hoursAhead)) * 60 * 60 * 1000,
+        });
+      },
+      {
+        pendingLabel: "Rescheduling...",
+        successMessage: "Follow-up rescheduled.",
+      },
+    );
+  };
+
+  const onDismissFollowup = (followUpId: string) => {
+    const key = `followup:cancel:${followUpId}`;
+    void runAction(
+      key,
+      async () => {
+        await cancelFollowup({ followUpId: followUpId as Id<"followUps"> });
+      },
+      {
+        pendingLabel: "Dismissing...",
+        successMessage: "Follow-up dismissed.",
       },
     );
   };
@@ -306,15 +367,40 @@ function QueueContent() {
       {followupConfirmations.map((item) => {
         const key = `followup:${item._id}`;
         const record = getRecord(key);
+        const dismissRecord = getRecord(`followup:cancel:${item._id}`);
+        const busy = record.pending || dismissRecord.pending;
+        const sourceText = item.sourceSnippet?.trim() || item.sourceMessage?.text?.trim() || "";
         return (
-          <div key={item._id} className="queue-item queue-item-condensed" aria-busy={record.pending}>
+          <div key={item._id} className="queue-item queue-item-condensed" aria-busy={busy}>
             <div>
-              <p className="queue-title">{item.reason}</p>
-              <p className="queue-meta">Due: {formatDateTime(item.dueAt)}</p>
+              <p className="queue-title">{item.thread?.title || item.thread?.jid || "Unknown thread"}</p>
+              <p className="queue-meta">Due: {formatDateTimeWithRelative(item.dueAt)}</p>
+              <p className="queue-body">{item.reason}</p>
+              {sourceText ? <p className="queue-meta">Source: {trim(sourceText, 180)}</p> : null}
             </div>
-            <button type="button" className="btn btn-primary" onClick={() => setReviewState({ kind: "followups", item })}>
-              Review
-            </button>
+            <div className="queue-actions">
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => onConfirmFollowup(item._id)}
+                disabled={record.pending || dismissRecord.pending}
+                aria-disabled={record.pending || dismissRecord.pending}
+              >
+                {record.pending ? "Confirming..." : "Confirm"}
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={() => onDismissFollowup(item._id)}
+                disabled={record.pending || dismissRecord.pending}
+                aria-disabled={record.pending || dismissRecord.pending}
+              >
+                {dismissRecord.pending ? "Dismissing..." : "Dismiss"}
+              </button>
+              <button type="button" className="btn btn-ghost" onClick={() => setReviewState({ kind: "followups", item })}>
+                Review
+              </button>
+            </div>
           </div>
         );
       })}
@@ -531,20 +617,78 @@ function QueueContent() {
 
         {reviewState?.kind === "followups" ? (
           <div className="stack compact">
-            <p className="queue-title">{reviewState.item.reason}</p>
-            <p className="queue-meta">Due: {formatDateTime(reviewState.item.dueAt)}</p>
-            <button
-              type="button"
-              className="btn btn-primary"
-              onClick={() => onConfirmFollowup(reviewState.item._id)}
-              disabled={getRecord(`followup:${reviewState.item._id}`).pending}
-              aria-disabled={getRecord(`followup:${reviewState.item._id}`).pending}
-            >
-              {getRecord(`followup:${reviewState.item._id}`).pending ? "Confirming..." : "Confirm Follow-up"}
-            </button>
+            <p className="queue-title">{reviewState.item.thread?.title || reviewState.item.thread?.jid || "Unknown thread"}</p>
+            <p className="queue-meta">Due: {formatDateTimeWithRelative(reviewState.item.dueAt)}</p>
+            <p className="queue-body">{reviewState.item.reason}</p>
+            {reviewState.item.sourceSnippet?.trim() || reviewState.item.sourceMessage?.text?.trim() ? (
+              <p className="queue-meta">
+                Source: {trim(reviewState.item.sourceSnippet?.trim() || reviewState.item.sourceMessage?.text?.trim() || "", 260)}
+              </p>
+            ) : null}
+            {typeof reviewState.item.confidence === "number" ? (
+              <p className="queue-meta">Detector confidence: {Math.round(reviewState.item.confidence * 100)}%</p>
+            ) : null}
+            <div className="queue-actions">
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => onConfirmFollowup(reviewState.item._id)}
+                disabled={getRecord(`followup:${reviewState.item._id}`).pending}
+                aria-disabled={getRecord(`followup:${reviewState.item._id}`).pending}
+              >
+                {getRecord(`followup:${reviewState.item._id}`).pending ? "Confirming..." : "Confirm"}
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={() => onSnoozeFollowup(reviewState.item._id, 24 * 60)}
+                disabled={getRecord(`followup:snooze:${reviewState.item._id}`).pending}
+                aria-disabled={getRecord(`followup:snooze:${reviewState.item._id}`).pending}
+              >
+                {getRecord(`followup:snooze:${reviewState.item._id}`).pending ? "Snoozing..." : "Snooze 1d"}
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={() => onRescheduleFollowup(reviewState.item._id, 24)}
+                disabled={getRecord(`followup:reschedule:${reviewState.item._id}`).pending}
+                aria-disabled={getRecord(`followup:reschedule:${reviewState.item._id}`).pending}
+              >
+                {getRecord(`followup:reschedule:${reviewState.item._id}`).pending ? "Rescheduling..." : "+24h"}
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={() => onDismissFollowup(reviewState.item._id)}
+                disabled={getRecord(`followup:cancel:${reviewState.item._id}`).pending}
+                aria-disabled={getRecord(`followup:cancel:${reviewState.item._id}`).pending}
+              >
+                {getRecord(`followup:cancel:${reviewState.item._id}`).pending ? "Dismissing..." : "Dismiss"}
+              </button>
+              {reviewState.item.thread?._id ? (
+                <Link href={`/conversations?threadId=${reviewState.item.thread._id}`} className="btn btn-ghost">
+                  Open Thread
+                </Link>
+              ) : null}
+            </div>
             {getRecord(`followup:${reviewState.item._id}`).error ? (
               <p className="queue-meta action-inline-error" role="alert">
                 {getRecord(`followup:${reviewState.item._id}`).error}
+              </p>
+            ) : null}
+            {getRecord(`followup:snooze:${reviewState.item._id}`).error ? (
+              <p className="queue-meta action-inline-error" role="alert">
+                {getRecord(`followup:snooze:${reviewState.item._id}`).error}
+              </p>
+            ) : null}
+            {getRecord(`followup:reschedule:${reviewState.item._id}`).error ? (
+              <p className="queue-meta action-inline-error" role="alert">
+                {getRecord(`followup:reschedule:${reviewState.item._id}`).error}
+              </p>
+            ) : null}
+            {getRecord(`followup:cancel:${reviewState.item._id}`).error ? (
+              <p className="queue-meta action-inline-error" role="alert">
+                {getRecord(`followup:cancel:${reviewState.item._id}`).error}
               </p>
             ) : null}
           </div>

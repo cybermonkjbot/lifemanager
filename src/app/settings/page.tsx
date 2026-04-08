@@ -7,7 +7,7 @@ export default async function SettingsPage() {
   return (
     <DashboardShell
       title="Settings"
-      subtitle="Configure runtime defaults for AI generation, pacing, and queue behavior."
+      subtitle="Configure runtime defaults, global personality profiles, and shared media assets."
       convexUrl={convexUrl}
     >
       <LiveSettings />

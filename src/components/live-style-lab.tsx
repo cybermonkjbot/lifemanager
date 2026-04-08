@@ -8,6 +8,12 @@ import { useMutation, useQuery } from "convex/react";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
 type LearnedTraitField = "commonPhrases" | "punctuationStyle" | "spellingNotes" | "humorNotes";
+type PhraseCleanupResult = {
+  dryRun: boolean;
+  scannedProfiles: number;
+  updatedProfiles: number;
+  removedPhraseCount: number;
+};
 
 const LEARNED_TRAIT_SECTIONS: Array<{ trait: LearnedTraitField; label: string; emptyLabel: string }> = [
   { trait: "commonPhrases", label: "Common phrases", emptyLabel: "Not enough data yet." },
@@ -22,6 +28,7 @@ function StyleLabContent() {
   const updateLearnedTrait = useMutation(api.style.updateLearnedTrait);
   const removeLearnedTrait = useMutation(api.style.removeLearnedTrait);
   const clearLearnedTraitSection = useMutation(api.style.clearLearnedTraitSection);
+  const cleanupCommonPhrases = useMutation(api.style.cleanupCommonPhrases);
   const installPersonaPack = useMutation(api.personality.installPersonaPack);
   const { runAction, getRecord, notices, dismissNotice } = useActionStateRegistry();
   const key = "style:mimicry";
@@ -72,9 +79,12 @@ function StyleLabContent() {
 
   const record = getRecord(key);
   const rollbackRecord = getRecord("style:rollback");
+  const cleanupPreviewRecord = getRecord("style:cleanup:preview");
+  const cleanupApplyRecord = getRecord("style:cleanup:apply");
   const installPackRecord = getRecord("style:persona-pack:install");
   const [editingTrait, setEditingTrait] = useState<{ trait: LearnedTraitField; value: string } | null>(null);
   const [traitDraft, setTraitDraft] = useState("");
+  const [cleanupSummary, setCleanupSummary] = useState<PhraseCleanupResult | null>(null);
   const [newTraitDrafts, setNewTraitDrafts] = useState<Record<LearnedTraitField, string>>({
     commonPhrases: "",
     punctuationStyle: "",
@@ -182,6 +192,74 @@ function StyleLabContent() {
 
       <article className="panel-card">
         <h3>Learned Traits</h3>
+        <div className="queue-item stack compact">
+          <p className="queue-title">Phrase Cleanup</p>
+          <p className="queue-meta">
+            Remove awkward or generic learned phrases (like repetitive catchphrases) from the style profile.
+          </p>
+          <div className="queue-actions">
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={() =>
+                void runAction(
+                  "style:cleanup:preview",
+                  async () => {
+                    const result = (await cleanupCommonPhrases({ dryRun: true })) as PhraseCleanupResult;
+                    setCleanupSummary(result);
+                  },
+                  {
+                    pendingLabel: "Previewing cleanup...",
+                    successMessage: "Cleanup preview refreshed.",
+                  },
+                )
+              }
+              disabled={cleanupPreviewRecord.pending || cleanupApplyRecord.pending}
+              aria-disabled={cleanupPreviewRecord.pending || cleanupApplyRecord.pending}
+            >
+              {cleanupPreviewRecord.pending ? "Previewing..." : "Preview Cleanup"}
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() =>
+                void runAction(
+                  "style:cleanup:apply",
+                  async () => {
+                    const result = (await cleanupCommonPhrases({ dryRun: false })) as PhraseCleanupResult;
+                    setCleanupSummary(result);
+                  },
+                  {
+                    pendingLabel: "Cleaning phrases...",
+                    successMessage: "Phrase cleanup complete.",
+                  },
+                )
+              }
+              disabled={cleanupPreviewRecord.pending || cleanupApplyRecord.pending}
+              aria-disabled={cleanupPreviewRecord.pending || cleanupApplyRecord.pending}
+            >
+              {cleanupApplyRecord.pending ? "Cleaning..." : "Apply Cleanup"}
+            </button>
+          </div>
+          {cleanupSummary ? (
+            <p className="queue-meta">
+              {cleanupSummary.dryRun ? "Preview" : "Applied"}: removed {cleanupSummary.removedPhraseCount} phrases across{" "}
+              {cleanupSummary.updatedProfiles}/{cleanupSummary.scannedProfiles} style profiles.
+            </p>
+          ) : (
+            <p className="queue-meta">Run preview to see what will be removed before applying.</p>
+          )}
+          {cleanupPreviewRecord.error ? (
+            <p className="queue-meta action-inline-error" role="alert">
+              {cleanupPreviewRecord.error}
+            </p>
+          ) : null}
+          {cleanupApplyRecord.error ? (
+            <p className="queue-meta action-inline-error" role="alert">
+              {cleanupApplyRecord.error}
+            </p>
+          ) : null}
+        </div>
         <div className="stack">
           {profileLoading ? (
             <p className="empty-line">Loading learned traits…</p>

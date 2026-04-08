@@ -49,6 +49,8 @@ Optional history/context tuning:
 - `SLM_HISTORY_FETCH_ON_DEMAND=true`
 - `SLM_HISTORY_FETCH_MAX_BATCH=50`
 - `SLM_HISTORY_FETCH_MAX_ROUNDS=3`
+- `SLM_VISION_FILTER_MODE=smart` (`smart` | `all` | `none`)
+- `SLM_VISION_FILTER_UNCAPTIONED_COOLDOWN_MS=5400000` (used in `smart` mode)
 - `SLM_EMBEDDINGS_MODEL=all-MiniLM-L6-v2`
 - `SLM_EMBEDDINGS_CACHE_DIR=/path/to/cache`
 
@@ -78,6 +80,28 @@ The setup wizard uses API routes:
 - `GET /api/setup/whatsapp/status`
 - `POST /api/setup/whatsapp/stop`
 - `POST /api/setup/whatsapp/reset`
+
+## WhatsApp Runtime Commands (Self Chat)
+
+Send a message to your own WhatsApp chat to control runtime without opening the dashboard:
+
+- `pause worker`
+- `resume worker`
+- `restart worker`
+- `pause app`
+- `resume app`
+- `restart app`
+- `pause both`
+- `resume both`
+- `restart both`
+- `status worker`
+- `status app`
+- `status both`
+
+Notes:
+- Commands only execute from your self chat (your own JID).
+- `pause worker` pauses automation while keeping the listener alive, so `resume worker` still works.
+- App controls use `.slm/app.pid` and start with `SLM_APP_START_CMD` (default `bun run dev:next`).
 
 ## Useful Commands
 

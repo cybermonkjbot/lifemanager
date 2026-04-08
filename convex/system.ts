@@ -21,6 +21,9 @@ export const health = query({
       .withIndex("by_createdAt")
       .order("desc")
       .take(12);
+    const followupEventWindow = (await ctx.db.query("systemEvents").withIndex("by_createdAt").order("desc").take(900))
+      .filter((event) => event.eventType.startsWith("followup."))
+      .slice(0, 500);
 
     const providerWindow = await ctx.db
       .query("providerRuns")
@@ -58,6 +61,23 @@ export const health = query({
       .withIndex("by_status_sendAt", (q) => q.eq("status", "failed"))
       .order("desc")
       .take(120);
+    const overdueSuggested = await ctx.db
+      .query("followUps")
+      .withIndex("by_status_dueAt", (q) => q.eq("status", "suggested").lte("dueAt", now))
+      .take(260);
+    const overdueConfirmed = await ctx.db
+      .query("followUps")
+      .withIndex("by_status_dueAt", (q) => q.eq("status", "confirmed").lte("dueAt", now))
+      .take(260);
+    const followupDetected = followupEventWindow.filter((event) => event.eventType === "followup.detected").length;
+    const followupConfirmed = followupEventWindow.filter((event) => event.eventType === "followup.confirmed").length;
+    const followupDismissed = followupEventWindow.filter((event) => event.eventType === "followup.dismissed").length;
+    const followupSent = followupEventWindow.filter((event) => event.eventType === "followup.sent").length;
+    const followupFailed = followupEventWindow.filter((event) => event.eventType === "followup.failed").length;
+    const detectionBase = Math.max(followupDetected, 1);
+    const followupConfirmationRate = followupDetected > 0 ? followupConfirmed / detectionBase : 0;
+    const followupDismissalRate = followupDetected > 0 ? followupDismissed / detectionBase : 0;
+    const followupOverdueCount = overdueSuggested.length + overdueConfirmed.length;
 
     const alerts: string[] = [];
     if (errorRate > 0.2 && totalProviderRuns >= 20) {
@@ -71,6 +91,9 @@ export const health = query({
     }
     if (dueNow >= 25) {
       alerts.push(`Outbox due queue is elevated (${dueNow} pending sends due now).`);
+    }
+    if (followupOverdueCount >= 20) {
+      alerts.push(`Follow-up overdue queue is elevated (${followupOverdueCount} due reminders awaiting action).`);
     }
 
     return {
@@ -89,6 +112,12 @@ export const health = query({
         pendingOutbox: pendingOutbox.length,
         dueOutbox: dueNow,
         failedOutboxRecent: failedOutbox.length,
+        followupDetections: followupDetected,
+        followupConfirmationRate,
+        followupDismissalRate,
+        followupSent,
+        followupFailed,
+        followupOverdueCount,
       },
       alerts,
       runbooks: [
@@ -167,6 +196,7 @@ export const recordEvent = mutation({
     eventType: v.string(),
     detail: v.string(),
     threadId: v.optional(v.id("threads")),
+    toolRunId: v.optional(v.string()),
     outboxId: v.optional(v.id("outbox")),
   },
   handler: async (ctx, args) => {

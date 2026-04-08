@@ -33,6 +33,11 @@ type StyleProfile = {
   spellingNotes?: string[];
 };
 
+type ContactMemoryFact = {
+  factValue: string;
+  factType: "preference" | "profile" | "schedule" | "relationship" | "promise" | "other";
+};
+
 type ThreadContext = {
   messages: Array<{ direction: "inbound" | "outbound"; text: string }>;
   memory?: { styleNotes?: string[] } | null;
@@ -96,7 +101,7 @@ export async function POST(request: Request) {
       })
       .catch(() => undefined);
 
-    const [runtimeSettings, styleProfile] = (await Promise.all([
+    const [runtimeSettings, globalStyleProfile] = (await Promise.all([
       convex.query(convexRefs.settingsGet, {}),
       convex.query(convexRefs.styleGetProfile, {}),
     ])) as [RuntimeSettings | null, StyleProfile | null];
@@ -121,6 +126,21 @@ export async function POST(request: Request) {
         styleHints = threadContext.memory?.styleNotes || [];
       }
 
+      await convex
+        .mutation(convexRefs.chatExtractContactMemoryFacts, {
+          threadId,
+          lookbackMessages: 120,
+        })
+        .catch(() => undefined);
+      const factsBundle = (await convex
+        .query(convexRefs.chatContactMemoryFactsList, {
+          threadId,
+          limit: 8,
+        })
+        .catch(() => null)) as { facts?: ContactMemoryFact[] } | null;
+      const factHints = (factsBundle?.facts || []).map((fact) => `Known contact fact (${fact.factType}): ${fact.factValue}`);
+      styleHints = [...styleHints, ...factHints];
+
       const personalitySetting = (await convex
         .query(convexRefs.personalityGetThreadSetting, { threadId })
         .catch(() => null)) as PersonalitySetting | null;
@@ -137,11 +157,20 @@ export async function POST(request: Request) {
       }
     }
 
+    const scopedStyleProfile = threadId
+      ? ((await convex
+          .query(convexRefs.chatGetThreadStyleProfile, {
+            threadId,
+            fallbackToGlobal: true,
+          })
+          .catch(() => null)) as { profile?: StyleProfile } | null)?.profile
+      : null;
+
     const aiResult = await generateReplyWithFallback({
       inboundText: message,
       historyLines,
       styleHints,
-      styleProfile: styleProfile || undefined,
+      styleProfile: scopedStyleProfile || globalStyleProfile || undefined,
       personality,
       runtime: {
         temperature: runtimeSettings?.aiTemperature,

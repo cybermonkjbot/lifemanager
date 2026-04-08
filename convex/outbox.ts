@@ -1,13 +1,24 @@
 import { v } from "convex/values";
 import { internal } from "./_generated/api";
 import { internalMutation, mutation, query } from "./_generated/server";
+import { detectFutureCommitment, hasRecentFollowupDuplicate } from "./lib/commitments";
 import { DEFAULT_LEASE_MS, DEFAULT_RETRY_LIMIT } from "./lib/constants";
 import { getConfig } from "./lib/config";
+import {
+  countUnansweredOutboundStreak,
+  latestInboundMessageAt,
+  MAX_UNANSWERED_OUTBOUND_STREAK,
+  resolveLongSilenceReopenWeeks,
+  shouldAllowLongSilenceConversationStarter,
+} from "./lib/outboundGuard";
 import {
   classifyThreadKind,
   eligibilityReasonLabel,
   resolveThreadEligibility,
 } from "./lib/threadEligibility";
+
+const UNANSWERED_OUTBOUND_RECHECK_MS = 5 * 60 * 1000;
+const UNANSWERED_OUTBOUND_SCAN_LIMIT = 25;
 
 function isWithinQuietHours(hour: number, startHour: number, endHour: number) {
   if (startHour === endHour) {
@@ -96,6 +107,7 @@ export const claimDue = mutation({
       outboxId: string;
       threadId: string;
       draftId: string;
+      toolRunId?: string;
       messageText: string;
       typingMs: number;
       jid: string;
@@ -107,7 +119,18 @@ export const claimDue = mutation({
       preReactionEmoji?: string;
       mediaAssetId?: string;
       mediaCaption?: string;
+      replyTargetWhatsAppMessageId?: string;
+      replyTargetSenderJid?: string;
+      replyTargetText?: string;
+      replyTargetMessageAt?: number;
     }>;
+    const unansweredOutboundStateByThread = new Map<
+      string,
+      {
+        unansweredStreak: number;
+        latestInboundAt?: number;
+      }
+    >();
 
     for (const item of due) {
       const draft = await ctx.db.get(item.draftId);
@@ -115,6 +138,9 @@ export const claimDue = mutation({
       if (!draft || !thread) {
         continue;
       }
+      const threadKind = thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup });
+      const sourceMessage = await ctx.db.get(draft.sourceMessageId);
+      const shouldQuoteSource = sourceMessage?.direction === "inbound";
 
       let deferUntil = 0;
       const deferReasons: string[] = [];
@@ -151,6 +177,53 @@ export const claimDue = mutation({
         deferReasons.push("global-rate-limit");
       }
 
+      if (threadKind === "direct") {
+        let unansweredState = unansweredOutboundStateByThread.get(thread._id);
+        if (!unansweredState) {
+          const latestMessages = await ctx.db
+            .query("messages")
+            .withIndex("by_thread_messageAt", (q) => q.eq("threadId", thread._id))
+            .order("desc")
+            .take(UNANSWERED_OUTBOUND_SCAN_LIMIT);
+          const activeClaimedOutbox = await ctx.db
+            .query("outbox")
+            .withIndex("by_thread_and_status", (q) => q.eq("threadId", thread._id).eq("status", "claimed"))
+            .take(MAX_UNANSWERED_OUTBOUND_STREAK + 2);
+
+          unansweredState = {
+            unansweredStreak: countUnansweredOutboundStreak(latestMessages) + activeClaimedOutbox.length,
+            latestInboundAt: latestInboundMessageAt(latestMessages),
+          };
+          unansweredOutboundStateByThread.set(thread._id, unansweredState);
+        }
+
+        const allowLongSilenceStarter = shouldAllowLongSilenceConversationStarter({
+          unansweredStreak: unansweredState.unansweredStreak,
+          latestInboundAt: unansweredState.latestInboundAt,
+          nowMs: now,
+          isConversationStarter: Boolean(draft.reason?.startsWith("Proactive check-in outreach")),
+        });
+
+        if (unansweredState.unansweredStreak >= MAX_UNANSWERED_OUTBOUND_STREAK && !allowLongSilenceStarter) {
+          deferUntil = Math.max(deferUntil, now + UNANSWERED_OUTBOUND_RECHECK_MS);
+          deferReasons.push("unanswered-outbound-limit");
+        } else if (allowLongSilenceStarter) {
+          const requiredWeeks = resolveLongSilenceReopenWeeks(unansweredState.unansweredStreak);
+          const elapsedWeeks = Math.max(
+            1,
+            Math.round((now - (unansweredState.latestInboundAt || now)) / (7 * 24 * 60 * 60 * 1000)),
+          );
+          await ctx.db.insert("systemEvents", {
+            source: "worker",
+            eventType: "outbox.unanswered_limit.override",
+            threadId: item.threadId,
+            outboxId: item._id,
+            detail: `Allowing long-silence conversation starter after ${elapsedWeeks} week(s) unanswered (threshold ${requiredWeeks} week(s)).`,
+            createdAt: now,
+          });
+        }
+      }
+
       if (deferUntil > now) {
         await ctx.db.patch(item._id, {
           status: "pending",
@@ -170,7 +243,6 @@ export const claimDue = mutation({
         continue;
       }
 
-      const threadKind = thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup });
       const explicitIgnore = await ctx.db
         .query("ignoreRules")
         .withIndex("by_target", (q) =>
@@ -229,6 +301,14 @@ export const claimDue = mutation({
               status: "failed",
               updatedAt: now,
             });
+            await ctx.db.insert("systemEvents", {
+              source: "worker",
+              eventType: "followup.failed",
+              threadId: item.threadId,
+              outboxId: item._id,
+              detail: reason.slice(0, 240),
+              createdAt: now,
+            });
           }
         }
         await ctx.db.insert("systemEvents", {
@@ -249,11 +329,26 @@ export const claimDue = mutation({
         attempts: item.attempts + 1,
         updatedAt: now,
       });
+      if (threadKind === "direct") {
+        const state = unansweredOutboundStateByThread.get(thread._id);
+        if (state) {
+          unansweredOutboundStateByThread.set(thread._id, {
+            ...state,
+            unansweredStreak: state.unansweredStreak + 1,
+          });
+        } else {
+          unansweredOutboundStateByThread.set(thread._id, {
+            unansweredStreak: 1,
+            latestInboundAt: undefined,
+          });
+        }
+      }
 
       claimed.push({
         outboxId: item._id,
         threadId: item.threadId,
         draftId: item.draftId,
+        toolRunId: item.toolRunId,
         messageText: item.messageText,
         typingMs: draft.typingMs,
         jid: thread.jid,
@@ -265,6 +360,10 @@ export const claimDue = mutation({
         preReactionEmoji: item.preReactionEmoji,
         mediaAssetId: item.mediaAssetId,
         mediaCaption: item.mediaCaption,
+        replyTargetWhatsAppMessageId: shouldQuoteSource ? sourceMessage?.whatsappMessageId : undefined,
+        replyTargetSenderJid: shouldQuoteSource ? sourceMessage?.senderJid : undefined,
+        replyTargetText: shouldQuoteSource ? sourceMessage?.text : undefined,
+        replyTargetMessageAt: shouldQuoteSource ? sourceMessage?.messageAt : undefined,
       });
     }
 
@@ -343,6 +442,7 @@ export const suppressForManualIntervention = mutation({
     if (!thread) {
       return {
         threadFound: false,
+        threadId: undefined,
         suppressedOutbox: 0,
       };
     }
@@ -462,6 +562,7 @@ export const suppressForManualIntervention = mutation({
 
     return {
       threadFound: true,
+      threadId: thread._id,
       recordedMessageId,
       suppressedOutbox,
     };
@@ -475,6 +576,7 @@ export const hydrateAiOutreach = mutation({
     provider: v.union(v.literal("azure"), v.literal("codex"), v.literal("heuristic")),
     confidence: v.number(),
     typingMs: v.number(),
+    toolRunId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const outbox = await ctx.db.get(args.outboxId);
@@ -486,6 +588,7 @@ export const hydrateAiOutreach = mutation({
     await ctx.db.patch(outbox._id, {
       messageText: args.text,
       provider: args.provider,
+      toolRunId: args.toolRunId,
       updatedAt: now,
     });
 
@@ -496,6 +599,7 @@ export const hydrateAiOutreach = mutation({
         provider: args.provider,
         confidence: args.confidence,
         typingMs: args.typingMs,
+        toolRunId: args.toolRunId,
         updatedAt: now,
       });
     }
@@ -583,15 +687,24 @@ export const markSent = mutation({
           status: "sent",
           updatedAt: now,
         });
+        await ctx.db.insert("systemEvents", {
+          source: "worker",
+          eventType: "followup.sent",
+          threadId: item.threadId,
+          outboxId: item._id,
+          detail: followUp.reason.slice(0, 240),
+          createdAt: now,
+        });
       }
     }
 
-    await ctx.db.insert("messages", {
+    const insertedMessageId = await ctx.db.insert("messages", {
       threadId: item.threadId,
       direction: "outbound",
       origin: "live",
       senderJid: "me",
       whatsappMessageId: args.whatsappMessageId,
+      toolRunId: item.toolRunId,
       text: item.messageText,
       messageType: item.sendKind || "text",
       reactionEmoji: item.reactionEmoji,
@@ -601,6 +714,79 @@ export const markSent = mutation({
       messageAt: now,
       createdAt: now,
     });
+
+    if (item.mediaAssetId) {
+      const asset = await ctx.db.get(item.mediaAssetId);
+      if (asset) {
+        await ctx.db.patch(asset._id, {
+          lastUsedAt: now,
+          updatedAt: now,
+        });
+      }
+    }
+
+    if ((item.sendKind || "text") === "text" && !item.followUpId) {
+      const commitment = detectFutureCommitment({
+        text: item.messageText,
+        direction: "outbound",
+        now,
+      });
+
+      if (commitment.outcome === "actionable") {
+        const duplicate = await hasRecentFollowupDuplicate(ctx, {
+          threadId: item.threadId,
+          normalizedKey: commitment.candidate.normalizedKey,
+          dueAt: commitment.candidate.dueAt,
+          now,
+        });
+        if (duplicate) {
+          await ctx.db.insert("systemEvents", {
+            source: "worker",
+            eventType: "followup.detected.duplicate_skipped",
+            threadId: item.threadId,
+            outboxId: item._id,
+            detail: `${commitment.candidate.reason} [key=${commitment.candidate.normalizedKey}]`,
+            createdAt: now,
+          });
+        } else {
+          await ctx.db.insert("followUps", {
+            threadId: item.threadId,
+            sourceMessageId: insertedMessageId,
+            reason: commitment.candidate.reason,
+            draftText:
+              commitment.candidate.kind === "plan"
+                ? "Quick check-in on the plan we agreed."
+                : "Quick reminder from my earlier promise.",
+            dueAt: commitment.candidate.dueAt,
+            kind: commitment.candidate.kind,
+            direction: commitment.candidate.direction,
+            confidence: commitment.candidate.confidence,
+            normalizedKey: commitment.candidate.normalizedKey,
+            sourceSnippet: commitment.candidate.sourceSnippet,
+            status: "suggested",
+            createdAt: now,
+            updatedAt: now,
+          });
+          await ctx.db.insert("systemEvents", {
+            source: "worker",
+            eventType: "followup.detected",
+            threadId: item.threadId,
+            outboxId: item._id,
+            detail: `${commitment.candidate.reason} [${Math.round(commitment.candidate.confidence * 100)}%]`,
+            createdAt: now,
+          });
+        }
+      } else if (commitment.outcome === "non_actionable") {
+        await ctx.db.insert("systemEvents", {
+          source: "worker",
+          eventType: "followup.detected.non_actionable",
+          threadId: item.threadId,
+          outboxId: item._id,
+          detail: `${commitment.reason} · ${commitment.sourceSnippet}`.slice(0, 240),
+          createdAt: now,
+        });
+      }
+    }
 
     if (
       ((item.sendKind || "text") === "reaction" || (item.sendKind || "text") === "text") &&
@@ -689,6 +875,14 @@ export const markFailed = mutation({
         await ctx.db.patch(followUp._id, {
           status: "failed",
           updatedAt: now,
+        });
+        await ctx.db.insert("systemEvents", {
+          source: "worker",
+          eventType: "followup.failed",
+          threadId: item.threadId,
+          outboxId: item._id,
+          detail: args.error.slice(0, 240),
+          createdAt: now,
         });
       }
     }

@@ -3,15 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "dev:next": "next dev",
+    "dev": "bun run dev:next",
+    "dev:next": "mkdir -p .slm && sh -lc 'echo $$ > .slm/app.pid; exec next dev'",
     "dev:convex": "convex dev",
     "worker": "bun run src/worker/index.ts",
+    "pidgin:refresh": "bun run scripts/pidgin-lexicon-refresh.ts",
     "self-improve": "bun run scripts/self-improvement-cycle.ts once",
     "self-improve:daemon": "bun run scripts/self-improvement-cycle.ts daemon",
     "dev:all": "concurrently -n next,convex,worker -c cyan,magenta,yellow \"bun run dev:next\" \"bun run dev:convex\" \"bun run worker\"",
     "build": "next build",
-    "start": "next start",
+    "start": "mkdir -p .slm && sh -lc 'echo $$ > .slm/app.pid; exec next start'",
     "lint": "eslint"
   },
   "dependencies": {

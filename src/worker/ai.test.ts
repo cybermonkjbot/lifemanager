@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  detectPidginSignal,
   describeInboundImageWithFallback,
   detectConversationSteeringMode,
   evaluateJokeGuardrail,
   generateReplyWithFallback,
   normalizeOutboundText,
+  postProcessReplyText,
+  sanitizeCommonPhrasesForPrompt,
 } from "./ai";
 import { getDefaultPersonaPack, getPersonaPackById } from "../../convex/lib/personaPacks";
 
@@ -53,6 +56,74 @@ test("normalizeOutboundText keeps line breaks while trimming", () => {
   assert.equal(output, "First line, test\nSecond line");
 });
 
+test("postProcessReplyText strips emojis and trims repeated direct-name addressing", () => {
+  const output = postProcessReplyText({
+    text: "Hey Alex, got it 😂. Alex, I will send it soon 😅",
+    inboundText: "Can you send it?",
+    theirName: "Alex Johnson",
+  });
+  assert.equal(output, "Hey, got it. I will send it soon");
+});
+
+test("postProcessReplyText keeps a single name mention when inbound explicitly uses it", () => {
+  const output = postProcessReplyText({
+    text: "Alex, I can sort this now.",
+    inboundText: "Alex can you sort this now?",
+    theirName: "Alex",
+  });
+  assert.equal(output, "Alex, I can sort this now.");
+});
+
+test("postProcessReplyText strips bare leading name when inbound does not use it", () => {
+  const output = postProcessReplyText({
+    text: "Alex I can sort this now.",
+    inboundText: "Can you sort this now?",
+    theirName: "Alex",
+  });
+  assert.equal(output, "I can sort this now.");
+});
+
+test("postProcessReplyText strips trailing direct-name address when inbound does not use it", () => {
+  const output = postProcessReplyText({
+    text: "I can sort this now, Alex.",
+    inboundText: "Can you sort this now?",
+    theirName: "Alex",
+  });
+  assert.equal(output, "I can sort this now.");
+});
+
+test("postProcessReplyText normalizes family terms in pidgin mode", () => {
+  const output = postProcessReplyText({
+    text: "My mum and dad will call later.",
+    inboundText: "abeg no vex, I dey road",
+    historyLines: ["Them: how far"],
+  });
+  assert.equal(output, "My Mama and Papa will call later.");
+});
+
+test("postProcessReplyText keeps family terms unchanged outside pidgin mode", () => {
+  const output = postProcessReplyText({
+    text: "My mum and dad will call later.",
+    inboundText: "Can we talk this evening?",
+    historyLines: ["Them: thanks for the update"],
+  });
+  assert.equal(output, "My mum and dad will call later.");
+});
+
+test("sanitizeCommonPhrasesForPrompt drops awkward catchphrases and keeps useful phrases", () => {
+  const result = sanitizeCommonPhrasesForPrompt([
+    "please allow me small",
+    "Please allow me",
+    "allow me small",
+    "circle back soon",
+    "let me check",
+    "send invoice summary",
+    "appreciate the quick heads-up",
+  ]);
+
+  assert.deepEqual(result, ["send invoice summary", "appreciate the quick heads-up"]);
+});
+
 test("evaluateJokeGuardrail blocks similar jokes already sent in chat history", () => {
   const result = evaluateJokeGuardrail("LOL I run on coffee and chaos before noon.", [
     "Them: Morning, how are you?",
@@ -71,6 +142,28 @@ test("evaluateJokeGuardrail blocks cringe joke patterns", () => {
 test("evaluateJokeGuardrail allows playful lines that are fresh and non-cringe", () => {
   const result = evaluateJokeGuardrail("Haha your timing is elite, that update landed right on cue.", [
     "Me: Thanks, I sent the file earlier.",
+  ]);
+  assert.equal(result.blocked, false);
+});
+
+test("evaluateJokeGuardrail blocks joke-chain stretching when a recent outbound joke exists", () => {
+  const result = evaluateJokeGuardrail("Haha I deserve MVP for surviving this chaos today.", [
+    "Them: Did you finish the notes?",
+    "Me: haha this week is pure chaos 😂",
+    "Them: lmao",
+    "Me: I still sent the report already.",
+  ]);
+  assert.equal(result.blocked, true);
+  assert.match(result.reason, /last 2 outbound replies/i);
+});
+
+test("evaluateJokeGuardrail allows jokes when prior humor is outside cooldown window", () => {
+  const result = evaluateJokeGuardrail("Haha I need a trophy for that timing.", [
+    "Me: lol this sprint humbled me",
+    "Them: haha",
+    "Me: I sent the timeline and budget.",
+    "Them: got it",
+    "Me: Let me know if anything is missing.",
   ]);
   assert.equal(result.blocked, false);
 });
@@ -99,6 +192,22 @@ test("detectConversationSteeringMode flags wrap-up acknowledgements", () => {
   assert.equal(mode, "wrap_up");
 });
 
+test("detectConversationSteeringMode flags Gen Z wrap-up acknowledgement phrases", () => {
+  const mode = detectConversationSteeringMode({
+    inboundText: "bet.",
+    historyLines: [],
+  });
+  assert.equal(mode, "wrap_up");
+});
+
+test("detectConversationSteeringMode handles stretched Gen Z wrap-up tokens", () => {
+  const mode = detectConversationSteeringMode({
+    inboundText: "say lessss",
+    historyLines: [],
+  });
+  assert.equal(mode, "wrap_up");
+});
+
 test("detectConversationSteeringMode flags looping low-signal exchanges", () => {
   const mode = detectConversationSteeringMode({
     inboundText: "ok",
@@ -110,6 +219,202 @@ test("detectConversationSteeringMode flags looping low-signal exchanges", () => 
     ],
   });
   assert.equal(mode, "loop");
+});
+
+test("detectConversationSteeringMode flags looping Gen Z acknowledgements", () => {
+  const mode = detectConversationSteeringMode({
+    inboundText: "kk",
+    historyLines: [
+      "Me: You still want me to send the updated notes?",
+      "Them: bet",
+      "Me: Should I share before lunch?",
+      "Them: kk",
+    ],
+  });
+  assert.equal(mode, "loop");
+});
+
+test("detectConversationSteeringMode flags Gen Z pause requests", () => {
+  const mode = detectConversationSteeringMode({
+    inboundText: "afk rn, hmu later",
+    historyLines: [],
+  });
+  assert.equal(mode, "pause");
+});
+
+test("detectConversationSteeringMode flags busy-rn shorthand pauses", () => {
+  const mode = detectConversationSteeringMode({
+    inboundText: "busy rn",
+    historyLines: [],
+  });
+  assert.equal(mode, "pause");
+});
+
+test("detectConversationSteeringMode flags code-switched continue-later pause", () => {
+  const mode = detectConversationSteeringMode({
+    inboundText: "make we continue later",
+    historyLines: [],
+  });
+  assert.equal(mode, "pause");
+});
+
+test("detectConversationSteeringMode flags pidgin call-later pause", () => {
+  const mode = detectConversationSteeringMode({
+    inboundText: "make i call you later",
+    historyLines: [],
+  });
+  assert.equal(mode, "pause");
+});
+
+test("detectConversationSteeringMode flags pidgin road status as pause", () => {
+  const mode = detectConversationSteeringMode({
+    inboundText: "i dey road rn",
+    historyLines: [],
+  });
+  assert.equal(mode, "pause");
+});
+
+test("detectConversationSteeringMode flags colloquial hard stop requests", () => {
+  const mode = detectConversationSteeringMode({
+    inboundText: "don't hit me up again.",
+    historyLines: [],
+  });
+  assert.equal(mode, "hard_stop");
+});
+
+test("detectConversationSteeringMode flags pidgin hard stop requests", () => {
+  const mode = detectConversationSteeringMode({
+    inboundText: "abeg no text me again",
+    historyLines: [],
+  });
+  assert.equal(mode, "hard_stop");
+});
+
+test("detectConversationSteeringMode flags pidgin hard stop no-disturb variants", () => {
+  const mode = detectConversationSteeringMode({
+    inboundText: "abeg no disturb me again",
+    historyLines: [],
+  });
+  assert.equal(mode, "hard_stop");
+});
+
+test("detectConversationSteeringMode treats social acknowledgement tails as wrap-up", () => {
+  const mode = detectConversationSteeringMode({
+    inboundText: "thx bro",
+    historyLines: [],
+  });
+  assert.equal(mode, "wrap_up");
+});
+
+test("detectConversationSteeringMode treats code-switched wrap-up phrases as wrap-up", () => {
+  const mode = detectConversationSteeringMode({
+    inboundText: "all good sha",
+    historyLines: [],
+  });
+  assert.equal(mode, "wrap_up");
+});
+
+test("detectConversationSteeringMode handles typo shorthand wrap-up tokens", () => {
+  const mode = detectConversationSteeringMode({
+    inboundText: "okkk",
+    historyLines: [],
+  });
+  assert.equal(mode, "wrap_up");
+});
+
+test("detectConversationSteeringMode handles typo thank-you wrap-up tokens", () => {
+  const mode = detectConversationSteeringMode({
+    inboundText: "tnx",
+    historyLines: [],
+  });
+  assert.equal(mode, "wrap_up");
+});
+
+test("detectConversationSteeringMode handles all-gud typo wrap-up", () => {
+  const mode = detectConversationSteeringMode({
+    inboundText: "all gud",
+    historyLines: [],
+  });
+  assert.equal(mode, "wrap_up");
+});
+
+test("detectConversationSteeringMode handles na-so wrap-up", () => {
+  const mode = detectConversationSteeringMode({
+    inboundText: "na so",
+    historyLines: [],
+  });
+  assert.equal(mode, "wrap_up");
+});
+
+test("detectConversationSteeringMode handles typo pidgin pause variants", () => {
+  const mode = detectConversationSteeringMode({
+    inboundText: "i dey wrk rn",
+    historyLines: [],
+  });
+  assert.equal(mode, "pause");
+});
+
+test("detectPidginSignal detects Naija/Pidgin phrasing from inbound text", () => {
+  const signal = detectPidginSignal({
+    inboundText: "abeg no vex, make we yarn later",
+    historyLines: [],
+  });
+  assert.equal(signal, true);
+});
+
+test("detectPidginSignal detects Naija/Pidgin phrasing from recent history", () => {
+  const signal = detectPidginSignal({
+    inboundText: "let's continue tomorrow",
+    historyLines: ["Them: how far", "Me: we dey outside now"],
+  });
+  assert.equal(signal, true);
+});
+
+test("detectPidginSignal stays off for plain English conversations", () => {
+  const signal = detectPidginSignal({
+    inboundText: "Can we continue this tomorrow morning?",
+    historyLines: ["Them: Thanks for the update", "Me: Sure, I will send it by 10."],
+  });
+  assert.equal(signal, false);
+});
+
+test("detectPidginSignal catches broader pidgin tokens from inbound text", () => {
+  const signal = detectPidginSignal({
+    inboundText: "wetin dey sup? no wahala, I don dey come",
+    historyLines: [],
+  });
+  assert.equal(signal, true);
+});
+
+test("detectPidginSignal catches broader pidgin tokens from history context", () => {
+  const signal = detectPidginSignal({
+    inboundText: "See you later",
+    historyLines: ["Them: no wahala", "Me: I fit run am, padi"],
+  });
+  assert.equal(signal, true);
+});
+
+test("detectPidginSignal catches commot/tori variants", () => {
+  const signal = detectPidginSignal({
+    inboundText: "make I commot now, I go yarn you the tori later",
+    historyLines: [],
+  });
+  assert.equal(signal, true);
+});
+
+test("detectPidginSignal does not trigger on weak family-token-only text", () => {
+  const signal = detectPidginSignal({
+    inboundText: "Mama and Papa are around",
+    historyLines: [],
+  });
+  assert.equal(signal, false);
+});
+
+test("evaluateJokeGuardrail allows common slang that is not forced meme humor", () => {
+  const result = evaluateJokeGuardrail("lol no cap your timing was elite", [
+    "Me: I sent the first draft this morning.",
+  ]);
+  assert.equal(result.blocked, false);
 });
 
 test("describeInboundImageWithFallback returns heuristic fallback when Azure config is missing", async () => {
@@ -143,9 +448,291 @@ test("generateReplyWithFallback short-circuits wrap-up messages locally", async 
     assert.equal(result.model, "heuristic-local-wrap_up");
     assert.equal(result.attempts.length, 1);
     assert.equal(result.attempts[0]?.stage, "heuristic_fallback");
-    assert.equal(result.contextToolCalls, undefined);
-    assert.equal(result.contextWindow, undefined);
+    assert.ok(Array.isArray(result.contextToolCalls));
+    assert.ok(result.contextToolCalls && result.contextToolCalls.some((call) => call.name === "context_window_cleaning"));
+    assert.ok(result.contextToolCalls && result.contextToolCalls.some((call) => call.name === "conversation_history_search"));
+    assert.ok(result.contextToolCalls && result.contextToolCalls.some((call) => call.name === "context_window_detection"));
+    assert.ok(result.contextWindow);
   } finally {
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback reprompts Azure when blocked refusal phrase is returned", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  let callCount = 0;
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async () => {
+      callCount += 1;
+      const outputText =
+        callCount === 1 ? "I'm sorry, but I cannot assist with that request." : "Sure, I can handle this now.";
+      return new Response(JSON.stringify({ output_text: outputText }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "Can you handle this now?",
+      historyLines: ["Them: Can you handle this now?"],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+      },
+    });
+
+    assert.equal(result.guardrailBlocked, false);
+    assert.equal(result.provider, "azure");
+    assert.equal(result.text, "Sure, I can handle this now.");
+    assert.ok(callCount >= 2);
+    assert.ok(
+      result.attempts.some((attempt) => attempt.status === "error" && /blocked refusal phrase detected/i.test(attempt.error || "")),
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback blocks humor draft when AI humor judge says not funny", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      const bodyText = typeof init?.body === "string" ? init.body : "";
+      const isHumorJudgeCall = /strict humor classifier|Candidate reply/i.test(bodyText);
+      if (!isHumorJudgeCall) {
+        return new Response(JSON.stringify({ output_text: "Haha I am a walking Monday bug report." }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(
+        JSON.stringify({
+          output_text: '{"isJokeAttempt":true,"isFunny":false,"confidence":0.91,"reason":"forced punchline"}',
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "How are you this morning?",
+      historyLines: ["Them: How are you this morning?"],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "log_only",
+      },
+    });
+
+    assert.equal(result.guardrailBlocked, true);
+    assert.match(result.guardrailReason || "", /not funny/i);
+    assert.ok(result.attempts.some((attempt) => attempt.stage === "humor_judge_azure" && attempt.status === "success"));
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback skips joke similarity matching when AI humor judge says draft is not a joke", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      const bodyText = typeof init?.body === "string" ? init.body : "";
+      const isHumorJudgeCall = /strict humor classifier|Candidate reply/i.test(bodyText);
+      if (!isHumorJudgeCall) {
+        return new Response(JSON.stringify({ output_text: "lol no cap your timing was elite" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(
+        JSON.stringify({
+          output_text: '{"isJokeAttempt":false,"isFunny":false,"confidence":0.86,"reason":"not intended as a joke"}',
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "Can you follow up now?",
+      historyLines: [
+        "Them: Can you follow up now?",
+        "Me: lol no cap your timing was elite",
+      ],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "log_only",
+      },
+    });
+
+    assert.equal(result.guardrailBlocked, false);
+    assert.equal(result.text, "lol no cap your timing was elite");
+    assert.ok(result.attempts.some((attempt) => attempt.stage === "humor_judge_azure" && attempt.status === "success"));
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback rewrites joke-chain stretching into a direct non-joke reply", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  let generationCalls = 0;
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      const bodyText = typeof init?.body === "string" ? init.body : "";
+      const isHumorJudgeCall = /strict humor classifier|Candidate reply/i.test(bodyText);
+      if (isHumorJudgeCall) {
+        if (bodyText.includes("I can send the update in 10 minutes.")) {
+          return new Response(
+            JSON.stringify({
+              output_text: '{"isJokeAttempt":false,"isFunny":false,"confidence":0.9,"reason":"direct reply"}',
+            }),
+            {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            },
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            output_text: '{"isJokeAttempt":true,"isFunny":true,"confidence":0.92,"reason":"playful and natural"}',
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      generationCalls += 1;
+      if (/The last 2 outbound replies already include humor/i.test(bodyText)) {
+        return new Response(JSON.stringify({ output_text: "I can send the update in 10 minutes." }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ output_text: "Haha I am on my villain arc today." }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "Can you send the update now?",
+      historyLines: [
+        "Them: Can you send the update now?",
+        "Me: haha this project is pure cinema 😂",
+        "Them: lol",
+        "Me: I can still send it.",
+      ],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "log_only",
+      },
+    });
+
+    assert.equal(result.guardrailBlocked, false);
+    assert.equal(result.text, "I can send the update in 10 minutes.");
+    assert.ok(generationCalls >= 2);
+    const humorJudgeSuccesses = result.attempts.filter((attempt) => attempt.stage === "humor_judge_azure" && attempt.status === "success");
+    assert.ok(humorJudgeSuccesses.length >= 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback sends manual review when joke-chain rewrite still violates guardrails", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  let generationCalls = 0;
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      const bodyText = typeof init?.body === "string" ? init.body : "";
+      const isHumorJudgeCall = /strict humor classifier|Candidate reply/i.test(bodyText);
+      if (isHumorJudgeCall) {
+        return new Response(
+          JSON.stringify({
+            output_text: '{"isJokeAttempt":true,"isFunny":true,"confidence":0.88,"reason":"still a joke"}',
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      generationCalls += 1;
+      if (/The last 2 outbound replies already include humor/i.test(bodyText)) {
+        return new Response(JSON.stringify({ output_text: "Haha still chaos o, but I can send now." }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ output_text: "Haha today is a full movie trailer." }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "Can you send the update now?",
+      historyLines: [
+        "Them: Can you send the update now?",
+        "Me: haha this project is pure cinema 😂",
+        "Them: lol",
+        "Me: I can still send it.",
+      ],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "manual_review",
+      },
+    });
+
+    assert.equal(result.guardrailBlocked, true);
+    assert.match(result.guardrailReason || "", /joke-chain rewrite/i);
+    assert.match(result.guardrailReason || "", /last 2 outbound replies/i);
+    assert.ok(generationCalls >= 2);
+  } finally {
+    globalThis.fetch = originalFetch;
     restoreAiEnv(snapshot);
   }
 });
@@ -226,6 +813,44 @@ test("generateReplyWithFallback records external semantic search diagnostics whe
   }
 });
 
+test("generateReplyWithFallback supplements sparse external override with local history search", async () => {
+  const snapshot = clearAiEnv();
+  try {
+    const result = await generateReplyWithFallback({
+      inboundText: "Can you resend the invoice summary and due date?",
+      historyLines: [
+        "Them: hello",
+        "Me: hi",
+        "Them: Please resend the invoice summary for March",
+        "Me: I will send it.",
+      ],
+      historySearchOverride: {
+        lines: ["Them: random note"],
+        candidateCount: 1,
+        semanticRerankCount: 1,
+        confidence: 0.12,
+        retrievalStage: "semantic_fallback",
+      },
+      styleHints: [],
+      runtime: {
+        fallbackMode: "azure_only",
+        contextSearchLineLimit: 3,
+      },
+    });
+
+    const searchCalls = (result.contextToolCalls || []).filter((call) => call.name === "conversation_history_search");
+    assert.ok(searchCalls.length >= 2);
+    const externalCall = searchCalls.find((call) => call.input?.source === "external");
+    const localSupplementCall = searchCalls.find((call) => call.input?.source === "local_supplement");
+    assert.ok(externalCall);
+    assert.equal(externalCall?.output?.localSupplementUsed, true);
+    assert.ok(localSupplementCall);
+    assert.ok(Number(localSupplementCall?.output?.supplementalHits || 0) >= 1);
+  } finally {
+    restoreAiEnv(snapshot);
+  }
+});
+
 test("context window trimming keeps prompt within configured budget", async () => {
   const snapshot = clearAiEnv();
   try {
@@ -262,6 +887,9 @@ test("persona pack loader returns validated default pack", () => {
   assert.equal(pack.id, "josh_witty_shortcuts.v1");
   assert.ok(pack.fewShots.length >= 30);
   assert.deepEqual(pack.activation.allowedProfileSlugs, ["girlfriend", "relationship"]);
+  assert.ok(pack.shortcutDictionary.some((entry) => entry.token === "how far"));
+  assert.ok(pack.shortcutDictionary.some((entry) => entry.token === "no wahala"));
+  assert.ok(pack.guardrails.some((line) => /mama and papa/i.test(line)));
   assert.equal(getPersonaPackById("missing-pack"), null);
 });
 

@@ -1,0 +1,122 @@
+export type MinimalMessageSnapshot = {
+  direction: "inbound" | "outbound";
+  messageAt?: number;
+};
+
+export type StatusOutreachLimitResult = {
+  allowed: boolean;
+  reason?: "daily_limit" | "too_soon";
+  outboundInWindow: number;
+  lastOutboundAt?: number;
+  waitMs?: number;
+};
+
+export const STATUS_OUTREACH_WINDOW_MS = 24 * 60 * 60 * 1000;
+export const STATUS_OUTREACH_MAX_PER_WINDOW = 2;
+export const STATUS_OUTREACH_MIN_GAP_MS = 3 * 60 * 60 * 1000;
+
+function finiteTimestamp(value: unknown): number | undefined {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return undefined;
+  }
+  return parsed;
+}
+
+function computeStableHash(input: string) {
+  let hash = 0;
+  for (let index = 0; index < input.length; index += 1) {
+    hash = (hash * 31 + input.charCodeAt(index)) >>> 0;
+  }
+  return hash;
+}
+
+export function evaluateStatusOutreachLimit(args: {
+  nowMs: number;
+  messages: MinimalMessageSnapshot[];
+  maxPerWindow?: number;
+  windowMs?: number;
+  minGapMs?: number;
+}): StatusOutreachLimitResult {
+  const nowMs = Math.max(0, Number(args.nowMs) || Date.now());
+  const maxPerWindow = Math.max(1, Math.round(args.maxPerWindow ?? STATUS_OUTREACH_MAX_PER_WINDOW));
+  const windowMs = Math.max(60_000, Math.round(args.windowMs ?? STATUS_OUTREACH_WINDOW_MS));
+  const minGapMs = Math.max(15_000, Math.round(args.minGapMs ?? STATUS_OUTREACH_MIN_GAP_MS));
+  const cutoff = nowMs - windowMs;
+
+  const outboundTimestamps = args.messages
+    .filter((message) => message.direction === "outbound")
+    .map((message) => finiteTimestamp(message.messageAt))
+    .filter((value): value is number => value !== undefined && value <= nowMs)
+    .sort((a, b) => b - a);
+
+  const outboundInWindow = outboundTimestamps.filter((messageAt) => messageAt >= cutoff).length;
+  const lastOutboundAt = outboundTimestamps[0];
+
+  if (outboundInWindow >= maxPerWindow) {
+    return {
+      allowed: false,
+      reason: "daily_limit",
+      outboundInWindow,
+      lastOutboundAt,
+    };
+  }
+
+  if (lastOutboundAt && nowMs - lastOutboundAt < minGapMs) {
+    return {
+      allowed: false,
+      reason: "too_soon",
+      outboundInWindow,
+      lastOutboundAt,
+      waitMs: Math.max(0, minGapMs - (nowMs - lastOutboundAt)),
+    };
+  }
+
+  return {
+    allowed: true,
+    outboundInWindow,
+    lastOutboundAt,
+  };
+}
+
+export function pickLaughReactionEmoji(text: string, funnyEmojis: string[]) {
+  const laughPool = ["😂", "🤣", "😆", "😅", "😄", "😁", "😹", "💀"];
+  for (const emoji of laughPool) {
+    if (text.includes(emoji)) {
+      return emoji;
+    }
+  }
+  for (const emoji of funnyEmojis) {
+    if (laughPool.includes(emoji)) {
+      return emoji;
+    }
+  }
+  return "😂";
+}
+
+export function shouldUseLaughReactionOnly(args: {
+  text: string;
+  hasFunnySignal: boolean;
+  hasInterestSignal: boolean;
+  messageAt: number;
+}): boolean {
+  if (!args.hasFunnySignal || args.hasInterestSignal) {
+    return false;
+  }
+
+  const normalized = args.text.trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  if (/[?]/.test(normalized)) {
+    return false;
+  }
+
+  if (/\b(what|why|when|where|who|how|should|can|could|would|let\s+me\s+know|thoughts|opinion)\b/i.test(normalized)) {
+    return false;
+  }
+
+  const hash = computeStableHash(`${normalized}:${Math.round(args.messageAt / 60_000)}`);
+  return hash % 3 === 0;
+}

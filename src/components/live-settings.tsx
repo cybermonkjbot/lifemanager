@@ -2,15 +2,21 @@
 
 import { ActionNotices } from "@/components/action-notices";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
+import { formatDateTime } from "@/lib/format";
 import { api } from "../../convex/_generated/api";
+import type { Id } from "../../convex/_generated/dataModel";
 import { useMutation, useQuery } from "convex/react";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
 
 type SettingsState = {
   ignoreGroupsByDefault: boolean;
   reactionsEnabled: boolean;
   stickersEnabled: boolean;
   memesEnabled: boolean;
+  generatedMemesEnabled: boolean;
+  generatedMemesAutoSendEnabled: boolean;
+  memeThreadCooldownMs: number;
+  memeSendProbability: number;
   soulModeEnabled: boolean;
   humorLearningEnabled: boolean;
   statusAutoReplyEnabled: boolean;
@@ -56,19 +62,66 @@ type KnownContact = {
   title?: string;
 };
 
+type PersonalityProfile = {
+  slug: string;
+  name: string;
+  description: string;
+  prompt: string;
+  defaultIntensity: number;
+  isDefault?: boolean;
+  updatedAt?: number;
+};
+
+type PersonalityProfileVersion = {
+  _id: string;
+  profileSlug: string;
+  versionNumber: number;
+  name: string;
+  description: string;
+  prompt: string;
+  defaultIntensity: number;
+  reason?: string;
+  createdAt: number;
+};
+
+type ProfileEditorFormProps = {
+  profile: PersonalityProfile;
+  pending: boolean;
+  error?: string;
+  onSave: (values: {
+    slug: string;
+    name: string;
+    description: string;
+    prompt: string;
+    defaultIntensity: number;
+  }) => void;
+};
+
+type MediaAsset = {
+  _id: string;
+  kind: "sticker" | "meme";
+  label: string;
+  tags: string[];
+  enabled: boolean;
+};
+
 function toState(source: Partial<SettingsState> | undefined): SettingsState {
   return {
     ignoreGroupsByDefault: source?.ignoreGroupsByDefault ?? true,
     reactionsEnabled: source?.reactionsEnabled ?? true,
     stickersEnabled: source?.stickersEnabled ?? true,
     memesEnabled: source?.memesEnabled ?? true,
+    generatedMemesEnabled: source?.generatedMemesEnabled ?? true,
+    generatedMemesAutoSendEnabled: source?.generatedMemesAutoSendEnabled ?? false,
+    memeThreadCooldownMs: source?.memeThreadCooldownMs ?? 3 * 60 * 60 * 1000,
+    memeSendProbability: source?.memeSendProbability ?? 0.3,
     soulModeEnabled: source?.soulModeEnabled ?? true,
     humorLearningEnabled: source?.humorLearningEnabled ?? true,
     statusAutoReplyEnabled: source?.statusAutoReplyEnabled ?? true,
     statusReplyRequireFunny: source?.statusReplyRequireFunny ?? true,
     funnyStatusKeywords:
-      source?.funnyStatusKeywords ?? ["lol", "lmao", "haha", "funny", "joke", "banter", "meme", "wild", "roast", "status", "story", "dead"],
-    funnyStatusEmojis: source?.funnyStatusEmojis ?? ["😂", "🤣", "😹", "😆", "😅", "😄", "😁", "😜", "🤪", "🙃", "🔥", "💀"],
+      source?.funnyStatusKeywords ?? ["lol", "lmao", "haha", "funny", "joke", "banter", "meme", "roast"],
+    funnyStatusEmojis: source?.funnyStatusEmojis ?? ["😂", "🤣", "😹", "😆", "😅", "😄", "😁", "😜", "🤪", "🙃"],
     aiFallbackMode: source?.aiFallbackMode ?? "all",
     aiTemperature: source?.aiTemperature ?? 0.7,
     aiMaxOutputTokens: source?.aiMaxOutputTokens ?? 140,
@@ -113,6 +166,10 @@ function stateEquals(a: SettingsState, b: SettingsState) {
     a.reactionsEnabled === b.reactionsEnabled &&
     a.stickersEnabled === b.stickersEnabled &&
     a.memesEnabled === b.memesEnabled &&
+    a.generatedMemesEnabled === b.generatedMemesEnabled &&
+    a.generatedMemesAutoSendEnabled === b.generatedMemesAutoSendEnabled &&
+    nearlyEqual(a.memeThreadCooldownMs, b.memeThreadCooldownMs) &&
+    nearlyEqual(a.memeSendProbability, b.memeSendProbability) &&
     a.soulModeEnabled === b.soulModeEnabled &&
     a.humorLearningEnabled === b.humorLearningEnabled &&
     a.statusAutoReplyEnabled === b.statusAutoReplyEnabled &&
@@ -170,27 +227,154 @@ function parseSimpleList(value: string, lowercase = false) {
   return [...new Set(normalized)];
 }
 
+function parseTagInput(input: string) {
+  const tags = input
+    .split(",")
+    .map((tag) => tag.trim().toLowerCase())
+    .filter(Boolean);
+  return [...new Set(tags)].slice(0, 20);
+}
+
+function clamp01(value: number) {
+  if (!Number.isFinite(value)) {
+    return 0.7;
+  }
+  return Math.max(0, Math.min(value, 1));
+}
+
+function ProfileEditorForm({ profile, pending, error, onSave }: ProfileEditorFormProps) {
+  const [name, setName] = useState(profile.name);
+  const [description, setDescription] = useState(profile.description);
+  const [prompt, setPrompt] = useState(profile.prompt);
+  const [defaultIntensity, setDefaultIntensity] = useState(clamp01(profile.defaultIntensity));
+
+  const hasChanged = useMemo(() => {
+    return (
+      name.trim() !== profile.name ||
+      description.trim() !== profile.description ||
+      prompt.trim() !== profile.prompt ||
+      Math.abs(defaultIntensity - clamp01(profile.defaultIntensity)) >= 0.001
+    );
+  }, [defaultIntensity, description, name, profile.defaultIntensity, profile.description, profile.name, profile.prompt, prompt]);
+
+  return (
+    <div className="personality-config-block">
+      <h3>Edit Profile</h3>
+      <label className="setup-input-group">
+        <span className="queue-meta">Display Name</span>
+        <input type="text" value={name} onChange={(event) => setName(event.target.value)} disabled={pending} aria-disabled={pending} />
+      </label>
+
+      <label className="setup-input-group">
+        <span className="queue-meta">Description</span>
+        <input
+          type="text"
+          value={description}
+          onChange={(event) => setDescription(event.target.value)}
+          disabled={pending}
+          aria-disabled={pending}
+        />
+      </label>
+
+      <label className="setup-input-group">
+        <span className="queue-meta">Behavior Prompt</span>
+        <textarea rows={4} value={prompt} onChange={(event) => setPrompt(event.target.value)} disabled={pending} aria-disabled={pending} />
+      </label>
+
+      <label className="setup-input-group">
+        <span className="queue-meta">Default Intensity: {Math.round(defaultIntensity * 100)}%</span>
+        <input
+          type="range"
+          min="0"
+          max="1"
+          step="0.01"
+          value={defaultIntensity}
+          onChange={(event) => setDefaultIntensity(Number(event.target.value))}
+          disabled={pending}
+          aria-disabled={pending}
+        />
+      </label>
+
+      <button
+        type="button"
+        className="btn btn-primary"
+        onClick={() =>
+          onSave({
+            slug: profile.slug,
+            name,
+            description,
+            prompt,
+            defaultIntensity,
+          })
+        }
+        disabled={!hasChanged || pending}
+        aria-disabled={!hasChanged || pending}
+      >
+        {pending ? "Saving..." : "Save Profile"}
+      </button>
+
+      {error ? (
+        <p className="queue-meta action-inline-error" role="alert">
+          {error}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 export function LiveSettings() {
   const saveSettings = useMutation(api.settings.save);
+  const upsertPersonalityProfile = useMutation(api.personality.upsertProfile);
+  const deletePersonalityProfile = useMutation(api.personality.deleteProfile);
+  const rollbackProfileVersion = useMutation(api.personality.rollbackProfileVersion);
+  const generateUploadUrl = useMutation(api.media.generateUploadUrl);
+  const registerAsset = useMutation(api.media.registerAsset);
+  const toggleAsset = useMutation(api.media.toggleAsset);
+  const deleteAsset = useMutation(api.media.deleteAsset);
   const settings = useQuery(api.settings.get, {}) as SettingsState | undefined;
   const defaults = useQuery(api.settings.defaults, {}) as SettingsState | undefined;
   const contacts = useQuery(api.threads.listContacts, { limit: 300 }) as KnownContact[] | undefined;
+  const profilesQuery = useQuery(api.personality.listProfiles, {}) as PersonalityProfile[] | undefined;
+  const mediaAssets = useQuery(api.media.listAssets, {}) as MediaAsset[] | undefined;
   const settingsLoading = settings === undefined || defaults === undefined;
   const contactsLoading = contacts === undefined;
+  const profilesLoading = profilesQuery === undefined;
   const { runAction, getRecord, notices, dismissNotice } = useActionStateRegistry();
   const key = "settings:save";
+  const profileKey = "personality:profile";
+  const mediaKey = "media:library";
 
   const remoteState = useMemo(() => toState(settings), [settings]);
   const defaultState = useMemo(() => toState(defaults), [defaults]);
   const knownContacts = useMemo(() => contacts || [], [contacts]);
+  const profiles = profilesQuery || [];
   const [draft, setDraft] = useState<SettingsState>(remoteState);
+  const [editorSlug, setEditorSlug] = useState("");
+  const [assetKind, setAssetKind] = useState<"sticker" | "meme">("sticker");
+  const [assetLabel, setAssetLabel] = useState("");
+  const [assetTags, setAssetTags] = useState("");
+  const [assetFile, setAssetFile] = useState<File | null>(null);
+  const [newProfileSlug, setNewProfileSlug] = useState("");
+  const [newProfileName, setNewProfileName] = useState("");
+  const [newProfileDescription, setNewProfileDescription] = useState("");
+  const [newProfilePrompt, setNewProfilePrompt] = useState("");
+  const [newProfileIntensity, setNewProfileIntensity] = useState(0.65);
 
   useEffect(() => {
     setDraft(remoteState);
   }, [remoteState]);
 
+  const selectedEditorSlug = editorSlug || profiles[0]?.slug || "";
+  const selectedEditorProfile = profiles.find((profile) => profile.slug === selectedEditorSlug) || null;
+  const profileVersions = useQuery(
+    api.personality.listProfileVersions,
+    selectedEditorProfile ? { slug: selectedEditorProfile.slug, limit: 20 } : "skip",
+  ) as PersonalityProfileVersion[] | undefined;
+
   const hasChanged = useMemo(() => !stateEquals(draft, remoteState), [draft, remoteState]);
   const record = getRecord(key);
+  const profileRecord = getRecord(profileKey);
+  const mediaRecord = getRecord(mediaKey);
 
   const onSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -206,6 +390,10 @@ export function LiveSettings() {
           reactionsEnabled: draft.reactionsEnabled,
           stickersEnabled: draft.stickersEnabled,
           memesEnabled: draft.memesEnabled,
+          generatedMemesEnabled: draft.generatedMemesEnabled,
+          generatedMemesAutoSendEnabled: draft.generatedMemesAutoSendEnabled,
+          memeThreadCooldownMs: Math.round(draft.memeThreadCooldownMs),
+          memeSendProbability: draft.memeSendProbability,
           soulModeEnabled: draft.soulModeEnabled,
           humorLearningEnabled: draft.humorLearningEnabled,
           statusAutoReplyEnabled: draft.statusAutoReplyEnabled,
@@ -278,6 +466,141 @@ export function LiveSettings() {
       ...prev,
       outreachContactJids: prev.outreachContactJids.filter((item) => item !== jid),
     }));
+  };
+
+  const saveProfile = (values: {
+    slug: string;
+    name: string;
+    description: string;
+    prompt: string;
+    defaultIntensity: number;
+  }) => {
+    void runAction(
+      profileKey,
+      async () => {
+        await upsertPersonalityProfile({
+          slug: values.slug,
+          name: values.name.trim(),
+          description: values.description.trim(),
+          prompt: values.prompt.trim(),
+          defaultIntensity: clamp01(values.defaultIntensity),
+        });
+      },
+      {
+        pendingLabel: "Saving profile...",
+        successMessage: "Personality profile updated.",
+      },
+    );
+  };
+
+  const createProfile = () => {
+    const slug = newProfileSlug.trim();
+    const name = newProfileName.trim();
+    const description = newProfileDescription.trim();
+    const prompt = newProfilePrompt.trim();
+    if (!slug || !name || !prompt) {
+      return;
+    }
+
+    void runAction(
+      profileKey,
+      async () => {
+        await upsertPersonalityProfile({
+          slug,
+          name,
+          description: description || "Custom profile",
+          prompt,
+          defaultIntensity: clamp01(newProfileIntensity),
+        });
+        setNewProfileSlug("");
+        setNewProfileName("");
+        setNewProfileDescription("");
+        setNewProfilePrompt("");
+        setNewProfileIntensity(0.65);
+      },
+      {
+        pendingLabel: "Creating profile...",
+        successMessage: "Profile created.",
+      },
+    );
+  };
+
+  const removeProfile = (slug: string) => {
+    void runAction(
+      profileKey,
+      async () => {
+        await deletePersonalityProfile({ slug });
+      },
+      {
+        pendingLabel: "Deleting profile...",
+        successMessage: "Profile deleted.",
+      },
+    );
+  };
+
+  const rollbackProfile = (versionId: string) => {
+    if (!selectedEditorProfile) {
+      return;
+    }
+    void runAction(
+      profileKey,
+      async () => {
+        await rollbackProfileVersion({
+          slug: selectedEditorProfile.slug,
+          versionId: versionId as Id<"personalityProfileVersions">,
+        });
+      },
+      {
+        pendingLabel: "Rolling back profile...",
+        successMessage: "Profile rolled back.",
+      },
+    );
+  };
+
+  const uploadAsset = () => {
+    if (!assetFile) {
+      return;
+    }
+
+    void runAction(
+      mediaKey,
+      async () => {
+        const uploadUrl = await generateUploadUrl({});
+        const upload = await fetch(uploadUrl as string, {
+          method: "POST",
+          headers: {
+            "Content-Type": assetFile.type || "application/octet-stream",
+          },
+          body: assetFile,
+        });
+
+        if (!upload.ok) {
+          throw new Error(`Upload failed (${upload.status})`);
+        }
+
+        const payload = (await upload.json()) as { storageId?: string };
+        if (!payload.storageId) {
+          throw new Error("Upload response missing storageId.");
+        }
+
+        await registerAsset({
+          kind: assetKind,
+          label: assetLabel.trim() || assetFile.name,
+          tags: parseTagInput(assetTags),
+          fileId: payload.storageId as Id<"_storage">,
+          mimeType: assetFile.type || "application/octet-stream",
+          enabled: true,
+        });
+
+        setAssetFile(null);
+        setAssetLabel("");
+        setAssetTags("");
+      },
+      {
+        pendingLabel: "Uploading media asset...",
+        successMessage: "Media asset added.",
+      },
+    );
   };
 
   if (settingsLoading) {
@@ -581,6 +904,74 @@ export function LiveSettings() {
               <option value="true">Yes</option>
               <option value="false">No</option>
             </select>
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Enable generated memes</span>
+            <select
+              value={draft.generatedMemesEnabled ? "true" : "false"}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  generatedMemesEnabled: event.target.value === "true",
+                }))
+              }
+              disabled={record.pending || !draft.memesEnabled}
+              aria-disabled={record.pending || !draft.memesEnabled}
+            >
+              <option value="true">Yes</option>
+              <option value="false">No</option>
+            </select>
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Auto-send generated memes</span>
+            <select
+              value={draft.generatedMemesAutoSendEnabled ? "true" : "false"}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  generatedMemesAutoSendEnabled: event.target.value === "true",
+                }))
+              }
+              disabled={record.pending || !draft.generatedMemesEnabled || !draft.memesEnabled}
+              aria-disabled={record.pending || !draft.generatedMemesEnabled || !draft.memesEnabled}
+            >
+              <option value="false">No (staged/manual first)</option>
+              <option value="true">Yes (auto-send allowed)</option>
+            </select>
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Meme thread cooldown (ms)</span>
+            <input
+              type="number"
+              min={300000}
+              max={604800000}
+              step={1000}
+              value={draft.memeThreadCooldownMs}
+              onChange={(event) =>
+                setDraft((prev) => ({ ...prev, memeThreadCooldownMs: parseNumber(event.target.value, prev.memeThreadCooldownMs) }))
+              }
+              disabled={record.pending || !draft.memesEnabled}
+              aria-disabled={record.pending || !draft.memesEnabled}
+            />
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Meme send probability (0-1)</span>
+            <input
+              type="number"
+              min={0}
+              max={1}
+              step={0.01}
+              value={draft.memeSendProbability}
+              onChange={(event) =>
+                setDraft((prev) => ({ ...prev, memeSendProbability: parseNumber(event.target.value, prev.memeSendProbability) }))
+              }
+              disabled={record.pending || !draft.memesEnabled}
+              aria-disabled={record.pending || !draft.memesEnabled}
+            />
           </label>
 
           <label className="stack compact">
@@ -1058,6 +1449,235 @@ export function LiveSettings() {
             />
             <span className="queue-meta">Use {"{{name}}"} for contact name and optional {"{{icebreaker}}"} placeholder.</span>
           </label>
+        </div>
+      </article>
+
+      <article className="panel-card">
+        <h3>Personality Profiles</h3>
+        {profilesLoading ? (
+          <p className="empty-line">Loading personality profiles…</p>
+        ) : profiles.length > 0 ? (
+          <div className="stack compact">
+            <div className="personality-config-block">
+              <p className="queue-meta">These profiles are global and apply across conversations.</p>
+              <label className="setup-input-group">
+                <span className="queue-meta">Profile to Edit</span>
+                <select value={selectedEditorSlug} onChange={(event) => setEditorSlug(event.target.value)}>
+                  {profiles.map((profile) => (
+                    <option key={profile.slug} value={profile.slug}>
+                      {profile.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+
+            {selectedEditorProfile ? (
+              <ProfileEditorForm
+                key={`${selectedEditorProfile.slug}:${selectedEditorProfile.updatedAt || 0}`}
+                profile={selectedEditorProfile}
+                pending={profileRecord.pending}
+                error={profileRecord.error}
+                onSave={saveProfile}
+              />
+            ) : null}
+
+            {selectedEditorProfile && !selectedEditorProfile.isDefault ? (
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={() => removeProfile(selectedEditorProfile.slug)}
+                disabled={profileRecord.pending}
+                aria-disabled={profileRecord.pending}
+              >
+                Delete Profile
+              </button>
+            ) : null}
+
+            <div className="personality-config-block">
+              <h3>Create Profile</h3>
+              <label className="setup-input-group">
+                <span className="queue-meta">Slug</span>
+                <input value={newProfileSlug} onChange={(event) => setNewProfileSlug(event.target.value)} placeholder="family_warm" />
+              </label>
+              <label className="setup-input-group">
+                <span className="queue-meta">Name</span>
+                <input value={newProfileName} onChange={(event) => setNewProfileName(event.target.value)} placeholder="Family Warm" />
+              </label>
+              <label className="setup-input-group">
+                <span className="queue-meta">Description</span>
+                <input value={newProfileDescription} onChange={(event) => setNewProfileDescription(event.target.value)} placeholder="Gentle and caring." />
+              </label>
+              <label className="setup-input-group">
+                <span className="queue-meta">Prompt</span>
+                <textarea rows={3} value={newProfilePrompt} onChange={(event) => setNewProfilePrompt(event.target.value)} />
+              </label>
+              <label className="setup-input-group">
+                <span className="queue-meta">Default Intensity: {Math.round(newProfileIntensity * 100)}%</span>
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.01"
+                  value={newProfileIntensity}
+                  onChange={(event) => setNewProfileIntensity(Number(event.target.value))}
+                />
+              </label>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={createProfile}
+                disabled={profileRecord.pending || !newProfileSlug.trim() || !newProfileName.trim() || !newProfilePrompt.trim()}
+                aria-disabled={profileRecord.pending || !newProfileSlug.trim() || !newProfileName.trim() || !newProfilePrompt.trim()}
+              >
+                Create Profile
+              </button>
+            </div>
+
+            <div className="personality-config-block">
+              <h3>Profile Version History</h3>
+              <div className="stack">
+                {(profileVersions || []).map((version) => (
+                  <div key={version._id} className="queue-item">
+                    <p className="queue-title">
+                      v{version.versionNumber} · {version.name}
+                    </p>
+                    <p className="queue-meta">
+                      {version.reason || "snapshot"} · {formatDateTime(version.createdAt)}
+                    </p>
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      onClick={() => rollbackProfile(version._id)}
+                      disabled={profileRecord.pending}
+                      aria-disabled={profileRecord.pending}
+                    >
+                      Rollback to This
+                    </button>
+                  </div>
+                ))}
+                {profileVersions !== undefined && profileVersions.length === 0 ? (
+                  <p className="empty-line">No history entries yet.</p>
+                ) : null}
+              </div>
+            </div>
+          </div>
+        ) : (
+          <p className="empty-line">No personality profiles configured yet.</p>
+        )}
+      </article>
+
+      <article className="panel-card">
+        <h3>Media Library</h3>
+        <p className="queue-meta">Upload curated sticker and meme assets for outbound policy use.</p>
+        <div className="stack compact">
+          <label className="setup-input-group">
+            <span className="queue-meta">Kind</span>
+            <select
+              value={assetKind}
+              onChange={(event) => setAssetKind(event.target.value === "meme" ? "meme" : "sticker")}
+              disabled={mediaRecord.pending}
+              aria-disabled={mediaRecord.pending}
+            >
+              <option value="sticker">Sticker</option>
+              <option value="meme">Meme</option>
+            </select>
+          </label>
+          <label className="setup-input-group">
+            <span className="queue-meta">Label</span>
+            <input
+              type="text"
+              value={assetLabel}
+              onChange={(event) => setAssetLabel(event.target.value)}
+              disabled={mediaRecord.pending}
+              aria-disabled={mediaRecord.pending}
+            />
+          </label>
+          <label className="setup-input-group">
+            <span className="queue-meta">Tags (comma separated)</span>
+            <input
+              type="text"
+              value={assetTags}
+              onChange={(event) => setAssetTags(event.target.value)}
+              disabled={mediaRecord.pending}
+              aria-disabled={mediaRecord.pending}
+            />
+          </label>
+          <label className="setup-input-group">
+            <span className="queue-meta">File</span>
+            <input
+              type="file"
+              accept="image/*,.webp"
+              onChange={(event: ChangeEvent<HTMLInputElement>) => setAssetFile(event.target.files?.[0] || null)}
+              disabled={mediaRecord.pending}
+              aria-disabled={mediaRecord.pending}
+            />
+          </label>
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={uploadAsset}
+            disabled={mediaRecord.pending || !assetFile}
+            aria-disabled={mediaRecord.pending || !assetFile}
+          >
+            {mediaRecord.pending ? "Uploading..." : "Upload Asset"}
+          </button>
+          <div className="stack">
+            {(mediaAssets || []).map((asset) => (
+              <div key={asset._id} className="queue-item">
+                <p className="queue-title">
+                  {asset.label} ({asset.kind})
+                </p>
+                <p className="queue-meta">
+                  {asset.enabled ? "Enabled" : "Disabled"} · {asset.tags.join(", ") || "No tags"}
+                </p>
+                <div className="queue-actions">
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    onClick={() =>
+                      void runAction(
+                        mediaKey,
+                        async () => {
+                          await toggleAsset({
+                            assetId: asset._id as Id<"mediaAssets">,
+                            enabled: !asset.enabled,
+                          });
+                        },
+                        {
+                          pendingLabel: "Updating asset...",
+                          successMessage: "Asset updated.",
+                        },
+                      )
+                    }
+                  >
+                    {asset.enabled ? "Disable" : "Enable"}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    onClick={() =>
+                      void runAction(
+                        mediaKey,
+                        async () => {
+                          await deleteAsset({
+                            assetId: asset._id as Id<"mediaAssets">,
+                          });
+                        },
+                        {
+                          pendingLabel: "Deleting asset...",
+                          successMessage: "Asset deleted.",
+                        },
+                      )
+                    }
+                  >
+                    Delete
+                  </button>
+                </div>
+              </div>
+            ))}
+            {(mediaAssets || []).length === 0 ? <p className="empty-line">No media assets yet.</p> : null}
+          </div>
         </div>
       </article>
     </section>

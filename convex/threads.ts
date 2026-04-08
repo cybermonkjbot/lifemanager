@@ -7,6 +7,31 @@ import {
   resolveThreadEligibility,
 } from "./lib/threadEligibility";
 
+function clampInt(value: number | undefined, fallback: number, min: number, max: number) {
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.round(Math.max(min, Math.min(max, value as number)));
+}
+
+function compactDetail(value: string, maxChars: number) {
+  if (value.length <= maxChars) {
+    return value;
+  }
+  return `${value.slice(0, Math.max(0, maxChars - 3))}...`;
+}
+
+function safeJsonParse(raw: string | undefined) {
+  if (!raw) {
+    return null;
+  }
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    return null;
+  }
+}
+
 export const list = query({
   args: {
     limit: v.optional(v.number()),
@@ -382,6 +407,104 @@ export const get = query({
       memory,
       grounding: grounding || null,
     };
+  },
+});
+
+export const getToolEvents = query({
+  args: {
+    threadId: v.id("threads"),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const thread = await ctx.db.get(args.threadId);
+    if (!thread) {
+      return [];
+    }
+
+    const limit = clampInt(args.limit, 220, 30, 500);
+    const events = await ctx.db
+      .query("systemEvents")
+      .withIndex("by_threadId_and_createdAt", (q) => q.eq("threadId", args.threadId))
+      .order("desc")
+      .take(limit);
+
+    const filtered = events.filter((event) => {
+      return (
+        event.eventType.startsWith("ai.context.tool.") ||
+        event.eventType.startsWith("outreach.ai.context.tool.") ||
+        event.eventType === "ai.context.window" ||
+        event.eventType === "outreach.ai.context.window" ||
+        event.eventType === "ai.style_guardrail.passed" ||
+        event.eventType === "ai.style_guardrail.failed"
+      );
+    });
+
+    return filtered.map((event) => {
+      if (event.eventType.startsWith("ai.context.tool.") || event.eventType.startsWith("outreach.ai.context.tool.")) {
+        const detailMatch = event.detail.match(/^([a-zA-Z0-9._-]+)\s+([0-9]+)ms\s+input=([\s\S]*?)\s+output=([\s\S]*)$/);
+        const toolNameFromType = event.eventType.split(".tool.")[1] || "unknown";
+        const toolName = detailMatch?.[1] || toolNameFromType;
+        const latencyMs = Number(detailMatch?.[2] || 0);
+        const inputText = detailMatch?.[3];
+        const outputText = detailMatch?.[4];
+        const parsedInput = safeJsonParse(inputText);
+        const parsedOutput = safeJsonParse(outputText);
+        return {
+          _id: event._id,
+          createdAt: event.createdAt,
+          eventType: event.eventType,
+          source: event.source,
+          toolRunId: event.toolRunId,
+          phase: event.eventType.startsWith("outreach.") ? "outreach" : "reply",
+          kind: "tool_call" as const,
+          toolName,
+          latencyMs: Number.isFinite(latencyMs) ? latencyMs : 0,
+          inputText: inputText ? compactDetail(inputText, 900) : undefined,
+          outputText: outputText ? compactDetail(outputText, 900) : undefined,
+          parsedInput,
+          parsedOutput,
+          detail: compactDetail(event.detail, 900),
+        };
+      }
+
+      if (event.eventType === "ai.context.window" || event.eventType === "outreach.ai.context.window") {
+        return {
+          _id: event._id,
+          createdAt: event.createdAt,
+          eventType: event.eventType,
+          source: event.source,
+          toolRunId: event.toolRunId,
+          phase: event.eventType.startsWith("outreach.") ? "outreach" : "reply",
+          kind: "context_window" as const,
+          detail: compactDetail(event.detail, 900),
+        };
+      }
+
+      const detailMatch = event.detail.match(/score=([0-9.]+)\s+threshold=([0-9.]+)\s+hints=([\s\S]*)/);
+      const score = Number(detailMatch?.[1] || 0);
+      const threshold = Number(detailMatch?.[2] || 0);
+      const hintsRaw = detailMatch?.[3] || "";
+      const hints = hintsRaw
+        .split("|")
+        .map((hint) => hint.trim())
+        .filter(Boolean)
+        .slice(0, 8);
+
+      return {
+        _id: event._id,
+        createdAt: event.createdAt,
+        eventType: event.eventType,
+        source: event.source,
+        toolRunId: event.toolRunId,
+        phase: "reply" as const,
+        kind: "style_guardrail" as const,
+        passed: event.eventType.endsWith(".passed"),
+        score: Number.isFinite(score) ? score : 0,
+        threshold: Number.isFinite(threshold) ? threshold : 0,
+        hints,
+        detail: compactDetail(event.detail, 900),
+      };
+    });
   },
 });
 

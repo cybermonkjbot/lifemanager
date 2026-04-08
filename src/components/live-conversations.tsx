@@ -8,7 +8,7 @@ import type { Id } from "../../convex/_generated/dataModel";
 import { useMutation, useQuery } from "convex/react";
 import Link from "next/link";
 import { formatDateTime, trim } from "@/lib/format";
-import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type LiveConversationsProps = {
   initialThreadId?: string;
@@ -24,22 +24,14 @@ type PersonalityProfile = {
   updatedAt?: number;
 };
 
-type PersonalityProfileVersion = {
-  _id: string;
-  profileSlug: string;
-  versionNumber: number;
-  name: string;
-  description: string;
-  prompt: string;
-  defaultIntensity: number;
-  reason?: string;
-  createdAt: number;
-};
-
 type ThreadPersonalitySetting = {
   profileSlug: string;
   intensity: number;
   customPrompt?: string;
+  memePolicyMode?: "auto" | "always_allow" | "always_block";
+  memeAutoProfessional?: boolean;
+  memeAutoProfessionalScore?: number;
+  memeAutoProfessionalSignals?: string[];
   threadPromptProfile?: string;
   threadPromptProfileSource?: "manual" | "auto";
   threadPromptProfileLookbackDays?: number;
@@ -52,8 +44,17 @@ type ThreadPersonalityFormProps = {
   initialProfileSlug: string;
   initialIntensity: number;
   initialCustomPrompt: string;
+  initialMemePolicyMode: "auto" | "always_allow" | "always_block";
+  autoProfessional?: boolean;
+  autoProfessionalScore?: number;
+  autoProfessionalSignals?: string[];
   pending: boolean;
-  onSave: (values: { profileSlug: string; intensity: number; customPrompt: string }) => void;
+  onSave: (values: {
+    profileSlug: string;
+    intensity: number;
+    customPrompt: string;
+    memePolicyMode: "auto" | "always_allow" | "always_block";
+  }) => void;
 };
 
 type PromptProfileFormProps = {
@@ -64,19 +65,6 @@ type PromptProfileFormProps = {
   pending: boolean;
   onAutoBuild: () => void;
   onSaveManual: (promptProfile: string) => void;
-};
-
-type ProfileEditorFormProps = {
-  profile: PersonalityProfile;
-  pending: boolean;
-  error?: string;
-  onSave: (values: {
-    slug: string;
-    name: string;
-    description: string;
-    prompt: string;
-    defaultIntensity: number;
-  }) => void;
 };
 
 type GroundingFormProps = {
@@ -95,16 +83,6 @@ type ThreadGrounding = {
   vibeNotes?: string;
 };
 
-type MediaAsset = {
-  _id: string;
-  kind: "sticker" | "meme";
-  label: string;
-  tags: string[];
-  enabled: boolean;
-  mimeType: string;
-  fileUrl?: string | null;
-};
-
 type MessageMediaPreview = {
   assetId: string;
   kind: "sticker" | "meme";
@@ -116,6 +94,7 @@ type MessageMediaPreview = {
 type ThreadMessage = {
   _id: string;
   direction: "inbound" | "outbound";
+  toolRunId?: string;
   text: string;
   messageType?: "text" | "reaction" | "sticker" | "meme";
   reactionEmoji?: string;
@@ -124,6 +103,35 @@ type ThreadMessage = {
   mediaCaption?: string;
   mediaPreview?: MessageMediaPreview | null;
   messageAt: number;
+};
+
+type ThreadToolEvent = {
+  _id: string;
+  createdAt: number;
+  eventType: string;
+  source: string;
+  toolRunId?: string;
+  phase: "reply" | "outreach";
+  kind: "tool_call" | "context_window" | "style_guardrail";
+  toolName?: string;
+  latencyMs?: number;
+  inputText?: string;
+  outputText?: string;
+  parsedInput?: unknown;
+  parsedOutput?: unknown;
+  detail?: string;
+  passed?: boolean;
+  score?: number;
+  threshold?: number;
+  hints?: string[];
+};
+
+type MessageToolSummary = {
+  messageId: string;
+  messageAt: number;
+  toolCalls: ThreadToolEvent[];
+  contextWindows: ThreadToolEvent[];
+  styleGuardrails: ThreadToolEvent[];
 };
 
 function messageKindLabel(kind?: string) {
@@ -186,14 +194,6 @@ function renderMessageMediaPreview(message: ThreadMessage) {
   );
 }
 
-function parseTagInput(input: string) {
-  const tags = input
-    .split(",")
-    .map((tag) => tag.trim().toLowerCase())
-    .filter(Boolean);
-  return [...new Set(tags)].slice(0, 20);
-}
-
 function clamp01(value: number) {
   if (!Number.isFinite(value)) {
     return 0.7;
@@ -201,24 +201,120 @@ function clamp01(value: number) {
   return Math.max(0, Math.min(value, 1));
 }
 
+const TOOL_EVENT_MAX_LAG_MS = 2 * 60 * 1000;
+const TOOL_EVENT_MAX_LEAD_MS = 45 * 60 * 1000;
+
+function buildMessageToolSummaries(messages: ThreadMessage[] | undefined, events: ThreadToolEvent[] | undefined) {
+  const outboundMessages = (messages || []).filter((message) => message.direction === "outbound").sort((a, b) => a.messageAt - b.messageAt);
+  const eventsAsc = [...(events || [])].sort((a, b) => a.createdAt - b.createdAt);
+  const byMessageId = new Map<string, MessageToolSummary>();
+  const messageIdByRunId = new Map<string, string>();
+  const unmatchedEvents: ThreadToolEvent[] = [];
+
+  for (const message of outboundMessages) {
+    byMessageId.set(message._id, {
+      messageId: message._id,
+      messageAt: message.messageAt,
+      toolCalls: [],
+      contextWindows: [],
+      styleGuardrails: [],
+    });
+    if (message.toolRunId) {
+      messageIdByRunId.set(message.toolRunId, message._id);
+    }
+  }
+
+  let messageCursor = 0;
+  for (const event of eventsAsc) {
+    if (event.toolRunId) {
+      const exactMessageId = messageIdByRunId.get(event.toolRunId);
+      if (exactMessageId) {
+        const exactSummary = byMessageId.get(exactMessageId);
+        if (exactSummary) {
+          if (event.kind === "tool_call") {
+            exactSummary.toolCalls.push(event);
+          } else if (event.kind === "context_window") {
+            exactSummary.contextWindows.push(event);
+          } else {
+            exactSummary.styleGuardrails.push(event);
+          }
+          continue;
+        }
+      }
+    }
+
+    while (
+      messageCursor < outboundMessages.length &&
+      outboundMessages[messageCursor].messageAt + TOOL_EVENT_MAX_LAG_MS < event.createdAt
+    ) {
+      messageCursor += 1;
+    }
+
+    const candidate = outboundMessages[messageCursor];
+    if (!candidate) {
+      unmatchedEvents.push(event);
+      continue;
+    }
+
+    const deltaMs = candidate.messageAt - event.createdAt;
+    if (deltaMs < -TOOL_EVENT_MAX_LAG_MS || deltaMs > TOOL_EVENT_MAX_LEAD_MS) {
+      unmatchedEvents.push(event);
+      continue;
+    }
+
+    const summary = byMessageId.get(candidate._id);
+    if (!summary) {
+      unmatchedEvents.push(event);
+      continue;
+    }
+
+    if (event.kind === "tool_call") {
+      summary.toolCalls.push(event);
+      continue;
+    }
+    if (event.kind === "context_window") {
+      summary.contextWindows.push(event);
+      continue;
+    }
+    summary.styleGuardrails.push(event);
+  }
+
+  for (const summary of byMessageId.values()) {
+    summary.toolCalls.sort((a, b) => b.createdAt - a.createdAt);
+    summary.contextWindows.sort((a, b) => b.createdAt - a.createdAt);
+    summary.styleGuardrails.sort((a, b) => b.createdAt - a.createdAt);
+  }
+
+  return {
+    byMessageId,
+    unmatchedEvents: unmatchedEvents.sort((a, b) => b.createdAt - a.createdAt),
+  };
+}
+
 function ThreadPersonalityForm({
   profiles,
   initialProfileSlug,
   initialIntensity,
   initialCustomPrompt,
+  initialMemePolicyMode,
+  autoProfessional,
+  autoProfessionalScore,
+  autoProfessionalSignals,
   pending,
   onSave,
 }: ThreadPersonalityFormProps) {
   const [profileSlug, setProfileSlug] = useState(initialProfileSlug);
   const [intensity, setIntensity] = useState(clamp01(initialIntensity));
   const [customPrompt, setCustomPrompt] = useState(initialCustomPrompt);
+  const [memePolicyMode, setMemePolicyMode] = useState<"auto" | "always_allow" | "always_block">(initialMemePolicyMode);
 
   const hasChanged = useMemo(() => {
     const profileChanged = profileSlug !== initialProfileSlug;
     const intensityChanged = Math.abs(intensity - clamp01(initialIntensity)) >= 0.001;
     const promptChanged = customPrompt.trim() !== initialCustomPrompt.trim();
-    return profileChanged || intensityChanged || promptChanged;
-  }, [customPrompt, initialCustomPrompt, initialIntensity, initialProfileSlug, intensity, profileSlug]);
+    const memePolicyChanged = memePolicyMode !== initialMemePolicyMode;
+    return profileChanged || intensityChanged || promptChanged || memePolicyChanged;
+  }, [customPrompt, initialCustomPrompt, initialIntensity, initialMemePolicyMode, initialProfileSlug, intensity, memePolicyMode, profileSlug]);
 
   return (
     <div className="personality-config-block">
@@ -267,10 +363,34 @@ function ThreadPersonalityForm({
         />
       </label>
 
+      <label className="setup-input-group">
+        <span className="queue-meta">Meme policy</span>
+        <select
+          value={memePolicyMode}
+          onChange={(event) =>
+            setMemePolicyMode(
+              event.target.value === "always_allow" ? "always_allow" : event.target.value === "always_block" ? "always_block" : "auto",
+            )
+          }
+          disabled={pending}
+          aria-disabled={pending}
+        >
+          <option value="auto">Auto</option>
+          <option value="always_allow">Always allow</option>
+          <option value="always_block">Always block</option>
+        </select>
+      </label>
+
+      <p className="queue-meta">
+        Auto professional detector: {autoProfessional ? "Professional" : "Non-professional"}
+        {typeof autoProfessionalScore === "number" ? ` (score ${autoProfessionalScore.toFixed(2)})` : ""}
+        {autoProfessionalSignals?.length ? ` · ${autoProfessionalSignals.slice(0, 3).join(", ")}` : ""}
+      </p>
+
       <button
         type="button"
         className="btn btn-primary"
-        onClick={() => onSave({ profileSlug, intensity, customPrompt })}
+        onClick={() => onSave({ profileSlug, intensity, customPrompt, memePolicyMode })}
         disabled={!hasChanged || pending}
         aria-disabled={!hasChanged || pending}
       >
@@ -349,88 +469,6 @@ function PromptProfileForm({
   );
 }
 
-function ProfileEditorForm({ profile, pending, error, onSave }: ProfileEditorFormProps) {
-  const [name, setName] = useState(profile.name);
-  const [description, setDescription] = useState(profile.description);
-  const [prompt, setPrompt] = useState(profile.prompt);
-  const [defaultIntensity, setDefaultIntensity] = useState(clamp01(profile.defaultIntensity));
-
-  const hasChanged = useMemo(() => {
-    return (
-      name.trim() !== profile.name ||
-      description.trim() !== profile.description ||
-      prompt.trim() !== profile.prompt ||
-      Math.abs(defaultIntensity - clamp01(profile.defaultIntensity)) >= 0.001
-    );
-  }, [defaultIntensity, description, name, profile.defaultIntensity, profile.description, profile.name, profile.prompt, prompt]);
-
-  return (
-    <div className="personality-config-block">
-      <h3>Personality Profiles</h3>
-      <p className="queue-meta">Configure your core modes (girlfriend, relationship, friendship, casual).</p>
-
-      <label className="setup-input-group">
-        <span className="queue-meta">Display Name</span>
-        <input type="text" value={name} onChange={(event) => setName(event.target.value)} disabled={pending} aria-disabled={pending} />
-      </label>
-
-      <label className="setup-input-group">
-        <span className="queue-meta">Description</span>
-        <input
-          type="text"
-          value={description}
-          onChange={(event) => setDescription(event.target.value)}
-          disabled={pending}
-          aria-disabled={pending}
-        />
-      </label>
-
-      <label className="setup-input-group">
-        <span className="queue-meta">Behavior Prompt</span>
-        <textarea rows={4} value={prompt} onChange={(event) => setPrompt(event.target.value)} disabled={pending} aria-disabled={pending} />
-      </label>
-
-      <label className="setup-input-group">
-        <span className="queue-meta">Default Intensity: {Math.round(defaultIntensity * 100)}%</span>
-        <input
-          type="range"
-          min="0"
-          max="1"
-          step="0.01"
-          value={defaultIntensity}
-          onChange={(event) => setDefaultIntensity(Number(event.target.value))}
-          disabled={pending}
-          aria-disabled={pending}
-        />
-      </label>
-
-      <button
-        type="button"
-        className="btn btn-primary"
-        onClick={() =>
-          onSave({
-            slug: profile.slug,
-            name,
-            description,
-            prompt,
-            defaultIntensity,
-          })
-        }
-        disabled={!hasChanged || pending}
-        aria-disabled={!hasChanged || pending}
-      >
-        {pending ? "Saving..." : "Save Profile"}
-      </button>
-
-      {error ? (
-        <p className="queue-meta action-inline-error" role="alert">
-          {error}
-        </p>
-      ) : null}
-    </div>
-  );
-}
-
 function GroundingForm({ initialMyName, initialTheirName, initialVibeNotes, autoAliases, pending, onSave }: GroundingFormProps) {
   const [myName, setMyName] = useState(initialMyName);
   const [theirName, setTheirName] = useState(initialTheirName);
@@ -500,15 +538,8 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
   const setThreadPersonality = useMutation(api.personality.setThreadSetting);
   const setThreadPromptProfile = useMutation(api.personality.setThreadPromptProfile);
   const autoBuildThreadPromptProfile = useMutation(api.personality.autoBuildThreadPromptProfile);
-  const upsertPersonalityProfile = useMutation(api.personality.upsertProfile);
-  const deletePersonalityProfile = useMutation(api.personality.deleteProfile);
-  const rollbackProfileVersion = useMutation(api.personality.rollbackProfileVersion);
   const saveGroundingMutation = useMutation(api.grounding.saveThreadGrounding);
   const ignoreThreadMutation = useMutation(api.backlog.ignoreThread);
-  const generateUploadUrl = useMutation(api.media.generateUploadUrl);
-  const registerAsset = useMutation(api.media.registerAsset);
-  const toggleAsset = useMutation(api.media.toggleAsset);
-  const deleteAsset = useMutation(api.media.deleteAsset);
   const recordEvent = useMutation(api.system.recordEvent);
   const { runAction, getRecord, notices, dismissNotice } = useActionStateRegistry();
 
@@ -549,39 +580,22 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
     api.grounding.getThreadGrounding,
     selectedThreadId ? { threadId: selectedThreadId as Id<"threads"> } : "skip",
   ) as ThreadGrounding | null | undefined;
-  const mediaAssets = useQuery(api.media.listAssets, {}) as MediaAsset[] | undefined;
-
-  const [editorSlug, setEditorSlug] = useState("");
-  const [assetKind, setAssetKind] = useState<"sticker" | "meme">("sticker");
-  const [assetLabel, setAssetLabel] = useState("");
-  const [assetTags, setAssetTags] = useState("");
-  const [assetFile, setAssetFile] = useState<File | null>(null);
-  const [newProfileSlug, setNewProfileSlug] = useState("");
-  const [newProfileName, setNewProfileName] = useState("");
-  const [newProfileDescription, setNewProfileDescription] = useState("");
-  const [newProfilePrompt, setNewProfilePrompt] = useState("");
-  const [newProfileIntensity, setNewProfileIntensity] = useState(0.65);
+  const threadToolEvents = useQuery(
+    api.threads.getToolEvents,
+    selectedThreadId ? { threadId: selectedThreadId as Id<"threads">, limit: 260 } : "skip",
+  ) as ThreadToolEvent[] | undefined;
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
-  const selectedEditorSlug = editorSlug || profiles[0]?.slug || "";
-  const selectedEditorProfile = profiles.find((profile) => profile.slug === selectedEditorSlug) || null;
-  const profileVersions = useQuery(
-    api.personality.listProfileVersions,
-    selectedEditorProfile ? { slug: selectedEditorProfile.slug, limit: 20 } : "skip",
-  ) as PersonalityProfileVersion[] | undefined;
+  const [toolSummaryMessageId, setToolSummaryMessageId] = useState<string | null>(null);
 
   const settingsKey = selectedThreadId ? `personality:thread:${selectedThreadId}` : "personality:thread:none";
   const promptProfileKey = selectedThreadId ? `personality:promptprofile:${selectedThreadId}` : "personality:promptprofile:none";
-  const profileKey = "personality:profile";
   const groundingKey = selectedThreadId ? `grounding:thread:${selectedThreadId}` : "grounding:thread:none";
   const ignoreThreadKey = selectedThreadId ? `conversation:ignore:${selectedThreadId}` : "conversation:ignore:none";
-  const mediaKey = "media:library";
 
   const settingsRecord = getRecord(settingsKey);
   const promptProfileRecord = getRecord(promptProfileKey);
-  const profileRecord = getRecord(profileKey);
   const groundingRecord = getRecord(groundingKey);
   const ignoreThreadRecord = getRecord(ignoreThreadKey);
-  const mediaRecord = getRecord(mediaKey);
   const lastLoadStartedThreadRef = useRef<string | null>(null);
   const lastLoadedThreadRef = useRef<string | null>(null);
 
@@ -613,7 +627,12 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
     });
   }, [recordEvent, selectedThreadId, thread]);
 
-  const saveThreadSetting = (values: { profileSlug: string; intensity: number; customPrompt: string }) => {
+  const saveThreadSetting = (values: {
+    profileSlug: string;
+    intensity: number;
+    customPrompt: string;
+    memePolicyMode: "auto" | "always_allow" | "always_block";
+  }) => {
     if (!selectedThreadId) {
       return;
     }
@@ -626,6 +645,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
           profileSlug: values.profileSlug,
           intensity: clamp01(values.intensity),
           customPrompt: values.customPrompt.trim() || undefined,
+          memePolicyMode: values.memePolicyMode,
         });
       },
       {
@@ -676,95 +696,6 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
     );
   };
 
-  const saveProfile = (values: {
-    slug: string;
-    name: string;
-    description: string;
-    prompt: string;
-    defaultIntensity: number;
-  }) => {
-    void runAction(
-      profileKey,
-      async () => {
-        await upsertPersonalityProfile({
-          slug: values.slug,
-          name: values.name.trim(),
-          description: values.description.trim(),
-          prompt: values.prompt.trim(),
-          defaultIntensity: clamp01(values.defaultIntensity),
-        });
-      },
-      {
-        pendingLabel: "Saving profile...",
-        successMessage: "Personality profile updated.",
-      },
-    );
-  };
-
-  const createProfile = () => {
-    const slug = newProfileSlug.trim();
-    const name = newProfileName.trim();
-    const description = newProfileDescription.trim();
-    const prompt = newProfilePrompt.trim();
-    if (!slug || !name || !prompt) {
-      return;
-    }
-
-    void runAction(
-      profileKey,
-      async () => {
-        await upsertPersonalityProfile({
-          slug,
-          name,
-          description: description || "Custom profile",
-          prompt,
-          defaultIntensity: clamp01(newProfileIntensity),
-        });
-        setNewProfileSlug("");
-        setNewProfileName("");
-        setNewProfileDescription("");
-        setNewProfilePrompt("");
-        setNewProfileIntensity(0.65);
-      },
-      {
-        pendingLabel: "Creating profile...",
-        successMessage: "Profile created.",
-      },
-    );
-  };
-
-  const removeProfile = (slug: string) => {
-    void runAction(
-      profileKey,
-      async () => {
-        await deletePersonalityProfile({ slug });
-      },
-      {
-        pendingLabel: "Deleting profile...",
-        successMessage: "Profile deleted.",
-      },
-    );
-  };
-
-  const rollbackProfile = (versionId: string) => {
-    if (!selectedEditorProfile) {
-      return;
-    }
-    void runAction(
-      profileKey,
-      async () => {
-        await rollbackProfileVersion({
-          slug: selectedEditorProfile.slug,
-          versionId: versionId as Id<"personalityProfileVersions">,
-        });
-      },
-      {
-        pendingLabel: "Rolling back profile...",
-        successMessage: "Profile rolled back.",
-      },
-    );
-  };
-
   const saveGrounding = (values: { myName: string; theirName: string; vibeNotes: string }) => {
     if (!selectedThreadId) {
       return;
@@ -806,52 +737,6 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
     );
   };
 
-  const uploadAsset = () => {
-    if (!assetFile) {
-      return;
-    }
-
-    void runAction(
-      mediaKey,
-      async () => {
-        const uploadUrl = await generateUploadUrl({});
-        const upload = await fetch(uploadUrl as string, {
-          method: "POST",
-          headers: {
-            "Content-Type": assetFile.type || "application/octet-stream",
-          },
-          body: assetFile,
-        });
-
-        if (!upload.ok) {
-          throw new Error(`Upload failed (${upload.status})`);
-        }
-
-        const payload = (await upload.json()) as { storageId?: string };
-        if (!payload.storageId) {
-          throw new Error("Upload response missing storageId.");
-        }
-
-        await registerAsset({
-          kind: assetKind,
-          label: assetLabel.trim() || assetFile.name,
-          tags: parseTagInput(assetTags),
-          fileId: payload.storageId as Id<"_storage">,
-          mimeType: assetFile.type || "application/octet-stream",
-          enabled: true,
-        });
-
-        setAssetFile(null);
-        setAssetLabel("");
-        setAssetTags("");
-      },
-      {
-        pendingLabel: "Uploading media asset...",
-        successMessage: "Media asset added.",
-      },
-    );
-  };
-
   const reactionsByMessage = useMemo(() => {
     const map = new Map<string, Array<{ actorJid: string; emoji: string; direction: "inbound" | "outbound" }>>();
     const rows = thread?.reactions || [];
@@ -867,9 +752,21 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
     return map;
   }, [thread?.reactions]);
 
-  const threadSettingKey = `${selectedThreadId || "none"}:${threadPersonality?.profileSlug || "casual"}:${threadPersonality?.intensity || 0.6}:${threadPersonality?.customPrompt || ""}`;
+  const threadSettingKey = `${selectedThreadId || "none"}:${threadPersonality?.profileSlug || "casual"}:${threadPersonality?.intensity || 0.6}:${threadPersonality?.customPrompt || ""}:${threadPersonality?.memePolicyMode || "auto"}:${threadPersonality?.memeAutoProfessional ? "pro" : "casual"}:${threadPersonality?.memeAutoProfessionalScore || 0}`;
   const promptProfileFormKey = `${selectedThreadId || "none"}:${threadPersonality?.threadPromptProfile || ""}:${threadPersonality?.threadPromptProfileLookbackDays || 365}:${threadPersonality?.threadPromptProfileSource || "none"}:${threadPersonality?.threadPromptProfileUpdatedAt || 0}`;
-  const editorFormKey = `${selectedEditorProfile?.slug || "none"}:${selectedEditorProfile?.updatedAt || 0}`;
+  const toolEventSummary = useMemo(
+    () => buildMessageToolSummaries(thread?.messages, threadToolEvents),
+    [thread?.messages, threadToolEvents],
+  );
+  const threadMessagesById = useMemo(() => {
+    const map = new Map<string, ThreadMessage>();
+    for (const message of thread?.messages || []) {
+      map.set(message._id, message);
+    }
+    return map;
+  }, [thread?.messages]);
+  const selectedToolSummary = toolSummaryMessageId ? toolEventSummary.byMessageId.get(toolSummaryMessageId) || null : null;
+  const selectedToolSummaryMessage = toolSummaryMessageId ? threadMessagesById.get(toolSummaryMessageId) || null : null;
 
   return (
     <section className="panel-grid split-view">
@@ -977,6 +874,10 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
                 const displayText = messageDisplayText(message);
                 const mediaCaption = message.mediaCaption?.trim();
                 const showMediaCaption = Boolean(mediaCaption && mediaCaption !== displayText);
+                const messageToolSummary = outbound ? toolEventSummary.byMessageId.get(message._id) : undefined;
+                const toolSummaryCount = messageToolSummary
+                  ? messageToolSummary.toolCalls.length + messageToolSummary.contextWindows.length + messageToolSummary.styleGuardrails.length
+                  : 0;
 
                 return (
                   <div key={message._id} className={`chat-row ${outbound ? "outbound" : "inbound"}`}>
@@ -998,6 +899,23 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
                           ))}
                         </div>
                       ) : null}
+                      {outbound && toolSummaryCount > 0 ? (
+                        <div className="queue-actions">
+                          <button
+                            type="button"
+                            className="btn btn-ghost message-tool-summary-trigger"
+                            onClick={() => setToolSummaryMessageId(message._id)}
+                          >
+                            Tools used ({messageToolSummary?.toolCalls.length || 0})
+                          </button>
+                          <p className="queue-meta message-tool-summary-meta">
+                            {messageToolSummary?.contextWindows.length ? `${messageToolSummary.contextWindows.length} context window` : "No context window"}
+                            {messageToolSummary?.styleGuardrails.length
+                              ? ` · ${messageToolSummary.styleGuardrails.length} style guardrail`
+                              : ""}
+                          </p>
+                        </div>
+                      ) : null}
                       <span>{formatDateTime(message.messageAt)}</span>
                     </div>
                   </div>
@@ -1015,7 +933,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
           open={settingsModalOpen}
           onClose={() => setSettingsModalOpen(false)}
           title={selectedThreadId ? "Conversation Settings" : "Workspace Settings"}
-          description="Manage conversation personality, grounding, profile studio, and media assets."
+          description="Manage thread-specific personality, prompt profile, and grounding."
         >
           <div className="conversation-controls">
             {selectedThreadId && (threadPersonalityLoading || profilesLoading) ? (
@@ -1029,6 +947,10 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
                 initialProfileSlug={threadPersonality?.profileSlug || "casual"}
                 initialIntensity={threadPersonality?.intensity ?? 0.6}
                 initialCustomPrompt={threadPersonality?.customPrompt || ""}
+                initialMemePolicyMode={threadPersonality?.memePolicyMode || "auto"}
+                autoProfessional={threadPersonality?.memeAutoProfessional}
+                autoProfessionalScore={threadPersonality?.memeAutoProfessionalScore}
+                autoProfessionalSignals={threadPersonality?.memeAutoProfessionalSignals}
                 pending={settingsRecord.pending}
                 onSave={saveThreadSetting}
               />
@@ -1059,229 +981,89 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
               />
             ) : null}
 
-            {profilesLoading ? <p className="empty-line">Loading personality profiles…</p> : null}
+            <p className="queue-meta">
+              Global profile studio and media library now live in{" "}
+              <Link href="/settings" onClick={() => setSettingsModalOpen(false)}>
+                Settings
+              </Link>
+              .
+            </p>
+          </div>
+        </UIModal>
 
-            {profiles.length > 0 ? (
-              <div className="personality-config-block">
-                <h3>Profile Studio</h3>
-                <p className="queue-meta">Pick a profile and edit how it behaves across all conversations.</p>
-                <label className="setup-input-group">
-                  <span className="queue-meta">Profile to Edit</span>
-                  <select value={selectedEditorSlug} onChange={(event) => setEditorSlug(event.target.value)}>
-                    {profiles.map((profile) => (
-                      <option key={profile.slug} value={profile.slug}>
-                        {profile.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+        <UIModal
+          open={Boolean(selectedToolSummary)}
+          onClose={() => setToolSummaryMessageId(null)}
+          title="Tool Call Summary"
+          description="Context tools and checks captured before this outbound response."
+        >
+          {selectedToolSummary ? (
+            <div className="stack compact">
+              <div className="queue-item">
+                <p className="queue-title">Response</p>
+                <p className="queue-body">{trim(selectedToolSummaryMessage?.text || "No response text available.", 340)}</p>
+                <p className="queue-meta">Sent: {formatDateTime(selectedToolSummary.messageAt)}</p>
+              </div>
 
-                {selectedEditorProfile ? (
-                  <ProfileEditorForm
-                    key={editorFormKey}
-                    profile={selectedEditorProfile}
-                    pending={profileRecord.pending}
-                    error={profileRecord.error}
-                    onSave={saveProfile}
-                  />
-                ) : null}
-
-                {selectedEditorProfile && !selectedEditorProfile.isDefault ? (
-                  <button
-                    type="button"
-                    className="btn btn-ghost"
-                    onClick={() => removeProfile(selectedEditorProfile.slug)}
-                    disabled={profileRecord.pending}
-                    aria-disabled={profileRecord.pending}
-                  >
-                    Delete Profile
-                  </button>
-                ) : null}
-
-                <div className="personality-config-block">
-                  <h3>Create Profile</h3>
-                  <label className="setup-input-group">
-                    <span className="queue-meta">Slug</span>
-                    <input value={newProfileSlug} onChange={(event) => setNewProfileSlug(event.target.value)} placeholder="family_warm" />
-                  </label>
-                  <label className="setup-input-group">
-                    <span className="queue-meta">Name</span>
-                    <input value={newProfileName} onChange={(event) => setNewProfileName(event.target.value)} placeholder="Family Warm" />
-                  </label>
-                  <label className="setup-input-group">
-                    <span className="queue-meta">Description</span>
-                    <input value={newProfileDescription} onChange={(event) => setNewProfileDescription(event.target.value)} placeholder="Gentle and caring." />
-                  </label>
-                  <label className="setup-input-group">
-                    <span className="queue-meta">Prompt</span>
-                    <textarea rows={3} value={newProfilePrompt} onChange={(event) => setNewProfilePrompt(event.target.value)} />
-                  </label>
-                  <label className="setup-input-group">
-                    <span className="queue-meta">Default Intensity: {Math.round(newProfileIntensity * 100)}%</span>
-                    <input
-                      type="range"
-                      min="0"
-                      max="1"
-                      step="0.01"
-                      value={newProfileIntensity}
-                      onChange={(event) => setNewProfileIntensity(Number(event.target.value))}
-                    />
-                  </label>
-                  <button
-                    type="button"
-                    className="btn btn-primary"
-                    onClick={createProfile}
-                    disabled={profileRecord.pending || !newProfileSlug.trim() || !newProfileName.trim() || !newProfilePrompt.trim()}
-                    aria-disabled={profileRecord.pending || !newProfileSlug.trim() || !newProfileName.trim() || !newProfilePrompt.trim()}
-                  >
-                    Create Profile
-                  </button>
-                </div>
-
-                <div className="personality-config-block">
-                  <h3>Profile Version History</h3>
-                  <div className="stack">
-                    {(profileVersions || []).map((version) => (
-                      <div key={version._id} className="queue-item">
-                        <p className="queue-title">
-                          v{version.versionNumber} · {version.name}
-                        </p>
+              <div className="queue-item">
+                <p className="queue-title">Tool Calls</p>
+                {selectedToolSummary.toolCalls.length === 0 ? (
+                  <p className="empty-line">No tool calls captured for this response.</p>
+                ) : (
+                  <div className="stack compact">
+                    {selectedToolSummary.toolCalls.map((event) => (
+                      <div key={event._id} className="tool-summary-item">
                         <p className="queue-meta">
-                          {version.reason || "snapshot"} · {formatDateTime(version.createdAt)}
+                          {event.phase === "outreach" ? "Outreach" : "Reply"} · {event.toolName || event.eventType} · {event.latencyMs || 0}ms ·{" "}
+                          {formatDateTime(event.createdAt)}
                         </p>
-                        <button
-                          type="button"
-                          className="btn btn-ghost"
-                          onClick={() => rollbackProfile(version._id)}
-                          disabled={profileRecord.pending}
-                          aria-disabled={profileRecord.pending}
-                        >
-                          Rollback to This
-                        </button>
+                        <p className="queue-meta">Input</p>
+                        <pre className="tool-summary-json">{event.inputText || "(not captured)"}</pre>
+                        <p className="queue-meta">Output</p>
+                        <pre className="tool-summary-json">{event.outputText || "(not captured)"}</pre>
                       </div>
                     ))}
-                    {profileVersions !== undefined && profileVersions.length === 0 ? (
-                      <p className="empty-line">No history entries yet.</p>
-                    ) : null}
                   </div>
-                </div>
+                )}
               </div>
-            ) : !profilesLoading ? (
-              <p className="empty-line">No personality profiles configured yet.</p>
-            ) : null}
 
-            <div className="personality-config-block">
-              <h3>Media Library</h3>
-              <p className="queue-meta">Upload curated sticker and meme assets for outbound policy use.</p>
-              <label className="setup-input-group">
-                <span className="queue-meta">Kind</span>
-                <select
-                  value={assetKind}
-                  onChange={(event) => setAssetKind(event.target.value === "meme" ? "meme" : "sticker")}
-                  disabled={mediaRecord.pending}
-                  aria-disabled={mediaRecord.pending}
-                >
-                  <option value="sticker">Sticker</option>
-                  <option value="meme">Meme</option>
-                </select>
-              </label>
-              <label className="setup-input-group">
-                <span className="queue-meta">Label</span>
-                <input
-                  type="text"
-                  value={assetLabel}
-                  onChange={(event) => setAssetLabel(event.target.value)}
-                  disabled={mediaRecord.pending}
-                  aria-disabled={mediaRecord.pending}
-                />
-              </label>
-              <label className="setup-input-group">
-                <span className="queue-meta">Tags (comma separated)</span>
-                <input
-                  type="text"
-                  value={assetTags}
-                  onChange={(event) => setAssetTags(event.target.value)}
-                  disabled={mediaRecord.pending}
-                  aria-disabled={mediaRecord.pending}
-                />
-              </label>
-              <label className="setup-input-group">
-                <span className="queue-meta">File</span>
-                <input
-                  type="file"
-                  accept="image/*,.webp"
-                  onChange={(event: ChangeEvent<HTMLInputElement>) => setAssetFile(event.target.files?.[0] || null)}
-                  disabled={mediaRecord.pending}
-                  aria-disabled={mediaRecord.pending}
-                />
-              </label>
-              <button
-                type="button"
-                className="btn btn-primary"
-                onClick={uploadAsset}
-                disabled={mediaRecord.pending || !assetFile}
-                aria-disabled={mediaRecord.pending || !assetFile}
-              >
-                {mediaRecord.pending ? "Uploading..." : "Upload Asset"}
-              </button>
-              <div className="stack">
-                {(mediaAssets || []).map((asset) => (
-                  <div key={asset._id} className="queue-item">
-                    <p className="queue-title">
-                      {asset.label} ({asset.kind})
-                    </p>
-                    <p className="queue-meta">
-                      {asset.enabled ? "Enabled" : "Disabled"} · {asset.tags.join(", ") || "No tags"}
-                    </p>
-                    <div className="queue-actions">
-                      <button
-                        type="button"
-                        className="btn btn-ghost"
-                        onClick={() =>
-                          void runAction(
-                            mediaKey,
-                            async () => {
-                              await toggleAsset({
-                                assetId: asset._id as Id<"mediaAssets">,
-                                enabled: !asset.enabled,
-                              });
-                            },
-                            {
-                              pendingLabel: "Updating asset...",
-                              successMessage: "Asset updated.",
-                            },
-                          )
-                        }
-                      >
-                        {asset.enabled ? "Disable" : "Enable"}
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-ghost"
-                        onClick={() =>
-                          void runAction(
-                            mediaKey,
-                            async () => {
-                              await deleteAsset({
-                                assetId: asset._id as Id<"mediaAssets">,
-                              });
-                            },
-                            {
-                              pendingLabel: "Deleting asset...",
-                              successMessage: "Asset deleted.",
-                            },
-                          )
-                        }
-                      >
-                        Delete
-                      </button>
-                    </div>
+              <div className="queue-item">
+                <p className="queue-title">Context Window + Guardrail</p>
+                {selectedToolSummary.contextWindows.length === 0 && selectedToolSummary.styleGuardrails.length === 0 ? (
+                  <p className="empty-line">No context-window or style-guardrail events captured.</p>
+                ) : (
+                  <div className="stack compact">
+                    {selectedToolSummary.contextWindows.map((event) => (
+                      <div key={event._id} className="tool-summary-item">
+                        <p className="queue-meta">
+                          {event.phase === "outreach" ? "Outreach" : "Reply"} context window · {formatDateTime(event.createdAt)}
+                        </p>
+                        <pre className="tool-summary-json">{event.detail || "(no detail)"}</pre>
+                      </div>
+                    ))}
+                    {selectedToolSummary.styleGuardrails.map((event) => (
+                      <div key={event._id} className="tool-summary-item">
+                        <p className="queue-meta">
+                          Style guardrail {event.passed ? "passed" : "failed"} · score {Number(event.score || 0).toFixed(2)} /{" "}
+                          {Number(event.threshold || 0).toFixed(2)} · {formatDateTime(event.createdAt)}
+                        </p>
+                        <pre className="tool-summary-json">
+                          {(event.hints || []).length > 0 ? (event.hints || []).join("\n") : event.detail || "(no hints captured)"}
+                        </pre>
+                      </div>
+                    ))}
                   </div>
-                ))}
-                {(mediaAssets || []).length === 0 ? <p className="empty-line">No media assets yet.</p> : null}
+                )}
               </div>
+
+              {toolEventSummary.unmatchedEvents.length > 0 ? (
+                <p className="queue-meta">
+                  {toolEventSummary.unmatchedEvents.length} recent tool event
+                  {toolEventSummary.unmatchedEvents.length === 1 ? "" : "s"} could not be matched to a visible outbound message.
+                </p>
+              ) : null}
             </div>
-          </div>
+          ) : null}
         </UIModal>
       </article>
     </section>

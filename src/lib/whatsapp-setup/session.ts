@@ -115,7 +115,7 @@ class WhatsAppSetupManager {
       try {
         const bunBin = process.env.BUN_BIN || "bun";
         const child = spawn(bunBin, ["run", "worker"], {
-          cwd: process.cwd(),
+          cwd: ".",
           env: process.env,
           detached: true,
           stdio: "ignore",
@@ -156,7 +156,14 @@ class WhatsAppSetupManager {
   }
 
   private get authPath() {
-    return process.env.WHATSAPP_AUTH_PATH || ".wa_auth";
+    const configured = (process.env.WHATSAPP_AUTH_PATH || "").trim();
+    if (configured) {
+      if (configured.startsWith("/")) {
+        return configured;
+      }
+      return join(/* turbopackIgnore: true */ process.cwd(), configured);
+    }
+    return join(process.cwd(), ".wa_auth");
   }
 
   private async hasRegisteredCreds() {

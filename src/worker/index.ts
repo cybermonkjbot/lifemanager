@@ -4,16 +4,33 @@ import makeWASocket, {
   downloadMediaMessage,
   fetchLatestWaWebVersion,
   useMultiFileAuthState,
+  type WAMessage,
   type UserFacingSocketConfig,
 } from "baileys";
+import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { rm } from "node:fs/promises";
 import pino from "pino";
 import { ConvexHttpClient } from "convex/browser";
 import type { Id } from "../../convex/_generated/dataModel";
+import {
+  resolveGhostingSeverity,
+  resolveLongSilenceReopenMs,
+  resolveLongSilenceReopenWeeks,
+} from "../../convex/lib/outboundGuard";
+import { hasPidginCasualSignal, hasPidginSignal } from "../../shared/pidgin-lexicon";
 import { convexRefs } from "../lib/convex-refs";
 import { acquireWorkerLock, releaseWorkerLockSync } from "../lib/runtime/worker-lock";
 import {
+  getAppRuntimeStatus,
+  pauseAppRuntime,
+  restartAppRuntime,
+  resumeAppRuntime,
+  startAppRuntime,
+} from "../lib/runtime/app-runtime";
+import {
   describeInboundImageWithFallback,
+  generateMemeImageWithAzure,
   generateReplyWithFallback,
   estimateDelayAndTyping,
   normalizeOutboundText,
@@ -29,6 +46,7 @@ import {
   maybeFetchOlderHistoryForThread,
   readHistoryFetchConfigFromEnv,
 } from "./history-context";
+import { decideOlderContextUsage } from "./context-recall-policy";
 import {
   classifyThreadKindFromJid,
   getSenderJid,
@@ -37,7 +55,24 @@ import {
   parseInboundMessage,
   type ParsedInboundMessage,
 } from "./whatsapp";
+import {
+  decideInboundVisionAnalysis,
+  readVisionFilterModeFromEnv,
+  readVisionFilterUncaptionedCooldownMsFromEnv,
+} from "./vision-filter";
 import { transcribeWithWhisperCpp, type WhisperTranscriptionResult } from "./stt";
+import {
+  evaluateStatusOutreachLimit,
+  pickLaughReactionEmoji,
+  shouldUseLaughReactionOnly,
+} from "./status-policy";
+import {
+  evaluateMemeTimingGate,
+  evaluateProfessionalMemeGuard,
+  resolveMemeAssetWithFallback,
+  type MemeAssetSource,
+} from "./meme-policy";
+import { parseRuntimeCommand, type RuntimeCommand, type RuntimeCommandTarget } from "./runtime-commands";
 
 const logger = pino({
   name: "slm-worker",
@@ -48,6 +83,10 @@ type RuntimeSettings = {
   reactionsEnabled: boolean;
   stickersEnabled: boolean;
   memesEnabled: boolean;
+  generatedMemesEnabled: boolean;
+  generatedMemesAutoSendEnabled: boolean;
+  memeThreadCooldownMs: number;
+  memeSendProbability: number;
   soulModeEnabled: boolean;
   humorLearningEnabled: boolean;
   statusAutoReplyEnabled: boolean;
@@ -86,10 +125,54 @@ type StyleProfileSnapshot = {
   spellingNotes?: string[];
 } | null;
 
+type ContactMemoryFactSnapshot = {
+  factKey: string;
+  factValue: string;
+  factType: "preference" | "profile" | "schedule" | "relationship" | "promise" | "other";
+  confidence: number;
+};
+
+type ContactFactsSnapshot = {
+  facts?: ContactMemoryFactSnapshot[];
+} | null;
+
+type OutboxClaimedItem = {
+  outboxId: string;
+  threadId: string;
+  toolRunId?: string;
+  jid: string;
+  messageText: string;
+  typingMs: number;
+  provider: "azure" | "codex" | "heuristic";
+  sendKind: "text" | "reaction" | "sticker" | "meme";
+  reactionEmoji?: string;
+  reactionTargetWhatsAppMessageId?: string;
+  preReactionEmoji?: string;
+  mediaAssetId?: string;
+  mediaCaption?: string;
+  replyTargetWhatsAppMessageId?: string;
+  replyTargetSenderJid?: string;
+  replyTargetText?: string;
+  replyTargetMessageAt?: number;
+};
+
+type StickerAssetSnapshot = {
+  _id: string;
+  label: string;
+  tags?: string[];
+  contextSummary?: string;
+  contextTags?: string[];
+  contextTriggers?: string[];
+  contextAvoid?: string[];
+  contextConfidence?: number;
+  contextUpdatedAt?: number;
+};
+
 type PersonalityThreadSetting = {
   profileSlug?: string;
   intensity?: number;
   customPrompt?: string;
+  memePolicyMode?: "auto" | "always_allow" | "always_block";
   threadPromptProfile?: string;
   threadPromptProfileSource?: "manual" | "auto";
   profile?: {
@@ -122,6 +205,15 @@ type SystemHealthSnapshot = {
 const AI_OUTREACH_PLACEHOLDER = "__SLM_AI_OUTREACH__";
 const DEFAULT_NIGHT_WIND_DOWN_START_HOUR = 23;
 const DEFAULT_NIGHT_WIND_DOWN_END_HOUR = 7;
+const TEXT_EMOJI_ALLOWLIST = ["🌚", "🙂‍↔️", "🥲", "😒"];
+const TEXT_EMOJI_MAX_PER_WINDOW = 2;
+const TEXT_EMOJI_WINDOW_MS = 6 * 60 * 60 * 1000;
+const STICKER_COMPANION_COOLDOWN_MS = 45 * 60 * 1000;
+const CORE_HUMOR_PATTERN = /\b(lol|lmao|lmfao|rofl|haha|hehe|funny|joke|banter|meme|roast|hilarious)\b/i;
+const CORE_HUMOR_EMOJI_PATTERN = /[😂🤣😹😆😄😁😅😜🤪🙃]/u;
+const LOW_SIGNAL_HUMOR_KEYWORDS = new Set(["status", "story", "update", "wild", "dead"]);
+const VISION_FILTER_MODE = readVisionFilterModeFromEnv();
+const VISION_FILTER_UNCAPTIONED_COOLDOWN_MS = readVisionFilterUncaptionedCooldownMsFromEnv();
 
 type OutboundPolicy =
   | {
@@ -139,6 +231,7 @@ type OutboundPolicy =
   | {
       mode: "meme";
       mediaAssetId: string;
+      assetSource: "generated" | "uploaded";
     }
   | {
       mode: "text";
@@ -161,22 +254,31 @@ function escapeRegex(input: string) {
   return input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function containsKeyword(text: string, keywords: string[]) {
+function countConfiguredHumorKeywordHits(text: string, keywords: string[]) {
+  let hits = 0;
   for (const keyword of keywords) {
-    const normalized = keyword.trim();
-    if (!normalized) {
+    const normalized = keyword.trim().toLowerCase();
+    if (!normalized || LOW_SIGNAL_HUMOR_KEYWORDS.has(normalized)) {
       continue;
     }
     const pattern = new RegExp(`\\b${escapeRegex(normalized)}\\b`, "i");
     if (pattern.test(text)) {
-      return true;
+      hits += 1;
     }
   }
-  return false;
+  return hits;
 }
 
-function containsEmoji(text: string, emojis: string[]) {
-  return emojis.some((emoji) => emoji && text.includes(emoji));
+function hasConfiguredHumorEmojiHit(text: string, emojis: string[]) {
+  return emojis.some((emoji) => emoji && CORE_HUMOR_EMOJI_PATTERN.test(emoji) && text.includes(emoji));
+}
+
+function hasHumorSignal(text: string, funnyKeywords: string[], funnyEmojis: string[]) {
+  const coreKeywordHit = CORE_HUMOR_PATTERN.test(text);
+  const coreEmojiHit = CORE_HUMOR_EMOJI_PATTERN.test(text);
+  const configuredKeywordHits = countConfiguredHumorKeywordHits(text, funnyKeywords);
+  const configuredEmojiHit = hasConfiguredHumorEmojiHit(text, funnyEmojis);
+  return coreKeywordHit || coreEmojiHit || configuredKeywordHits >= 2 || (configuredKeywordHits >= 1 && configuredEmojiHit);
 }
 
 function looksLikeAckOnly(text: string) {
@@ -188,18 +290,34 @@ function looksLikeAckOnly(text: string) {
 }
 
 function shouldUseMeme(text: string, funnyKeywords: string[], funnyEmojis: string[]) {
-  return /\b(meme|lol|lmao|funny|joke|banter)\b/i.test(text) || containsKeyword(text, funnyKeywords) || containsEmoji(text, funnyEmojis);
+  return /\b(meme|reaction image|template)\b/i.test(text) || hasHumorSignal(text, funnyKeywords, funnyEmojis);
 }
 
 function positiveTone(text: string, funnyKeywords: string[], funnyEmojis: string[]) {
-  return /\b(lol|haha|nice|great|love|amazing|awesome|cool|banter|funny)\b/i.test(text) || containsKeyword(text, funnyKeywords) || containsEmoji(text, funnyEmojis);
+  return hasHumorSignal(text, funnyKeywords, funnyEmojis);
 }
 
 function looksLikeFunnyStatus(text: string, funnyKeywords: string[], funnyEmojis: string[]) {
   const hasStatusWord = /\b(status|story|update)\b/i.test(text);
-  const hasPlayfulSignal =
-    /\b(lol|haha|lmao|funny|joke|banter|meme)\b/i.test(text) || containsKeyword(text, funnyKeywords) || containsEmoji(text, funnyEmojis);
+  const hasPlayfulSignal = hasHumorSignal(text, funnyKeywords, funnyEmojis);
   return hasStatusWord && hasPlayfulSignal;
+}
+
+function isSeriousConversation(text: string) {
+  return /\b(death|died|funeral|burial|rip|hospital|surgery|diagnosis|cancer|emergency|accident|police|court|lawyer|legal|lawsuit|contract|salary|rent|debt|loan|bank|wire|transfer|fraud|otp|password|security|refund|chargeback|abuse|assault|suicid|depress(ed|ion)?)\b/i.test(
+    text,
+  );
+}
+
+function hasGenZCasualSignal(text: string) {
+  return (
+    /\b(bro|sis|bestie|babe|baby|shawty|fr|ngl|tbh|idk|ikr|vibe|vibes|vibing|soft life|lmao|lol|banter)\b/i.test(text) ||
+    hasPidginCasualSignal(text)
+  );
+}
+
+function hasStickerCue(text: string) {
+  return /\b(sticker|stickerify|drop (a|that) sticker|send (a|that) sticker|sticker me)\b/i.test(text);
 }
 
 function hasStatusInterestSignal(text: string) {
@@ -213,6 +331,84 @@ function hasLinkOrEmail(text: string) {
   const urlPattern =
     /\b(?:https?:\/\/|www\.)\S+|\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|net|org|io|co|ng|edu|gov|info|ai|app|dev|xyz|me|tv|ly|biz|us|uk|ca|au|de|fr|jp|in|za)\b(?:\/\S*)?/i;
   return emailPattern.test(text) || urlPattern.test(text);
+}
+
+function countUnansweredOutboundTail(
+  messages: Array<{
+    direction: "inbound" | "outbound";
+  }>,
+) {
+  let count = 0;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.direction !== "outbound") {
+      break;
+    }
+    count += 1;
+  }
+  return count;
+}
+
+function latestInboundAt(
+  messages: Array<{
+    direction: "inbound" | "outbound";
+    messageAt?: number;
+  }>,
+) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.direction === "inbound" && Number.isFinite(message.messageAt) && (message.messageAt || 0) > 0) {
+      return Number(message.messageAt);
+    }
+  }
+  return undefined;
+}
+
+function inferGhostReopenTone(
+  messages: Array<{
+    direction: "inbound" | "outbound";
+    text: string;
+  }>,
+) {
+  const recent = messages.slice(-60);
+  const hardBanterPattern = /\b(mf|mfs|motherf\w*|f\*+k|fuck)\b/i;
+  const playfulPattern = /\b(lol|lmao|lmfao|haha|bro|banter|roast)\b|[😂🤣😅😹]/i;
+
+  let hasNaijaSignal = false;
+  let hasPlayfulSignal = false;
+  let inboundHardBanter = false;
+  let outboundHardBanter = false;
+
+  for (const message of recent) {
+    const text = (message.text || "").toLowerCase();
+    if (!text) {
+      continue;
+    }
+    if (hasPidginSignal({ inboundText: text, threshold: 1.0 })) {
+      hasNaijaSignal = true;
+    }
+    if (playfulPattern.test(text)) {
+      hasPlayfulSignal = true;
+    }
+    if (hardBanterPattern.test(text)) {
+      if (message.direction === "inbound") {
+        inboundHardBanter = true;
+      } else {
+        outboundHardBanter = true;
+      }
+    }
+  }
+
+  if (hasNaijaSignal) {
+    return "naija_tease" as const;
+  }
+  if (inboundHardBanter && outboundHardBanter) {
+    return "hard_banter" as const;
+  }
+  if (hasPlayfulSignal) {
+    return "playful" as const;
+  }
+  return "warm" as const;
 }
 
 function sleep(ms: number) {
@@ -337,6 +533,10 @@ function attemptStageLabel(stage: AiAttempt["stage"]) {
       return "Azure HTTP fallback";
     case "codex_cli":
       return "Codex CLI fallback";
+    case "humor_judge_azure":
+      return "Humor judge (Azure)";
+    case "humor_judge_codex":
+      return "Humor judge (Codex)";
     case "heuristic_guardrail":
       return "Heuristic guardrail";
     case "heuristic_fallback":
@@ -365,6 +565,12 @@ function compactLogText(value: string, maxChars: number) {
     return normalized;
   }
   return `${normalized.slice(0, Math.max(0, maxChars - 3))}...`;
+}
+
+function createToolRunId(scope: "reply" | "outreach", threadId: string, sourceMessageId?: string) {
+  const randomToken = Math.random().toString(36).slice(2, 10);
+  const sourceToken = sourceMessageId ? sourceMessageId.slice(-8) : "none";
+  return `${scope}_${threadId.slice(-8)}_${sourceToken}_${Date.now()}_${randomToken}`;
 }
 
 function createConvexClient() {
@@ -474,6 +680,25 @@ async function run() {
 
   let processingOutbox = false;
   let sock: Awaited<ReturnType<typeof createSocket>>;
+  let workerRuntimePaused = false;
+
+  const normalizeAccountJid = (jid: string | null | undefined) => {
+    if (!jid) {
+      return "";
+    }
+    const [left = ""] = jid.trim().toLowerCase().split("@");
+    const [bare = ""] = left.split(":");
+    return bare;
+  };
+
+  const getSelfJid = () => {
+    const fromSocket = sock?.user?.id || "";
+    if (fromSocket) {
+      return fromSocket;
+    }
+    const creds = (state as { creds?: { me?: { id?: string } } }).creds;
+    return creds?.me?.id || "";
+  };
 
   const reconnectDelay = (attempt: number) => {
     const base = Math.min(1000 * 2 ** Math.max(0, attempt - 1), 15_000);
@@ -568,24 +793,46 @@ async function run() {
     expiresAt: 0,
     inFlight: null,
   };
+  const threadStyleProfileCache = new Map<string, CacheState<StyleProfileSnapshot>>();
   const systemHealthCache: CacheState<SystemHealthSnapshot> = {
     value: null,
     hasValue: false,
     expiresAt: 0,
     inFlight: null,
   };
-  const enabledAssetCache = new Map<"sticker" | "meme", CacheState<string | undefined>>();
+  const uploadedMemeFallbackCache: CacheState<string | undefined> = {
+    value: undefined,
+    hasValue: false,
+    expiresAt: 0,
+    inFlight: null,
+  };
+  const enabledStickerCache: CacheState<StickerAssetSnapshot[]> = {
+    value: [],
+    hasValue: false,
+    expiresAt: 0,
+    inFlight: null,
+  };
   const mediaAssetBufferCache = new Map<string, { buffer: Buffer; cachedAt: number; expiresAt: number }>();
   const mediaAssetBufferInFlight = new Map<string, Promise<Buffer>>();
   const historyFetchConfig = readHistoryFetchConfigFromEnv();
   const historyFetchStateByThread = new Map<string, { roundsUsed: number; lastFetchedAt: number; blockedUntil: number }>();
+  const stickerContextPassInFlightByAsset = new Set<string>();
+  const stickerContextSkipUntilByAsset = new Map<string, number>();
+  const memePrewarmInFlightByThread = new Set<string>();
+  const memePrewarmSkipUntilByThread = new Map<string, number>();
+  const memeGenerationSkipUntilByThread = new Map<string, number>();
 
   const SETTINGS_CACHE_TTL_MS = 1500;
   const STYLE_PROFILE_CACHE_TTL_MS = 20_000;
-  const HEALTH_CACHE_TTL_MS = 1500;
-  const ENABLED_ASSET_CACHE_TTL_MS = 12_000;
-  const MEDIA_ASSET_BUFFER_CACHE_TTL_MS = 5 * 60 * 1000;
-  const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
+const HEALTH_CACHE_TTL_MS = 1500;
+const ENABLED_ASSET_CACHE_TTL_MS = 12_000;
+const STICKER_CONTEXT_STALE_AFTER_MS = 30 * 24 * 60 * 60 * 1000;
+const STICKER_CONTEXT_PASS_INTERVAL_MS = 60_000;
+const STICKER_CONTEXT_FAILURE_RETRY_MS = 10 * 60 * 1000;
+const MEME_PREWARM_COOLDOWN_MS = 25 * 60 * 1000;
+const MEME_GENERATION_FAILURE_RETRY_MS = 10 * 60 * 1000;
+const MEDIA_ASSET_BUFFER_CACHE_TTL_MS = 5 * 60 * 1000;
+const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
 
   const getRuntimeSettings = async () => {
     const settings = await resolveTtlCache(runtimeSettingsCache, SETTINGS_CACHE_TTL_MS, async () => {
@@ -601,19 +848,550 @@ async function run() {
     });
   };
 
+  const getStyleProfileForThread = async (threadId?: string) => {
+    if (!threadId) {
+      return await getStyleProfile();
+    }
+
+    const cache =
+      threadStyleProfileCache.get(threadId) ||
+      (() => {
+        const next: CacheState<StyleProfileSnapshot> = {
+          value: null,
+          hasValue: false,
+          expiresAt: 0,
+          inFlight: null,
+        };
+        threadStyleProfileCache.set(threadId, next);
+        return next;
+      })();
+
+    return await resolveTtlCache(cache, STYLE_PROFILE_CACHE_TTL_MS, async () => {
+      const bundle = (await convex
+        .query(convexRefs.chatGetThreadStyleProfile, {
+          threadId,
+          fallbackToGlobal: true,
+        })
+        .catch(() => null)) as { profile?: StyleProfileSnapshot } | null;
+
+      if (bundle?.profile) {
+        return bundle.profile;
+      }
+      return await getStyleProfile();
+    });
+  };
+
   const getSystemHealth = async () => {
     return await resolveTtlCache(systemHealthCache, HEALTH_CACHE_TTL_MS, async () => {
       return (await convex.query(convexRefs.systemHealth, {})) as SystemHealthSnapshot;
     });
   };
 
-  const pickEnabledAsset = async (kind: "sticker" | "meme") => {
-    const cache = enabledAssetCache.get(kind) ?? { value: undefined, hasValue: false, expiresAt: 0, inFlight: null };
-    enabledAssetCache.set(kind, cache);
-    return await resolveTtlCache(cache, ENABLED_ASSET_CACHE_TTL_MS, async () => {
-      const assets = (await convex.query(convexRefs.mediaGetEnabledByKind, { kind }).catch(() => [])) as Array<{ _id: string }> | [];
-      return assets[0]?._id;
+  const pickUploadedMemeFallbackAsset = async () => {
+    return await resolveTtlCache(uploadedMemeFallbackCache, ENABLED_ASSET_CACHE_TTL_MS, async () => {
+      const row = (await convex.query(convexRefs.mediaGetBestUploadedMemeFallback, {}).catch(() => null)) as
+        | { assetId: string }
+        | null;
+      return row?.assetId;
     });
+  };
+
+  const pickGeneratedMemeForThread = async (threadId: string, cooldownMs: number) => {
+    const row = (await convex
+      .query(convexRefs.mediaGetBestGeneratedMemeForThread, {
+        threadId,
+        cooldownMs,
+        limit: 40,
+      })
+      .catch(() => null)) as { assetId: string } | null;
+    return row?.assetId;
+  };
+
+  const markMediaAssetUsed = async (assetId?: string) => {
+    if (!assetId) {
+      return;
+    }
+    await convex
+      .mutation(convexRefs.mediaMarkAssetUsed, {
+        assetId: assetId as Id<"mediaAssets">,
+      })
+      .catch(() => undefined);
+  };
+
+  const buildThreadMemeContextSnippet = (args: {
+    inboundText: string;
+    recentHistoryLines: string[];
+    styleHints?: string[];
+  }) => {
+    const snippet = [
+      `Inbound: ${args.inboundText.trim()}`,
+      args.recentHistoryLines.length ? `History: ${args.recentHistoryLines.slice(-4).join(" | ")}` : "",
+      args.styleHints?.length ? `Hints: ${args.styleHints.slice(0, 3).join(" | ")}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+    return snippet.slice(0, 380);
+  };
+
+  const generateAndStoreThreadMeme = async (args: {
+    threadId: string;
+    threadJid: string;
+    inboundText: string;
+    recentHistoryLines: string[];
+    styleHints?: string[];
+    runtimeSettings: RuntimeSettings | null;
+    threadTitle?: string;
+    reason: "on_demand" | "prewarm";
+  }) => {
+    const blockedUntil = memeGenerationSkipUntilByThread.get(args.threadId) || 0;
+    if (blockedUntil > Date.now()) {
+      return undefined;
+    }
+
+    const generation = await generateMemeImageWithAzure({
+      inboundText: args.inboundText,
+      recentHistoryLines: args.recentHistoryLines,
+      styleHints: args.styleHints,
+      threadTitle: args.threadTitle,
+    });
+
+    if (!generation.imageBytes || generation.error) {
+      memeGenerationSkipUntilByThread.set(args.threadId, Date.now() + MEME_GENERATION_FAILURE_RETRY_MS);
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: "media.meme.generate.error",
+          threadId: args.threadId as Id<"threads">,
+          detail: compactLogText(
+            `reason=${args.reason} model=${generation.model} error=${generation.error || "empty_payload"}`,
+            300,
+          ),
+        })
+        .catch(() => undefined);
+      return undefined;
+    }
+
+    const contentHash = createHash("sha256").update(generation.imageBytes).digest("hex");
+    const uploadUrl = (await convex.mutation(convexRefs.mediaGenerateUploadUrl, {})) as string;
+    const upload = await fetch(uploadUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": generation.mimeType || "image/png",
+      },
+      body: new Uint8Array(generation.imageBytes),
+    });
+    if (!upload.ok) {
+      throw new Error(`Generated meme upload failed (${upload.status}).`);
+    }
+    const payload = (await upload.json()) as { storageId?: string };
+    if (!payload.storageId) {
+      throw new Error("Generated meme upload response missing storageId.");
+    }
+
+    const nowIso = new Date().toISOString().slice(0, 10);
+    const labelSuffix = args.threadJid.slice(0, 18);
+    const contextSnippet = buildThreadMemeContextSnippet({
+      inboundText: args.inboundText,
+      recentHistoryLines: args.recentHistoryLines,
+      styleHints: args.styleHints,
+    });
+
+    const assetId = (await convex.mutation(convexRefs.mediaRegisterAssetIfMissing, {
+      kind: "meme",
+      label: `Thread meme ${nowIso} ${labelSuffix}`,
+      tags: [
+        "generated",
+        "thread",
+        "meme",
+        args.reason === "prewarm" ? "prewarm" : "on_demand",
+      ],
+      fileId: payload.storageId as Id<"_storage">,
+      mimeType: generation.mimeType || "image/png",
+      enabled: true,
+      contentHash,
+      source: "generated",
+      threadId: args.threadId as Id<"threads">,
+      generationPromptHash: generation.promptHash,
+      generationContextSnippet: contextSnippet,
+    })) as Id<"mediaAssets">;
+
+    uploadedMemeFallbackCache.hasValue = false;
+    uploadedMemeFallbackCache.expiresAt = 0;
+    memeGenerationSkipUntilByThread.delete(args.threadId);
+
+    await convex
+      .mutation(convexRefs.systemRecordEvent, {
+        source: "worker",
+        eventType: "media.meme.generated",
+        threadId: args.threadId as Id<"threads">,
+        detail: compactLogText(`reason=${args.reason} asset=${assetId} model=${generation.model}`, 280),
+      })
+      .catch(() => undefined);
+
+    return assetId;
+  };
+
+  const maybePrewarmThreadMeme = async (args: {
+    threadId: string;
+    threadJid: string;
+    inboundText: string;
+    recentHistoryLines: string[];
+    styleHints?: string[];
+    runtimeSettings: RuntimeSettings | null;
+    threadTitle?: string;
+  }) => {
+    if ((args.runtimeSettings?.generatedMemesEnabled ?? true) === false) {
+      return;
+    }
+    if (memePrewarmInFlightByThread.has(args.threadId)) {
+      return;
+    }
+    const blockedUntil = memePrewarmSkipUntilByThread.get(args.threadId) || 0;
+    if (blockedUntil > Date.now()) {
+      return;
+    }
+
+    memePrewarmInFlightByThread.add(args.threadId);
+    try {
+      const existing = await pickGeneratedMemeForThread(args.threadId, 0);
+      if (existing) {
+        memePrewarmSkipUntilByThread.set(args.threadId, Date.now() + MEME_PREWARM_COOLDOWN_MS);
+        return;
+      }
+      await generateAndStoreThreadMeme({
+        ...args,
+        reason: "prewarm",
+      });
+      memePrewarmSkipUntilByThread.set(args.threadId, Date.now() + MEME_PREWARM_COOLDOWN_MS);
+    } catch {
+      memePrewarmSkipUntilByThread.set(args.threadId, Date.now() + MEME_GENERATION_FAILURE_RETRY_MS);
+    } finally {
+      memePrewarmInFlightByThread.delete(args.threadId);
+    }
+  };
+
+  const tokenizeForMatch = (input: string) => {
+    const stopwords = new Set([
+      "a",
+      "an",
+      "and",
+      "are",
+      "as",
+      "at",
+      "be",
+      "but",
+      "for",
+      "from",
+      "i",
+      "if",
+      "in",
+      "is",
+      "it",
+      "its",
+      "me",
+      "my",
+      "of",
+      "on",
+      "or",
+      "so",
+      "the",
+      "to",
+      "we",
+      "you",
+      "your",
+    ]);
+    return input
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, " ")
+      .split(/\s+/)
+      .map((word) => word.trim())
+      .filter((word) => word.length >= 3 && !stopwords.has(word));
+  };
+
+  const uniqueTrimmed = (values: string[], limit = 20) => {
+    const deduped = new Set(
+      values
+        .map((value) => value.trim())
+        .filter(Boolean),
+    );
+    return [...deduped].slice(0, limit);
+  };
+
+  const buildStickerContextFromDescription = (description: string, label?: string, tags?: string[]) => {
+    const merged = [description, label || "", ...(tags || [])].filter(Boolean).join(" ").toLowerCase();
+    const words = tokenizeForMatch(merged);
+    const toneTags: string[] = [];
+    if (/\b(funny|laugh|lol|joke|meme|goofy|cartoon|silly)\b/.test(merged)) {
+      toneTags.push("playful");
+    }
+    if (/\b(celebrat|party|dance|congrats|win|victory|success)\b/.test(merged)) {
+      toneTags.push("celebratory");
+    }
+    if (/\b(heart|love|hug|kiss|cute|sweet)\b/.test(merged)) {
+      toneTags.push("affectionate");
+    }
+    if (/\b(sad|cry|comfort|sorry|support|there for you)\b/.test(merged)) {
+      toneTags.push("supportive");
+    }
+    if (/\b(angry|annoy|eyeroll|frustrat|wtf)\b/.test(merged)) {
+      toneTags.push("frustrated");
+    }
+    if (toneTags.length === 0) {
+      toneTags.push("neutral_reaction");
+    }
+
+    const triggers = uniqueTrimmed([
+      ...words,
+      ...toneTags,
+      ...(tags || []).map((tag) => tag.toLowerCase()),
+    ], 16);
+
+    const avoid = uniqueTrimmed([
+      ...(toneTags.includes("playful") ? ["bereavement", "emergency", "serious"] : []),
+      ...(toneTags.includes("celebratory") ? ["bad news", "loss", "apology"] : []),
+      ...(toneTags.includes("frustrated") ? ["congrats", "good news"] : []),
+    ], 8);
+
+    const summary =
+      toneTags.includes("playful")
+        ? "Use for light, funny moments, banter, and casual reactions."
+        : toneTags.includes("celebratory")
+          ? "Use when celebrating wins, milestones, or good news."
+          : toneTags.includes("supportive")
+            ? "Use to show empathy, comfort, or gentle reassurance."
+            : toneTags.includes("affectionate")
+              ? "Use for warm, affectionate, or sweet interactions."
+              : toneTags.includes("frustrated")
+                ? "Use for mild frustration, disbelief, or eye-roll moments."
+                : "Use as a neutral visual reaction in casual conversation.";
+
+    const confidence = description ? 0.66 : 0.45;
+    return {
+      summary,
+      toneTags,
+      triggers,
+      avoid,
+      confidence,
+    };
+  };
+
+  const ensureStickerContextForAsset = async (assetId: string) => {
+    if (!assetId || stickerContextPassInFlightByAsset.has(assetId)) {
+      return;
+    }
+    const blockedUntil = stickerContextSkipUntilByAsset.get(assetId) || 0;
+    if (blockedUntil > Date.now()) {
+      return;
+    }
+
+    stickerContextPassInFlightByAsset.add(assetId);
+    try {
+      const asset = (await convex.query(convexRefs.mediaGetAssetDownloadUrl, {
+        assetId,
+      })) as
+        | null
+        | {
+            assetId: string;
+            kind: "sticker" | "meme";
+            mimeType: string;
+            label: string;
+            url: string;
+            contextSummary?: string;
+            contextTags?: string[];
+            contextTriggers?: string[];
+            contextAvoid?: string[];
+            contextConfidence?: number;
+            contextUpdatedAt?: number;
+          };
+      if (!asset || asset.kind !== "sticker" || !asset.url) {
+        return;
+      }
+      if ((asset.contextUpdatedAt || 0) > Date.now() - STICKER_CONTEXT_STALE_AFTER_MS) {
+        return;
+      }
+
+      const response = await fetch(asset.url);
+      if (!response.ok) {
+        throw new Error(`Failed to download sticker asset ${assetId}: ${response.status}`);
+      }
+      const stickerBytes = Buffer.from(await response.arrayBuffer());
+      if (stickerBytes.length === 0) {
+        throw new Error(`Sticker asset ${assetId} is empty.`);
+      }
+
+      const runtimeSettings = await getRuntimeSettings();
+      const visual = await describeInboundImageWithFallback({
+        imageBytes: stickerBytes,
+        mimeType: asset.mimeType,
+        caption: asset.label,
+        runtime: {
+          temperature: runtimeSettings?.aiTemperature,
+          maxOutputTokens: runtimeSettings?.aiMaxOutputTokens,
+          maxReplyChars: runtimeSettings?.aiMaxReplyChars,
+          fallbackMode: runtimeSettings?.aiFallbackMode,
+        },
+      });
+
+      const context = buildStickerContextFromDescription(visual.description, asset.label);
+      await convex
+        .mutation(convexRefs.mediaUpsertAssetContext, {
+          assetId: asset.assetId as Id<"mediaAssets">,
+          contextSummary: context.summary,
+          contextTags: context.toneTags,
+          contextTriggers: context.triggers,
+          contextAvoid: context.avoid,
+          contextConfidence: context.confidence,
+          contextSource: visual.provider === "azure" ? "vision_ai" : "heuristic",
+        })
+        .catch(() => undefined);
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: "media.sticker.context_passed",
+          detail: compactLogText(`asset=${assetId} source=${visual.provider} summary=${context.summary}`, 280),
+        })
+        .catch(() => undefined);
+
+      enabledStickerCache.hasValue = false;
+      enabledStickerCache.expiresAt = 0;
+      stickerContextSkipUntilByAsset.delete(assetId);
+    } catch (error) {
+      const err = error instanceof Error ? error.message : String(error);
+      stickerContextSkipUntilByAsset.set(assetId, Date.now() + STICKER_CONTEXT_FAILURE_RETRY_MS);
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: "media.sticker.context_pass_error",
+          detail: compactLogText(`asset=${assetId} ${err}`, 280),
+        })
+        .catch(() => undefined);
+    } finally {
+      stickerContextPassInFlightByAsset.delete(assetId);
+    }
+  };
+
+  const runStickerContextBackfillPass = async () => {
+    const candidates = (await convex
+      .query(convexRefs.mediaListStickerAssetsNeedingContext, {
+        limit: 8,
+        staleAfterMs: STICKER_CONTEXT_STALE_AFTER_MS,
+      })
+      .catch(() => [])) as Array<{ _id: string }>;
+    for (const item of candidates) {
+      await ensureStickerContextForAsset(item._id);
+    }
+  };
+
+  const getEnabledStickerAssets = async () => {
+    return await resolveTtlCache(enabledStickerCache, ENABLED_ASSET_CACHE_TTL_MS, async () => {
+      return (await convex.query(convexRefs.mediaGetEnabledByKind, { kind: "sticker" }).catch(() => [])) as StickerAssetSnapshot[];
+    });
+  };
+
+  const pickBestStickerAsset = async (inboundText: string) => {
+    const stickers = await getEnabledStickerAssets();
+    if (!stickers.length) {
+      return undefined;
+    }
+
+    const keywords = new Set(tokenizeForMatch(inboundText));
+    const scored = stickers.map((asset) => {
+      const triggers = [
+        ...(asset.contextTriggers || []),
+        ...(asset.contextTags || []),
+        ...(asset.tags || []),
+      ].map((value) => value.toLowerCase());
+      const avoid = (asset.contextAvoid || []).map((value) => value.toLowerCase());
+      let score = 0;
+      for (const token of keywords) {
+        if (triggers.some((entry) => entry.includes(token) || token.includes(entry))) {
+          score += 2;
+        }
+        if (avoid.some((entry) => entry.includes(token) || token.includes(entry))) {
+          score -= 3;
+        }
+      }
+      score += (asset.contextConfidence ?? 0.35) * 0.6;
+      if (!asset.contextUpdatedAt) {
+        score -= 0.4;
+      }
+      return { asset, score };
+    });
+
+    scored.sort((a, b) => b.score - a.score);
+    const chosen = scored[0]?.asset || stickers[0];
+    if (chosen && (!chosen.contextUpdatedAt || !chosen.contextSummary)) {
+      void ensureStickerContextForAsset(chosen._id);
+    }
+    return chosen?._id;
+  };
+
+  const decideStickerCompanionPlan = async (args: {
+    jid: string;
+    threadId: string;
+    inboundText: string;
+    outboundText: string;
+    runtimeSettings: RuntimeSettings | null;
+    preReactionActive: boolean;
+  }) => {
+    if (classifyThreadKindFromJid(args.jid) !== "direct") {
+      return null;
+    }
+    if (args.preReactionActive) {
+      return null;
+    }
+    if ((args.runtimeSettings?.stickersEnabled ?? true) === false) {
+      return null;
+    }
+    if ((getRecentStickerCompanionAt(args.jid) || 0) > Date.now() - STICKER_COMPANION_COOLDOWN_MS) {
+      return null;
+    }
+
+    const inbound = (args.inboundText || "").trim();
+    const outbound = (args.outboundText || "").trim();
+    const combined = `${inbound}\n${outbound}`.trim();
+    if (!combined) {
+      return null;
+    }
+    if (isSeriousConversation(combined)) {
+      return null;
+    }
+
+    const funnyKeywords = args.runtimeSettings?.funnyStatusKeywords || [];
+    const funnyEmojis = args.runtimeSettings?.funnyStatusEmojis || [];
+    const playfulSignal =
+      positiveTone(combined, funnyKeywords, funnyEmojis) ||
+      looksLikeFunnyStatus(combined, funnyKeywords, funnyEmojis) ||
+      hasGenZCasualSignal(combined);
+    if (!playfulSignal) {
+      return null;
+    }
+
+    const stickerAssetId = await pickBestStickerAsset(`${inbound}\n${outbound}`.trim());
+    if (!stickerAssetId) {
+      return null;
+    }
+
+    const seed = createHash("sha1").update(`${args.threadId}|${inbound}|${outbound}`).digest("hex");
+    const questionLike = /\?$/.test(outbound) || /\b(can|could|should|when|where|what|why|how)\b/i.test(outbound);
+    const position: "before" | "after" = questionLike || parseInt(seed.slice(0, 2), 16) % 2 === 0 ? "before" : "after";
+    return {
+      assetId: stickerAssetId,
+      position,
+    };
+  };
+
+  const sendStickerCompanion = async (args: { jid: string; assetId: string }) => {
+    await ensureStickerContextForAsset(args.assetId);
+    const stickerBuffer = await fetchMediaAssetBuffer(args.assetId);
+    rememberAutomatedThreadSend(args.jid);
+    const sent = await sock.sendMessage(args.jid, {
+      sticker: stickerBuffer,
+    });
+    const sentId = sent?.key?.id || undefined;
+    rememberAutomatedOutboundId(sentId);
+    rememberStickerCompanionAt(args.jid, Date.now());
+    return sentId;
   };
 
   const pruneMediaAssetBufferCache = () => {
@@ -641,6 +1419,18 @@ async function run() {
     inbound: ParsedInboundMessage;
     runtimeSettings: RuntimeSettings | null;
     personalityIntensity?: number;
+    threadKind: "direct" | "group" | "broadcast_or_system";
+    threadId: string;
+    threadJid: string;
+    threadTitle?: string;
+    threadMessages: Array<{
+      direction: "inbound" | "outbound";
+      text: string;
+      messageType?: string;
+      messageAt?: number;
+    }>;
+    memePolicyMode?: "auto" | "always_allow" | "always_block";
+    styleHints?: string[];
   }): Promise<OutboundPolicy> => {
     const text = args.inbound.text || "";
     const funnyKeywords = args.runtimeSettings?.funnyStatusKeywords || [];
@@ -653,16 +1443,18 @@ async function run() {
       lowRisk &&
       personalityPositive &&
       (positiveTone(text, funnyKeywords, funnyEmojis) || looksLikeFunnyStatus(text, funnyKeywords, funnyEmojis));
+    const stickerOnlyEligible =
+      args.threadKind === "direct" &&
+      (args.runtimeSettings?.stickersEnabled ?? true) &&
+      !isSeriousConversation(text) &&
+      (hasStickerCue(text) ||
+        (humorAllowed &&
+          ((args.inbound.kind === "sticker" && text.trim().length <= 180) ||
+            (hasGenZCasualSignal(text) && text.trim().length <= 140) ||
+            /\b(lol|lmao|haha|banter|meme|funny|dead)\b/i.test(text))));
 
-    if ((args.runtimeSettings?.reactionsEnabled ?? true) && looksLikeAckOnly(text)) {
-      return {
-        mode: "reaction_only",
-        emoji: chooseReactionEmoji(text),
-      };
-    }
-
-    if ((args.runtimeSettings?.stickersEnabled ?? true) && args.inbound.kind === "sticker" && humorAllowed) {
-      const stickerId = await pickEnabledAsset("sticker");
+    if (stickerOnlyEligible) {
+      const stickerId = await pickBestStickerAsset(text);
       if (stickerId) {
         return {
           mode: "sticker",
@@ -671,13 +1463,111 @@ async function run() {
       }
     }
 
-    if ((args.runtimeSettings?.memesEnabled ?? true) && shouldUseMeme(text, funnyKeywords, funnyEmojis) && humorAllowed) {
-      const memeId = await pickEnabledAsset("meme");
-      if (memeId) {
+    if ((args.runtimeSettings?.reactionsEnabled ?? true) && looksLikeAckOnly(text)) {
+      return {
+        mode: "reaction_only",
+        emoji: chooseReactionEmoji(text),
+      };
+    }
+
+    if (
+      args.threadKind === "direct" &&
+      (args.runtimeSettings?.stickersEnabled ?? true) &&
+      args.inbound.kind === "sticker" &&
+      humorAllowed
+    ) {
+      const stickerId = await pickBestStickerAsset(text);
+      if (stickerId) {
         return {
-          mode: "meme",
-          mediaAssetId: memeId,
+          mode: "sticker",
+          mediaAssetId: stickerId,
         };
+      }
+    }
+
+    const memeCue = shouldUseMeme(text, funnyKeywords, funnyEmojis);
+    const memeEligibleBase =
+      args.threadKind === "direct" &&
+      (args.runtimeSettings?.memesEnabled ?? true) &&
+      memeCue &&
+      humorAllowed &&
+      !isSeriousConversation(text);
+
+    if (memeEligibleBase) {
+      const professionalGuard = evaluateProfessionalMemeGuard({
+        memePolicyMode: args.memePolicyMode,
+        historyMessages: args.threadMessages.map((message) => ({
+          text: message.text,
+          direction: message.direction,
+          messageType: message.messageType,
+        })),
+        latestInboundText: text,
+      });
+
+      if (!professionalGuard.blocked) {
+        void maybePrewarmThreadMeme({
+          threadId: args.threadId,
+          threadJid: args.threadJid,
+          inboundText: text,
+          recentHistoryLines: args.threadMessages.map((message) => `${message.direction === "inbound" ? "Them" : "Me"}: ${message.text}`),
+          styleHints: args.styleHints,
+          runtimeSettings: args.runtimeSettings,
+          threadTitle: args.threadTitle,
+        });
+      }
+
+      const lastMemeSentAt = args.threadMessages
+        .filter((message) => message.direction === "outbound" && message.messageType === "meme")
+        .map((message) => Number(message.messageAt || 0))
+        .sort((a, b) => b - a)[0];
+      const timingGate = evaluateMemeTimingGate({
+        nowMs: Date.now(),
+        lastMemeSentAtMs: lastMemeSentAt,
+        cooldownMs: Math.max(5 * 60 * 1000, Math.min(args.runtimeSettings?.memeThreadCooldownMs ?? 3 * 60 * 60 * 1000, 7 * 24 * 60 * 60 * 1000)),
+        probability: Math.max(0, Math.min(args.runtimeSettings?.memeSendProbability ?? 0.3, 1)),
+        randomValue: Math.random(),
+      });
+
+      if (!professionalGuard.blocked && timingGate.pass) {
+        const asset = await resolveMemeAssetWithFallback({
+          pickGeneratedCached: async () => {
+            const generatedEnabled = args.runtimeSettings?.generatedMemesEnabled ?? true;
+            if (!generatedEnabled) {
+              return undefined;
+            }
+            return await pickGeneratedMemeForThread(args.threadId, args.runtimeSettings?.memeThreadCooldownMs ?? 3 * 60 * 60 * 1000);
+          },
+          generateFresh: async () => {
+            const generatedEnabled = args.runtimeSettings?.generatedMemesEnabled ?? true;
+            if (!generatedEnabled) {
+              return undefined;
+            }
+            return await generateAndStoreThreadMeme({
+              threadId: args.threadId,
+              threadJid: args.threadJid,
+              inboundText: text,
+              recentHistoryLines: args.threadMessages.map(
+                (message) => `${message.direction === "inbound" ? "Them" : "Me"}: ${message.text}`,
+              ),
+              styleHints: args.styleHints,
+              runtimeSettings: args.runtimeSettings,
+              threadTitle: args.threadTitle,
+              reason: "on_demand",
+            });
+          },
+          pickUploadedFallback: async () => {
+            return await pickUploadedMemeFallbackAsset();
+          },
+        });
+
+        if (asset.assetId) {
+          const assetSource: MemeAssetSource = asset.source;
+          return {
+            mode: "meme",
+            mediaAssetId: asset.assetId,
+            assetSource: assetSource === "generated_cache" || assetSource === "generated_fresh" ? "generated" : "uploaded",
+          };
+        }
       }
     }
 
@@ -699,6 +1589,9 @@ async function run() {
   const automatedOutboundIds = new Map<string, number>();
   const automatedOutboundThreadSends = new Map<string, number>();
   const recentEmojiOutboundByThread = new Map<string, number>();
+  const recentStickerCompanionByThread = new Map<string, number>();
+  const stickerAssetIdByHash = new Map<string, Id<"mediaAssets">>();
+  const inboundImageVisionLastSentAtByThread = new Map<string, number>();
   let inboundConcurrency = Math.round(clamp(Number(process.env.SLM_INBOUND_CONCURRENCY || 4), 1, 16));
   let outboxSendConcurrency = Math.round(clamp(Number(process.env.SLM_OUTBOX_CONCURRENCY || 4), 1, 16));
   const runInboundWithLimit = createDynamicLimiter(() => inboundConcurrency);
@@ -720,6 +1613,52 @@ async function run() {
     const existing = recentEmojiOutboundByThread.get(threadJid);
     if (existing === undefined || nextAt > existing) {
       recentEmojiOutboundByThread.set(threadJid, nextAt);
+    }
+  };
+  const pruneRecentStickerCompanionByThread = () => {
+    const cutoff = Date.now() - STICKER_COMPANION_COOLDOWN_MS;
+    for (const [threadJid, sentAt] of recentStickerCompanionByThread.entries()) {
+      if (sentAt < cutoff) {
+        recentStickerCompanionByThread.delete(threadJid);
+      }
+    }
+  };
+  const rememberStickerCompanionAt = (threadJid: string, sentAtMs: number) => {
+    if (!threadJid || !Number.isFinite(sentAtMs)) {
+      return;
+    }
+    pruneRecentStickerCompanionByThread();
+    const nextAt = Number(sentAtMs);
+    const existing = recentStickerCompanionByThread.get(threadJid);
+    if (existing === undefined || nextAt > existing) {
+      recentStickerCompanionByThread.set(threadJid, nextAt);
+    }
+  };
+  const getRecentStickerCompanionAt = (threadJid: string) => {
+    if (!threadJid) {
+      return undefined;
+    }
+    pruneRecentStickerCompanionByThread();
+    return recentStickerCompanionByThread.get(threadJid);
+  };
+  const pruneInboundImageVisionByThread = () => {
+    const ttl = Math.max(VISION_FILTER_UNCAPTIONED_COOLDOWN_MS * 3, 6 * 60 * 60 * 1000);
+    const cutoff = Date.now() - ttl;
+    for (const [threadJid, lastAt] of inboundImageVisionLastSentAtByThread.entries()) {
+      if (lastAt < cutoff) {
+        inboundImageVisionLastSentAtByThread.delete(threadJid);
+      }
+    }
+  };
+  const rememberInboundImageVisionAt = (threadJid: string, atMs: number) => {
+    if (!threadJid || !Number.isFinite(atMs)) {
+      return;
+    }
+    pruneInboundImageVisionByThread();
+    const nextAt = Number(atMs);
+    const existing = inboundImageVisionLastSentAtByThread.get(threadJid);
+    if (existing === undefined || nextAt > existing) {
+      inboundImageVisionLastSentAtByThread.set(threadJid, nextAt);
     }
   };
   const getRecentEmojiOutboundAt = (threadJid: string) => {
@@ -868,6 +1807,328 @@ async function run() {
       .catch(() => undefined);
   };
 
+  const maybeCaptureStickerAsset = async (args: {
+    message: Parameters<typeof downloadMediaMessage>[0];
+    messageId: string;
+    threadId?: string;
+    whatsappMessageId?: string;
+    mimeType?: string;
+    direction: "inbound" | "outbound";
+    ingestMode: "live" | "history_sync" | "history_fetch";
+  }) => {
+    try {
+      const mediaBytes = await downloadMediaMessage(
+        args.message,
+        "buffer",
+        {},
+        {
+          reuploadRequest: (msg) => sock.updateMediaMessage(msg),
+          logger,
+        },
+      );
+      const buffer = Buffer.from(mediaBytes);
+      if (buffer.length === 0) {
+        return;
+      }
+
+      const contentHash = createHash("sha256").update(buffer).digest("hex");
+      const cachedAssetId = stickerAssetIdByHash.get(contentHash);
+      if (cachedAssetId) {
+        await convex
+          .mutation(convexRefs.inboundAttachMediaAsset, {
+            messageId: args.messageId as Id<"messages">,
+            mediaAssetId: cachedAssetId,
+          })
+          .catch(() => undefined);
+        void ensureStickerContextForAsset(cachedAssetId);
+        return;
+      }
+
+      const existing = (await convex
+        .query(convexRefs.mediaFindAssetByContentHash, {
+          kind: "sticker",
+          contentHash,
+        })
+        .catch(() => null)) as { _id: Id<"mediaAssets"> } | null;
+
+      if (existing?._id) {
+        stickerAssetIdByHash.set(contentHash, existing._id);
+        await convex
+          .mutation(convexRefs.inboundAttachMediaAsset, {
+            messageId: args.messageId as Id<"messages">,
+            mediaAssetId: existing._id,
+          })
+          .catch(() => undefined);
+        void ensureStickerContextForAsset(existing._id);
+        return;
+      }
+
+      const uploadUrl = (await convex.mutation(convexRefs.mediaGenerateUploadUrl, {})) as string;
+      const upload = await fetch(uploadUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": args.mimeType || "image/webp",
+        },
+        body: buffer,
+      });
+      if (!upload.ok) {
+        throw new Error(`Sticker upload failed (${upload.status}).`);
+      }
+      const uploadPayload = (await upload.json()) as { storageId?: string };
+      if (!uploadPayload.storageId) {
+        throw new Error("Sticker upload response missing storageId.");
+      }
+
+      const nowIso = new Date().toISOString().slice(0, 10);
+      const labelSuffix = (args.whatsappMessageId || contentHash).slice(-8);
+      const assetId = (await convex.mutation(convexRefs.mediaRegisterAssetIfMissing, {
+        kind: "sticker",
+        label: `Auto sticker ${nowIso} ${labelSuffix}`,
+        tags: [
+          "autocaptured",
+          "whatsapp",
+          "sticker",
+          args.direction === "outbound" ? "outbound" : "inbound",
+          args.ingestMode === "live" ? "live" : "history",
+        ],
+        fileId: uploadPayload.storageId as Id<"_storage">,
+        mimeType: args.mimeType || "image/webp",
+        enabled: true,
+        contentHash,
+      })) as Id<"mediaAssets">;
+
+      stickerAssetIdByHash.set(contentHash, assetId);
+      await convex
+        .mutation(convexRefs.inboundAttachMediaAsset, {
+          messageId: args.messageId as Id<"messages">,
+          mediaAssetId: assetId,
+        })
+        .catch(() => undefined);
+      void ensureStickerContextForAsset(assetId);
+    } catch (error) {
+      const err = error instanceof Error ? error.message : String(error);
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: "media.sticker.capture_error",
+          threadId: args.threadId as Id<"threads"> | undefined,
+          detail: compactLogText(err, 280),
+        })
+        .catch(() => undefined);
+    }
+  };
+
+  const scheduleWorkerSelfRestart = async () => {
+    const bunBin = process.env.BUN_BIN || "bun";
+    const shell = process.env.SHELL || "sh";
+    const startCmd = `sleep 1; cd "${process.cwd().replace(/"/g, '\\"')}" && ${bunBin} run worker >/dev/null 2>&1`;
+    const child = spawn(shell, ["-lc", startCmd], {
+      cwd: ".",
+      env: process.env,
+      detached: true,
+      stdio: "ignore",
+    });
+    child.unref();
+  };
+
+  const describeWorkerRuntime = () => {
+    return workerRuntimePaused ? "worker paused (listener still active)" : "worker active";
+  };
+
+  const runRuntimeCommandForTarget = async (
+    command: RuntimeCommand,
+    target: RuntimeCommandTarget,
+  ): Promise<{ lines: string[]; restartWorker: boolean; hasError: boolean }> => {
+    const lines: string[] = [];
+    let restartWorker = false;
+    let hasError = false;
+
+    if (target === "worker") {
+      if (command.action === "status") {
+        lines.push(describeWorkerRuntime());
+      } else if (command.action === "pause") {
+        workerRuntimePaused = true;
+        lines.push("worker paused (listening for resume commands)");
+      } else if (command.action === "resume") {
+        workerRuntimePaused = false;
+        lines.push("worker resumed");
+      } else if (command.action === "restart") {
+        workerRuntimePaused = false;
+        restartWorker = true;
+        lines.push("worker restart requested");
+      }
+      return { lines, restartWorker, hasError };
+    }
+
+    if (target === "app") {
+      if (command.action === "status") {
+        const appStatus = await getAppRuntimeStatus();
+        lines.push(appStatus.running ? `app running (pid ${appStatus.pid})` : "app not running");
+        return { lines, restartWorker, hasError };
+      }
+
+      if (command.action === "pause") {
+        const result = await pauseAppRuntime();
+        if (result.action === "paused") {
+          lines.push(`app paused (pid ${result.pid})`);
+        } else if (result.action === "none" || result.action === "stale") {
+          lines.push("app not running");
+        } else {
+          lines.push("app pause failed");
+          hasError = true;
+        }
+        return { lines, restartWorker, hasError };
+      }
+
+      if (command.action === "resume") {
+        const result = await resumeAppRuntime();
+        if (result.action === "resumed") {
+          lines.push(`app resumed (pid ${result.pid})`);
+          return { lines, restartWorker, hasError };
+        }
+        if (result.action === "none" || result.action === "stale") {
+          const started = await startAppRuntime();
+          if (started.action === "started") {
+            lines.push(`app started (pid ${started.pid})`);
+          } else if (started.action === "none") {
+            lines.push(`app running (pid ${started.pid})`);
+          } else {
+            lines.push("app start failed");
+            hasError = true;
+          }
+          return { lines, restartWorker, hasError };
+        }
+
+        lines.push("app resume failed");
+        hasError = true;
+        return { lines, restartWorker, hasError };
+      }
+
+      const restarted = await restartAppRuntime();
+      if (restarted.action === "started") {
+        lines.push(`app restarted (pid ${restarted.pid})`);
+      } else if (restarted.action === "none") {
+        lines.push(`app running (pid ${restarted.pid})`);
+      } else {
+        lines.push("app restart failed");
+        hasError = true;
+      }
+      return { lines, restartWorker, hasError };
+    }
+
+    return { lines, restartWorker, hasError };
+  };
+
+  const runRuntimeCommand = async (command: RuntimeCommand) => {
+    const targets: RuntimeCommandTarget[] = command.target === "both" ? ["worker", "app"] : [command.target];
+    let shouldRestartWorker = false;
+    const detailLines: string[] = [];
+    let hasError = false;
+
+    for (const target of targets) {
+      const result = await runRuntimeCommandForTarget(command, target);
+      if (result.lines.length > 0) {
+        detailLines.push(...result.lines);
+      }
+      shouldRestartWorker = shouldRestartWorker || result.restartWorker;
+      hasError = hasError || result.hasError;
+    }
+
+    if (detailLines.length === 0) {
+      detailLines.push("no changes applied");
+    }
+
+    return {
+      shouldRestartWorker,
+      hasError,
+      responseText: `Runtime command: ${command.action} ${command.target}\n${detailLines.join("\n")}`,
+    };
+  };
+
+  const maybeHandleRuntimeControlCommand = async (message: {
+    key: { id?: string | null; fromMe?: boolean | null; remoteJid?: string | null; participant?: string | null };
+    message?: unknown;
+  }) => {
+    const parsed = parseInboundMessage(message.message as Parameters<typeof parseInboundMessage>[0]);
+    if (parsed.kind !== "text") {
+      return false;
+    }
+
+    const rawThreadJid = getThreadJid(message.key as Parameters<typeof getThreadJid>[0]);
+    const senderJid = getSenderJid(message.key as Parameters<typeof getSenderJid>[0]);
+    const threadJid = rawThreadJid === "status@broadcast" ? senderJid : rawThreadJid;
+    if (!threadJid || !senderJid) {
+      return false;
+    }
+
+    const selfJid = getSelfJid();
+    const selfAccount = normalizeAccountJid(selfJid);
+    if (!selfAccount) {
+      return false;
+    }
+
+    const isSelfThread = normalizeAccountJid(threadJid) === selfAccount;
+    if (!isSelfThread) {
+      return false;
+    }
+
+    const senderAccount = normalizeAccountJid(senderJid);
+    const senderIsSelf = senderAccount.length > 0 && senderAccount === selfAccount;
+    if (!senderIsSelf) {
+      return false;
+    }
+
+    const command = parseRuntimeCommand(parsed.text);
+    if (!command) {
+      return false;
+    }
+
+    await convex
+      .mutation(convexRefs.systemRecordEvent, {
+        source: "worker",
+        eventType: "runtime.command.received",
+        detail: compactLogText(`${command.action} ${command.target} (${command.raw})`, 260),
+      })
+      .catch(() => undefined);
+
+    try {
+      const outcome = await runRuntimeCommand(command);
+      rememberAutomatedThreadSend(threadJid);
+      const sent = await sock.sendMessage(threadJid, {
+        text: outcome.responseText,
+      });
+      rememberAutomatedOutboundId(sent?.key?.id || undefined);
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: outcome.hasError ? "runtime.command.failed" : "runtime.command.executed",
+          detail: compactLogText(outcome.responseText, 280),
+        })
+        .catch(() => undefined);
+
+      if (outcome.shouldRestartWorker) {
+        await scheduleWorkerSelfRestart();
+        await shutdown(0, "Worker restarting after WhatsApp runtime command.");
+      }
+    } catch (error) {
+      const err = error instanceof Error ? error.message : String(error);
+      rememberAutomatedThreadSend(threadJid);
+      const sent = await sock.sendMessage(threadJid, {
+        text: `Runtime command failed: ${compactLogText(err, 260)}`,
+      });
+      rememberAutomatedOutboundId(sent?.key?.id || undefined);
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: "runtime.command.failed",
+          detail: compactLogText(err, 280),
+        })
+        .catch(() => undefined);
+    }
+
+    return true;
+  };
+
   const processOwnMessage = async (message: {
     key: { id?: string | null; remoteJid?: string | null; participant?: string | null };
     message?: unknown;
@@ -899,7 +2160,7 @@ async function run() {
         rememberEmojiOutboundAt(threadJid, messageAt);
       }
 
-      await convex.mutation(convexRefs.outboxSuppressForManualIntervention, {
+      const ownSync = (await convex.mutation(convexRefs.outboxSuppressForManualIntervention, {
         threadJid,
         whatsappMessageId: outboundMessageId,
         text: parsed.text,
@@ -908,7 +2169,19 @@ async function run() {
         reactionTargetWhatsAppMessageId: parsed.kind === "reaction" ? parsed.targetWhatsAppMessageId : undefined,
         mediaCaption: parsed.kind === "sticker" || parsed.kind === "image" ? parsed.caption : undefined,
         messageAt,
-      });
+      })) as { recordedMessageId?: string; threadId?: string };
+
+      if (parsed.kind === "sticker" && ownSync.recordedMessageId) {
+        await maybeCaptureStickerAsset({
+          message: message as Parameters<typeof downloadMediaMessage>[0],
+          messageId: ownSync.recordedMessageId,
+          threadId: ownSync.threadId,
+          whatsappMessageId: outboundMessageId,
+          mimeType: parsed.mimeType,
+          direction: "outbound",
+          ingestMode: "live",
+        });
+      }
     } catch (error) {
       const err = error instanceof Error ? error.message : String(error);
       logger.warn({ err, messageKey: message.key?.id }, "Own outbound processing error");
@@ -955,7 +2228,7 @@ async function run() {
         rememberEmojiOutboundAt(threadJid, messageAt);
       }
 
-      await convex.mutation(convexRefs.inboundIngestHistorical, {
+      const ingested = (await convex.mutation(convexRefs.inboundIngestHistorical, {
         ingestMode,
         direction,
         threadJid,
@@ -970,7 +2243,23 @@ async function run() {
         threadKind: classifyThreadKindFromJid(threadJid),
         whatsappMessageId: message.key.id || undefined,
         messageAt,
-      });
+      })) as {
+        threadId: string;
+        messageId: string;
+        duplicate: boolean;
+      };
+
+      if (parsed.kind === "sticker" && ingested.messageId) {
+        await maybeCaptureStickerAsset({
+          message: message as Parameters<typeof downloadMediaMessage>[0],
+          messageId: ingested.messageId,
+          threadId: ingested.threadId,
+          whatsappMessageId: message.key.id || undefined,
+          mimeType: parsed.mimeType,
+          direction,
+          ingestMode,
+        });
+      }
     } catch (error) {
       const err = error instanceof Error ? error.message : String(error);
       await convex
@@ -1085,6 +2374,18 @@ async function run() {
         nightPausedUntil?: number;
       };
 
+      if (effectiveParsed.kind === "sticker" && ingest.messageId) {
+        await maybeCaptureStickerAsset({
+          message: message as Parameters<typeof downloadMediaMessage>[0],
+          messageId: ingest.messageId,
+          threadId: ingest.threadId,
+          whatsappMessageId: message.key.id || undefined,
+          mimeType: effectiveParsed.mimeType,
+          direction: "inbound",
+          ingestMode: "live",
+        });
+      }
+
       if (ingest.duplicate) {
         logger.info({ threadJid, whatsappMessageId: message.key.id }, "Inbound duplicate ignored");
         return;
@@ -1100,6 +2401,18 @@ async function run() {
 
       if (ingest.ignored) {
         logger.info({ threadJid, blockedReason: ingest.blockedReason }, "Inbound ignored by rules");
+        return;
+      }
+
+      if (workerRuntimePaused) {
+        await convex
+          .mutation(convexRefs.systemRecordEvent, {
+            source: "worker",
+            eventType: "inbound.runtime_paused.skipped",
+            threadId: ingest.threadId as Id<"threads">,
+            detail: "Inbound message stored but automation is paused by runtime command.",
+          })
+          .catch(() => undefined);
         return;
       }
 
@@ -1194,7 +2507,32 @@ async function run() {
         }
         if (!visualAnalysisPromise) {
           visualAnalysisPromise = (async () => {
+            const visionDecision = decideInboundVisionAnalysis({
+              parsed: effectiveParsed,
+              mode: VISION_FILTER_MODE,
+              nowMs: Date.now(),
+              lastAllowedAtMs: inboundImageVisionLastSentAtByThread.get(threadJid),
+              uncaptionedCooldownMs: VISION_FILTER_UNCAPTIONED_COOLDOWN_MS,
+            });
+            if (!visionDecision.allow) {
+              await convex
+                .mutation(convexRefs.systemRecordEvent, {
+                  source: "ai",
+                  eventType: "ai.vision.filtered",
+                  threadId: ingest.threadId,
+                  detail: compactLogText(
+                    `mode=${visionDecision.mode} reason=${visionDecision.reason} score=${visionDecision.score} signals=${visionDecision.signals.join("|") || "none"}`,
+                    260,
+                  ),
+                })
+                .catch(() => undefined);
+              return null;
+            }
+
             try {
+              if (effectiveParsed.kind === "image") {
+                rememberInboundImageVisionAt(threadJid, Date.now());
+              }
               const mediaBytes = await downloadMediaMessage(
                 message as Parameters<typeof downloadMediaMessage>[0],
                 "buffer",
@@ -1250,7 +2588,36 @@ async function run() {
         return;
       }
 
+      let statusSignalText = "";
+      let statusHasFunnySignal = false;
+      let statusHasInterestSignal = false;
+
       if (isStatusBroadcast) {
+        const threadSnapshot = (await convex
+          .query(convexRefs.threadGet, {
+            threadId: ingest.threadId,
+          })
+          .catch(() => null)) as ThreadContextSnapshot;
+        const statusLimit = evaluateStatusOutreachLimit({
+          nowMs: now,
+          messages: threadSnapshot?.messages || [],
+        });
+        if (!statusLimit.allowed) {
+          const waitMinutes = Math.max(1, Math.ceil((statusLimit.waitMs || 0) / 60_000));
+          await convex
+            .mutation(convexRefs.systemRecordEvent, {
+              source: "worker",
+              eventType: "inbound.status.skipped",
+              threadId: ingest.threadId as Id<"threads">,
+              detail:
+                statusLimit.reason === "daily_limit"
+                  ? "Status update skipped to keep outreach paced: already sent 2 replies in the last 24 hours."
+                  : `Status update skipped to avoid back-to-back outreach. Try again in about ${waitMinutes} minute${waitMinutes === 1 ? "" : "s"}.`,
+            })
+            .catch(() => undefined);
+          return;
+        }
+
         const statusScreeningTextParts = [effectiveParsed.text];
         if (effectiveParsed.kind === "image" || effectiveParsed.kind === "sticker") {
           const visualAnalysis = await getVisualAnalysis();
@@ -1258,8 +2625,8 @@ async function run() {
             statusScreeningTextParts.push(visualAnalysis.description);
           }
         }
-        const statusScreeningText = statusScreeningTextParts.filter(Boolean).join("\n");
-        if (hasLinkOrEmail(statusScreeningText)) {
+        statusSignalText = statusScreeningTextParts.filter(Boolean).join("\n");
+        if (hasLinkOrEmail(statusSignalText)) {
           await convex
             .mutation(convexRefs.systemRecordEvent, {
               source: "worker",
@@ -1270,46 +2637,72 @@ async function run() {
             .catch(() => undefined);
           return;
         }
+
+        statusHasFunnySignal =
+          positiveTone(statusSignalText, funnyKeywords, funnyEmojis) ||
+          shouldUseMeme(statusSignalText, funnyKeywords, funnyEmojis);
+        statusHasInterestSignal = hasStatusInterestSignal(statusSignalText);
       }
 
-      if (isStatusBroadcast && (runtimeSettings?.statusReplyRequireFunny ?? true)) {
-        const funnySignalTextParts = [effectiveParsed.text];
-        if (effectiveParsed.kind === "image" || effectiveParsed.kind === "sticker") {
-          const visualAnalysis = await getVisualAnalysis();
-          if (visualAnalysis?.description) {
-            funnySignalTextParts.push(visualAnalysis.description);
-          }
-        }
-        const funnySignalText = funnySignalTextParts.filter(Boolean).join("\n");
-        const hasFunnySignal =
-          positiveTone(funnySignalText, funnyKeywords, funnyEmojis) ||
-          shouldUseMeme(funnySignalText, funnyKeywords, funnyEmojis) ||
-          containsKeyword(funnySignalText, funnyKeywords) ||
-          containsEmoji(funnySignalText, funnyEmojis);
-        const hasInterestSignal = hasStatusInterestSignal(funnySignalText);
-        if (!hasFunnySignal && !hasInterestSignal) {
-          await convex
-            .mutation(convexRefs.systemRecordEvent, {
-              source: "worker",
-              eventType: "inbound.status.skipped",
-              threadId: ingest.threadId as Id<"threads">,
-              detail: "Status update skipped because it did not match funny/playful or priority-news-interest signals.",
-            })
-            .catch(() => undefined);
-          return;
-        }
+      if (
+        isStatusBroadcast &&
+        (runtimeSettings?.statusReplyRequireFunny ?? true) &&
+        !statusHasFunnySignal &&
+        !statusHasInterestSignal
+      ) {
+        await convex
+          .mutation(convexRefs.systemRecordEvent, {
+            source: "worker",
+            eventType: "inbound.status.skipped",
+            threadId: ingest.threadId as Id<"threads">,
+            detail: "Status update skipped because it did not match funny/playful or priority-news-interest signals.",
+          })
+          .catch(() => undefined);
+        return;
+      }
+
+      const preferLaughReactionOnly =
+        isStatusBroadcast &&
+        (runtimeSettings?.reactionsEnabled ?? true) &&
+        shouldUseLaughReactionOnly({
+          text: statusSignalText || effectiveParsed.text,
+          hasFunnySignal: statusHasFunnySignal,
+          hasInterestSignal: statusHasInterestSignal,
+          messageAt,
+        });
+
+      if (preferLaughReactionOnly) {
+        await convex
+          .mutation(convexRefs.systemRecordEvent, {
+            source: "worker",
+            eventType: "inbound.status.reaction_only",
+            threadId: ingest.threadId as Id<"threads">,
+            detail: "Funny status handled with reaction-only response to avoid over-messaging.",
+          })
+          .catch(() => undefined);
       }
 
       if (
         (runtimeSettings?.humorLearningEnabled ?? true) &&
         (effectiveParsed.kind === "text" || effectiveParsed.kind === "reaction")
       ) {
+        const humorContextText = [
+          isStatusBroadcast && statusSignalText ? `status_signal: ${statusSignalText}` : "",
+          "caption" in effectiveParsed && effectiveParsed.caption ? `caption: ${effectiveParsed.caption}` : "",
+          effectiveParsed.kind === "reaction" && effectiveParsed.targetWhatsAppMessageId
+            ? `reaction_target_id: ${effectiveParsed.targetWhatsAppMessageId}`
+            : "",
+        ]
+          .filter(Boolean)
+          .join("\n")
+          .slice(0, 600);
         await convex
           .mutation(convexRefs.styleLearnFromHumorSignal, {
             threadId: ingest.threadId as Id<"threads">,
             inboundText: effectiveParsed.text,
             signalKind: effectiveParsed.kind === "reaction" ? "reaction" : "text",
             reactionEmoji: effectiveParsed.kind === "reaction" ? effectiveParsed.emoji : undefined,
+            contextText: humorContextText || undefined,
           })
           .catch(() => undefined);
       }
@@ -1349,6 +2742,7 @@ async function run() {
 
       const forceNightWindDownReply = Boolean(nightWindDownUntil);
       let personalitySetting: PersonalityThreadSetting = null;
+      let threadContextForPolicy: ThreadContextSnapshot = null;
       let outboundPolicy: OutboundPolicy;
       if (forceNightWindDownReply) {
         personalitySetting = (await convex.query(convexRefs.personalityGetThreadSetting, {
@@ -1356,6 +2750,11 @@ async function run() {
         })) as PersonalityThreadSetting;
         outboundPolicy = {
           mode: "text",
+        };
+      } else if (preferLaughReactionOnly) {
+        outboundPolicy = {
+          mode: "reaction_only",
+          emoji: pickLaughReactionEmoji(statusSignalText || inboundForPolicy.text || "", funnyEmojis),
         };
       } else if ((runtimeSettings?.reactionsEnabled ?? true) && looksLikeAckOnly(inboundForPolicy.text || "")) {
         outboundPolicy = {
@@ -1366,27 +2765,62 @@ async function run() {
         personalitySetting = (await convex.query(convexRefs.personalityGetThreadSetting, {
           threadId: ingest.threadId,
         })) as PersonalityThreadSetting;
+        threadContextForPolicy = (await convex
+          .query(convexRefs.threadGet, {
+            threadId: ingest.threadId,
+          })
+          .catch(() => null)) as ThreadContextSnapshot;
         outboundPolicy = await decideOutboundPolicy({
           inbound: inboundForPolicy,
           runtimeSettings,
           personalityIntensity: personalitySetting?.intensity,
+          threadKind,
+          threadId: String(ingest.threadId),
+          threadJid,
+          threadTitle: threadContextForPolicy?.grounding?.theirName || threadJid,
+          threadMessages: threadContextForPolicy?.messages || [],
+          memePolicyMode: personalitySetting?.memePolicyMode,
+          styleHints: threadContextForPolicy?.memory?.styleNotes || [],
         });
       }
 
       const shouldGenerateAiText = outboundPolicy.mode === "text" || outboundPolicy.mode === "reaction_plus_text" || outboundPolicy.mode === "meme";
+      const toolRunId = createToolRunId("reply", String(ingest.threadId), String(ingest.messageId));
       let threadContext: ThreadContextSnapshot = null;
       let historyLines: string[] = [];
       let styleHints: string[] = [];
       let styleProfile: StyleProfileSnapshot = null;
+      let contactFacts: ContactMemoryFactSnapshot[] = [];
       if (shouldGenerateAiText) {
-        threadContext = (await convex.query(convexRefs.threadGet, {
-          threadId: ingest.threadId,
-        })) as ThreadContextSnapshot;
+        threadContext =
+          threadContextForPolicy ||
+          ((await convex.query(convexRefs.threadGet, {
+            threadId: ingest.threadId,
+          })) as ThreadContextSnapshot);
         historyLines = (threadContext?.messages || []).map((m) => {
           return `${m.direction === "inbound" ? "Them" : "Me"}: ${m.text}`;
         });
         styleHints = threadContext?.memory?.styleNotes || [];
-        styleProfile = await getStyleProfile();
+        styleProfile = await getStyleProfileForThread(ingest.threadId);
+        await convex
+          .mutation(convexRefs.chatExtractContactMemoryFacts, {
+            threadId: ingest.threadId,
+            lookbackMessages: 120,
+          })
+          .catch(() => undefined);
+        const factsBundle = (await convex
+          .query(convexRefs.chatContactMemoryFactsList, {
+            threadId: ingest.threadId,
+            limit: 8,
+          })
+          .catch(() => null)) as ContactFactsSnapshot;
+        contactFacts = factsBundle?.facts || [];
+        if (contactFacts.length > 0) {
+          styleHints = [
+            ...styleHints,
+            ...contactFacts.map((fact) => `Known contact fact (${fact.factType}): ${fact.factValue}`),
+          ];
+        }
       }
       let historySearchOverride:
         | {
@@ -1415,55 +2849,78 @@ async function run() {
       }
 
       if (shouldGenerateAiText && threadContext) {
-        const initialSearch = await buildHistorySearchOverride({
-          convex,
-          threadId: ingest.threadId,
-          query: inboundTextForAi,
-          limit: Math.max(8, Math.min(runtimeSettings?.aiHistoryLineLimit ?? 12, 20)),
+        const olderContextDecision = decideOlderContextUsage({
+          inboundText: inboundTextForAi,
+          messages: threadContext.messages || [],
         });
-        historySearchOverride = initialSearch.override;
-        const needsHistoryFetch =
-          historyFetchConfig.enabled &&
-          (historySearchOverride.lines.length < 3 || historySearchOverride.confidence < 0.38);
-        if (needsHistoryFetch) {
-          const fetchResult = await maybeFetchOlderHistoryForThread({
-            socket: sock,
+        await convex
+          .mutation(convexRefs.systemRecordEvent, {
+            source: "ai",
+            eventType: "ai.context.recall_policy",
+            threadId: ingest.threadId,
+            toolRunId,
+            detail: compactLogText(
+              `allowOlder=${olderContextDecision.allowOlderContext} reason=${olderContextDecision.reason} cue=${olderContextDecision.explicitRecallCue} stale=${olderContextDecision.staleThread} gapMs=${olderContextDecision.gapMs ?? -1}`,
+              280,
+            ),
+          })
+          .catch(() => undefined);
+
+        if (!olderContextDecision.allowOlderContext) {
+          // Chat was resumed without an explicit callback cue: keep only the latest line as context.
+          historyLines = historyLines.slice(-1);
+        } else {
+          const initialSearch = await buildHistorySearchOverride({
             convex,
             threadId: ingest.threadId,
-            threadJid,
-            threadMessages: threadContext.messages,
-            stateByThread: historyFetchStateByThread,
-            config: historyFetchConfig,
+            query: inboundTextForAi,
+            limit: Math.max(8, Math.min(runtimeSettings?.aiHistoryLineLimit ?? 12, 20)),
           });
-          await convex
-            .mutation(convexRefs.systemRecordEvent, {
-              source: "ai",
-              eventType: fetchResult.requested ? "ai.context.history_fetch.requested" : "ai.context.history_fetch.skipped",
-              threadId: ingest.threadId,
-              detail: compactLogText(JSON.stringify(fetchResult), 280),
-            })
-            .catch(() => undefined);
-
-          if (fetchResult.requested) {
-            threadContext = (await convex.query(convexRefs.threadGet, {
-              threadId: ingest.threadId,
-            })) as ThreadContextSnapshot;
-            historyLines = (threadContext?.messages || []).map((m) => {
-              return `${m.direction === "inbound" ? "Them" : "Me"}: ${m.text}`;
-            });
-
-            const refreshedSearch = await buildHistorySearchOverride({
+          historySearchOverride = initialSearch.override;
+          const needsHistoryFetch =
+            historyFetchConfig.enabled &&
+            (historySearchOverride.lines.length < 3 || historySearchOverride.confidence < 0.38);
+          if (needsHistoryFetch) {
+            const fetchResult = await maybeFetchOlderHistoryForThread({
+              socket: sock,
               convex,
               threadId: ingest.threadId,
-              query: inboundTextForAi,
-              limit: Math.max(8, Math.min(runtimeSettings?.aiHistoryLineLimit ?? 12, 20)),
+              threadJid,
+              threadMessages: threadContext.messages,
+              stateByThread: historyFetchStateByThread,
+              config: historyFetchConfig,
             });
-            historySearchOverride = refreshedSearch.override;
+            await convex
+              .mutation(convexRefs.systemRecordEvent, {
+                source: "ai",
+                eventType: fetchResult.requested ? "ai.context.history_fetch.requested" : "ai.context.history_fetch.skipped",
+                threadId: ingest.threadId,
+                toolRunId,
+                detail: compactLogText(JSON.stringify(fetchResult), 280),
+              })
+              .catch(() => undefined);
+
+            if (fetchResult.requested) {
+              threadContext = (await convex.query(convexRefs.threadGet, {
+                threadId: ingest.threadId,
+              })) as ThreadContextSnapshot;
+              historyLines = (threadContext?.messages || []).map((m) => {
+                return `${m.direction === "inbound" ? "Them" : "Me"}: ${m.text}`;
+              });
+
+              const refreshedSearch = await buildHistorySearchOverride({
+                convex,
+                threadId: ingest.threadId,
+                query: inboundTextForAi,
+                limit: Math.max(8, Math.min(runtimeSettings?.aiHistoryLineLimit ?? 12, 20)),
+              });
+              historySearchOverride = refreshedSearch.override;
+            }
           }
         }
       }
 
-      const ai = shouldGenerateAiText
+      let ai = shouldGenerateAiText
         ? await generateReplyWithFallback({
             inboundText: inboundTextForAi,
             historyLines,
@@ -1494,12 +2951,82 @@ async function run() {
           })
         : null;
 
+      if (ai && shouldGenerateAiText && !ai.guardrailBlocked) {
+        const styleGuardrail = (await convex
+          .query(convexRefs.chatReplyStyleGuardrailCheck, {
+            threadId: ingest.threadId,
+            candidateReply: ai.text,
+            inboundText: inboundTextForAi,
+            strictness: "balanced",
+          })
+          .catch(() => null)) as
+          | {
+              passed?: boolean;
+              score?: number;
+              threshold?: number;
+              rewriteHints?: string[];
+            }
+          | null;
+
+        if (styleGuardrail) {
+          await convex
+            .mutation(convexRefs.systemRecordEvent, {
+              source: "ai",
+              eventType: styleGuardrail.passed ? "ai.style_guardrail.passed" : "ai.style_guardrail.failed",
+              threadId: ingest.threadId,
+              toolRunId,
+              detail: compactLogText(
+                `score=${Number(styleGuardrail.score || 0).toFixed(2)} threshold=${Number(styleGuardrail.threshold || 0).toFixed(2)} hints=${(styleGuardrail.rewriteHints || []).join(" | ")}`,
+                280,
+              ),
+            })
+            .catch(() => undefined);
+        }
+
+        if (styleGuardrail && !styleGuardrail.passed && Array.isArray(styleGuardrail.rewriteHints) && styleGuardrail.rewriteHints.length > 0) {
+          const guardrailHints = styleGuardrail.rewriteHints.slice(0, 4);
+          const rewritten = await generateReplyWithFallback({
+            inboundText: inboundTextForAi,
+            historyLines,
+            historySearchOverride,
+            styleHints: [...styleHints, ...guardrailHints],
+            styleProfile: styleProfile || undefined,
+            personality: personalitySetting
+              ? {
+                  profileSlug: personalitySetting.profileSlug || personalitySetting.profile?.slug,
+                  profileName: personalitySetting.profile?.name,
+                  profileDescription: personalitySetting.profile?.description,
+                  profilePrompt: personalitySetting.profile?.prompt,
+                  intensity: personalitySetting.intensity,
+                  customPrompt: personalitySetting.customPrompt || "",
+                  threadPromptProfile: personalitySetting.threadPromptProfile || "",
+                  threadPromptProfileSource: personalitySetting.threadPromptProfileSource,
+                }
+              : undefined,
+            grounding: threadContext?.grounding
+              ? {
+                  myName: threadContext.grounding.myName,
+                  theirName: threadContext.grounding.theirName,
+                  autoAliases: threadContext.grounding.autoAliases || [],
+                  vibeNotes: threadContext.grounding.vibeNotes || "",
+                }
+              : undefined,
+            runtime: runtimeAiConfig,
+          });
+
+          if (!rewritten.guardrailBlocked) {
+            ai = rewritten;
+          }
+        }
+      }
+
       if (ai) {
         await convex
           .mutation(convexRefs.systemRecordEvent, {
             source: "ai",
             eventType: "ai.reply.pipeline",
             threadId: ingest.threadId,
+            toolRunId,
             detail: `Generated ${ai.attempts.length} AI pipeline attempt(s) for inbound message.`,
           })
           .catch(() => undefined);
@@ -1526,6 +3053,7 @@ async function run() {
               source: "ai",
               eventType: attemptEventType(attempt),
               threadId: ingest.threadId,
+              toolRunId,
               detail,
             })
             .catch(() => undefined);
@@ -1537,6 +3065,7 @@ async function run() {
               source: "ai",
               eventType: "ai.context.window",
               threadId: ingest.threadId,
+              toolRunId,
               detail: `Prompt tokens ${ai.contextWindow.estimatedPromptTokens}/${Math.max(128, ai.contextWindow.maxContextTokens - ai.contextWindow.reserveOutputTokens)}; overflow ${ai.contextWindow.overflowTokens}; history ${ai.contextWindow.usedHistoryLines}; relevant ${ai.contextWindow.relevantHistoryLines}.`,
             })
             .catch(() => undefined);
@@ -1549,6 +3078,7 @@ async function run() {
                 source: "ai",
                 eventType: `ai.context.tool.${toolCall.name}`,
                 threadId: ingest.threadId,
+                toolRunId,
                 detail: compactLogText(
                   `${toolCall.name} ${toolCall.latencyMs}ms input=${JSON.stringify(toolCall.input)} output=${JSON.stringify(toolCall.output)}`,
                   300,
@@ -1564,6 +3094,7 @@ async function run() {
               source: "ai",
               eventType: "ai.reply.blocked",
               threadId: ingest.threadId,
+              toolRunId,
               detail: ai.guardrailReason || "Blocked by guardrail",
             })
             .catch(() => undefined);
@@ -1590,6 +3121,10 @@ async function run() {
               recentMessages: threadContext?.messages,
               lastEmojiSentAtMs: getRecentEmojiOutboundAt(threadJid),
               fallbackText: "All good.",
+              allowEmojiInText: true,
+              allowedEmojiInText: TEXT_EMOJI_ALLOWLIST,
+              maxAllowedEmojiMessagesInWindow: TEXT_EMOJI_MAX_PER_WINDOW,
+              allowedEmojiWindowMs: TEXT_EMOJI_WINDOW_MS,
             })
           : null;
       const textForDraft = emojiAdjustedDraft?.text || rawTextForDraft;
@@ -1613,6 +3148,7 @@ async function run() {
       const draftPayload = {
         threadId: ingest.threadId,
         sourceMessageId: ingest.messageId,
+        toolRunId,
         text: textForDraft,
         provider: ai?.provider || "heuristic",
         confidence: ai ? (ai.provider === "heuristic" ? fallbackConfidence : primaryConfidence) : fallbackConfidence,
@@ -1638,6 +3174,7 @@ async function run() {
           source: "ai",
           eventType: "ai.reply.generated",
           threadId: ingest.threadId,
+          toolRunId,
           detail: ai
             ? `Reply generated via ${ai.provider}/${ai.model} in ${ai.latencyMs}ms.`
             : `Reply generated via policy mode ${outboundPolicy.mode}.`,
@@ -1650,14 +3187,32 @@ async function run() {
             source: "ai",
             eventType: "ai.reply.emoji_cooldown_applied",
             threadId: ingest.threadId,
-            detail: "Emoji removed from draft due to 15-minute emoji cooldown policy.",
+            toolRunId,
+            detail: emojiAdjustedDraft.cooldownActive
+              ? "Emoji removed from draft due to active cooldown policy."
+              : "Emoji removed from draft due to no-emoji text policy.",
           })
           .catch(() => undefined);
       }
 
       const health = await getSystemHealth();
+      const stageGeneratedMemeForManualReview =
+        outboundPolicy.mode === "meme" &&
+        outboundPolicy.assetSource === "generated" &&
+        !(runtimeSettings?.generatedMemesAutoSendEnabled ?? false);
 
-      if (health?.config?.autonomyPaused) {
+      if (stageGeneratedMemeForManualReview) {
+        await convex
+          .mutation(convexRefs.systemRecordEvent, {
+            source: "ai",
+            eventType: "ai.meme.generated.staged_manual_review",
+            threadId: ingest.threadId,
+            toolRunId,
+            detail: "Generated meme draft staged for manual approval (auto-send disabled).",
+          })
+          .catch(() => undefined);
+        await convex.mutation(convexRefs.draftSaveGenerated, draftPayload);
+      } else if (health?.config?.autonomyPaused) {
         await convex.mutation(convexRefs.draftSaveGenerated, draftPayload);
       } else {
         await convex.mutation(convexRefs.draftSaveOrReplacePending, draftPayload);
@@ -1780,6 +3335,10 @@ async function run() {
           );
           continue;
         }
+        const runtimeCommandHandled = await maybeHandleRuntimeControlCommand(message);
+        if (runtimeCommandHandled) {
+          continue;
+        }
         if (message.key.fromMe) {
           void enqueueByThreadLane(inboundThreadLanes, laneKey, () =>
             runInboundWithLimit(async () => {
@@ -1802,19 +3361,7 @@ async function run() {
   attachListeners(sock);
 
   const hydrateAiOutreach = async (
-    item: {
-      outboxId: string;
-      threadId: string;
-      jid: string;
-      messageText: string;
-      typingMs: number;
-      sendKind: "text" | "reaction" | "sticker" | "meme";
-      reactionEmoji?: string;
-      reactionTargetWhatsAppMessageId?: string;
-      preReactionEmoji?: string;
-      mediaAssetId?: string;
-      mediaCaption?: string;
-    },
+    item: OutboxClaimedItem,
     runtimeSettings: RuntimeSettings | null,
   ) => {
     if (item.messageText !== AI_OUTREACH_PLACEHOLDER) {
@@ -1824,6 +3371,7 @@ async function run() {
         typingMs: item.typingMs,
       };
     }
+    const toolRunId = createToolRunId("outreach", item.threadId, item.outboxId);
 
     const threadContext = (await convex.query(convexRefs.threadGet, {
       threadId: item.threadId,
@@ -1841,11 +3389,51 @@ async function run() {
     });
 
     const styleHints = threadContext?.memory?.styleNotes || [];
-    const styleProfile = await getStyleProfile();
+    const styleProfile = await getStyleProfileForThread(item.threadId);
 
     const personalitySetting = (await convex.query(convexRefs.personalityGetThreadSetting, {
       threadId: item.threadId,
     })) as PersonalityThreadSetting;
+
+    const unansweredOutboundTail = countUnansweredOutboundTail(threadContext?.messages || []);
+    const lastInboundAtMs = latestInboundAt(threadContext?.messages || []);
+    const elapsedGhostSilenceMs = lastInboundAtMs ? Math.max(0, Date.now() - lastInboundAtMs) : 0;
+    const requiredGhostReopenMs = resolveLongSilenceReopenMs(unansweredOutboundTail);
+    const requiredGhostReopenWeeks = resolveLongSilenceReopenWeeks(unansweredOutboundTail);
+    const longSilenceGhostReopen = Boolean(
+      unansweredOutboundTail >= 2 &&
+        lastInboundAtMs &&
+        Date.now() - lastInboundAtMs >= requiredGhostReopenMs,
+    );
+    const ghostReopenWeeks = longSilenceGhostReopen
+      ? Math.max(1, Math.round((Date.now() - (lastInboundAtMs || Date.now())) / (7 * 24 * 60 * 60 * 1000)))
+      : 0;
+    const ghostReopenTone = longSilenceGhostReopen ? inferGhostReopenTone(threadContext?.messages || []) : "warm";
+    const ghostSeverity = longSilenceGhostReopen
+      ? resolveGhostingSeverity({
+          unansweredStreak: unansweredOutboundTail,
+          elapsedSilenceMs: elapsedGhostSilenceMs,
+        })
+      : "mild";
+
+    const ghostReopenInstruction =
+      !longSilenceGhostReopen
+        ? ""
+        : ghostReopenTone === "naija_tease"
+          ? ghostSeverity === "severe"
+            ? `This is a long-silence re-open (${ghostReopenWeeks} weeks unanswered; threshold ${requiredGhostReopenWeeks} week(s)). Use a stronger but playful Naija ghosting tease (example vibe: "Shey you ghost me finish abi 😭"), then warm check-in.`
+            : `This is a long-silence re-open (${ghostReopenWeeks} weeks unanswered; threshold ${requiredGhostReopenWeeks} week(s)). Start with a light Naija tease about ghosting (example vibe: "Shey you ghost me abi 😄"), then warm check-in.`
+          : ghostReopenTone === "hard_banter"
+            ? ghostSeverity === "severe"
+              ? `This is a long-silence re-open (${ghostReopenWeeks} weeks unanswered; threshold ${requiredGhostReopenWeeks} week(s)). Use playful roast energy about ghosting (example vibe: "You sly mf, you ghosted me 😭"), but keep it affectionate, brief, and not hostile.`
+              : `This is a long-silence re-open (${ghostReopenWeeks} weeks unanswered; threshold ${requiredGhostReopenWeeks} week(s)). Use mild playful roast energy (example vibe: "You sly one, you ghosted me small 😅"), then warm check-in.`
+            : ghostReopenTone === "playful"
+              ? ghostSeverity === "severe"
+                ? `This is a long-silence re-open (${ghostReopenWeeks} weeks unanswered; threshold ${requiredGhostReopenWeeks} week(s)). Use a stronger playful ghosting callout (example vibe: "Omo, you ghosted me hard 😭"), then warm check-in.`
+                : `This is a long-silence re-open (${ghostReopenWeeks} weeks unanswered; threshold ${requiredGhostReopenWeeks} week(s)). Use a playful ghosting callout (example vibe: "You ghosted me small 😅"), then warm check-in.`
+              : ghostSeverity === "severe"
+                ? `This is a long-silence re-open (${ghostReopenWeeks} weeks unanswered; threshold ${requiredGhostReopenWeeks} week(s)). Use a clear but calm ghosting callout (example vibe: "You really disappeared on me 😅"), then warm check-in.`
+                : `This is a long-silence re-open (${ghostReopenWeeks} weeks unanswered; threshold ${requiredGhostReopenWeeks} week(s)). Use a gentle ghosting callout (example vibe: "You ghosted me a bit 😅"), then warm check-in.`;
 
     const memorySummary = threadContext?.memory?.summary ? `Memory summary: ${threadContext.memory.summary}` : "";
     const contactName = threadContext?.thread?.title?.split(/\s+/)[0] || "there";
@@ -1853,6 +3441,8 @@ async function run() {
       "Proactively start a fresh check-in conversation with this contact now.",
       "Use previous chat context so the opener feels natural, specific, and warm.",
       "Keep it to 1-2 short sentences, avoid sounding robotic, and include exactly one gentle question.",
+      "Do not sound needy, accusatory, or passive-aggressive.",
+      ghostReopenInstruction,
       memorySummary,
       `Contact first name: ${contactName}`,
     ]
@@ -1936,6 +3526,7 @@ async function run() {
           source: "ai",
           eventType: `outreach.${attemptEventType(attempt)}`,
           threadId: item.threadId,
+          toolRunId,
           detail,
         })
         .catch(() => undefined);
@@ -1947,6 +3538,7 @@ async function run() {
           source: "ai",
           eventType: "outreach.ai.context.window",
           threadId: item.threadId,
+          toolRunId,
           detail: `Prompt tokens ${ai.contextWindow.estimatedPromptTokens}/${Math.max(128, ai.contextWindow.maxContextTokens - ai.contextWindow.reserveOutputTokens)}; overflow ${ai.contextWindow.overflowTokens}; history ${ai.contextWindow.usedHistoryLines}; relevant ${ai.contextWindow.relevantHistoryLines}.`,
         })
         .catch(() => undefined);
@@ -1959,6 +3551,7 @@ async function run() {
             source: "ai",
             eventType: `outreach.ai.context.tool.${toolCall.name}`,
             threadId: item.threadId,
+            toolRunId,
             detail: compactLogText(
               `${toolCall.name} ${toolCall.latencyMs}ms input=${JSON.stringify(toolCall.input)} output=${JSON.stringify(toolCall.output)}`,
               300,
@@ -1972,7 +3565,23 @@ async function run() {
       throw new Error(ai.guardrailReason || "Azure-only mode blocked outreach fallback.");
     }
 
-    const fallbackText = `Hey ${contactName}, just checking in. How is your day going?`;
+    const fallbackText = !longSilenceGhostReopen
+      ? "Hey, just checking in. How is your day going?"
+      : ghostReopenTone === "naija_tease"
+        ? ghostSeverity === "severe"
+          ? "Shey you ghost me finish abi 😭. Hope you dey alright?"
+          : "Shey you ghost me abi 😄. How have you been lately?"
+        : ghostReopenTone === "hard_banter"
+          ? ghostSeverity === "severe"
+            ? "You sly mf, you ghosted me 😭. You good though?"
+            : "You sly one, you ghosted me small 😅. You good?"
+          : ghostReopenTone === "playful"
+            ? ghostSeverity === "severe"
+              ? "Omo, you ghosted me hard 😭. How have you been though?"
+              : "You ghosted me small 😅. How have you been?"
+            : ghostSeverity === "severe"
+              ? "You really disappeared on me 😅. Hope you're doing well?"
+              : "You ghosted me a little 😅. How have you been lately?";
     const rawSafeText = normalizeOutboundText(ai.guardrailBlocked ? fallbackText : ai.text);
     const emojiAdjusted = applyEmojiCooldownPolicy({
       text: rawSafeText,
@@ -1980,6 +3589,10 @@ async function run() {
       recentMessages: threadContext?.messages,
       lastEmojiSentAtMs: getRecentEmojiOutboundAt(item.jid),
       fallbackText,
+      allowEmojiInText: true,
+      allowedEmojiInText: TEXT_EMOJI_ALLOWLIST,
+      maxAllowedEmojiMessagesInWindow: TEXT_EMOJI_MAX_PER_WINDOW,
+      allowedEmojiWindowMs: TEXT_EMOJI_WINDOW_MS,
     });
     const safeText = emojiAdjusted.text;
     const timing = estimateDelayAndTyping(safeText, {
@@ -2000,6 +3613,7 @@ async function run() {
       provider,
       confidence,
       typingMs: timing.typingMs,
+      toolRunId,
     });
 
     if (emojiAdjusted.emojiSuppressed) {
@@ -2008,13 +3622,17 @@ async function run() {
           source: "ai",
           eventType: "outreach.ai.emoji_cooldown_applied",
           threadId: item.threadId,
-          detail: "Emoji removed from outreach draft due to 15-minute emoji cooldown policy.",
+          toolRunId,
+          detail: emojiAdjusted.cooldownActive
+            ? "Emoji removed from outreach draft due to active cooldown policy."
+            : "Emoji removed from outreach draft due to no-emoji text policy.",
         })
         .catch(() => undefined);
     }
 
     return {
       ...item,
+      toolRunId,
       messageText: safeText,
       typingMs: timing.typingMs,
     };
@@ -2067,8 +3685,32 @@ async function run() {
     }
   };
 
+  const buildQuotedMessageOptions = (item: OutboxClaimedItem): { quoted: WAMessage } | undefined => {
+    if (!item.replyTargetWhatsAppMessageId) {
+      return undefined;
+    }
+
+    const text = (item.replyTargetText || "").trim() || " ";
+    const quoted: WAMessage = {
+      key: {
+        remoteJid: item.jid,
+        fromMe: false,
+        id: item.replyTargetWhatsAppMessageId,
+        participant: isGroupJid(item.jid) ? item.replyTargetSenderJid : undefined,
+      },
+      message: {
+        conversation: text,
+      },
+      messageTimestamp: Math.floor((item.replyTargetMessageAt ?? Date.now()) / 1000),
+    };
+    return { quoted };
+  };
+
   const pollOutbox = async () => {
     if (processingOutbox) {
+      return;
+    }
+    if (workerRuntimePaused) {
       return;
     }
 
@@ -2079,20 +3721,7 @@ async function run() {
       const claimed = (await convex.mutation(convexRefs.outboxClaimDue, {
         workerId,
         limit: claimLimit,
-      })) as Array<{
-        outboxId: string;
-        threadId: string;
-        jid: string;
-        messageText: string;
-        typingMs: number;
-        provider: "azure" | "codex" | "heuristic";
-        sendKind: "text" | "reaction" | "sticker" | "meme";
-        reactionEmoji?: string;
-        reactionTargetWhatsAppMessageId?: string;
-        preReactionEmoji?: string;
-        mediaAssetId?: string;
-        mediaCaption?: string;
-      }>;
+      })) as OutboxClaimedItem[];
       const tasks = claimed.map((item) =>
         enqueueByThreadLane(outboxThreadLanes, item.threadId, () =>
           runOutboxWithLimit(async () => {
@@ -2152,15 +3781,27 @@ async function run() {
 
               let effectiveMessageText = hydrated.messageText;
               let effectiveMediaCaption = hydrated.mediaCaption || hydrated.messageText;
+              const quotedMessageOptions = buildQuotedMessageOptions(hydrated);
+              let threadForEmojiPolicy: ThreadContextSnapshot = null;
               let emojiPolicyApplied = false;
               if (hydrated.sendKind === "text" || hydrated.sendKind === "meme") {
+                threadForEmojiPolicy = (await convex
+                  .query(convexRefs.threadGet, {
+                    threadId: item.threadId as Id<"threads">,
+                  })
+                  .catch(() => null)) as ThreadContextSnapshot | null;
                 const baseText = hydrated.sendKind === "meme" ? effectiveMediaCaption : effectiveMessageText;
                 const originalMediaCaption = hydrated.mediaCaption || hydrated.messageText;
                 const emojiAdjusted = applyEmojiCooldownPolicy({
                   text: baseText,
                   nowMs: Date.now(),
+                  recentMessages: threadForEmojiPolicy?.messages,
                   lastEmojiSentAtMs: getRecentEmojiOutboundAt(item.jid),
                   fallbackText: hydrated.sendKind === "meme" ? "Checking in with you." : "All good.",
+                  allowEmojiInText: true,
+                  allowedEmojiInText: TEXT_EMOJI_ALLOWLIST,
+                  maxAllowedEmojiMessagesInWindow: TEXT_EMOJI_MAX_PER_WINDOW,
+                  allowedEmojiWindowMs: TEXT_EMOJI_WINDOW_MS,
                 });
                 emojiPolicyApplied = emojiAdjusted.emojiSuppressed;
                 if (hydrated.sendKind === "text") {
@@ -2189,10 +3830,58 @@ async function run() {
                     eventType: "outbox.emoji_cooldown_applied",
                     threadId: item.threadId as Id<"threads">,
                     outboxId: item.outboxId as Id<"outbox">,
-                    detail: "Emoji removed from outbox message due to 15-minute emoji cooldown policy.",
+                    detail: "Emoji removed from outbox message due to no-emoji text policy.",
                   })
                   .catch(() => undefined);
               }
+
+              const latestInboundText =
+                [...(threadForEmojiPolicy?.messages || [])]
+                  .reverse()
+                  .find((message) => message.direction === "inbound")?.text || "";
+              const stickerCompanionPlan =
+                hydrated.sendKind === "text"
+                  ? await decideStickerCompanionPlan({
+                      jid: item.jid,
+                      threadId: item.threadId,
+                      inboundText: latestInboundText,
+                      outboundText: effectiveMessageText,
+                      runtimeSettings,
+                      preReactionActive: Boolean(hydrated.reactionEmoji && hydrated.reactionTargetWhatsAppMessageId),
+                    })
+                  : null;
+
+              const maybeSendStickerCompanion = async (phase: "before" | "after") => {
+                if (!stickerCompanionPlan || stickerCompanionPlan.position !== phase) {
+                  return;
+                }
+                try {
+                  const stickerMessageId = await sendStickerCompanion({
+                    jid: item.jid,
+                    assetId: stickerCompanionPlan.assetId,
+                  });
+                  await convex
+                    .mutation(convexRefs.systemRecordEvent, {
+                      source: "worker",
+                      eventType: `outbox.sticker_companion.${phase}`,
+                      threadId: item.threadId as Id<"threads">,
+                      outboxId: item.outboxId as Id<"outbox">,
+                      detail: `Sent sticker companion (${phase}) asset=${stickerCompanionPlan.assetId} id=${stickerMessageId || "unknown"}.`,
+                    })
+                    .catch(() => undefined);
+                } catch (error) {
+                  const err = error instanceof Error ? error.message : String(error);
+                  await convex
+                    .mutation(convexRefs.systemRecordEvent, {
+                      source: "worker",
+                      eventType: "outbox.sticker_companion.error",
+                      threadId: item.threadId as Id<"threads">,
+                      outboxId: item.outboxId as Id<"outbox">,
+                      detail: compactLogText(err, 260),
+                    })
+                    .catch(() => undefined);
+                }
+              };
 
               let sent: { key?: { id?: string | null } } | undefined;
               if (hydrated.sendKind === "reaction") {
@@ -2214,11 +3903,12 @@ async function run() {
                 if (!hydrated.mediaAssetId) {
                   throw new Error("Sticker outbox item missing media asset id.");
                 }
+                await ensureStickerContextForAsset(hydrated.mediaAssetId);
                 const stickerBuffer = await fetchMediaAssetBuffer(hydrated.mediaAssetId);
                 rememberAutomatedThreadSend(item.jid);
                 sent = await sock.sendMessage(item.jid, {
                   sticker: stickerBuffer,
-                });
+                }, quotedMessageOptions);
               } else if (hydrated.sendKind === "meme") {
                 if (!hydrated.mediaAssetId) {
                   throw new Error("Meme outbox item missing media asset id.");
@@ -2238,7 +3928,7 @@ async function run() {
                 sent = await sock.sendMessage(item.jid, {
                   image: memeBuffer,
                   caption: effectiveMediaCaption || effectiveMessageText,
-                });
+                }, quotedMessageOptions);
                 await sock.sendPresenceUpdate("paused", item.jid);
               } else {
                 await sock.sendPresenceUpdate("composing", item.jid);
@@ -2251,8 +3941,10 @@ async function run() {
                   await sock.sendPresenceUpdate("paused", item.jid);
                   return;
                 }
+                await maybeSendStickerCompanion("before");
                 rememberAutomatedThreadSend(item.jid);
-                sent = await sock.sendMessage(item.jid, { text: effectiveMessageText });
+                sent = await sock.sendMessage(item.jid, { text: effectiveMessageText }, quotedMessageOptions);
+                await maybeSendStickerCompanion("after");
                 await sock.sendPresenceUpdate("paused", item.jid);
               }
 
@@ -2267,6 +3959,9 @@ async function run() {
                 outboxId: item.outboxId,
                 whatsappMessageId: sent?.key?.id || undefined,
               });
+              if (hydrated.sendKind === "meme" && hydrated.mediaAssetId) {
+                await markMediaAssetUsed(hydrated.mediaAssetId);
+              }
             } catch (error) {
               const err = error instanceof Error ? error.message : String(error);
               await convex.mutation(convexRefs.outboxMarkFailed, {
@@ -2290,8 +3985,20 @@ async function run() {
   setInterval(() => {
     void pollOutbox();
   }, intervalMs);
+  setInterval(() => {
+    void runStickerContextBackfillPass();
+  }, STICKER_CONTEXT_PASS_INTERVAL_MS);
+  void runStickerContextBackfillPass();
 
-  logger.info({ workerId, intervalMs }, "Social Life Manager worker started");
+  logger.info(
+    {
+      workerId,
+      intervalMs,
+      visionFilterMode: VISION_FILTER_MODE,
+      visionUncaptionedCooldownMs: VISION_FILTER_UNCAPTIONED_COOLDOWN_MS,
+    },
+    "Social Life Manager worker started",
+  );
 }
 
 void run().catch((error) => {

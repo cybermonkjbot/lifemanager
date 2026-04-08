@@ -25,6 +25,18 @@ function isWithinHourWindow(hour: number, startHour: number, endHour: number) {
   return hour >= startHour || hour < endHour;
 }
 
+export function shouldPauseOutreachForQuietHours(args: {
+  quietHoursEnabled: boolean;
+  nowHour: number;
+  quietHoursStartHour: number;
+  quietHoursEndHour: number;
+}) {
+  if (!args.quietHoursEnabled) {
+    return false;
+  }
+  return isWithinHourWindow(args.nowHour, args.quietHoursStartHour, args.quietHoursEndHour);
+}
+
 function pickVariant(seed: string, options: string[]) {
   if (options.length === 0) {
     return "";
@@ -72,7 +84,14 @@ export const run = internalMutation({
       return { queued: 0, reason: "autonomy_paused" as const };
     }
 
-    if (isWithinHourWindow(nowHour, config.quietHoursStartHour, config.quietHoursEndHour)) {
+    if (
+      shouldPauseOutreachForQuietHours({
+        quietHoursEnabled: config.quietHoursEnabled,
+        nowHour,
+        quietHoursStartHour: config.quietHoursStartHour,
+        quietHoursEndHour: config.quietHoursEndHour,
+      })
+    ) {
       return { queued: 0, reason: "night_wind_down" as const };
     }
 

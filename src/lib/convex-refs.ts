@@ -17,8 +17,15 @@ export const convexRefs = {
   contextWindowDetection: makeFunctionReference<"query">("contextTools:contextWindowDetection"),
   contextWindowCleaning: makeFunctionReference<"query">("contextTools:contextWindowCleaning"),
   contextGetThreadOldestMessageForFetch: makeFunctionReference<"query">("contextTools:getThreadOldestMessageForFetch"),
+  chatMemorySearch: makeFunctionReference<"query">("chatTools:memorySearch"),
+  chatConversationRecallQuery: makeFunctionReference<"query">("chatTools:conversationRecallQuery"),
+  chatGetThreadStyleProfile: makeFunctionReference<"query">("chatTools:getThreadStyleProfile"),
+  chatContactMemoryFactsList: makeFunctionReference<"query">("chatTools:contactMemoryFactsList"),
+  chatPersonalConnectorsInternalSearch: makeFunctionReference<"query">("chatTools:personalConnectorsInternalSearch"),
+  chatReplyStyleGuardrailCheck: makeFunctionReference<"query">("chatTools:replyStyleGuardrailCheck"),
 
   inboundIngest: makeFunctionReference<"mutation">("inbound:ingest"),
+  inboundAttachMediaAsset: makeFunctionReference<"mutation">("inbound:attachMediaAsset"),
   draftSaveGenerated: makeFunctionReference<"mutation">("draft:saveGenerated"),
   draftSaveOrReplacePending: makeFunctionReference<"mutation">("draft:saveOrReplacePending"),
   draftCreateGuardrailHold: makeFunctionReference<"mutation">("draft:createGuardrailHold"),
@@ -53,6 +60,9 @@ export const convexRefs = {
   systemUpsertSetupStatus: makeFunctionReference<"mutation">("system:upsertSetupStatus"),
   systemReportSetupListener: makeFunctionReference<"mutation">("system:reportSetupListener"),
   contextUpsertMessageEmbeddings: makeFunctionReference<"mutation">("contextTools:upsertMessageEmbeddings"),
+  chatRebuildThreadStyleProfile: makeFunctionReference<"mutation">("chatTools:rebuildThreadStyleProfile"),
+  chatUpsertContactMemoryFact: makeFunctionReference<"mutation">("chatTools:upsertContactMemoryFact"),
+  chatExtractContactMemoryFacts: makeFunctionReference<"mutation">("chatTools:extractContactMemoryFacts"),
 
   styleGetProfile: makeFunctionReference<"query">("style:getProfile"),
   styleSetMimicry: makeFunctionReference<"mutation">("style:setMimicry"),
@@ -64,15 +74,26 @@ export const convexRefs = {
 
   mediaGenerateUploadUrl: makeFunctionReference<"mutation">("media:generateUploadUrl"),
   mediaRegisterAsset: makeFunctionReference<"mutation">("media:registerAsset"),
+  mediaFindAssetByContentHash: makeFunctionReference<"query">("media:findAssetByContentHash"),
+  mediaRegisterAssetIfMissing: makeFunctionReference<"mutation">("media:registerAssetIfMissing"),
+  mediaUpsertAssetContext: makeFunctionReference<"mutation">("media:upsertAssetContext"),
+  mediaListStickerAssetsNeedingContext: makeFunctionReference<"query">("media:listStickerAssetsNeedingContext"),
   mediaListAssets: makeFunctionReference<"query">("media:listAssets"),
   mediaGetEnabledByKind: makeFunctionReference<"query">("media:getEnabledByKind"),
+  mediaGetBestGeneratedMemeForThread: makeFunctionReference<"query">("media:getBestGeneratedMemeForThread"),
+  mediaGetBestUploadedMemeFallback: makeFunctionReference<"query">("media:getBestUploadedMemeFallback"),
   mediaGetAssetDownloadUrl: makeFunctionReference<"query">("media:getAssetDownloadUrl"),
+  mediaMarkAssetUsed: makeFunctionReference<"mutation">("media:markAssetUsed"),
   mediaToggleAsset: makeFunctionReference<"mutation">("media:toggleAsset"),
   mediaDeleteAsset: makeFunctionReference<"mutation">("media:deleteAsset"),
 
   groundingGetThreadGrounding: makeFunctionReference<"query">("grounding:getThreadGrounding"),
   groundingSaveThreadGrounding: makeFunctionReference<"mutation">("grounding:saveThreadGrounding"),
   inboundIngestHistorical: makeFunctionReference<"mutation">("inbound:ingestHistorical"),
+  chatHistoryBackfillImport: makeFunctionReference<"action">("chatTools:historyBackfillImport"),
+  chatExternalWebSearch: makeFunctionReference<"action">("chatTools:externalWebSearch"),
+  chatPersonalConnectorsSearch: makeFunctionReference<"action">("chatTools:personalConnectorsSearch"),
+  chatToolRouterPlan: makeFunctionReference<"action">("chatTools:toolRouterPlan"),
 };
 
 export type ConvexRefs = typeof convexRefs;

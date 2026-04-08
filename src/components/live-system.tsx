@@ -9,7 +9,15 @@ import { FormEvent, useState } from "react";
 
 type TestAttempt = {
   provider: "azure" | "codex" | "heuristic";
-  stage: "azure_sdk" | "azure_http" | "azure_responses" | "codex_cli" | "heuristic_guardrail" | "heuristic_fallback";
+  stage:
+    | "azure_sdk"
+    | "azure_http"
+    | "azure_responses"
+    | "codex_cli"
+    | "heuristic_guardrail"
+    | "heuristic_fallback"
+    | "humor_judge_azure"
+    | "humor_judge_codex";
   model: string;
   status: "success" | "error";
   latencyMs: number;
@@ -217,6 +225,12 @@ function SystemContent() {
           pendingOutbox: number;
           dueOutbox: number;
           failedOutboxRecent: number;
+          followupDetections: number;
+          followupConfirmationRate: number;
+          followupDismissalRate: number;
+          followupSent: number;
+          followupFailed: number;
+          followupOverdueCount: number;
         };
         alerts?: string[];
         runbooks?: Array<{
@@ -276,6 +290,11 @@ function SystemContent() {
             <p className="queue-meta">Open guardrails: {metrics.openGuardrails}</p>
             <p className="queue-meta">Outbox pending/due: {metrics.pendingOutbox}/{metrics.dueOutbox}</p>
             <p className="queue-meta">Recent failed outbox items: {metrics.failedOutboxRecent}</p>
+            <p className="queue-meta">Follow-up detections: {metrics.followupDetections}</p>
+            <p className="queue-meta">Follow-up confirmation rate: {(metrics.followupConfirmationRate * 100).toFixed(1)}%</p>
+            <p className="queue-meta">Follow-up dismissal rate: {(metrics.followupDismissalRate * 100).toFixed(1)}%</p>
+            <p className="queue-meta">Follow-up sent/failed: {metrics.followupSent}/{metrics.followupFailed}</p>
+            <p className="queue-meta">Overdue follow-ups: {metrics.followupOverdueCount}</p>
           </div>
         ) : (
           <p className="empty-line">No metrics yet.</p>

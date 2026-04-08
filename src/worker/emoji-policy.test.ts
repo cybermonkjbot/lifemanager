@@ -46,7 +46,7 @@ test("applyEmojiCooldownPolicy strips emoji when cooldown is active", () => {
   assert.equal(result.shouldRecordEmojiSend, false);
 });
 
-test("applyEmojiCooldownPolicy keeps emoji when cooldown window has passed", () => {
+test("applyEmojiCooldownPolicy strips emoji even when cooldown window has passed", () => {
   const nowMs = 3_000_000;
   const result = applyEmojiCooldownPolicy({
     nowMs,
@@ -55,9 +55,74 @@ test("applyEmojiCooldownPolicy keeps emoji when cooldown window has passed", () 
   });
 
   assert.equal(result.cooldownActive, false);
+  assert.equal(result.emojiSuppressed, true);
+  assert.equal(result.text, "Great news");
+  assert.equal(result.shouldRecordEmojiSend, false);
+});
+
+test("applyEmojiCooldownPolicy can allow emoji text when explicitly enabled and cooldown is inactive", () => {
+  const nowMs = 3_000_000;
+  const result = applyEmojiCooldownPolicy({
+    nowMs,
+    text: "Great news 🎉",
+    recentMessages: [{ direction: "outbound", text: "Old emoji 😄", messageAt: nowMs - EMOJI_COOLDOWN_MS - 5_000 }],
+    allowEmojiInText: true,
+  });
+
+  assert.equal(result.cooldownActive, false);
   assert.equal(result.emojiSuppressed, false);
   assert.equal(result.text, "Great news 🎉");
   assert.equal(result.shouldRecordEmojiSend, true);
+});
+
+test("applyEmojiCooldownPolicy allows whitelisted emoji up to max messages in window", () => {
+  const nowMs = 5_000_000;
+  const result = applyEmojiCooldownPolicy({
+    nowMs,
+    text: "No worries 🌚",
+    allowEmojiInText: true,
+    allowedEmojiInText: ["🌚", "😒"],
+    maxAllowedEmojiMessagesInWindow: 2,
+    allowedEmojiWindowMs: 6 * 60 * 60 * 1000,
+    recentMessages: [{ direction: "outbound", text: "Hmm 😒", messageAt: nowMs - 3_000 }],
+  });
+
+  assert.equal(result.emojiSuppressed, false);
+  assert.equal(result.text, "No worries 🌚");
+});
+
+test("applyEmojiCooldownPolicy strips whitelisted emoji once max messages in window is reached", () => {
+  const nowMs = 6_000_000;
+  const result = applyEmojiCooldownPolicy({
+    nowMs,
+    text: "No worries 🌚",
+    allowEmojiInText: true,
+    allowedEmojiInText: ["🌚", "😒"],
+    maxAllowedEmojiMessagesInWindow: 2,
+    allowedEmojiWindowMs: 6 * 60 * 60 * 1000,
+    recentMessages: [
+      { direction: "outbound", text: "Hmm 😒", messageAt: nowMs - 7_000 },
+      { direction: "outbound", text: "Okay 🌚", messageAt: nowMs - 2_000 },
+    ],
+  });
+
+  assert.equal(result.emojiSuppressed, true);
+  assert.equal(result.text, "No worries");
+});
+
+test("applyEmojiCooldownPolicy strips non-whitelisted emoji even when emoji text is enabled", () => {
+  const nowMs = 7_000_000;
+  const result = applyEmojiCooldownPolicy({
+    nowMs,
+    text: "Great news 🎉",
+    allowEmojiInText: true,
+    allowedEmojiInText: ["🌚", "😒"],
+    maxAllowedEmojiMessagesInWindow: 2,
+    allowedEmojiWindowMs: 6 * 60 * 60 * 1000,
+  });
+
+  assert.equal(result.emojiSuppressed, true);
+  assert.equal(result.text, "Great news");
 });
 
 test("applyEmojiCooldownPolicy falls back when text becomes empty after stripping", () => {

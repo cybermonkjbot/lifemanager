@@ -124,6 +124,7 @@ export const saveGenerated = mutation({
   args: {
     threadId: v.id("threads"),
     sourceMessageId: v.id("messages"),
+    toolRunId: v.optional(v.string()),
     text: v.string(),
     provider: v.union(v.literal("azure"), v.literal("codex"), v.literal("heuristic")),
     confidence: v.number(),
@@ -154,6 +155,7 @@ export const saveOrReplacePending = mutation({
   args: {
     threadId: v.id("threads"),
     sourceMessageId: v.id("messages"),
+    toolRunId: v.optional(v.string()),
     text: v.string(),
     provider: v.union(v.literal("azure"), v.literal("codex"), v.literal("heuristic")),
     confidence: v.number(),
@@ -211,6 +213,7 @@ export const saveOrReplacePending = mutation({
       if (draft && draft.status !== "sent" && draft.status !== "rejected") {
         await ctx.db.patch(draft._id, {
           sourceMessageId: args.sourceMessageId,
+          toolRunId: args.toolRunId,
           text: args.text,
           sendKind,
           reactionEmoji: args.reactionEmoji,
@@ -228,6 +231,7 @@ export const saveOrReplacePending = mutation({
 
         await ctx.db.patch(primaryPending._id, {
           draftId: draft._id,
+          toolRunId: args.toolRunId,
           messageText: args.text,
           sendKind,
           reactionEmoji: args.reactionEmoji,
@@ -286,6 +290,7 @@ export const saveOrReplacePending = mutation({
     const outboxId = await ctx.db.insert("outbox", {
       threadId: args.threadId,
       draftId,
+      toolRunId: args.toolRunId,
       messageText: args.text,
       sendKind,
       reactionEmoji: args.reactionEmoji,
@@ -411,6 +416,7 @@ export const approve = mutation({
       });
 
       await ctx.db.patch(pendingOutbox._id, {
+        toolRunId: draft.toolRunId,
         sendAt: now + draft.delayMs,
         messageText: draft.text,
         sendKind,
@@ -439,6 +445,7 @@ export const approve = mutation({
     const outboxId = await ctx.db.insert("outbox", {
       threadId: draft.threadId,
       draftId: draft._id,
+      toolRunId: draft.toolRunId,
       messageText: draft.text,
       sendKind,
       reactionEmoji: draft.reactionEmoji,
@@ -568,6 +575,7 @@ export const snooze = mutation({
     const activeOutbox = existingOutbox.find((item) => item.status === "pending" || item.status === "claimed");
     if (activeOutbox) {
       await ctx.db.patch(activeOutbox._id, {
+        toolRunId: draft.toolRunId,
         messageText: draft.text,
         sendKind: draft.sendKind || "text",
         reactionEmoji: draft.reactionEmoji,
@@ -592,6 +600,7 @@ export const snooze = mutation({
     const outboxId = await ctx.db.insert("outbox", {
       threadId: draft.threadId,
       draftId: draft._id,
+      toolRunId: draft.toolRunId,
       messageText: draft.text,
       sendKind: draft.sendKind || "text",
       reactionEmoji: draft.reactionEmoji,

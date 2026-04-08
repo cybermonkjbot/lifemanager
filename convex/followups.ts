@@ -1,5 +1,7 @@
 import { v } from "convex/values";
+import type { Doc } from "./_generated/dataModel";
 import { internalMutation, mutation, query } from "./_generated/server";
+import type { QueryCtx } from "./_generated/server";
 
 const followupStatusOrAll = v.union(
   v.literal("all"),
@@ -12,6 +14,68 @@ const followupStatusOrAll = v.union(
 );
 
 const followupSort = v.union(v.literal("due_asc"), v.literal("due_desc"), v.literal("updated_desc"));
+const followupTimelineFilter = v.union(
+  v.literal("all"),
+  v.literal("needs_review"),
+  v.literal("confirmed"),
+  v.literal("queued_sent"),
+  v.literal("failed"),
+  v.literal("dismissed"),
+);
+
+function startOfDay(ms: number) {
+  const date = new Date(ms);
+  date.setHours(0, 0, 0, 0);
+  return date.getTime();
+}
+
+function statusMatchesTimelineFilter(
+  status: "suggested" | "confirmed" | "queued" | "sent" | "failed" | "cancelled",
+  filter: "all" | "needs_review" | "confirmed" | "queued_sent" | "failed" | "dismissed",
+) {
+  if (filter === "all") {
+    return true;
+  }
+  if (filter === "needs_review") {
+    return status === "suggested";
+  }
+  if (filter === "confirmed") {
+    return status === "confirmed";
+  }
+  if (filter === "queued_sent") {
+    return status === "queued" || status === "sent";
+  }
+  if (filter === "failed") {
+    return status === "failed";
+  }
+  return status === "cancelled";
+}
+
+async function enrichFollowups(
+  ctx: QueryCtx,
+  items: Doc<"followUps">[],
+) {
+  return await Promise.all(
+    items.map(async (item) => {
+      const [thread, sourceMessage] = await Promise.all([
+        ctx.db.get(item.threadId),
+        ctx.db.get(item.sourceMessageId),
+      ]);
+      return {
+        ...item,
+        thread,
+        sourceMessage: sourceMessage
+          ? {
+              _id: sourceMessage._id,
+              text: sourceMessage.text,
+              messageAt: sourceMessage.messageAt,
+              direction: sourceMessage.direction,
+            }
+          : null,
+      };
+    }),
+  );
+}
 
 export const list = query({
   args: {
@@ -23,13 +87,16 @@ export const list = query({
     const limit = Math.min(args.limit ?? 50, 100);
     const status = args.status || "all";
     const sort = args.sort || "due_asc";
-    const base = status === "all"
-      ? await ctx.db.query("followUps").withIndex("by_dueAt").order("asc").take(Math.min(limit * 3, 500))
-      : await ctx.db
-          .query("followUps")
-          .withIndex("by_status_dueAt", (q) => q.eq("status", status as "suggested" | "confirmed" | "queued" | "sent" | "failed" | "cancelled"))
-          .order("asc")
-          .take(Math.min(limit * 3, 500));
+    const base =
+      status === "all"
+        ? await ctx.db.query("followUps").withIndex("by_dueAt").order("asc").take(Math.min(limit * 3, 500))
+        : await ctx.db
+            .query("followUps")
+            .withIndex("by_status_dueAt", (q) =>
+              q.eq("status", status as "suggested" | "confirmed" | "queued" | "sent" | "failed" | "cancelled"),
+            )
+            .order("asc")
+            .take(Math.min(limit * 3, 500));
 
     const items = [...base];
     if (sort === "due_desc") {
@@ -38,15 +105,61 @@ export const list = query({
       items.sort((a, b) => b.updatedAt - a.updatedAt);
     }
 
-    return await Promise.all(
-      items.slice(0, limit).map(async (item) => {
-        const thread = await ctx.db.get(item.threadId);
-        return {
-          ...item,
-          thread,
-        };
-      }),
-    );
+    return await enrichFollowups(ctx, items.slice(0, limit));
+  },
+});
+
+export const timeline = query({
+  args: {
+    limit: v.optional(v.number()),
+    filter: v.optional(followupTimelineFilter),
+  },
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    const todayStart = startOfDay(now);
+    const tomorrowStart = todayStart + 24 * 60 * 60 * 1000;
+    const limit = Math.min(args.limit ?? 160, 300);
+    const filter = args.filter || "all";
+
+    const base = await ctx.db
+      .query("followUps")
+      .withIndex("by_dueAt")
+      .order("asc")
+      .take(Math.min(limit * 5, 900));
+
+    const filtered = base.filter((item) => statusMatchesTimelineFilter(item.status, filter)).slice(0, limit);
+    const enriched = await enrichFollowups(ctx, filtered);
+
+    const overdue: typeof enriched = [];
+    const today: typeof enriched = [];
+    const upcoming: typeof enriched = [];
+
+    for (const item of enriched) {
+      if (item.dueAt < now) {
+        overdue.push(item);
+      } else if (item.dueAt >= todayStart && item.dueAt < tomorrowStart) {
+        today.push(item);
+      } else {
+        upcoming.push(item);
+      }
+    }
+
+    return {
+      now,
+      filter,
+      totals: {
+        all: base.length,
+        visible: enriched.length,
+        overdue: overdue.length,
+        today: today.length,
+        upcoming: upcoming.length,
+      },
+      sections: {
+        overdue,
+        today,
+        upcoming,
+      },
+    };
   },
 });
 
@@ -64,9 +177,17 @@ export const confirm = mutation({
       return followUp._id;
     }
 
+    const now = Date.now();
     await ctx.db.patch(followUp._id, {
       status: "confirmed",
-      updatedAt: Date.now(),
+      updatedAt: now,
+    });
+    await ctx.db.insert("systemEvents", {
+      source: "dashboard",
+      eventType: "followup.confirmed",
+      threadId: followUp.threadId,
+      detail: followUp.reason.slice(0, 240),
+      createdAt: now,
     });
 
     return followUp._id;
@@ -134,9 +255,17 @@ export const cancel = mutation({
       return row._id;
     }
 
+    const now = Date.now();
     await ctx.db.patch(row._id, {
       status: "cancelled",
-      updatedAt: Date.now(),
+      updatedAt: now,
+    });
+    await ctx.db.insert("systemEvents", {
+      source: "dashboard",
+      eventType: "followup.dismissed",
+      threadId: row.threadId,
+      detail: row.reason.slice(0, 240),
+      createdAt: now,
     });
     return row._id;
   },

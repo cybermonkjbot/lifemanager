@@ -3,6 +3,7 @@ import type { Doc } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { mutation, query } from "./_generated/server";
 import { setConfigValue, getConfig } from "./lib/config";
+import { assessProfessionalConversation, type MemePolicyMode } from "./lib/memePolicy";
 import { DEFAULT_PERSONA_PACK_ID, PERSONA_PACKS, getPersonaPackById } from "./lib/personaPacks";
 
 type DefaultPersonalityProfile = {
@@ -231,6 +232,7 @@ async function ensureThreadSetting(
     threadId,
     profileSlug: fallbackProfile?.slug || "casual",
     intensity: clamp01(fallbackProfile?.defaultIntensity ?? 0.58),
+    memePolicyMode: "auto",
     createdAt: now,
     updatedAt: now,
   });
@@ -241,6 +243,7 @@ async function ensureThreadSetting(
     threadId,
     profileSlug: fallbackProfile?.slug || "casual",
     intensity: clamp01(fallbackProfile?.defaultIntensity ?? 0.58),
+    memePolicyMode: "auto",
     createdAt: now,
     updatedAt: now,
   };
@@ -790,11 +793,29 @@ export const getThreadSetting = query({
 
     if (!setting) {
       const fallback = fallbackProfile;
+      const recentMessages = await ctx.db
+        .query("messages")
+        .withIndex("by_thread_messageAt", (q) => q.eq("threadId", args.threadId))
+        .order("desc")
+        .take(60);
+      const latestInboundText = recentMessages.find((message) => message.direction === "inbound")?.text || "";
+      const professionalAssessment = assessProfessionalConversation({
+        messages: recentMessages.reverse().map((message) => ({
+          text: message.text,
+          direction: message.direction,
+          messageType: message.messageType,
+        })),
+        latestInboundText,
+      });
       return {
         threadId: args.threadId,
         profileSlug: fallback?.slug || "casual",
         intensity: clamp01(fallback?.defaultIntensity ?? 0.58),
         customPrompt: "",
+        memePolicyMode: "auto" as MemePolicyMode,
+        memeAutoProfessional: professionalAssessment.isProfessional,
+        memeAutoProfessionalScore: professionalAssessment.score,
+        memeAutoProfessionalSignals: professionalAssessment.signals,
         threadPromptProfile: "",
         threadPromptProfileSource: undefined,
         threadPromptProfileLookbackDays: undefined,
@@ -805,12 +826,30 @@ export const getThreadSetting = query({
     }
 
     const selectedProfile = profileBySlug.get(setting.profileSlug) || fallbackProfile;
+    const recentMessages = await ctx.db
+      .query("messages")
+      .withIndex("by_thread_messageAt", (q) => q.eq("threadId", args.threadId))
+      .order("desc")
+      .take(60);
+    const latestInboundText = recentMessages.find((message) => message.direction === "inbound")?.text || "";
+    const professionalAssessment = assessProfessionalConversation({
+      messages: recentMessages.reverse().map((message) => ({
+        text: message.text,
+        direction: message.direction,
+        messageType: message.messageType,
+      })),
+      latestInboundText,
+    });
 
     return {
       threadId: args.threadId,
       profileSlug: setting.profileSlug,
       intensity: clamp01(setting.intensity),
       customPrompt: setting.customPrompt || "",
+      memePolicyMode: (setting.memePolicyMode || "auto") as MemePolicyMode,
+      memeAutoProfessional: professionalAssessment.isProfessional,
+      memeAutoProfessionalScore: professionalAssessment.score,
+      memeAutoProfessionalSignals: professionalAssessment.signals,
       threadPromptProfile: setting.threadPromptProfile || "",
       threadPromptProfileSource: setting.threadPromptProfileSource,
       threadPromptProfileLookbackDays: setting.threadPromptProfileLookbackDays,
@@ -828,6 +867,7 @@ export const setThreadSetting = mutation({
     profileSlug: v.string(),
     intensity: v.number(),
     customPrompt: v.optional(v.string()),
+    memePolicyMode: v.optional(v.union(v.literal("auto"), v.literal("always_allow"), v.literal("always_block"))),
   },
   handler: async (ctx, args) => {
     const profileSlug = normalizeSlug(args.profileSlug);
@@ -846,6 +886,7 @@ export const setThreadSetting = mutation({
       profileSlug,
       intensity: clamp01(args.intensity),
       customPrompt: args.customPrompt?.trim() || undefined,
+      memePolicyMode: args.memePolicyMode || "auto",
       updatedAt: now,
     };
 

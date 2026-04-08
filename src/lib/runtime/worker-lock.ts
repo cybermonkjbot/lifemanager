@@ -2,7 +2,7 @@ import { existsSync, rmSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-const WORKER_PID_PATH = join(process.cwd(), ".slm", "worker.pid");
+const WORKER_PID_PATH = join(".slm", "worker.pid");
 
 type StopWorkerResult = {
   action: "none" | "stale" | "terminated" | "killed" | "failed";

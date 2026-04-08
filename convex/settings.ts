@@ -23,6 +23,10 @@ export const save = mutation({
     reactionsEnabled: v.boolean(),
     stickersEnabled: v.boolean(),
     memesEnabled: v.boolean(),
+    generatedMemesEnabled: v.boolean(),
+    generatedMemesAutoSendEnabled: v.boolean(),
+    memeThreadCooldownMs: v.number(),
+    memeSendProbability: v.number(),
     soulModeEnabled: v.boolean(),
     humorLearningEnabled: v.boolean(),
     statusAutoReplyEnabled: v.boolean(),
@@ -75,6 +79,10 @@ export const save = mutation({
       reactionsEnabled: args.reactionsEnabled,
       stickersEnabled: args.stickersEnabled,
       memesEnabled: args.memesEnabled,
+      generatedMemesEnabled: args.generatedMemesEnabled,
+      generatedMemesAutoSendEnabled: args.generatedMemesAutoSendEnabled,
+      memeThreadCooldownMs: clampInt(args.memeThreadCooldownMs, 5 * 60 * 1000, 7 * 24 * 60 * 60 * 1000),
+      memeSendProbability: clamp(args.memeSendProbability, 0, 1),
       soulModeEnabled: args.soulModeEnabled,
       humorLearningEnabled: args.humorLearningEnabled,
       statusAutoReplyEnabled: args.statusAutoReplyEnabled,
@@ -140,6 +148,10 @@ export const save = mutation({
     await setConfigValue(ctx, "reactionsEnabled", normalized.reactionsEnabled ? "true" : "false");
     await setConfigValue(ctx, "stickersEnabled", normalized.stickersEnabled ? "true" : "false");
     await setConfigValue(ctx, "memesEnabled", normalized.memesEnabled ? "true" : "false");
+    await setConfigValue(ctx, "generatedMemesEnabled", normalized.generatedMemesEnabled ? "true" : "false");
+    await setConfigValue(ctx, "generatedMemesAutoSendEnabled", normalized.generatedMemesAutoSendEnabled ? "true" : "false");
+    await setConfigValue(ctx, "memeThreadCooldownMs", String(normalized.memeThreadCooldownMs));
+    await setConfigValue(ctx, "memeSendProbability", String(normalized.memeSendProbability));
     await setConfigValue(ctx, "soulModeEnabled", normalized.soulModeEnabled ? "true" : "false");
     await setConfigValue(ctx, "humorLearningEnabled", normalized.humorLearningEnabled ? "true" : "false");
     await setConfigValue(ctx, "statusAutoReplyEnabled", normalized.statusAutoReplyEnabled ? "true" : "false");
