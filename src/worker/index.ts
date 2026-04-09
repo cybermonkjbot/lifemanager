@@ -88,6 +88,8 @@ import {
 } from "./meme-policy";
 import { parseRuntimeCommand, type RuntimeCommand, type RuntimeCommandTarget } from "./runtime-commands";
 import { parseSelfImproveCommand, type SelfImproveCommand } from "./self-improve-command";
+import { isSelfControlHelpCommand } from "./control-help-command";
+import { shouldAttemptSelfControlOnUpsert } from "./self-control-routing";
 
 const logger = pino({
   name: "slm-worker",
@@ -3195,6 +3197,63 @@ function resolveTextEmojiAllowlist() {
     return lines.join("\n");
   };
 
+  const buildSelfControlHelpText = () => {
+    return [
+      "Self-chat command help",
+      "",
+      "Runtime controls:",
+      "- pause | resume | restart | status (defaults to worker)",
+      "- pause worker|app|both",
+      "- resume worker|app|both",
+      "- restart worker|app|both",
+      "- status worker|app|both",
+      "",
+      "Local Codex improve:",
+      "- improve <prompt>",
+      "- improve status",
+      "- improve latest",
+      "",
+      "Help:",
+      "- help",
+      "- /slm help",
+      "- improve help",
+    ].join("\n");
+  };
+
+  const maybeHandleSelfControlHelpCommand = async (message: {
+    key: SelfControlMessageKey;
+    message?: unknown;
+  }) => {
+    const parsed = parseInboundMessage(message.message as Parameters<typeof parseInboundMessage>[0]);
+    if (parsed.kind !== "text") {
+      return false;
+    }
+
+    const selfControl = resolveSelfControlThread(message.key);
+    if (!selfControl) {
+      return false;
+    }
+    const { threadJid } = selfControl;
+
+    if (!isSelfControlHelpCommand(parsed.text)) {
+      return false;
+    }
+
+    const responseText = buildSelfControlHelpText();
+    rememberAutomatedThreadSend(threadJid);
+    const sent = await sock.sendMessage(threadJid, { text: responseText });
+    rememberAutomatedOutboundId(sent?.key?.id || undefined);
+    await convex
+      .mutation(convexRefs.systemRecordEvent, {
+        source: "worker",
+        eventType: "self_control.help.sent",
+        detail: "help command response sent",
+      })
+      .catch(() => undefined);
+
+    return true;
+  };
+
   const runRuntimeCommandForTarget = async (
     command: RuntimeCommand,
     target: RuntimeCommandTarget,
@@ -5073,12 +5132,24 @@ function resolveTextEmojiAllowlist() {
 
       for (const message of event.messages) {
         const laneKey = getThreadJid(message.key) || `unknown:${message.key.id || Date.now()}`;
-        if (ingestMode) {
+        const messageAt = normalizeIncomingMessageTimestamp(message.messageTimestamp, Date.now());
+        const allowSelfControlHandling = shouldAttemptSelfControlOnUpsert({
+          ingestMode,
+          upsertType: event.type,
+          fromMe: Boolean(message.key?.fromMe),
+          messageAt,
+        });
+
+        if (!allowSelfControlHandling && ingestMode) {
           void enqueueByThreadLane(inboundThreadLanes, laneKey, () =>
             runInboundWithLimit(async () => {
               await processHistoricalMessage(message, ingestMode);
             }),
           );
+          continue;
+        }
+        const helpCommandHandled = await maybeHandleSelfControlHelpCommand(message);
+        if (helpCommandHandled) {
           continue;
         }
         const selfImproveCommandHandled = await maybeHandleSelfImproveCommand(message);

@@ -145,6 +145,13 @@ type FriendshipCohortInference = {
   usedBridgeFallback: boolean;
 };
 
+export type ProfessionalLinguaInference = {
+  enabled: boolean;
+  confidence: number;
+  signals: string[];
+  reason: "profile_professional" | "business_context" | "disabled";
+};
+
 type AzureApiStyle = "auto" | "chat_completions" | "responses";
 type FallbackMode = "all" | "azure_only";
 type AntiBeggiBeggiTone = "soft" | "firm" | "funny";
@@ -1563,6 +1570,13 @@ const FRIENDSHIP_SCENARIO_HINTS: Array<{ scenario: string; pattern: RegExp }> = 
   { scenario: "conflict_repair", pattern: /\b(came off harsh|hurt|misunderstood|my bad)\b/i },
 ];
 
+const PROFESSIONAL_LINGUA_SIGNAL_PATTERNS: Array<{ id: string; pattern: RegExp; weight: number }> = [
+  { id: "professional_greeting", pattern: /\b(good morning|good afternoon|good evening)\b/i, weight: 0.35 },
+  { id: "execution_language", pattern: /\b(align|confirm|share|deliver|timeline|eta|review|update)\b/i, weight: 0.62 },
+  { id: "work_keywords", pattern: /\b(client|proposal|brief|deadline|stakeholder|meeting|action item)\b/i, weight: 0.7 },
+  { id: "polite_formality", pattern: /\b(please|kindly|appreciate|thank you)\b/i, weight: 0.28 },
+];
+
 function inferFriendshipScenarioHint(text: string) {
   for (const hint of FRIENDSHIP_SCENARIO_HINTS) {
     if (hint.pattern.test(text)) {
@@ -1647,6 +1661,58 @@ export function inferFriendshipGenerationCohort(args: {
     signals: (cohort === "boomer" ? boomerSignals : genZSignals).slice(0, 5),
     scenario,
     usedBridgeFallback: false,
+  };
+}
+
+export function inferProfessionalLinguaProfile(args: {
+  inboundText: string;
+  recentHistoryLines: string[];
+  relevantHistoryLines: string[];
+  personality?: PersonalityContext;
+  personalDomain: PersonalConversationDomain;
+  businessStyleRisk: boolean;
+}): ProfessionalLinguaInference {
+  const slug = (args.personality?.profileSlug || "").trim().toLowerCase();
+  const profileName = (args.personality?.profileName || "").trim().toLowerCase();
+  const corpus = [args.inboundText, ...args.recentHistoryLines.slice(-6), ...args.relevantHistoryLines.slice(-4)].join(" ");
+
+  let score = 0;
+  const signals: string[] = [];
+  if (slug === "professional" || profileName.includes("professional")) {
+    score += 1.15;
+    signals.push("professional_profile_selected");
+  } else if (slug === "casual") {
+    score += 0.18;
+    signals.push("casual_profile_selected");
+  }
+  if (args.personalDomain === "work_admin") {
+    score += 0.72;
+    signals.push("work_admin_domain");
+  }
+  if (args.businessStyleRisk) {
+    score += 0.85;
+    signals.push("business_style_risk");
+  }
+  for (const signal of PROFESSIONAL_LINGUA_SIGNAL_PATTERNS) {
+    if (signal.pattern.test(corpus)) {
+      score += signal.weight;
+      signals.push(signal.id);
+    }
+  }
+
+  const enabled = score >= 1.15 || ((slug === "professional" || profileName.includes("professional")) && score >= 0.9);
+  const confidence = clamp01(0.35 + Math.min(score, 3) * 0.2);
+  const reason =
+    enabled && (slug === "professional" || profileName.includes("professional"))
+      ? "profile_professional"
+      : enabled
+        ? "business_context"
+        : "disabled";
+  return {
+    enabled,
+    confidence,
+    signals: signals.slice(0, 6),
+    reason,
   };
 }
 
@@ -2521,6 +2587,23 @@ function buildPrompt(args: {
     oldEnglishMode,
     friendshipInference,
   });
+  const professionalLingua = inferProfessionalLinguaProfile({
+    inboundText: args.inboundText,
+    recentHistoryLines: recentHistory.map((line) => line.line),
+    relevantHistoryLines: relevantHistory.map((line) => line.line),
+    personality: args.personality,
+    personalDomain: responseWorkbench.workbench.personalDomain,
+    businessStyleRisk: responseWorkbench.workbench.businessStyleRisk,
+  });
+  const professionalLinguaInstruction = professionalLingua.enabled
+    ? "Professional lingua mode is ON. Mirror the account owner's established professional language style from profile and thread context: concise, respectful, clear, and action-oriented."
+    : "";
+  const professionalLinguaCadenceInstruction = professionalLingua.enabled
+    ? "Professional cadence: brief acknowledgment -> direct answer or action -> optional concrete next-step close."
+    : "";
+  const professionalLinguaGuardrailInstruction = professionalLingua.enabled
+    ? "Avoid robotic corporate filler (for example: 'Please be informed', 'Thanks for reaching out', or rigid template phrasing). Keep it naturally human."
+    : "";
   toolCalls.push(responseWorkbench.call);
   const responseWorkbenchInstruction =
     responseWorkbench.workbench.replyMode === "clarify"
@@ -2551,6 +2634,11 @@ function buildPrompt(args: {
     responseWorkbench.workbench.friendshipCohortSignals?.length
       ? `Friendship cohort signals: ${responseWorkbench.workbench.friendshipCohortSignals.join(", ")}`
       : "Friendship cohort signals: none",
+    professionalLingua.enabled ? "Professional lingua mode: on" : "Professional lingua mode: off",
+    `Professional lingua confidence: ${Math.round(professionalLingua.confidence * 100)}%`,
+    professionalLingua.signals.length > 0
+      ? `Professional lingua signals: ${professionalLingua.signals.join(", ")}`
+      : "Professional lingua signals: none",
     responseWorkbench.workbench.explicitAsks.length > 0
       ? `Explicit asks: ${responseWorkbench.workbench.explicitAsks.join(" | ")}`
       : "Explicit asks: none",
@@ -2595,6 +2683,9 @@ function buildPrompt(args: {
       steeringInstruction,
       insultHandlingInstruction,
       friendshipRoutingInstruction,
+      professionalLinguaInstruction,
+      professionalLinguaCadenceInstruction,
+      professionalLinguaGuardrailInstruction,
       pidginInstruction,
       oldEnglishInstruction,
       bossEscalationInstruction,
@@ -2606,7 +2697,9 @@ function buildPrompt(args: {
           ? "Tone mode is DIRECT_ACTION. Prioritize a concrete answer, recommendation, or next step quickly."
           : "Tone mode is BALANCED. Blend warmth and action in one concise reply.",
       responseWorkbench.workbench.businessStyleRisk
-        ? "Keep wording personal and human; avoid sounding like account management, customer support, or business ops."
+        ? professionalLingua.enabled
+          ? "Keep wording professional but human: precise, respectful, and practical without sounding like a support macro."
+          : "Keep wording personal and human; avoid sounding like account management, customer support, or business ops."
         : "",
       replyPolicyInstruction ? `Additional reply policy: ${replyPolicyInstruction}` : "",
       mimicryInstruction,

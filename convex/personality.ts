@@ -57,11 +57,19 @@ const DEFAULT_PERSONALITY_PROFILES: DefaultPersonalityProfile[] = [
   },
   {
     slug: "casual",
-    name: "Casual / Professional",
+    name: "Casual",
     description: "Calm, polite, concise, and still personal to your identity.",
     prompt:
       "Write concise, polite, and calm replies in the account owner's natural voice. Keep emotional tone light, stay practical, and avoid overfamiliar language unless the other person clearly leads with it.",
     defaultIntensity: 0.58,
+  },
+  {
+    slug: "professional",
+    name: "Professional Conversation",
+    description: "Clear, respectful, and execution-focused in your own professional lingua.",
+    prompt:
+      "Write in the account owner's professional lingua: concise, respectful, and action-oriented. Keep wording human and direct, mirror the thread's established professional phrasing, and end with clear ownership or next steps when needed.",
+    defaultIntensity: 0.64,
   },
 ];
 

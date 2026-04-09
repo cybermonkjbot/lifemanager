@@ -12,6 +12,7 @@ import {
   hasAggressiveInsultCue,
   hasBossAddressCue,
   inferFriendshipGenerationCohort,
+  inferProfessionalLinguaProfile,
   normalizeOutboundText,
   postProcessReplyText,
   routeAckResponseChannel,
@@ -1857,6 +1858,47 @@ test("generateReplyWithFallback injects personal-first anti-corporate instructio
   }
 });
 
+test("generateReplyWithFallback injects professional lingua instructions for professional persona", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  const requestBodies: string[] = [];
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      requestBodies.push(typeof init?.body === "string" ? init.body : "");
+      return new Response(JSON.stringify({ output_text: "Confirmed. I will share the updated timeline shortly." }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "Please share the updated timeline for client review.",
+      historyLines: ["Them: Please share the updated timeline for client review."],
+      styleHints: [],
+      personality: {
+        profileSlug: "professional",
+        profileName: "Professional Conversation",
+      },
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "log_only",
+      },
+    });
+
+    assert.equal(result.provider, "azure");
+    assert.ok(requestBodies.some((body) => /Professional lingua mode is ON/i.test(body)));
+    assert.ok(requestBodies.some((body) => /Professional cadence/i.test(body)));
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
 test("generateReplyWithFallback injects micro-reply cadence guidance", async () => {
   const snapshot = clearAiEnv();
   const originalFetch = globalThis.fetch;
@@ -2551,6 +2593,44 @@ test("inferFriendshipGenerationCohort falls back to bridge when ambiguous", () =
   });
   assert.equal(inferred.cohort, "bridge");
   assert.equal(inferred.usedBridgeFallback, true);
+});
+
+test("inferProfessionalLinguaProfile enables when professional profile is selected", () => {
+  const inferred = inferProfessionalLinguaProfile({
+    inboundText: "Please share the updated timeline before the client meeting.",
+    recentHistoryLines: ["Me: I will send the revised brief shortly."],
+    relevantHistoryLines: [],
+    personality: { profileSlug: "professional", profileName: "Professional Conversation" },
+    personalDomain: "work_admin",
+    businessStyleRisk: true,
+  });
+  assert.equal(inferred.enabled, true);
+  assert.equal(inferred.reason, "profile_professional");
+});
+
+test("inferProfessionalLinguaProfile enables from business context even on casual profile", () => {
+  const inferred = inferProfessionalLinguaProfile({
+    inboundText: "Can you confirm the client-ready draft and ETA?",
+    recentHistoryLines: ["Them: Stakeholders need the proposal by tomorrow."],
+    relevantHistoryLines: [],
+    personality: { profileSlug: "casual", profileName: "Casual" },
+    personalDomain: "work_admin",
+    businessStyleRisk: true,
+  });
+  assert.equal(inferred.enabled, true);
+  assert.equal(inferred.reason, "business_context");
+});
+
+test("inferProfessionalLinguaProfile stays off in non-business casual chats", () => {
+  const inferred = inferProfessionalLinguaProfile({
+    inboundText: "You around for dinner later?",
+    recentHistoryLines: ["Them: let's catch up this evening"],
+    relevantHistoryLines: [],
+    personality: { profileSlug: "casual", profileName: "Casual" },
+    personalDomain: "friend",
+    businessStyleRisk: false,
+  });
+  assert.equal(inferred.enabled, false);
 });
 
 test("selectFewShotsForPrompt can prioritize preferred cohort and scenario tags", () => {

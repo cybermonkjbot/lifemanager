@@ -101,6 +101,7 @@ Send a message to your own WhatsApp chat to control runtime without opening the 
 Notes:
 - Commands only execute from your self chat (your own JID).
 - Shortcuts are supported for worker control: `pause`, `resume`, `restart`, `status` (and `/slm pause`, etc.).
+- Send `help` anytime to get the full command list in chat.
 - `pause worker` pauses automation while keeping the listener alive, so `resume worker` still works.
 - App controls use `.slm/app.pid` and start with `SLM_APP_START_CMD` (default `bun run dev:next`).
 
