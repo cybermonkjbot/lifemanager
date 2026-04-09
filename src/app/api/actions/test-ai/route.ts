@@ -14,6 +14,9 @@ type RuntimeSettings = {
   aiMaxReplyChars?: number;
   aiHistoryLineLimit?: number;
   aiFallbackMode?: "all" | "azure_only";
+  aiModelFirstEnabled?: boolean;
+  aiDeterministicModes?: string[];
+  aiAckRoutingEnabled?: boolean;
   aiReplyPolicy?: string;
   aiSystemInstruction?: string;
   activePersonaPackId?: string;
@@ -40,6 +43,7 @@ type ContactMemoryFact = {
 };
 
 type ThreadContext = {
+  thread?: { jid?: string } | null;
   messages: Array<{ direction: "inbound" | "outbound"; text: string }>;
   memory?: { styleNotes?: string[] } | null;
 };
@@ -110,6 +114,7 @@ export async function POST(request: Request) {
     let historyLines: string[] = [];
     let styleHints: string[] = [];
     let contactFacts: ContactMemoryFact[] = [];
+    let threadJid: string | undefined;
     let personality: {
       profileSlug?: string;
       profileName?: string;
@@ -122,6 +127,7 @@ export async function POST(request: Request) {
     if (threadId) {
       const threadContext = (await convex.query(convexRefs.threadGet, { threadId }).catch(() => null)) as ThreadContext | null;
       if (threadContext) {
+        threadJid = threadContext.thread?.jid || undefined;
         historyLines = threadContext.messages.map((messageItem) => {
           return `${messageItem.direction === "inbound" ? "Them" : "Me"}: ${messageItem.text}`;
         });
@@ -182,6 +188,9 @@ export async function POST(request: Request) {
         maxReplyChars: runtimeSettings?.aiMaxReplyChars,
         historyLineLimit: runtimeSettings?.aiHistoryLineLimit,
         fallbackMode: runtimeSettings?.aiFallbackMode,
+        modelFirstEnabled: runtimeSettings?.aiModelFirstEnabled,
+        deterministicModes: runtimeSettings?.aiDeterministicModes,
+        ackRoutingEnabled: runtimeSettings?.aiAckRoutingEnabled,
         replyPolicyInstruction: runtimeSettings?.aiReplyPolicy || "",
         systemInstruction: runtimeSettings?.aiSystemInstruction || "",
         activePersonaPackId: runtimeSettings?.activePersonaPackId || "",
@@ -194,6 +203,61 @@ export async function POST(request: Request) {
         delayMaxMs: runtimeSettings?.humanDelayMaxMs,
         typingMinMs: runtimeSettings?.humanTypingMinMs,
         typingMaxMs: runtimeSettings?.humanTypingMaxMs,
+      },
+      modelToolContext: {
+        threadId,
+        contactJid: threadJid,
+        executeToolRouterPlan: async (toolArgs) => {
+          const maxResults = Number(toolArgs.maxResults);
+          const maxToolsPerRun = Number(toolArgs.maxToolsPerRun);
+          if (!Number.isFinite(maxResults) || maxResults > 20) {
+            return {
+              status: "error" as const,
+              errorCode: "max_results_exceeded",
+              errorMessage: "maxResults exceeds server cap (20).",
+              latencyMs: 0,
+            };
+          }
+          if (!Number.isFinite(maxToolsPerRun) || maxToolsPerRun > 8) {
+            return {
+              status: "error" as const,
+              errorCode: "max_tools_per_run_exceeded",
+              errorMessage: "maxToolsPerRun exceeds server cap (8).",
+              latencyMs: 0,
+            };
+          }
+
+          const startedAt = Date.now();
+          try {
+            const output = await convex.action(convexRefs.chatToolRouterPlan, {
+              task: toolArgs.task,
+              candidateReply: toolArgs.candidateReply || "",
+              ...(threadId ? { threadId } : {}),
+              ...(threadJid ? { contactJid: threadJid } : {}),
+              execute: true,
+              plannerMode: "hybrid",
+              allowSideEffects: true,
+              includeExtraction: Boolean(toolArgs.includeExtraction),
+              timeoutMs: Math.round(Math.max(500, Math.min(toolArgs.toolTimeoutMs, 30_000))),
+              maxResults: Math.round(Math.max(1, Math.min(maxResults, 20))),
+              maxToolsPerRun: Math.round(Math.max(1, Math.min(maxToolsPerRun, 8))),
+            });
+            return {
+              status: "success" as const,
+              output,
+              latencyMs: Date.now() - startedAt,
+            };
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            const lower = message.toLowerCase();
+            return {
+              status: lower.includes("timeout") ? ("timeout" as const) : ("error" as const),
+              errorCode: lower.includes("timeout") ? "timeout" : "tool_router_error",
+              errorMessage: compactText(message, 260),
+              latencyMs: Date.now() - startedAt,
+            };
+          }
+        },
       },
     });
 

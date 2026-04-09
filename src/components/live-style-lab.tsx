@@ -62,6 +62,8 @@ function StyleLabContent() {
           version: string;
           description: string;
           allowedProfileSlugs: string[];
+          cohorts?: string[];
+          scenarioCount?: number;
         }>;
       }
     | undefined;
@@ -559,6 +561,14 @@ function StyleLabContent() {
                   <p className="queue-meta">
                     Allowed profiles: {pack.allowedProfileSlugs.join(", ")}{isActive ? " · Active" : ""}
                   </p>
+                  {Array.isArray(pack.cohorts) && pack.cohorts.length > 0 ? (
+                    <p className="queue-meta">
+                      Cohorts: {pack.cohorts.join(", ")}
+                      {typeof pack.scenarioCount === "number" ? ` · Scenarios: ${pack.scenarioCount}` : ""}
+                    </p>
+                  ) : typeof pack.scenarioCount === "number" && pack.scenarioCount > 0 ? (
+                    <p className="queue-meta">Scenarios: {pack.scenarioCount}</p>
+                  ) : null}
                   <button
                     type="button"
                     className="btn btn-primary"

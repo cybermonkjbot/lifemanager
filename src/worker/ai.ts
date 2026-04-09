@@ -47,6 +47,8 @@ export type AiAttempt = {
     | "azure_http"
     | "azure_responses"
     | "codex_cli"
+    | "ack_router_azure"
+    | "ack_router_codex"
     | "heuristic_guardrail"
     | "heuristic_fallback"
     | "humor_judge_azure"
@@ -75,6 +77,7 @@ export type QualityCheck = {
 type AttemptOutcome = {
   result?: Omit<AiResult, "attempts">;
   attempts: AiAttempt[];
+  toolCalls?: ContextToolCall[];
 };
 
 export type ImageAnalysisResult = {
@@ -132,16 +135,28 @@ type ContactMemoryFactContext = {
   confidence?: number;
 };
 
+export type FriendshipGenerationCohort = "boomer" | "gen_z" | "bridge";
+
+type FriendshipCohortInference = {
+  cohort: FriendshipGenerationCohort;
+  confidence: number;
+  signals: string[];
+  scenario?: string;
+  usedBridgeFallback: boolean;
+};
+
 type AzureApiStyle = "auto" | "chat_completions" | "responses";
 type FallbackMode = "all" | "azure_only";
 type AntiBeggiBeggiTone = "soft" | "firm" | "funny";
 export type ConversationSteeringMode = "none" | "hard_stop" | "pause" | "wrap_up" | "loop" | "anti_beggi_beggi" | "anti_sales_pitch";
+export type AckRoutingChannel = "reaction_only" | "reaction_plus_text" | "text";
 export type ContextToolName =
   | "context_window_detection"
   | "context_window_cleaning"
   | "conversation_history_search"
   | "contact_memory_fact_selection"
-  | "response_workbench";
+  | "response_workbench"
+  | "model_tool_router_plan";
 
 export type ContextToolCall = {
   name: ContextToolName;
@@ -165,6 +180,9 @@ type RuntimeAiTuning = {
   model?: string;
   apiStyle?: AzureApiStyle;
   fallbackMode?: FallbackMode;
+  modelFirstEnabled?: boolean;
+  deterministicModes?: string[];
+  ackRoutingEnabled?: boolean;
   systemInstruction?: string;
   replyPolicyInstruction?: string;
   activePersonaPackId?: string;
@@ -184,11 +202,45 @@ type RuntimeAiTuning = {
   contextUtilizationTarget?: number;
   contextExpansionLineStep?: number;
   adaptiveContextMinTokens?: number;
+  maxToolRounds?: number;
+  maxToolCallsPerRound?: number;
+  toolTimeoutMs?: number;
   codexTimeoutMs?: number;
   delayMinMs?: number;
   delayMaxMs?: number;
   typingMinMs?: number;
   typingMaxMs?: number;
+};
+
+type ToolRouterPlanInput = {
+  task: string;
+  candidateReply?: string;
+  includeExtraction?: boolean;
+  maxResults?: number;
+  maxToolsPerRun?: number;
+  threadId?: string;
+  contactJid?: string;
+};
+
+type ModelToolExecutionResult = {
+  status: "success" | "error" | "timeout";
+  output?: unknown;
+  errorCode?: string;
+  errorMessage?: string;
+  latencyMs: number;
+};
+
+export type ModelToolContext = {
+  threadId?: string;
+  contactJid?: string;
+  executeToolRouterPlan: (args: {
+    task: string;
+    candidateReply?: string;
+    includeExtraction: boolean;
+    maxResults: number;
+    maxToolsPerRun: number;
+    toolTimeoutMs: number;
+  }) => Promise<ModelToolExecutionResult>;
 };
 
 type AzureConfig = {
@@ -303,6 +355,44 @@ const ROYAL_JOKE_TERMS = new Set(["king", "queen"]);
 const BLOCKED_REFUSAL_PATTERNS = [/\bi(?:'|’)m sorry,\s*but\s*i cannot assist with that request\.?\b/i];
 const BLOCKED_REFUSAL_ERROR = "Blocked refusal phrase detected.";
 const BLOCKED_REFUSAL_REPROMPT_LIMIT = 2;
+const MODEL_TOOL_ROUTER_NAME = "tool_router_plan";
+const DEFAULT_MODEL_TOOL_MAX_ROUNDS = 3;
+const DEFAULT_MODEL_TOOL_MAX_CALLS_PER_ROUND = 4;
+const DEFAULT_MODEL_TOOL_TIMEOUT_MS = 8_000;
+const MODEL_TOOL_MAX_ROUNDS_CAP = 8;
+const MODEL_TOOL_MAX_CALLS_PER_ROUND_CAP = 8;
+const MODEL_TOOL_TIMEOUT_MS_CAP = 30_000;
+const MODEL_TOOL_MAX_RESULTS_CAP = 20;
+const MODEL_TOOL_MAX_TOOLS_PER_RUN_CAP = 8;
+const MODEL_TOOL_ROUTER_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    task: {
+      type: "string",
+      minLength: 1,
+      maxLength: 320,
+    },
+    candidateReply: {
+      type: "string",
+      maxLength: 600,
+    },
+    includeExtraction: {
+      type: "boolean",
+    },
+    maxResults: {
+      type: "integer",
+      minimum: 1,
+      maximum: MODEL_TOOL_MAX_RESULTS_CAP,
+    },
+    maxToolsPerRun: {
+      type: "integer",
+      minimum: 1,
+      maximum: MODEL_TOOL_MAX_TOOLS_PER_RUN_CAP,
+    },
+  },
+  required: ["task"],
+} as const;
 const AWKWARD_CATCHPHRASE_PATTERNS = [
   /\b(?:please|kindly|abeg)\s+(?:just\s+)?(?:allow|pardon)\s+me(?:\s+small)?\b/i,
   /\b(?:allow|pardon)\s+me\s+small\b/i,
@@ -1037,6 +1127,39 @@ function shouldForceNoFollowUpQuestion(mode: ConversationSteeringMode) {
   );
 }
 
+const LEGACY_HEURISTIC_ONLY_STEERING_MODES: ConversationSteeringMode[] = [
+  "hard_stop",
+  "anti_beggi_beggi",
+  "anti_sales_pitch",
+  "pause",
+  "loop",
+  "wrap_up",
+];
+
+const DEFAULT_MODEL_FIRST_DETERMINISTIC_MODES: ConversationSteeringMode[] = [
+  "hard_stop",
+  "anti_beggi_beggi",
+  "anti_sales_pitch",
+];
+
+const ALLOWED_DETERMINISTIC_STEERING_MODE_SET = new Set<ConversationSteeringMode>(LEGACY_HEURISTIC_ONLY_STEERING_MODES);
+
+function resolveDeterministicBypassModes(runtime?: RuntimeAiTuning) {
+  if (!runtime?.modelFirstEnabled) {
+    return new Set(LEGACY_HEURISTIC_ONLY_STEERING_MODES);
+  }
+  const requested = (runtime.deterministicModes || [])
+    .map((mode) => mode.trim().toLowerCase())
+    .filter(
+      (mode): mode is ConversationSteeringMode =>
+        mode !== "none" && ALLOWED_DETERMINISTIC_STEERING_MODE_SET.has(mode as ConversationSteeringMode),
+    );
+  if (requested.length === 0) {
+    return new Set(DEFAULT_MODEL_FIRST_DETERMINISTIC_MODES);
+  }
+  return new Set(requested);
+}
+
 function hasLeadHandoffCue(text: string) {
   const normalized = normalizeOutboundText(text || "");
   if (!normalized) {
@@ -1287,6 +1410,7 @@ type ResponseWorkbenchInput = {
   steeringMode: ConversationSteeringMode;
   pidginMode: boolean;
   oldEnglishMode: boolean;
+  friendshipInference?: FriendshipCohortInference;
 };
 
 type ResponseWorkbench = {
@@ -1300,6 +1424,11 @@ type ResponseWorkbench = {
   businessStyleRisk: boolean;
   emotionalCue: boolean;
   planningCue: boolean;
+  friendshipCohort?: FriendshipGenerationCohort;
+  friendshipCohortConfidence?: number;
+  friendshipCohortSignals?: string[];
+  friendshipScenario?: string;
+  friendshipBridgeFallback?: boolean;
 };
 
 type PersonalConversationDomain =
@@ -1404,6 +1533,121 @@ function hasAmbiguityCue(text: string) {
     return true;
   }
   return false;
+}
+
+const FRIENDSHIP_BOOMER_SIGNAL_PATTERNS: Array<{ id: string; pattern: RegExp; weight: number }> = [
+  { id: "formal_polite", pattern: /\b(kindly|please|appreciate|thank you|much appreciated)\b/i, weight: 0.9 },
+  { id: "formal_greeting", pattern: /\b(good morning|good afternoon|good evening)\b/i, weight: 0.8 },
+  { id: "structured_plans", pattern: /\b(let us|shall we|would you be able|at your convenience)\b/i, weight: 0.85 },
+  { id: "steady_warmth", pattern: /\b(take care|bless you|glad to hear|i understand)\b/i, weight: 0.6 },
+];
+
+const FRIENDSHIP_GEN_Z_SIGNAL_PATTERNS: Array<{ id: string; pattern: RegExp; weight: number }> = [
+  { id: "casual_slang", pattern: /\b(tbh|fr|ngl|lowkey|highkey|bet|vibe|for real|rn)\b/i, weight: 0.9 },
+  { id: "genz_terms", pattern: /\b(bestie|bro|slaps|mood|valid|real one)\b/i, weight: 0.8 },
+  { id: "casual_ack", pattern: /\b(you good|we good|i got you|say less|i'm down)\b/i, weight: 0.72 },
+  { id: "all_lowercase_style", pattern: /^[^A-Z]{12,}$/m, weight: 0.38 },
+];
+
+const FRIENDSHIP_FACT_BOOMER_HINTS = /\b(retired|retirement|grand(child|kids)|church|choir|neighborhood association)\b/i;
+const FRIENDSHIP_FACT_GEN_Z_HINTS = /\b(campus|semester|midterm|finals|tiktok|snapchat|discord|roommate)\b/i;
+
+const FRIENDSHIP_SCENARIO_HINTS: Array<{ scenario: string; pattern: RegExp }> = [
+  { scenario: "check_in", pattern: /\b(how have you been|checking in|you good|how are you doing)\b/i },
+  { scenario: "making_plans", pattern: /\b(catch up|weekend|meet up|hang out)\b/i },
+  { scenario: "reschedule", pattern: /\b(move|reschedule|another day|shift it)\b/i },
+  { scenario: "emotional_support", pattern: /\b(rough day|drained|overwhelmed|stressed)\b/i },
+  { scenario: "celebrate_win", pattern: /\b(got the offer|promotion|passed|won)\b/i },
+  { scenario: "money_boundary", pattern: /\b(lend|loan|borrow|money right now)\b/i },
+  { scenario: "friendship_drift", pattern: /\b(drifting|feel distant|we barely talk)\b/i },
+  { scenario: "conflict_repair", pattern: /\b(came off harsh|hurt|misunderstood|my bad)\b/i },
+];
+
+function inferFriendshipScenarioHint(text: string) {
+  for (const hint of FRIENDSHIP_SCENARIO_HINTS) {
+    if (hint.pattern.test(text)) {
+      return hint.scenario;
+    }
+  }
+  return undefined;
+}
+
+export function inferFriendshipGenerationCohort(args: {
+  inboundText: string;
+  recentHistoryLines: string[];
+  relevantHistoryLines: string[];
+  contactFacts?: Array<{ factValue: string; factType?: string; confidence?: number }>;
+}): FriendshipCohortInference {
+  const inbound = normalizeOutboundText(args.inboundText).toLowerCase();
+  const recent = args.recentHistoryLines.slice(-6).join(" ").toLowerCase();
+  const relevant = args.relevantHistoryLines.slice(-4).join(" ").toLowerCase();
+  const corpus = [inbound, recent, relevant].filter(Boolean).join(" ");
+  const contactFactsText = (args.contactFacts || [])
+    .slice(0, 8)
+    .map((fact) => `${fact.factType || "other"} ${fact.factValue || ""}`.toLowerCase())
+    .join(" ");
+
+  let boomerScore = 0;
+  let genZScore = 0;
+  const boomerSignals: string[] = [];
+  const genZSignals: string[] = [];
+
+  for (const signal of FRIENDSHIP_BOOMER_SIGNAL_PATTERNS) {
+    if (signal.pattern.test(corpus)) {
+      boomerScore += signal.weight;
+      boomerSignals.push(signal.id);
+    }
+  }
+  for (const signal of FRIENDSHIP_GEN_Z_SIGNAL_PATTERNS) {
+    if (signal.pattern.test(corpus)) {
+      genZScore += signal.weight;
+      genZSignals.push(signal.id);
+    }
+  }
+
+  if (FRIENDSHIP_FACT_BOOMER_HINTS.test(contactFactsText)) {
+    boomerScore += 0.65;
+    boomerSignals.push("contact_fact_hint");
+  }
+  if (FRIENDSHIP_FACT_GEN_Z_HINTS.test(contactFactsText)) {
+    genZScore += 0.65;
+    genZSignals.push("contact_fact_hint");
+  }
+
+  if (/\b(pls|u|ur)\b/i.test(corpus)) {
+    genZScore += 0.18;
+    genZSignals.push("short_text_tokens");
+  }
+  if (/\b(i am|i have|let us)\b/i.test(corpus)) {
+    boomerScore += 0.12;
+    boomerSignals.push("expanded_grammar");
+  }
+
+  const scenario = inferFriendshipScenarioHint(inbound);
+  const total = boomerScore + genZScore;
+  const topScore = Math.max(boomerScore, genZScore);
+  const diff = Math.abs(boomerScore - genZScore);
+  const confidence = total <= 0 ? 0.32 : clamp01(0.45 + (topScore / (total + 0.001)) * 0.4 + Math.min(diff, 1.2) * 0.15);
+  const isAmbiguous = topScore < 0.75 || diff < 0.4;
+
+  if (isAmbiguous) {
+    return {
+      cohort: "bridge",
+      confidence,
+      signals: ["low_confidence", ...boomerSignals.slice(0, 2), ...genZSignals.slice(0, 2)].slice(0, 5),
+      scenario,
+      usedBridgeFallback: true,
+    };
+  }
+
+  const cohort: FriendshipGenerationCohort = boomerScore >= genZScore ? "boomer" : "gen_z";
+  return {
+    cohort,
+    confidence,
+    signals: (cohort === "boomer" ? boomerSignals : genZSignals).slice(0, 5),
+    scenario,
+    usedBridgeFallback: false,
+  };
 }
 
 function detectPersonalConversationDomain(text: string): PersonalConversationDomain {
@@ -1591,6 +1835,11 @@ function buildResponseWorkbench(args: ResponseWorkbenchInput) {
     businessStyleRisk: personalContext.businessStyleRisk,
     emotionalCue: personalContext.emotionalCue,
     planningCue: personalContext.planningCue,
+    friendshipCohort: args.friendshipInference?.cohort,
+    friendshipCohortConfidence: args.friendshipInference?.confidence,
+    friendshipCohortSignals: args.friendshipInference?.signals,
+    friendshipScenario: args.friendshipInference?.scenario,
+    friendshipBridgeFallback: args.friendshipInference?.usedBridgeFallback,
   };
 
   return {
@@ -1617,6 +1866,11 @@ function buildResponseWorkbench(args: ResponseWorkbenchInput) {
         businessStyleRisk: workbench.businessStyleRisk,
         emotionalCue: workbench.emotionalCue,
         planningCue: workbench.planningCue,
+        friendshipCohort: workbench.friendshipCohort,
+        friendshipCohortConfidence: workbench.friendshipCohortConfidence,
+        friendshipCohortSignals: workbench.friendshipCohortSignals,
+        friendshipScenario: workbench.friendshipScenario,
+        friendshipBridgeFallback: workbench.friendshipBridgeFallback,
       },
     },
   };
@@ -2152,6 +2406,26 @@ function buildPrompt(args: {
         : "Apply the selected personality lightly and keep responses neutral-first.";
   const personalityLabel = args.personality?.profileName || args.personality?.profileSlug || "";
   const activePersonaPack = resolveActivePersonaPack(args.runtime, args.personality);
+  const friendshipInference =
+    activePersonaPack?.id === "friendship_cross_gen.v1" && (args.personality?.profileSlug || "").trim().toLowerCase() === "friendship"
+      ? inferFriendshipGenerationCohort({
+          inboundText: args.inboundText,
+          recentHistoryLines: recentHistory.map((line) => line.line),
+          relevantHistoryLines: relevantHistory.map((line) => line.line),
+          contactFacts: selectedContactFacts.map((fact) => ({
+            factType: fact.factType,
+            factValue: fact.factValue,
+            confidence: fact.confidence,
+          })),
+        })
+      : undefined;
+  const friendshipRoutingInstruction = friendshipInference
+    ? friendshipInference.cohort === "boomer"
+      ? "Friendship cohort route: BOOMER. Prefer clear, respectful, steady wording and avoid trendy slang."
+      : friendshipInference.cohort === "gen_z"
+        ? "Friendship cohort route: GEN_Z. Use naturally casual compact phrasing and light slang only when it fits the thread."
+        : "Friendship cohort route: BRIDGE fallback. Use a neutral cross-generational tone with warm, plain wording."
+    : "";
   const personaPackShortcuts = activePersonaPack
     ? activePersonaPack.shortcutDictionary
         .slice(0, 10)
@@ -2159,7 +2433,12 @@ function buildPrompt(args: {
         .join(" | ")
     : "";
   const personaPackGuardrails = activePersonaPack ? activePersonaPack.guardrails.slice(0, 6).join(" | ") : "";
-  const personaPackFewShots = activePersonaPack ? selectFewShotsForPrompt(activePersonaPack, 900, args.inboundText) : [];
+  const personaPackFewShots = activePersonaPack
+    ? selectFewShotsForPrompt(activePersonaPack, 900, args.inboundText, {
+        preferredCohort: friendshipInference?.cohort,
+        preferredScenario: friendshipInference?.scenario,
+      })
+    : [];
   const personaPackFewShotText =
     personaPackFewShots.length > 0
       ? personaPackFewShots
@@ -2240,6 +2519,7 @@ function buildPrompt(args: {
     steeringMode,
     pidginMode,
     oldEnglishMode,
+    friendshipInference,
   });
   toolCalls.push(responseWorkbench.call);
   const responseWorkbenchInstruction =
@@ -2258,6 +2538,19 @@ function buildPrompt(args: {
     `Personal domain: ${responseWorkbench.workbench.personalDomain}`,
     `Tone need: ${responseWorkbench.workbench.toneNeed}`,
     `Business-style risk: ${responseWorkbench.workbench.businessStyleRisk ? "yes" : "no"}`,
+    responseWorkbench.workbench.friendshipCohort
+      ? `Friendship cohort: ${responseWorkbench.workbench.friendshipCohort}`
+      : "Friendship cohort: n/a",
+    typeof responseWorkbench.workbench.friendshipCohortConfidence === "number"
+      ? `Friendship cohort confidence: ${Math.round(responseWorkbench.workbench.friendshipCohortConfidence * 100)}%`
+      : "Friendship cohort confidence: n/a",
+    responseWorkbench.workbench.friendshipScenario
+      ? `Friendship scenario hint: ${responseWorkbench.workbench.friendshipScenario}`
+      : "Friendship scenario hint: n/a",
+    responseWorkbench.workbench.friendshipBridgeFallback ? "Friendship bridge fallback: yes" : "Friendship bridge fallback: no",
+    responseWorkbench.workbench.friendshipCohortSignals?.length
+      ? `Friendship cohort signals: ${responseWorkbench.workbench.friendshipCohortSignals.join(", ")}`
+      : "Friendship cohort signals: none",
     responseWorkbench.workbench.explicitAsks.length > 0
       ? `Explicit asks: ${responseWorkbench.workbench.explicitAsks.join(" | ")}`
       : "Explicit asks: none",
@@ -2301,6 +2594,7 @@ function buildPrompt(args: {
       antiJokeChainInstruction,
       steeringInstruction,
       insultHandlingInstruction,
+      friendshipRoutingInstruction,
       pidginInstruction,
       oldEnglishInstruction,
       bossEscalationInstruction,
@@ -4118,14 +4412,450 @@ function estimateTextTokens(text: string) {
   return Math.max(1, Math.round(trimmed.length / 4));
 }
 
+function normalizeRuntimeInt(value: number | undefined, fallback: number, min: number, max: number) {
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.round(Math.max(min, Math.min(value as number, max)));
+}
+
+function resolveModelToolConfig(runtime?: RuntimeAiTuning) {
+  return {
+    maxToolRounds: normalizeRuntimeInt(
+      runtime?.maxToolRounds,
+      parseBoundedNumber(process.env.SLM_AI_TOOL_MAX_ROUNDS, DEFAULT_MODEL_TOOL_MAX_ROUNDS, 0, MODEL_TOOL_MAX_ROUNDS_CAP),
+      0,
+      MODEL_TOOL_MAX_ROUNDS_CAP,
+    ),
+    maxToolCallsPerRound: normalizeRuntimeInt(
+      runtime?.maxToolCallsPerRound,
+      parseBoundedNumber(
+        process.env.SLM_AI_TOOL_MAX_CALLS_PER_ROUND,
+        DEFAULT_MODEL_TOOL_MAX_CALLS_PER_ROUND,
+        1,
+        MODEL_TOOL_MAX_CALLS_PER_ROUND_CAP,
+      ),
+      1,
+      MODEL_TOOL_MAX_CALLS_PER_ROUND_CAP,
+    ),
+    toolTimeoutMs: normalizeRuntimeInt(
+      runtime?.toolTimeoutMs,
+      parseBoundedNumber(
+        process.env.SLM_AI_TOOL_TIMEOUT_MS,
+        DEFAULT_MODEL_TOOL_TIMEOUT_MS,
+        250,
+        MODEL_TOOL_TIMEOUT_MS_CAP,
+      ),
+      250,
+      MODEL_TOOL_TIMEOUT_MS_CAP,
+    ),
+  };
+}
+
+function buildResponseToolDefinition() {
+  return [
+    {
+      type: "function",
+      name: MODEL_TOOL_ROUTER_NAME,
+      description:
+        "Plan and execute internal context/retrieval tools for this chat task, then return structured findings and summaries.",
+      strict: true,
+      parameters: MODEL_TOOL_ROUTER_SCHEMA,
+    },
+  ];
+}
+
+function buildChatToolDefinition() {
+  return [
+    {
+      type: "function",
+      function: {
+        name: MODEL_TOOL_ROUTER_NAME,
+        description:
+          "Plan and execute internal context/retrieval tools for this chat task, then return structured findings and summaries.",
+        strict: true,
+        parameters: MODEL_TOOL_ROUTER_SCHEMA,
+      },
+    },
+  ];
+}
+
+function compactToolOutputPreview(value: unknown, maxChars = 260) {
+  const encoded = JSON.stringify(value ?? null);
+  if (encoded.length <= maxChars) {
+    return encoded;
+  }
+  return `${encoded.slice(0, Math.max(0, maxChars - 3))}...`;
+}
+
+function sanitizeToolOutputForModel(value: unknown) {
+  const encoded = JSON.stringify(value ?? null);
+  if (encoded.length <= 12_000) {
+    return value;
+  }
+  return {
+    truncated: true,
+    outputSize: encoded.length,
+    preview: encoded.slice(0, 1_200),
+  };
+}
+
+function safeParseJsonObject(value: unknown) {
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return null;
+}
+
+function parseToolRouterPlanInput(raw: unknown): { parsed?: ToolRouterPlanInput; error?: string } {
+  const payload = safeParseJsonObject(raw);
+  if (!payload) {
+    return {
+      error: "Tool arguments must be a JSON object.",
+    };
+  }
+
+  const allowedKeys = new Set([
+    "task",
+    "candidateReply",
+    "includeExtraction",
+    "maxResults",
+    "maxToolsPerRun",
+    "threadId",
+    "contactJid",
+  ]);
+  const unknownKeys = Object.keys(payload).filter((key) => !allowedKeys.has(key));
+  if (unknownKeys.length > 0) {
+    return {
+      error: `Unsupported argument keys: ${unknownKeys.join(", ")}`,
+    };
+  }
+
+  const task = typeof payload.task === "string" ? payload.task.trim() : "";
+  if (!task) {
+    return {
+      error: "Tool argument 'task' is required.",
+    };
+  }
+
+  const candidateReply = typeof payload.candidateReply === "string" ? payload.candidateReply.trim().slice(0, 600) : undefined;
+  const includeExtraction = Boolean(payload.includeExtraction);
+  const maxResultsRaw = payload.maxResults;
+  if (maxResultsRaw !== undefined && (!Number.isFinite(Number(maxResultsRaw)) || Number(maxResultsRaw) > MODEL_TOOL_MAX_RESULTS_CAP)) {
+    return {
+      error: `maxResults must be <= ${MODEL_TOOL_MAX_RESULTS_CAP}.`,
+    };
+  }
+  const maxToolsPerRunRaw = payload.maxToolsPerRun;
+  if (
+    maxToolsPerRunRaw !== undefined &&
+    (!Number.isFinite(Number(maxToolsPerRunRaw)) || Number(maxToolsPerRunRaw) > MODEL_TOOL_MAX_TOOLS_PER_RUN_CAP)
+  ) {
+    return {
+      error: `maxToolsPerRun must be <= ${MODEL_TOOL_MAX_TOOLS_PER_RUN_CAP}.`,
+    };
+  }
+
+  const maxResults =
+    maxResultsRaw === undefined ? undefined : Math.round(Math.max(1, Math.min(Number(maxResultsRaw), MODEL_TOOL_MAX_RESULTS_CAP)));
+  const maxToolsPerRun =
+    maxToolsPerRunRaw === undefined
+      ? undefined
+      : Math.round(Math.max(1, Math.min(Number(maxToolsPerRunRaw), MODEL_TOOL_MAX_TOOLS_PER_RUN_CAP)));
+  const threadId = typeof payload.threadId === "string" ? payload.threadId.trim() : undefined;
+  const contactJid = typeof payload.contactJid === "string" ? payload.contactJid.trim() : undefined;
+
+  return {
+    parsed: {
+      task: task.slice(0, 320),
+      candidateReply: candidateReply || undefined,
+      includeExtraction,
+      maxResults,
+      maxToolsPerRun,
+      threadId: threadId || undefined,
+      contactJid: contactJid || undefined,
+    },
+  };
+}
+
+async function runWithTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await new Promise<T>((resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(`timeout after ${timeoutMs}ms`)), timeoutMs);
+      promise
+        .then((value) => resolve(value))
+        .catch((error) => reject(error));
+    });
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+type ParsedResponseToolCall = {
+  callId: string;
+  name: string;
+  arguments: unknown;
+};
+
+function extractResponseFunctionCalls(payload: unknown): ParsedResponseToolCall[] {
+  if (!payload || typeof payload !== "object") {
+    return [];
+  }
+  const output = (payload as { output?: unknown }).output;
+  if (!Array.isArray(output)) {
+    return [];
+  }
+
+  return output
+    .map((item, index) => {
+      if (!item || typeof item !== "object") {
+        return null;
+      }
+      const type = (item as { type?: unknown }).type;
+      if (type !== "function_call") {
+        return null;
+      }
+      const callIdRaw = (item as { call_id?: unknown; id?: unknown }).call_id ?? (item as { id?: unknown }).id;
+      const callId = typeof callIdRaw === "string" && callIdRaw.trim() ? callIdRaw.trim() : `response_call_${index}`;
+      const nameRaw = (item as { name?: unknown }).name;
+      const name = typeof nameRaw === "string" ? nameRaw.trim() : "";
+      const argumentsRaw = (item as { arguments?: unknown }).arguments;
+      return {
+        callId,
+        name,
+        arguments: argumentsRaw,
+      } satisfies ParsedResponseToolCall;
+    })
+    .filter((item): item is ParsedResponseToolCall => Boolean(item));
+}
+
+function extractChatToolCalls(payload: unknown): ParsedResponseToolCall[] {
+  if (!payload || typeof payload !== "object") {
+    return [];
+  }
+  const choices = (payload as { choices?: unknown }).choices;
+  if (!Array.isArray(choices) || choices.length === 0) {
+    return [];
+  }
+  const firstChoice = choices[0];
+  if (!firstChoice || typeof firstChoice !== "object") {
+    return [];
+  }
+  const message = (firstChoice as { message?: unknown }).message;
+  if (!message || typeof message !== "object") {
+    return [];
+  }
+  const toolCalls = (message as { tool_calls?: unknown }).tool_calls;
+  if (!Array.isArray(toolCalls)) {
+    return [];
+  }
+
+  return toolCalls
+    .map((item, index) => {
+      if (!item || typeof item !== "object") {
+        return null;
+      }
+      const idRaw = (item as { id?: unknown }).id;
+      const callId = typeof idRaw === "string" && idRaw.trim() ? idRaw.trim() : `chat_tool_call_${index}`;
+      const fn = (item as { function?: unknown }).function;
+      if (!fn || typeof fn !== "object") {
+        return null;
+      }
+      const nameRaw = (fn as { name?: unknown }).name;
+      const name = typeof nameRaw === "string" ? nameRaw.trim() : "";
+      const argumentsRaw = (fn as { arguments?: unknown }).arguments;
+      return {
+        callId,
+        name,
+        arguments: argumentsRaw,
+      } satisfies ParsedResponseToolCall;
+    })
+    .filter((item): item is ParsedResponseToolCall => Boolean(item));
+}
+
+async function executeModelToolRouterCall(args: {
+  rawArguments: unknown;
+  round: number;
+  callIndex: number;
+  toolTimeoutMs: number;
+  context: ModelToolContext;
+}): Promise<{
+  outputPayload: Record<string, unknown>;
+  call: ContextToolCall;
+}> {
+  const startedAt = Date.now();
+  const parsed = parseToolRouterPlanInput(args.rawArguments);
+  if (!parsed.parsed) {
+    const latencyMs = Date.now() - startedAt;
+    return {
+      outputPayload: {
+        status: "error",
+        errorCode: "validation",
+        errorMessage: parsed.error || "Invalid tool arguments.",
+      },
+      call: {
+        name: "model_tool_router_plan",
+        latencyMs,
+        input: {
+          round: args.round,
+          callIndex: args.callIndex,
+          parseOk: false,
+          rawArgumentsType: typeof args.rawArguments,
+        },
+        output: {
+          status: "error",
+          errorCode: "validation",
+          errorMessage: parsed.error || "Invalid tool arguments.",
+        },
+      },
+    };
+  }
+
+  if (parsed.parsed.threadId && args.context.threadId && parsed.parsed.threadId !== args.context.threadId) {
+    const latencyMs = Date.now() - startedAt;
+    return {
+      outputPayload: {
+        status: "error",
+        errorCode: "scope_mismatch",
+        errorMessage: "threadId mismatch rejected by server scope.",
+      },
+      call: {
+        name: "model_tool_router_plan",
+        latencyMs,
+        input: {
+          round: args.round,
+          callIndex: args.callIndex,
+          parseOk: true,
+          task: parsed.parsed.task,
+        },
+        output: {
+          status: "error",
+          errorCode: "scope_mismatch",
+          errorMessage: "threadId mismatch rejected by server scope.",
+        },
+      },
+    };
+  }
+
+  if (parsed.parsed.contactJid && args.context.contactJid && parsed.parsed.contactJid !== args.context.contactJid) {
+    const latencyMs = Date.now() - startedAt;
+    return {
+      outputPayload: {
+        status: "error",
+        errorCode: "scope_mismatch",
+        errorMessage: "contactJid mismatch rejected by server scope.",
+      },
+      call: {
+        name: "model_tool_router_plan",
+        latencyMs,
+        input: {
+          round: args.round,
+          callIndex: args.callIndex,
+          parseOk: true,
+          task: parsed.parsed.task,
+        },
+        output: {
+          status: "error",
+          errorCode: "scope_mismatch",
+          errorMessage: "contactJid mismatch rejected by server scope.",
+        },
+      },
+    };
+  }
+
+  try {
+    const execution = await runWithTimeout(
+      args.context.executeToolRouterPlan({
+        task: parsed.parsed.task,
+        candidateReply: parsed.parsed.candidateReply,
+        includeExtraction: Boolean(parsed.parsed.includeExtraction),
+        maxResults: parsed.parsed.maxResults ?? 8,
+        maxToolsPerRun: parsed.parsed.maxToolsPerRun ?? 6,
+        toolTimeoutMs: args.toolTimeoutMs,
+      }),
+      args.toolTimeoutMs,
+    );
+    const latencyMs = Date.now() - startedAt;
+    const outputPayload = {
+      status: execution.status,
+      ...(execution.errorCode ? { errorCode: execution.errorCode } : {}),
+      ...(execution.errorMessage ? { errorMessage: execution.errorMessage } : {}),
+      output: sanitizeToolOutputForModel(execution.output ?? null),
+    };
+    return {
+      outputPayload,
+      call: {
+        name: "model_tool_router_plan",
+        latencyMs,
+        input: {
+          round: args.round,
+          callIndex: args.callIndex,
+          parseOk: true,
+          task: parsed.parsed.task,
+          includeExtraction: Boolean(parsed.parsed.includeExtraction),
+          maxResults: parsed.parsed.maxResults ?? 8,
+          maxToolsPerRun: parsed.parsed.maxToolsPerRun ?? 6,
+        },
+        output: {
+          status: execution.status,
+          ...(execution.errorCode ? { errorCode: execution.errorCode } : {}),
+          ...(execution.errorMessage ? { errorMessage: execution.errorMessage } : {}),
+          preview: compactToolOutputPreview(execution.output),
+        },
+      },
+    };
+  } catch (error) {
+    const latencyMs = Date.now() - startedAt;
+    const message = toErrorMessage(error);
+    return {
+      outputPayload: {
+        status: "timeout",
+        errorCode: "timeout",
+        errorMessage: message,
+      },
+      call: {
+        name: "model_tool_router_plan",
+        latencyMs,
+        input: {
+          round: args.round,
+          callIndex: args.callIndex,
+          parseOk: true,
+          task: parsed.parsed.task,
+        },
+        output: {
+          status: "timeout",
+          errorCode: "timeout",
+          errorMessage: message,
+        },
+      },
+    };
+  }
+}
+
 async function runAzure(
   prompt: string,
   inboundText: string,
   historyLines: string[],
   runtime?: RuntimeAiTuning,
+  modelToolContext?: ModelToolContext,
 ): Promise<AttemptOutcome> {
   const cfg = getAzureConfig(runtime);
   const attempts: AiAttempt[] = [];
+  const toolCalls: ContextToolCall[] = [];
   const missingConfigStage: AiAttempt["stage"] = cfg.apiStyle === "responses" ? "azure_responses" : "azure_sdk";
   if (!cfg.endpoint || !cfg.apiKey) {
     attempts.push({
@@ -4136,10 +4866,12 @@ async function runAzure(
       latencyMs: 0,
       error: "Azure AI endpoint/key missing.",
     });
-    return { attempts };
+    return { attempts, toolCalls };
   }
 
   const startAll = Date.now();
+  const toolConfig = resolveModelToolConfig(runtime);
+  const toolEnabled = Boolean(modelToolContext) && toolConfig.maxToolRounds > 0;
   const messages = [
     {
       role: "system",
@@ -4155,29 +4887,153 @@ async function runAzure(
     const responsesStart = Date.now();
     const responsesEndpoint = buildAzureResponsesEndpoint(cfg.endpoint);
     try {
-      const response = await fetch(responsesEndpoint, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "api-key": cfg.apiKey,
-          Authorization: `Bearer ${cfg.apiKey}`,
-        },
-        body: JSON.stringify({
-          model: cfg.model,
-          instructions: cfg.systemInstruction,
-          input: prompt,
-          temperature: cfg.temperature,
-          max_output_tokens: cfg.maxOutputTokens,
-        }),
-      });
+      let raw: unknown = null;
+      let tokenUsage: ReturnType<typeof extractTokenUsageFromProviderPayload> = null;
+      if (!toolEnabled || !modelToolContext) {
+        const response = await fetch(responsesEndpoint, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "api-key": cfg.apiKey,
+            Authorization: `Bearer ${cfg.apiKey}`,
+          },
+          body: JSON.stringify({
+            model: cfg.model,
+            instructions: cfg.systemInstruction,
+            input: prompt,
+            temperature: cfg.temperature,
+            max_output_tokens: cfg.maxOutputTokens,
+          }),
+        });
 
-      if (!response.ok) {
-        const text = await response.text();
-        throw new Error(`Azure Responses failed (${response.status}): ${text.slice(0, 300)}`);
+        if (!response.ok) {
+          const text = await response.text();
+          throw new Error(`Azure Responses failed (${response.status}): ${text.slice(0, 300)}`);
+        }
+
+        raw = await response.json();
+        tokenUsage = extractTokenUsageFromProviderPayload(raw);
+      } else {
+        let previousResponseId: string | undefined;
+        let nextInput: unknown = prompt;
+        const tools = buildResponseToolDefinition();
+        for (let round = 0; round <= toolConfig.maxToolRounds; round += 1) {
+          const response = await fetch(responsesEndpoint, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "api-key": cfg.apiKey,
+              Authorization: `Bearer ${cfg.apiKey}`,
+            },
+            body: JSON.stringify({
+              model: cfg.model,
+              instructions: cfg.systemInstruction,
+              input: nextInput,
+              ...(previousResponseId ? { previous_response_id: previousResponseId } : {}),
+              temperature: cfg.temperature,
+              max_output_tokens: cfg.maxOutputTokens,
+              tools,
+              tool_choice: "auto",
+              parallel_tool_calls: true,
+            }),
+          });
+
+          if (!response.ok) {
+            const text = await response.text();
+            throw new Error(`Azure Responses failed (${response.status}): ${text.slice(0, 300)}`);
+          }
+
+          raw = await response.json();
+          tokenUsage = extractTokenUsageFromProviderPayload(raw);
+          const responseId = (raw as { id?: unknown })?.id;
+          if (typeof responseId === "string" && responseId.trim()) {
+            previousResponseId = responseId;
+          }
+
+          const functionCalls = extractResponseFunctionCalls(raw);
+          if (functionCalls.length === 0) {
+            break;
+          }
+          if (round >= toolConfig.maxToolRounds) {
+            throw new Error(`Tool-calling rounds exceeded maxToolRounds=${toolConfig.maxToolRounds}.`);
+          }
+
+          const selectedCalls = functionCalls.slice(0, toolConfig.maxToolCallsPerRound);
+          const skippedCalls = functionCalls.slice(toolConfig.maxToolCallsPerRound);
+          const executed = await Promise.all(
+            selectedCalls.map(async (call, index) => {
+              if (call.name !== MODEL_TOOL_ROUTER_NAME) {
+                const latencyMs = 0;
+                return {
+                  callId: call.callId,
+                  outputPayload: {
+                    status: "error",
+                    errorCode: "unsupported_tool",
+                    errorMessage: `Unsupported tool ${call.name}.`,
+                  },
+                  callTelemetry: {
+                    name: "model_tool_router_plan" as const,
+                    latencyMs,
+                    input: {
+                      round: round + 1,
+                      callIndex: index,
+                      requestedTool: call.name,
+                    },
+                    output: {
+                      status: "error",
+                      errorCode: "unsupported_tool",
+                      errorMessage: `Unsupported tool ${call.name}.`,
+                    },
+                  },
+                };
+              }
+              const execution = await executeModelToolRouterCall({
+                rawArguments: call.arguments,
+                round: round + 1,
+                callIndex: index,
+                toolTimeoutMs: toolConfig.toolTimeoutMs,
+                context: modelToolContext,
+              });
+              return {
+                callId: call.callId,
+                outputPayload: execution.outputPayload,
+                callTelemetry: execution.call,
+              };
+            }),
+          );
+
+          for (const skipped of skippedCalls) {
+            executed.push({
+              callId: skipped.callId,
+              outputPayload: {
+                status: "error",
+                errorCode: "max_tool_calls_per_round_exceeded",
+                errorMessage: `Skipped because tool call count exceeded ${toolConfig.maxToolCallsPerRound} in a single round.`,
+              },
+              callTelemetry: {
+                name: "model_tool_router_plan" as const,
+                latencyMs: 0,
+                input: {
+                  round: round + 1,
+                  requestedTool: skipped.name,
+                },
+                output: {
+                  status: "error",
+                  errorCode: "max_tool_calls_per_round_exceeded",
+                },
+              },
+            });
+          }
+
+          toolCalls.push(...executed.map((item) => item.callTelemetry));
+          nextInput = executed.map((item) => ({
+            type: "function_call_output",
+            call_id: item.callId,
+            output: JSON.stringify(item.outputPayload),
+          }));
+        }
       }
 
-      const raw = await response.json();
-      const tokenUsage = extractTokenUsageFromProviderPayload(raw);
       const cleaned = sanitizeReplyText(extractAzureResponsesText(raw), runtime?.maxReplyChars);
       if (!cleaned) {
         throw new Error("Azure Responses returned empty response.");
@@ -4212,6 +5068,7 @@ async function runAzure(
           guardrailBlocked: false,
         },
         attempts,
+        toolCalls,
       };
     } catch (error) {
       attempts.push({
@@ -4222,7 +5079,190 @@ async function runAzure(
         latencyMs: Date.now() - responsesStart,
         error: toErrorMessage(error),
       });
-      return { attempts };
+      return { attempts, toolCalls };
+    }
+  }
+
+  if (toolEnabled && modelToolContext) {
+    const chatStart = Date.now();
+    const chatEndpoint = buildAzureChatCompletionsEndpoint(cfg.endpoint);
+    const chatMessages: Array<Record<string, unknown>> = [...messages];
+    let lastData: unknown = null;
+    let tokenUsage: ReturnType<typeof extractTokenUsageFromProviderPayload> = null;
+
+    try {
+      const tools = buildChatToolDefinition();
+      for (let round = 0; round <= toolConfig.maxToolRounds; round += 1) {
+        const response = await fetch(chatEndpoint, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "api-key": cfg.apiKey,
+            Authorization: `Bearer ${cfg.apiKey}`,
+          },
+          body: JSON.stringify({
+            model: cfg.model,
+            messages: chatMessages,
+            max_tokens: cfg.maxOutputTokens,
+            temperature: cfg.temperature,
+            tools,
+            tool_choice: "auto",
+            parallel_tool_calls: true,
+          }),
+        });
+
+        if (!response.ok) {
+          const text = await response.text();
+          throw new Error(`Azure Chat Completions failed (${response.status}): ${text.slice(0, 300)}`);
+        }
+
+        const data = await response.json();
+        lastData = data;
+        tokenUsage = extractTokenUsageFromProviderPayload(data);
+        const toolCallsForRound = extractChatToolCalls(data);
+        if (toolCallsForRound.length === 0) {
+          break;
+        }
+        if (round >= toolConfig.maxToolRounds) {
+          throw new Error(`Tool-calling rounds exceeded maxToolRounds=${toolConfig.maxToolRounds}.`);
+        }
+
+        const firstChoiceMessage = ((data as { choices?: Array<{ message?: unknown }> }).choices || [])[0]?.message;
+        if (firstChoiceMessage && typeof firstChoiceMessage === "object") {
+          const assistantMessage = firstChoiceMessage as {
+            role?: unknown;
+            content?: unknown;
+            tool_calls?: unknown;
+          };
+          chatMessages.push({
+            role: typeof assistantMessage.role === "string" ? assistantMessage.role : "assistant",
+            ...(assistantMessage.content !== undefined ? { content: assistantMessage.content } : { content: "" }),
+            ...(Array.isArray(assistantMessage.tool_calls) ? { tool_calls: assistantMessage.tool_calls } : {}),
+          });
+        }
+
+        const selectedCalls = toolCallsForRound.slice(0, toolConfig.maxToolCallsPerRound);
+        const skippedCalls = toolCallsForRound.slice(toolConfig.maxToolCallsPerRound);
+        const executed = await Promise.all(
+          selectedCalls.map(async (call, index) => {
+            if (call.name !== MODEL_TOOL_ROUTER_NAME) {
+              return {
+                callId: call.callId,
+                outputPayload: {
+                  status: "error",
+                  errorCode: "unsupported_tool",
+                  errorMessage: `Unsupported tool ${call.name}.`,
+                },
+                callTelemetry: {
+                  name: "model_tool_router_plan" as const,
+                  latencyMs: 0,
+                  input: {
+                    round: round + 1,
+                    callIndex: index,
+                    requestedTool: call.name,
+                  },
+                  output: {
+                    status: "error",
+                    errorCode: "unsupported_tool",
+                    errorMessage: `Unsupported tool ${call.name}.`,
+                  },
+                },
+              };
+            }
+            const execution = await executeModelToolRouterCall({
+              rawArguments: call.arguments,
+              round: round + 1,
+              callIndex: index,
+              toolTimeoutMs: toolConfig.toolTimeoutMs,
+              context: modelToolContext,
+            });
+            return {
+              callId: call.callId,
+              outputPayload: execution.outputPayload,
+              callTelemetry: execution.call,
+            };
+          }),
+        );
+        for (const skipped of skippedCalls) {
+          executed.push({
+            callId: skipped.callId,
+            outputPayload: {
+              status: "error",
+              errorCode: "max_tool_calls_per_round_exceeded",
+              errorMessage: `Skipped because tool call count exceeded ${toolConfig.maxToolCallsPerRound} in a single round.`,
+            },
+            callTelemetry: {
+              name: "model_tool_router_plan" as const,
+              latencyMs: 0,
+              input: {
+                round: round + 1,
+                requestedTool: skipped.name,
+              },
+              output: {
+                status: "error",
+                errorCode: "max_tool_calls_per_round_exceeded",
+              },
+            },
+          });
+        }
+
+        toolCalls.push(...executed.map((item) => item.callTelemetry));
+        for (const executedCall of executed) {
+          chatMessages.push({
+            role: "tool",
+            tool_call_id: executedCall.callId,
+            name: MODEL_TOOL_ROUTER_NAME,
+            content: JSON.stringify(executedCall.outputPayload),
+          });
+        }
+      }
+
+      const cleaned = sanitizeReplyText(extractAzureChatCompletionText(lastData), runtime?.maxReplyChars);
+      if (!cleaned) {
+        throw new Error("Azure AI returned empty response.");
+      }
+      if (containsBlockedRefusalText(cleaned)) {
+        throw new Error(BLOCKED_REFUSAL_ERROR);
+      }
+      if (isLowValueReply(cleaned, inboundText)) {
+        throw new Error("Azure AI returned low-value canned text.");
+      }
+
+      attempts.push({
+        provider: "azure",
+        stage: "azure_sdk",
+        model: cfg.model,
+        status: "success",
+        latencyMs: Date.now() - chatStart,
+        ...enrichAttemptWithUsage({
+          provider: "azure",
+          model: cfg.model,
+          usageSource: "provider",
+          ...(tokenUsage || {}),
+        }),
+      });
+
+      return {
+        result: {
+          text: cleaned,
+          provider: "azure",
+          model: cfg.model,
+          latencyMs: Date.now() - startAll,
+          guardrailBlocked: false,
+        },
+        attempts,
+        toolCalls,
+      };
+    } catch (error) {
+      attempts.push({
+        provider: "azure",
+        stage: "azure_sdk",
+        model: cfg.model,
+        status: "error",
+        latencyMs: Date.now() - chatStart,
+        error: toErrorMessage(error),
+      });
+      return { attempts, toolCalls };
     }
   }
 
@@ -4292,6 +5332,7 @@ async function runAzure(
         guardrailBlocked: false,
       },
       attempts,
+      toolCalls,
     };
   } catch (error) {
     attempts.push({
@@ -4374,6 +5415,7 @@ async function runAzure(
         guardrailBlocked: false,
       },
       attempts,
+      toolCalls,
     };
   } catch (error) {
     attempts.push({
@@ -4384,7 +5426,7 @@ async function runAzure(
       latencyMs: Date.now() - httpStart,
       error: toErrorMessage(error),
     });
-    return { attempts };
+    return { attempts, toolCalls };
   }
 }
 
@@ -4866,17 +5908,20 @@ async function runWithBlockedRefusalReprompts(args: {
   maxReprompts?: number;
 }) {
   const allAttempts: AiAttempt[] = [];
+  const allToolCalls: ContextToolCall[] = [];
   const maxReprompts = Math.round(Math.max(0, Math.min(args.maxReprompts ?? BLOCKED_REFUSAL_REPROMPT_LIMIT, 4)));
   let prompt = args.basePrompt;
 
   for (let retry = 0; retry <= maxReprompts; retry += 1) {
     const outcome = await args.run(prompt);
     allAttempts.push(...outcome.attempts);
+    allToolCalls.push(...(outcome.toolCalls || []));
     if (outcome.result) {
       return {
         result: outcome.result,
         attempts: allAttempts,
         promptUsed: prompt,
+        toolCalls: allToolCalls,
       };
     }
 
@@ -4890,6 +5935,7 @@ async function runWithBlockedRefusalReprompts(args: {
   return {
     attempts: allAttempts,
     promptUsed: prompt,
+    toolCalls: allToolCalls,
   };
 }
 
@@ -5120,6 +6166,333 @@ async function applyQualityGate(args: {
   } satisfies AiResult;
 }
 
+type AckRoutingResult = {
+  channel?: AckRoutingChannel;
+  reason?: string;
+  provider?: "azure" | "codex";
+  model?: string;
+  latencyMs: number;
+  attempts: AiAttempt[];
+};
+
+function normalizeAckRoutingChannel(value: string): AckRoutingChannel | null {
+  const normalized = value.trim().toLowerCase().replace(/[-\s]+/g, "_");
+  if (!normalized) {
+    return null;
+  }
+  if (normalized === "reaction_only" || normalized === "reaction") {
+    return "reaction_only";
+  }
+  if (normalized === "reaction_plus_text" || normalized === "reaction_text" || normalized === "react_plus_text") {
+    return "reaction_plus_text";
+  }
+  if (normalized === "text" || normalized === "text_only") {
+    return "text";
+  }
+  return null;
+}
+
+function parseAckRoutingOutput(raw: string): { channel?: AckRoutingChannel; reason?: string } | null {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const objectStart = trimmed.indexOf("{");
+  const objectEnd = trimmed.lastIndexOf("}");
+  if (objectStart >= 0 && objectEnd > objectStart) {
+    const jsonText = trimmed.slice(objectStart, objectEnd + 1);
+    try {
+      const parsed = JSON.parse(jsonText) as {
+        channel?: unknown;
+        reason?: unknown;
+      };
+      const channel = typeof parsed.channel === "string" ? normalizeAckRoutingChannel(parsed.channel) : null;
+      if (!channel) {
+        return null;
+      }
+      const reason =
+        typeof parsed.reason === "string" && parsed.reason.trim()
+          ? normalizeOutboundText(parsed.reason).slice(0, 120)
+          : undefined;
+      return { channel, reason };
+    } catch {
+      return null;
+    }
+  }
+
+  const channel =
+    normalizeAckRoutingChannel(trimmed) ||
+    (/\breaction[\s_+-]*plus[\s_+-]*text\b/i.test(trimmed)
+      ? "reaction_plus_text"
+      : /\breaction[\s_+-]*only\b/i.test(trimmed)
+        ? "reaction_only"
+        : /\btext\b/i.test(trimmed)
+          ? "text"
+          : null);
+  if (!channel) {
+    return null;
+  }
+  return { channel };
+}
+
+function buildAckRoutingPrompt(args: {
+  inboundText: string;
+  historyLines: string[];
+}) {
+  const recentHistory = args.historyLines
+    .slice(-6)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join("\n");
+  return [
+    "You are routing a short WhatsApp inbound to an outbound channel.",
+    "Choose exactly one channel:",
+    "- reaction_only: pure acknowledgment/closure where an emoji reaction is enough.",
+    "- reaction_plus_text: acknowledgment where reaction helps and one tiny text line adds value.",
+    "- text: any request/question/ambiguity/risk, or when unsure.",
+    "Bias toward text when uncertain.",
+    "Output strict JSON only with keys channel and reason.",
+    'Example: {"channel":"reaction_only","reason":"pure acknowledgment"}',
+    recentHistory ? `Recent chat:\n${recentHistory}` : "",
+    `Latest inbound: ${args.inboundText}`,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+async function runAckRouterWithAzure(args: {
+  prompt: string;
+  runtime?: RuntimeAiTuning;
+}): Promise<AckRoutingResult> {
+  const cfg = getAzureConfig(args.runtime);
+  if (!cfg.endpoint || !cfg.apiKey) {
+    return {
+      latencyMs: 0,
+      attempts: [
+        {
+          provider: "azure",
+          stage: "ack_router_azure",
+          model: cfg.model,
+          status: "error",
+          latencyMs: 0,
+          error: "Azure AI endpoint/key missing for ack router.",
+        },
+      ],
+    };
+  }
+
+  const start = Date.now();
+  try {
+    let rawText = "";
+    let tokenUsage: ReturnType<typeof extractTokenUsageFromProviderPayload> = null;
+    if (cfg.apiStyle === "responses") {
+      const response = await fetch(buildAzureResponsesEndpoint(cfg.endpoint), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "api-key": cfg.apiKey,
+          Authorization: `Bearer ${cfg.apiKey}`,
+        },
+        body: JSON.stringify({
+          model: cfg.model,
+          instructions: "You are a strict JSON classifier.",
+          input: args.prompt,
+          temperature: 0,
+          max_output_tokens: 80,
+        }),
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`Azure ack router failed (${response.status}): ${text.slice(0, 240)}`);
+      }
+      const payload = await response.json();
+      tokenUsage = extractTokenUsageFromProviderPayload(payload);
+      rawText = extractAzureResponsesText(payload);
+    } else {
+      const response = await fetch(buildAzureChatCompletionsEndpoint(cfg.endpoint), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "api-key": cfg.apiKey,
+          Authorization: `Bearer ${cfg.apiKey}`,
+        },
+        body: JSON.stringify({
+          model: cfg.model,
+          messages: [
+            {
+              role: "system",
+              content: "You are a strict JSON classifier.",
+            },
+            {
+              role: "user",
+              content: args.prompt,
+            },
+          ],
+          temperature: 0,
+          max_tokens: 80,
+        }),
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`Azure ack router failed (${response.status}): ${text.slice(0, 240)}`);
+      }
+      const payload = await response.json();
+      tokenUsage = extractTokenUsageFromProviderPayload(payload);
+      rawText = extractAzureChatCompletionText(payload);
+    }
+
+    const parsed = parseAckRoutingOutput(rawText);
+    if (!parsed?.channel) {
+      throw new Error(`Unable to parse ack router output: ${rawText.slice(0, 200)}`);
+    }
+
+    const latencyMs = Date.now() - start;
+    return {
+      channel: parsed.channel,
+      reason: parsed.reason,
+      provider: "azure",
+      model: cfg.model,
+      latencyMs,
+      attempts: [
+        {
+          provider: "azure",
+          stage: "ack_router_azure",
+          model: cfg.model,
+          status: "success",
+          latencyMs,
+          ...enrichAttemptWithUsage({
+            provider: "azure",
+            model: cfg.model,
+            usageSource: "provider",
+            ...(tokenUsage || {}),
+          }),
+        },
+      ],
+    };
+  } catch (error) {
+    return {
+      latencyMs: Date.now() - start,
+      attempts: [
+        {
+          provider: "azure",
+          stage: "ack_router_azure",
+          model: cfg.model,
+          status: "error",
+          latencyMs: Date.now() - start,
+          error: toErrorMessage(error),
+        },
+      ],
+    };
+  }
+}
+
+async function runAckRouterWithCodex(args: {
+  prompt: string;
+  runtime?: RuntimeAiTuning;
+}): Promise<AckRoutingResult> {
+  const codexPath = process.env.CODEX_CLI_PATH || "codex";
+  const model = process.env.CODEX_FALLBACK_MODEL || "gpt-5.2";
+  const outFile = join(tmpdir(), `slm-ack-router-${Date.now()}-${Math.random().toString(16).slice(2)}.txt`);
+  const start = Date.now();
+  try {
+    await execFileAsync(codexPath, ["exec", "--model", model, "--output-last-message", outFile, args.prompt], {
+      timeout: Math.round(Math.max(20_000, Math.min(args.runtime?.codexTimeoutMs ?? QUALITY_FIRST_CODEX_TIMEOUT_MS, 300_000))),
+      maxBuffer: 1024 * 1024,
+    });
+    const raw = await fs.readFile(outFile, "utf8");
+    await fs.unlink(outFile).catch(() => undefined);
+
+    const parsed = parseAckRoutingOutput(raw);
+    if (!parsed?.channel) {
+      throw new Error(`Unable to parse codex ack router output: ${raw.slice(0, 200)}`);
+    }
+
+    const latencyMs = Date.now() - start;
+    return {
+      channel: parsed.channel,
+      reason: parsed.reason,
+      provider: "codex",
+      model,
+      latencyMs,
+      attempts: [
+        {
+          provider: "codex",
+          stage: "ack_router_codex",
+          model,
+          status: "success",
+          latencyMs,
+          ...enrichAttemptWithUsage({
+            provider: "codex",
+            model,
+            usageSource: "estimated",
+            inputTokens: estimateTextTokens(args.prompt),
+            outputTokens: estimateTextTokens(raw),
+          }),
+        },
+      ],
+    };
+  } catch (error) {
+    await fs.unlink(outFile).catch(() => undefined);
+    return {
+      latencyMs: Date.now() - start,
+      attempts: [
+        {
+          provider: "codex",
+          stage: "ack_router_codex",
+          model,
+          status: "error",
+          latencyMs: Date.now() - start,
+          error: toErrorMessage(error),
+        },
+      ],
+    };
+  }
+}
+
+export async function routeAckResponseChannel(args: {
+  inboundText: string;
+  historyLines: string[];
+  runtime?: RuntimeAiTuning;
+}): Promise<AckRoutingResult> {
+  const prompt = buildAckRoutingPrompt({
+    inboundText: args.inboundText,
+    historyLines: args.historyLines,
+  });
+  const attempts: AiAttempt[] = [];
+
+  const azure = await runAckRouterWithAzure({
+    prompt,
+    runtime: args.runtime,
+  });
+  attempts.push(...azure.attempts);
+  if (azure.channel) {
+    return {
+      ...azure,
+      attempts,
+    };
+  }
+
+  if (resolveFallbackMode(args.runtime) === "all") {
+    const codex = await runAckRouterWithCodex({
+      prompt,
+      runtime: args.runtime,
+    });
+    attempts.push(...codex.attempts);
+    if (codex.channel) {
+      return {
+        ...codex,
+        attempts,
+      };
+    }
+  }
+
+  return {
+    latencyMs: attempts.reduce((sum, attempt) => sum + attempt.latencyMs, 0),
+    attempts,
+  };
+}
+
 export async function generateReplyWithFallback(args: {
   inboundText: string;
   historyLines: string[];
@@ -5130,6 +6503,7 @@ export async function generateReplyWithFallback(args: {
   personality?: PersonalityContext;
   grounding?: GroundingContext;
   runtime?: RuntimeAiTuning;
+  modelToolContext?: ModelToolContext;
 }): Promise<AiResult> {
   const activePersonaPack = resolveActivePersonaPack(args.runtime, args.personality);
   const finalizeResult = (result: AiResult): AiResult => {
@@ -5179,13 +6553,8 @@ export async function generateReplyWithFallback(args: {
     inboundText: args.inboundText,
     historyLines: args.historyLines,
   });
-  const shouldUseHeuristicOnly =
-    steeringMode === "hard_stop" ||
-    steeringMode === "anti_beggi_beggi" ||
-    steeringMode === "anti_sales_pitch" ||
-    steeringMode === "pause" ||
-    steeringMode === "loop" ||
-    steeringMode === "wrap_up";
+  const deterministicBypassModes = resolveDeterministicBypassModes(args.runtime);
+  const shouldUseHeuristicOnly = steeringMode !== "none" && deterministicBypassModes.has(steeringMode);
   if (shouldUseHeuristicOnly) {
     return finalizeResult({
       text: normalizeOutboundText(heuristicReply(args.inboundText, args.historyLines)),
@@ -5217,8 +6586,9 @@ export async function generateReplyWithFallback(args: {
   const azureOutcome = await runWithBlockedRefusalReprompts({
     basePrompt: builtPrompt.prompt,
     inboundText: args.inboundText,
-    run: (prompt) => runAzure(prompt, args.inboundText, args.historyLines, args.runtime),
+    run: (prompt) => runAzure(prompt, args.inboundText, args.historyLines, args.runtime, args.modelToolContext),
   });
+  const combinedContextToolCalls = [...builtPrompt.contextToolCalls, ...(azureOutcome.toolCalls || [])];
   attempts.push(...azureOutcome.attempts);
   if (azureOutcome.result) {
     const gated = await applyQualityGate({
@@ -5232,7 +6602,7 @@ export async function generateReplyWithFallback(args: {
     });
     return finalizeResult({
       ...gated,
-      contextToolCalls: builtPrompt.contextToolCalls,
+      contextToolCalls: combinedContextToolCalls,
       contextWindow: builtPrompt.contextWindow,
     });
   }
@@ -5251,7 +6621,7 @@ export async function generateReplyWithFallback(args: {
       qualityRewriteApplied: false,
       activePersonaPackId: activePersonaPack?.id,
       attempts,
-      contextToolCalls: builtPrompt.contextToolCalls,
+      contextToolCalls: combinedContextToolCalls,
       contextWindow: builtPrompt.contextWindow,
     };
   }
@@ -5274,7 +6644,7 @@ export async function generateReplyWithFallback(args: {
     });
     return finalizeResult({
       ...gated,
-      contextToolCalls: builtPrompt.contextToolCalls,
+      contextToolCalls: combinedContextToolCalls,
       contextWindow: builtPrompt.contextWindow,
     });
   }
@@ -5304,7 +6674,7 @@ export async function generateReplyWithFallback(args: {
   });
   return finalizeResult({
     ...gated,
-    contextToolCalls: builtPrompt.contextToolCalls,
+    contextToolCalls: combinedContextToolCalls,
     contextWindow: builtPrompt.contextWindow,
   });
 }

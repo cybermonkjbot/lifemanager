@@ -100,8 +100,25 @@ Send a message to your own WhatsApp chat to control runtime without opening the 
 
 Notes:
 - Commands only execute from your self chat (your own JID).
+- Shortcuts are supported for worker control: `pause`, `resume`, `restart`, `status` (and `/slm pause`, etc.).
 - `pause worker` pauses automation while keeping the listener alive, so `resume worker` still works.
 - App controls use `.slm/app.pid` and start with `SLM_APP_START_CMD` (default `bun run dev:next`).
+
+## Local Codex Self-Improve Commands (Self Chat)
+
+You can also trigger a local Codex improvement run with project context from your self chat:
+
+- `improve <prompt>` (or `/slm improve <prompt>`)
+- `improve status`
+- `improve latest`
+
+Examples:
+- `improve tighten self-message command handling and add tests`
+- `improve status`
+
+Notes:
+- Runs execute in the background via `bun run self-improve -- --prompt "<prompt>"`.
+- Latest report path: `.slm/self-improvement/latest.md`.
 
 ## Useful Commands
 

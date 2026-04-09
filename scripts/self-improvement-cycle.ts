@@ -50,6 +50,7 @@ type CliArgs = {
   configPath: string;
   intervalMinutesOverride?: number;
   dryRun: boolean;
+  promptOverride?: string;
 };
 
 type RunStats = {
@@ -132,6 +133,7 @@ function parseCliArgs(argv: string[]): CliArgs {
   let configPath = DEFAULT_CONFIG_PATH;
   let intervalMinutesOverride: number | undefined;
   let dryRun = false;
+  let promptOverride: string | undefined;
 
   const args = [...argv];
   if (args[0] === "once" || args[0] === "daemon") {
@@ -162,6 +164,15 @@ function parseCliArgs(argv: string[]): CliArgs {
       dryRun = true;
       continue;
     }
+    if (arg === "--prompt") {
+      const value = args[i + 1];
+      if (!value || !value.trim()) {
+        throw new Error("Missing value for --prompt");
+      }
+      promptOverride = value.trim();
+      i += 1;
+      continue;
+    }
     throw new Error(`Unknown argument: ${arg}`);
   }
 
@@ -170,6 +181,7 @@ function parseCliArgs(argv: string[]): CliArgs {
     configPath,
     intervalMinutesOverride,
     dryRun,
+    promptOverride,
   };
 }
 
@@ -525,8 +537,9 @@ async function runSingleCycle(params: {
   projectRoot: string;
   config: SelfImprovementConfig;
   dryRun: boolean;
+  promptOverride?: string;
 }) {
-  const { projectRoot, config, dryRun } = params;
+  const { projectRoot, config, dryRun, promptOverride } = params;
   const start = Date.now();
   const runId = runIdFromDate(new Date(start));
   const outputRoot = resolve(projectRoot, config.outputDir);
@@ -553,8 +566,18 @@ async function runSingleCycle(params: {
       TIMESTAMP: nowIso(),
     });
 
+    const operatorPrompt = promptOverride
+      ? [
+          "",
+          "Operator Priority Prompt:",
+          "Treat this as a high-priority focus for this run:",
+          promptOverride,
+        ].join("\n")
+      : "";
+
     const fullPrompt = [
       prompt,
+      operatorPrompt,
       "",
       "---",
       "Context below. Use it to produce specific, high-leverage improvements.",
@@ -617,6 +640,7 @@ async function runSingleCycle(params: {
       codexSandbox: config.codexSandbox,
       codexExitCode,
       codexErrorMessage,
+      promptOverride: promptOverride || null,
       stats,
     };
 
@@ -637,8 +661,9 @@ async function runDaemon(params: {
   config: SelfImprovementConfig;
   intervalMinutes: number;
   dryRun: boolean;
+  promptOverride?: string;
 }) {
-  const { projectRoot, config, intervalMinutes, dryRun } = params;
+  const { projectRoot, config, intervalMinutes, dryRun, promptOverride } = params;
   let stopRequested = false;
 
   process.on("SIGINT", () => {
@@ -653,7 +678,7 @@ async function runDaemon(params: {
   log(`daemon mode active, interval=${intervalMinutes} minutes`);
   while (!stopRequested) {
     try {
-      await runSingleCycle({ projectRoot, config, dryRun });
+      await runSingleCycle({ projectRoot, config, dryRun, promptOverride });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       log(`run failed: ${message}`);
@@ -687,11 +712,17 @@ async function main() {
       config,
       intervalMinutes: config.intervalMinutes,
       dryRun: args.dryRun,
+      promptOverride: args.promptOverride,
     });
     return;
   }
 
-  await runSingleCycle({ projectRoot, config, dryRun: args.dryRun });
+  await runSingleCycle({
+    projectRoot,
+    config,
+    dryRun: args.dryRun,
+    promptOverride: args.promptOverride,
+  });
 }
 
 main().catch((error) => {

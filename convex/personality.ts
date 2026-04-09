@@ -495,6 +495,8 @@ export const listPersonaPacks = query({
       qualityGateMode: config.qualityGateMode,
       qualityGateThreshold: config.qualityGateThreshold,
       packs: PERSONA_PACKS.map((pack) => ({
+        cohorts: [...new Set(pack.fewShots.flatMap((example) => (example.cohort ? [example.cohort] : [])))],
+        scenarioCount: new Set(pack.fewShots.flatMap((example) => (example.scenario ? [example.scenario] : []))).size,
         id: pack.id,
         name: pack.name,
         version: pack.version,

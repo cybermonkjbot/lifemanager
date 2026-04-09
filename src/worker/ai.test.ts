@@ -11,11 +11,13 @@ import {
   generateReplyWithFallback,
   hasAggressiveInsultCue,
   hasBossAddressCue,
+  inferFriendshipGenerationCohort,
   normalizeOutboundText,
   postProcessReplyText,
+  routeAckResponseChannel,
   sanitizeCommonPhrasesForPrompt,
 } from "./ai";
-import { getDefaultPersonaPack, getPersonaPackById, selectFewShotsForPrompt } from "../../convex/lib/personaPacks";
+import { getDefaultPersonaPack, getPersonaPackById, parsePersonaPackForTests, selectFewShotsForPrompt } from "../../convex/lib/personaPacks";
 
 const ENV_KEYS = [
   "AZURE_AI_ENDPOINT",
@@ -771,6 +773,161 @@ test("generateReplyWithFallback short-circuits wrap-up messages locally", async 
     assert.ok(result.contextToolCalls && result.contextToolCalls.some((call) => call.name === "context_window_detection"));
     assert.ok(result.contextWindow);
   } finally {
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback in model-first mode routes pause/loop/wrap_up through model path", async () => {
+  const snapshot = clearAiEnv();
+
+  try {
+    const cases: Array<{ mode: "pause" | "loop" | "wrap_up"; inboundText: string; historyLines: string[] }> = [
+      {
+        mode: "pause",
+        inboundText: "I'm driving rn, will text later",
+        historyLines: [],
+      },
+      {
+        mode: "loop",
+        inboundText: "ok",
+        historyLines: [
+          "Me: Are you free this evening?",
+          "Them: ok",
+          "Me: Should I lock in 7pm?",
+          "Them: cool",
+        ],
+      },
+      {
+        mode: "wrap_up",
+        inboundText: "Thanks, all good.",
+        historyLines: ["Me: Sent details earlier."],
+      },
+    ];
+
+    for (const item of cases) {
+      const result = await generateReplyWithFallback({
+        inboundText: item.inboundText,
+        historyLines: item.historyLines,
+        styleHints: [],
+        runtime: {
+          modelFirstEnabled: true,
+          fallbackMode: "azure_only",
+        },
+      });
+      assert.equal(result.provider, "azure");
+      assert.equal(result.guardrailBlocked, true);
+      assert.equal(result.model, "gpt-5.4");
+      assert.equal(result.attempts.some((attempt) => attempt.model === `heuristic-local-${item.mode}`), false);
+    }
+  } finally {
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback in model-first mode still keeps hard-stop deterministic bypass", async () => {
+  const snapshot = clearAiEnv();
+
+  try {
+    const result = await generateReplyWithFallback({
+      inboundText: "please stop texting me",
+      historyLines: [],
+      styleHints: [],
+      runtime: {
+        modelFirstEnabled: true,
+        fallbackMode: "azure_only",
+      },
+    });
+
+    assert.equal(result.provider, "heuristic");
+    assert.equal(result.model, "heuristic-local-hard_stop");
+    assert.equal(result.attempts[0]?.stage, "heuristic_fallback");
+  } finally {
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback honors custom deterministic mode list in model-first mode", async () => {
+  const snapshot = clearAiEnv();
+
+  try {
+    const result = await generateReplyWithFallback({
+      inboundText: "I'm in a meeting right now, talk later",
+      historyLines: [],
+      styleHints: [],
+      runtime: {
+        modelFirstEnabled: true,
+        deterministicModes: ["hard_stop", "anti_beggi_beggi", "anti_sales_pitch", "pause"],
+        fallbackMode: "azure_only",
+      },
+    });
+
+    assert.equal(result.provider, "heuristic");
+    assert.equal(result.model, "heuristic-local-pause");
+  } finally {
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("routeAckResponseChannel returns reaction_plus_text when model router says so", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async () => {
+      return new Response(JSON.stringify({ output_text: '{"channel":"reaction_plus_text","reason":"warm acknowledgment"}' }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const routed = await routeAckResponseChannel({
+      inboundText: "thanks",
+      historyLines: ["Them: Sent the file", "Me: Nice one"],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+      },
+    });
+
+    assert.equal(routed.channel, "reaction_plus_text");
+    assert.equal(routed.provider, "azure");
+    assert.equal(routed.attempts[0]?.stage, "ack_router_azure");
+    assert.equal(routed.attempts[0]?.status, "success");
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("routeAckResponseChannel returns undefined channel when router output is invalid", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async () => {
+      return new Response(JSON.stringify({ output_text: '{"channel":"unknown"}' }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const routed = await routeAckResponseChannel({
+      inboundText: "ok",
+      historyLines: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+      },
+    });
+
+    assert.equal(routed.channel, undefined);
+    assert.equal(routed.attempts.some((attempt) => attempt.stage === "ack_router_azure" && attempt.status === "error"), true);
+  } finally {
+    globalThis.fetch = originalFetch;
     restoreAiEnv(snapshot);
   }
 });
@@ -1771,6 +1928,389 @@ test("generateReplyWithFallback accepts one-word binary answers in manual review
   }
 });
 
+test("generateReplyWithFallback executes one Responses tool round and resumes with function_call_output", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  const requestBodies: Array<Record<string, unknown>> = [];
+  const executedTasks: string[] = [];
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    let callCount = 0;
+    globalThis.fetch = (async (_input, init) => {
+      const parsed = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : {};
+      requestBodies.push(parsed);
+      callCount += 1;
+      if (callCount === 1) {
+        return new Response(
+          JSON.stringify({
+            id: "resp_1",
+            output: [
+              {
+                type: "function_call",
+                name: "tool_router_plan",
+                call_id: "call_1",
+                arguments: '{"task":"find invoice summary","includeExtraction":true,"maxResults":6,"maxToolsPerRun":4}',
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response(JSON.stringify({ id: "resp_2", output_text: "Sure, I can send it now." }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "Can you check the invoice summary?",
+      historyLines: ["Them: Can you check the invoice summary?"],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "log_only",
+      },
+      modelToolContext: {
+        threadId: "thread_1",
+        contactJid: "123@s.whatsapp.net",
+        executeToolRouterPlan: async (toolArgs) => {
+          executedTasks.push(toolArgs.task);
+          assert.equal(toolArgs.includeExtraction, true);
+          return {
+            status: "success",
+            output: {
+              executed: true,
+              summary: "Found invoice snippets.",
+            },
+            latencyMs: 12,
+          };
+        },
+      },
+    });
+
+    assert.equal(result.provider, "azure");
+    assert.equal(result.text, "Sure, I can send it now.");
+    assert.equal(executedTasks.length, 1);
+    assert.ok(Array.isArray(requestBodies[0]?.tools));
+    assert.equal(requestBodies[0]?.tool_choice, "auto");
+    assert.equal(requestBodies[0]?.parallel_tool_calls, true);
+    const secondInput = requestBodies[1]?.input;
+    assert.ok(Array.isArray(secondInput));
+    assert.ok(result.contextToolCalls?.some((call) => call.name === "model_tool_router_plan"));
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback enforces Responses tool round cap", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async () => {
+      return new Response(
+        JSON.stringify({
+          id: `resp_${Date.now()}`,
+          output: [
+            {
+              type: "function_call",
+              name: "tool_router_plan",
+              call_id: "call_repeat",
+              arguments: '{"task":"keep calling"}',
+            },
+          ],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "Loop test",
+      historyLines: [],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        maxToolRounds: 1,
+      },
+      modelToolContext: {
+        threadId: "thread_1",
+        executeToolRouterPlan: async () => ({
+          status: "success",
+          output: { ok: true },
+          latencyMs: 1,
+        }),
+      },
+    });
+
+    assert.equal(result.guardrailBlocked, true);
+    assert.ok(result.attempts.some((attempt) => /maxToolRounds/i.test(attempt.error || "")));
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback sends structured validation errors for malformed tool args and continues", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  const requestBodies: Array<Record<string, unknown>> = [];
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    let callCount = 0;
+    globalThis.fetch = (async (_input, init) => {
+      const parsed = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : {};
+      requestBodies.push(parsed);
+      callCount += 1;
+      if (callCount === 1) {
+        return new Response(
+          JSON.stringify({
+            id: "resp_bad_1",
+            output: [
+              {
+                type: "function_call",
+                name: "tool_router_plan",
+                call_id: "bad_1",
+                arguments: '{"task":"","maxResults":200}',
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response(JSON.stringify({ id: "resp_bad_2", output_text: "Noted, I can check it." }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "Can you check this?",
+      historyLines: [],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "log_only",
+      },
+      modelToolContext: {
+        threadId: "thread_1",
+        executeToolRouterPlan: async () => ({
+          status: "success",
+          output: { shouldNotRun: true },
+          latencyMs: 0,
+        }),
+      },
+    });
+
+    assert.equal(result.provider, "azure");
+    assert.equal(result.text, "Noted, I can check it.");
+    assert.ok(result.contextToolCalls?.some((call) => call.name === "model_tool_router_plan" && call.output?.errorCode === "validation"));
+    const functionOutputs = requestBodies[1]?.input as Array<Record<string, unknown>>;
+    assert.ok(Array.isArray(functionOutputs));
+    assert.ok(functionOutputs[0]?.output && String(functionOutputs[0]?.output).includes('"status":"error"'));
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback supports chat-completions tool-call loop", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  const requestBodies: Array<Record<string, unknown>> = [];
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    let callCount = 0;
+    globalThis.fetch = (async (_input, init) => {
+      const parsed = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : {};
+      requestBodies.push(parsed);
+      callCount += 1;
+      if (callCount === 1) {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  role: "assistant",
+                  tool_calls: [
+                    {
+                      id: "chat_tool_1",
+                      type: "function",
+                      function: {
+                        name: "tool_router_plan",
+                        arguments: '{"task":"find recall evidence"}',
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: "Yes, I can send it now.",
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "Can you send it now?",
+      historyLines: [],
+      styleHints: [],
+      runtime: {
+        apiStyle: "chat_completions",
+        fallbackMode: "azure_only",
+        qualityGateMode: "log_only",
+      },
+      modelToolContext: {
+        threadId: "thread_1",
+        executeToolRouterPlan: async () => ({
+          status: "success",
+          output: { evidence: ["message-1"] },
+          latencyMs: 6,
+        }),
+      },
+    });
+
+    assert.equal(result.provider, "azure");
+    assert.equal(result.text, "Yes, I can send it now.");
+    assert.ok(Array.isArray(requestBodies[0]?.tools));
+    const secondMessages = requestBodies[1]?.messages as Array<Record<string, unknown>>;
+    assert.ok(Array.isArray(secondMessages));
+    assert.ok(secondMessages.some((message) => message.role === "tool"));
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback captures tool executor timeout/failure and continues", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    let callCount = 0;
+    globalThis.fetch = (async () => {
+      callCount += 1;
+      if (callCount === 1) {
+        return new Response(
+          JSON.stringify({
+            id: "resp_timeout_1",
+            output: [
+              {
+                type: "function_call",
+                name: "tool_router_plan",
+                call_id: "timeout_call",
+                arguments: '{"task":"slow call"}',
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response(JSON.stringify({ id: "resp_timeout_2", output_text: "I can check and update you." }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "Please check this.",
+      historyLines: [],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "log_only",
+        toolTimeoutMs: 50,
+      },
+      modelToolContext: {
+        executeToolRouterPlan: async () => {
+          throw new Error("tool execution crashed");
+        },
+      },
+    });
+
+    assert.equal(result.provider, "azure");
+    assert.equal(result.text, "I can check and update you.");
+    assert.ok(
+      result.contextToolCalls?.some(
+        (call) => call.name === "model_tool_router_plan" && (call.output?.status === "timeout" || call.output?.status === "error"),
+      ),
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback keeps backward-compatible non-tool request when modelToolContext is absent", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  const requestBodies: Array<Record<string, unknown>> = [];
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      const parsed = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : {};
+      requestBodies.push(parsed);
+      return new Response(JSON.stringify({ output_text: "All good." }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "Quick check",
+      historyLines: [],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "log_only",
+      },
+    });
+
+    assert.equal(result.provider, "azure");
+    assert.ok(!("tools" in requestBodies[0]));
+    assert.ok(!result.contextToolCalls?.some((call) => call.name === "model_tool_router_plan"));
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
 test("generateReplyWithFallback injects selected contact-memory facts and logs selection tool call", async () => {
   const snapshot = clearAiEnv();
   const originalFetch = globalThis.fetch;
@@ -1983,6 +2523,141 @@ test("selectFewShotsForPrompt falls back to pack order when inbound is empty", (
   assert.equal(selected[0]?.inbound, "I'm still in class and freezing.");
 });
 
+test("inferFriendshipGenerationCohort detects gen_z cues", () => {
+  const inferred = inferFriendshipGenerationCohort({
+    inboundText: "lowkey i'm down fr, we should catch up rn",
+    recentHistoryLines: ["Them: that's a vibe tbh", "Me: say less"],
+    relevantHistoryLines: [],
+  });
+  assert.equal(inferred.cohort, "gen_z");
+  assert.equal(inferred.usedBridgeFallback, false);
+});
+
+test("inferFriendshipGenerationCohort detects boomer cues", () => {
+  const inferred = inferFriendshipGenerationCohort({
+    inboundText: "Good afternoon. Thank you for checking in, I appreciate it.",
+    recentHistoryLines: ["Them: Please let us speak this weekend."],
+    relevantHistoryLines: [],
+  });
+  assert.equal(inferred.cohort, "boomer");
+  assert.equal(inferred.usedBridgeFallback, false);
+});
+
+test("inferFriendshipGenerationCohort falls back to bridge when ambiguous", () => {
+  const inferred = inferFriendshipGenerationCohort({
+    inboundText: "Hey, are you around later?",
+    recentHistoryLines: ["Them: let me know"],
+    relevantHistoryLines: [],
+  });
+  assert.equal(inferred.cohort, "bridge");
+  assert.equal(inferred.usedBridgeFallback, true);
+});
+
+test("selectFewShotsForPrompt can prioritize preferred cohort and scenario tags", () => {
+  const pack = getPersonaPackById("friendship_cross_gen.v1");
+  assert.ok(pack);
+  const selected = selectFewShotsForPrompt(pack!, 900, "Hey, how have you been this week?", {
+    preferredCohort: "gen_z",
+    preferredScenario: "check_in",
+  });
+  assert.ok(selected.length > 0);
+  assert.equal(selected[0]?.cohort, "gen_z");
+  assert.equal(selected[0]?.scenario, "check_in");
+});
+
+test("parsePersonaPackForTests accepts optional example metadata fields", () => {
+  const parsed = parsePersonaPackForTests({
+    id: "test_pack.v1",
+    name: "Test Pack",
+    version: "1.0.0",
+    description: "Test",
+    activation: { allowedProfileSlugs: ["friendship"] },
+    masterPrompt: "Test prompt",
+    shortcutDictionary: [{ token: "ok", meaning: "okay", usageRule: "Use casually." }],
+    guardrails: ["Do not be rude."],
+    checklist: {
+      passThreshold: 0.72,
+      criteria: [
+        { id: "context_specificity", label: "Context", weight: 0.3, description: "d" },
+        { id: "natural_shortcuts", label: "Shortcuts", weight: 0.2, description: "d" },
+        { id: "anti_generic", label: "Generic", weight: 0.2, description: "d" },
+        { id: "anti_cringe", label: "Cringe", weight: 0.2, description: "d" },
+        { id: "brevity_fit", label: "Brevity", weight: 0.1, description: "d" },
+      ],
+    },
+    rewritePolicy: {
+      mode: "auto_rewrite_once",
+      maxPasses: 1,
+      instruction: "Rewrite",
+    },
+    styleTraits: {
+      commonPhrases: ["all good"],
+      punctuationStyle: ["simple"],
+      humorNotes: ["light"],
+      spellingNotes: ["clear"],
+    },
+    personalityPatch: {
+      appendToSlugs: ["friendship"],
+      promptBlock: "Patch",
+    },
+    fewShots: Array.from({ length: 30 }, (_, index) => ({
+      inbound: `inbound ${index}`,
+      reply: `reply ${index}`,
+      cohort: index === 0 ? "bridge" : undefined,
+      scenario: index === 0 ? "check_in" : undefined,
+      tags: index === 0 ? ["friendship", "check-in"] : undefined,
+    })),
+  });
+  assert.equal(parsed.fewShots[0]?.cohort, "bridge");
+  assert.equal(parsed.fewShots[0]?.scenario, "check_in");
+  assert.deepEqual(parsed.fewShots[0]?.tags, ["friendship", "check-in"]);
+});
+
+test("parsePersonaPackForTests rejects invalid cohort metadata", () => {
+  assert.throws(() =>
+    parsePersonaPackForTests({
+      id: "bad_pack.v1",
+      name: "Bad Pack",
+      version: "1.0.0",
+      description: "Test",
+      activation: { allowedProfileSlugs: ["friendship"] },
+      masterPrompt: "Test prompt",
+      shortcutDictionary: [{ token: "ok", meaning: "okay", usageRule: "Use casually." }],
+      guardrails: ["Do not be rude."],
+      checklist: {
+        passThreshold: 0.72,
+        criteria: [
+          { id: "context_specificity", label: "Context", weight: 0.3, description: "d" },
+          { id: "natural_shortcuts", label: "Shortcuts", weight: 0.2, description: "d" },
+          { id: "anti_generic", label: "Generic", weight: 0.2, description: "d" },
+          { id: "anti_cringe", label: "Cringe", weight: 0.2, description: "d" },
+          { id: "brevity_fit", label: "Brevity", weight: 0.1, description: "d" },
+        ],
+      },
+      rewritePolicy: {
+        mode: "auto_rewrite_once",
+        maxPasses: 1,
+        instruction: "Rewrite",
+      },
+      styleTraits: {
+        commonPhrases: ["all good"],
+        punctuationStyle: ["simple"],
+        humorNotes: ["light"],
+        spellingNotes: ["clear"],
+      },
+      personalityPatch: {
+        appendToSlugs: ["friendship"],
+        promptBlock: "Patch",
+      },
+      fewShots: Array.from({ length: 30 }, (_, index) => ({
+        inbound: `inbound ${index}`,
+        reply: `reply ${index}`,
+        cohort: index === 0 ? "millennial" : undefined,
+      })),
+    }),
+  );
+});
+
 test("generateReplyWithFallback applies active persona pack only for romantic profile slugs", async () => {
   const snapshot = clearAiEnv();
   process.env.CODEX_CLI_PATH = "__missing_codex_binary__";
@@ -2006,6 +2681,38 @@ test("generateReplyWithFallback applies active persona pack only for romantic pr
       personality: { profileSlug: "casual" },
       runtime: {
         activePersonaPackId: "josh_witty_shortcuts.v1",
+        qualityGateMode: "log_only",
+      },
+    });
+    assert.equal(casual.activePersonaPackId, undefined);
+  } finally {
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback applies friendship cross-gen pack only for friendship profile", async () => {
+  const snapshot = clearAiEnv();
+  process.env.CODEX_CLI_PATH = "__missing_codex_binary__";
+  try {
+    const friendship = await generateReplyWithFallback({
+      inboundText: "lowkey i'm down fr, we should catch up rn",
+      historyLines: ["Them: lowkey i'm down fr, we should catch up rn"],
+      styleHints: [],
+      personality: { profileSlug: "friendship" },
+      runtime: {
+        activePersonaPackId: "friendship_cross_gen.v1",
+        qualityGateMode: "log_only",
+      },
+    });
+    assert.equal(friendship.activePersonaPackId, "friendship_cross_gen.v1");
+
+    const casual = await generateReplyWithFallback({
+      inboundText: "lowkey i'm down fr, we should catch up rn",
+      historyLines: ["Them: lowkey i'm down fr, we should catch up rn"],
+      styleHints: [],
+      personality: { profileSlug: "casual" },
+      runtime: {
+        activePersonaPackId: "friendship_cross_gen.v1",
         qualityGateMode: "log_only",
       },
     });

@@ -9,7 +9,8 @@ import makeWASocket, {
 } from "baileys";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { rm } from "node:fs/promises";
+import { readFile, rm, stat } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import pino from "pino";
 import { ConvexHttpClient } from "convex/browser";
 import type { Id } from "../../convex/_generated/dataModel";
@@ -34,7 +35,10 @@ import {
   generateReplyWithFallback,
   estimateDelayAndTyping,
   normalizeOutboundText,
+  routeAckResponseChannel,
   type AiAttempt,
+  type ConversationSteeringMode,
+  type ModelToolContext,
 } from "./ai";
 import {
   EMOJI_COOLDOWN_MS,
@@ -83,6 +87,7 @@ import {
   type MemeAssetSource,
 } from "./meme-policy";
 import { parseRuntimeCommand, type RuntimeCommand, type RuntimeCommandTarget } from "./runtime-commands";
+import { parseSelfImproveCommand, type SelfImproveCommand } from "./self-improve-command";
 
 const logger = pino({
   name: "slm-worker",
@@ -108,6 +113,9 @@ type RuntimeSettings = {
   aiMaxReplyChars: number;
   aiHistoryLineLimit: number;
   aiFallbackMode: "all" | "azure_only";
+  aiModelFirstEnabled: boolean;
+  aiDeterministicModes: string[];
+  aiAckRoutingEnabled: boolean;
   aiPrimaryConfidence: number;
   aiFallbackConfidence: number;
   aiReplyPolicy: string;
@@ -316,6 +324,25 @@ type OutboundPolicy =
   | {
       mode: "text";
     };
+
+const ALLOWED_RUNTIME_DETERMINISTIC_MODE_SET = new Set<ConversationSteeringMode>([
+  "hard_stop",
+  "anti_beggi_beggi",
+  "anti_sales_pitch",
+  "pause",
+  "loop",
+  "wrap_up",
+]);
+
+function resolveRuntimeDeterministicModes(modes: string[] | undefined) {
+  const parsed = (modes || [])
+    .map((mode) => mode.trim().toLowerCase())
+    .filter(
+      (mode): mode is ConversationSteeringMode =>
+        mode !== "none" && ALLOWED_RUNTIME_DETERMINISTIC_MODE_SET.has(mode as ConversationSteeringMode),
+    );
+  return parsed.length ? [...new Set(parsed)] : undefined;
+}
 
 function chooseReactionEmoji(text: string) {
   if (/\b(thanks|thank you|thx)\b/i.test(text)) {
@@ -701,6 +728,10 @@ function attemptStageLabel(stage: AiAttempt["stage"]) {
       return "Azure HTTP fallback";
     case "codex_cli":
       return "Codex CLI fallback";
+    case "ack_router_azure":
+      return "Ack router (Azure)";
+    case "ack_router_codex":
+      return "Ack router (Codex)";
     case "humor_judge_azure":
       return "Humor judge (Azure)";
     case "humor_judge_codex":
@@ -723,6 +754,11 @@ function attemptEventType(attempt: AiAttempt) {
   }
   if (attempt.stage === "codex_cli") {
     return attempt.status === "success" ? "ai.fallback.codex.success" : "ai.fallback.codex.error";
+  }
+  if (attempt.stage === "ack_router_azure" || attempt.stage === "ack_router_codex") {
+    return attempt.status === "success"
+      ? `ai.ack_router.attempt.${attempt.provider}.success`
+      : `ai.ack_router.attempt.${attempt.provider}.error`;
   }
   return attempt.status === "success" ? `ai.attempt.${attempt.stage}.success` : `ai.attempt.${attempt.stage}.error`;
 }
@@ -750,6 +786,34 @@ function formatAttemptUsage(attempt: AiAttempt) {
     parts.push(`usage ${attempt.usageSource}`);
   }
   return parts.join(" · ");
+}
+
+function summarizeAiPipelineMetrics(args: {
+  attempts: AiAttempt[];
+  latencyMs: number;
+  manualReview: boolean;
+}) {
+  const hasModelSuccess = args.attempts.some(
+    (attempt) => attempt.status === "success" && (attempt.provider === "azure" || attempt.provider === "codex"),
+  );
+  const deterministicBypass = args.attempts.some(
+    (attempt) =>
+      attempt.status === "success" &&
+      attempt.stage === "heuristic_fallback" &&
+      attempt.model.startsWith("heuristic-local-"),
+  );
+  const fallbackUsed = args.attempts.some(
+    (attempt) =>
+      attempt.status === "success" &&
+      (attempt.stage === "codex_cli" || (attempt.stage === "heuristic_fallback" && attempt.model === "heuristic-fallback")),
+  );
+  return {
+    modelUtilized: hasModelSuccess,
+    deterministicBypass,
+    fallbackUsed,
+    manualReview: args.manualReview,
+    latencyMs: Math.max(0, Math.round(args.latencyMs)),
+  };
 }
 
 function stableHash(input: string) {
@@ -906,6 +970,76 @@ async function runWithTimeout<T>(promise: Promise<T>, timeoutMs: number): Promis
       clearTimeout(timer);
     }
   }
+}
+
+function buildModelToolContext(args: {
+  convex: ConvexHttpClient;
+  threadId?: string;
+  contactJid?: string;
+}): ModelToolContext {
+  return {
+    threadId: args.threadId,
+    contactJid: args.contactJid,
+    executeToolRouterPlan: async (toolArgs) => {
+      const maxResults = Number(toolArgs.maxResults);
+      const maxToolsPerRun = Number(toolArgs.maxToolsPerRun);
+      if (!Number.isFinite(maxResults) || maxResults > 20) {
+        return {
+          status: "error",
+          errorCode: "max_results_exceeded",
+          errorMessage: "maxResults exceeds server cap (20).",
+          latencyMs: 0,
+        };
+      }
+      if (!Number.isFinite(maxToolsPerRun) || maxToolsPerRun > 8) {
+        return {
+          status: "error",
+          errorCode: "max_tools_per_run_exceeded",
+          errorMessage: "maxToolsPerRun exceeds server cap (8).",
+          latencyMs: 0,
+        };
+      }
+      if (!args.threadId && toolArgs.includeExtraction) {
+        return {
+          status: "error",
+          errorCode: "thread_scope_required",
+          errorMessage: "includeExtraction requires a scoped threadId.",
+          latencyMs: 0,
+        };
+      }
+
+      const startedAt = Date.now();
+      try {
+        const output = await args.convex.action(convexRefs.chatToolRouterPlan, {
+          task: toolArgs.task,
+          candidateReply: toolArgs.candidateReply || "",
+          ...(args.threadId ? { threadId: args.threadId as Id<"threads"> } : {}),
+          ...(args.contactJid ? { contactJid: args.contactJid } : {}),
+          execute: true,
+          plannerMode: "hybrid",
+          allowSideEffects: true,
+          includeExtraction: Boolean(toolArgs.includeExtraction),
+          timeoutMs: Math.round(Math.max(500, Math.min(toolArgs.toolTimeoutMs, 30_000))),
+          maxResults: Math.round(Math.max(1, Math.min(maxResults, 20))),
+          maxToolsPerRun: Math.round(Math.max(1, Math.min(maxToolsPerRun, 8))),
+        });
+        return {
+          status: "success",
+          output,
+          latencyMs: Date.now() - startedAt,
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const lower = message.toLowerCase();
+        return {
+          status: lower.includes("timeout") ? "timeout" : "error",
+          errorCode: lower.includes("timeout") ? "timeout" : "tool_router_error",
+          errorMessage: compactLogText(message, 260),
+          latencyMs: Date.now() - startedAt,
+        };
+      }
+    },
+  };
 }
 
 async function recordContextToolRunTelemetry(args: {
@@ -1545,6 +1679,89 @@ function resolveTextEmojiAllowlist() {
     return settings;
   };
 
+  const emitAiPipelineMetrics = async (args: {
+    pipeline: "reply" | "outreach" | "status_builder" | "ack_router";
+    attempts: AiAttempt[];
+    latencyMs: number;
+    manualReview: boolean;
+    threadId?: Id<"threads">;
+    toolRunId?: string;
+    detailSuffix?: string;
+  }) => {
+    const metrics = summarizeAiPipelineMetrics({
+      attempts: args.attempts,
+      latencyMs: args.latencyMs,
+      manualReview: args.manualReview,
+    });
+    const detail = compactLogText(
+      `pipeline=${args.pipeline} model_utilized=${metrics.modelUtilized ? 1 : 0} deterministic_bypass=${metrics.deterministicBypass ? 1 : 0} fallback=${metrics.fallbackUsed ? 1 : 0} manual_review=${metrics.manualReview ? 1 : 0} latency_ms=${metrics.latencyMs}${args.detailSuffix ? ` ${args.detailSuffix}` : ""}`,
+      300,
+    );
+    await convex
+      .mutation(convexRefs.systemRecordEvent, {
+        source: "ai",
+        eventType: `ai.metrics.${args.pipeline}.sample`,
+        ...(args.threadId ? { threadId: args.threadId } : {}),
+        ...(args.toolRunId ? { toolRunId: args.toolRunId } : {}),
+        detail,
+      })
+      .catch(() => undefined);
+
+    if (metrics.modelUtilized) {
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "ai",
+          eventType: `ai.metrics.${args.pipeline}.model_utilized`,
+          ...(args.threadId ? { threadId: args.threadId } : {}),
+          ...(args.toolRunId ? { toolRunId: args.toolRunId } : {}),
+          detail: `pipeline=${args.pipeline} value=1`,
+        })
+        .catch(() => undefined);
+    }
+    if (metrics.deterministicBypass) {
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "ai",
+          eventType: `ai.metrics.${args.pipeline}.deterministic_bypass`,
+          ...(args.threadId ? { threadId: args.threadId } : {}),
+          ...(args.toolRunId ? { toolRunId: args.toolRunId } : {}),
+          detail: `pipeline=${args.pipeline} value=1`,
+        })
+        .catch(() => undefined);
+    }
+    if (metrics.fallbackUsed) {
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "ai",
+          eventType: `ai.metrics.${args.pipeline}.fallback`,
+          ...(args.threadId ? { threadId: args.threadId } : {}),
+          ...(args.toolRunId ? { toolRunId: args.toolRunId } : {}),
+          detail: `pipeline=${args.pipeline} value=1`,
+        })
+        .catch(() => undefined);
+    }
+    if (metrics.manualReview) {
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "ai",
+          eventType: `ai.metrics.${args.pipeline}.manual_review`,
+          ...(args.threadId ? { threadId: args.threadId } : {}),
+          ...(args.toolRunId ? { toolRunId: args.toolRunId } : {}),
+          detail: `pipeline=${args.pipeline} value=1`,
+        })
+        .catch(() => undefined);
+    }
+    await convex
+      .mutation(convexRefs.systemRecordEvent, {
+        source: "ai",
+        eventType: `ai.metrics.${args.pipeline}.latency`,
+        ...(args.threadId ? { threadId: args.threadId } : {}),
+        ...(args.toolRunId ? { toolRunId: args.toolRunId } : {}),
+        detail: `pipeline=${args.pipeline} latency_ms=${metrics.latencyMs}`,
+      })
+      .catch(() => undefined);
+  };
+
   const getStyleProfile = async () => {
     return await resolveTtlCache(styleProfileCache, STYLE_PROFILE_CACHE_TTL_MS, async () => {
       return (await convex.query(convexRefs.styleGetProfile, {})) as StyleProfileSnapshot;
@@ -2164,13 +2381,6 @@ function resolveTextEmojiAllowlist() {
           mediaAssetId: stickerId,
         };
       }
-    }
-
-    if ((args.runtimeSettings?.reactionsEnabled ?? true) && looksLikeAckOnly(text)) {
-      return {
-        mode: "reaction_only",
-        emoji: chooseReactionEmoji(text),
-      };
     }
 
     if (
@@ -2813,6 +3023,178 @@ function resolveTextEmojiAllowlist() {
     return workerRuntimePaused ? "worker paused (listener still active)" : "worker active";
   };
 
+  type SelfControlMessageKey = {
+    id?: string | null;
+    fromMe?: boolean | null;
+    remoteJid?: string | null;
+    participant?: string | null;
+  };
+
+  const SELF_IMPROVE_MAX_PROMPT_CHARS = 1200;
+  const SELF_IMPROVE_ROOT = resolve(process.cwd(), ".slm", "self-improvement");
+  const SELF_IMPROVE_LOCK_PATH = join(SELF_IMPROVE_ROOT, "runner.lock");
+  const SELF_IMPROVE_LATEST_META_PATH = join(SELF_IMPROVE_ROOT, "latest-meta.json");
+  const SELF_IMPROVE_LATEST_REPORT_PATH = join(SELF_IMPROVE_ROOT, "latest.md");
+
+  const resolveSelfControlThread = (messageKey: SelfControlMessageKey) => {
+    const rawThreadJid = getThreadJid(messageKey as Parameters<typeof getThreadJid>[0]);
+    const senderJid = getSenderJid(messageKey as Parameters<typeof getSenderJid>[0]);
+    const threadJid = rawThreadJid === "status@broadcast" ? senderJid : rawThreadJid;
+    if (!threadJid || !senderJid) {
+      return null;
+    }
+
+    const selfJid = getSelfJid();
+    const selfAccount = normalizeAccountJid(selfJid);
+    if (!selfAccount) {
+      return null;
+    }
+
+    const isSelfThread = normalizeAccountJid(threadJid) === selfAccount;
+    if (!isSelfThread) {
+      return null;
+    }
+
+    const senderAccount = normalizeAccountJid(senderJid);
+    const senderIsSelf = senderAccount.length > 0 && senderAccount === selfAccount;
+    if (!senderIsSelf) {
+      return null;
+    }
+
+    return { threadJid };
+  };
+
+  const isSelfImproveRunActive = async () => {
+    try {
+      await stat(SELF_IMPROVE_LOCK_PATH);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const readLatestSelfImproveMeta = async () => {
+    try {
+      const text = await readFile(SELF_IMPROVE_LATEST_META_PATH, "utf8");
+      const parsed = JSON.parse(text) as {
+        runId?: string;
+        finishedAt?: string;
+        durationMs?: number;
+        codexExitCode?: number | null;
+        codexErrorMessage?: string | null;
+      };
+      return parsed;
+    } catch {
+      return null;
+    }
+  };
+
+  const launchSelfImproveRun = async (command: Extract<SelfImproveCommand, { action: "run" }>) => {
+    const prompt = command.prompt.trim();
+    if (!prompt) {
+      return {
+        hasError: true,
+        responseText: "Local Codex improvement command failed\nreason: prompt is required",
+      };
+    }
+
+    if (prompt.length > SELF_IMPROVE_MAX_PROMPT_CHARS) {
+      return {
+        hasError: true,
+        responseText: [
+          "Local Codex improvement command failed",
+          `reason: prompt too long (${prompt.length} chars, max ${SELF_IMPROVE_MAX_PROMPT_CHARS})`,
+        ].join("\n"),
+      };
+    }
+
+    if (await isSelfImproveRunActive()) {
+      return {
+        hasError: true,
+        responseText: [
+          "Local Codex improvement command not started",
+          "reason: another self-improvement run is already active",
+          'check: send "improve status"',
+        ].join("\n"),
+      };
+    }
+
+    const bunBin = process.env.BUN_BIN || "bun";
+    const child = spawn(bunBin, ["run", "self-improve", "--", "--prompt", prompt], {
+      cwd: process.cwd(),
+      env: process.env,
+      detached: true,
+      stdio: "ignore",
+    });
+    child.unref();
+
+    return {
+      hasError: false,
+      responseText: [
+        "Local Codex improvement run queued",
+        `prompt: ${compactLogText(prompt, 220)}`,
+        `status: started in background${child.pid ? ` (pid ${child.pid})` : ""}`,
+        `report: ${SELF_IMPROVE_LATEST_REPORT_PATH}`,
+        'check: send "improve status" or "improve latest"',
+      ].join("\n"),
+    };
+  };
+
+  const buildSelfImproveStatusText = async () => {
+    const active = await isSelfImproveRunActive();
+    const latest = await readLatestSelfImproveMeta();
+    const lines: string[] = ["Local Codex self-improve status", `active: ${active ? "running" : "idle"}`];
+    if (!latest?.runId) {
+      lines.push("latest: no completed runs yet");
+      lines.push(`report: ${SELF_IMPROVE_LATEST_REPORT_PATH}`);
+      return lines.join("\n");
+    }
+
+    lines.push(`latest run: ${latest.runId}`);
+    if (latest.finishedAt) {
+      lines.push(`finished: ${latest.finishedAt}`);
+    }
+    if (typeof latest.durationMs === "number" && Number.isFinite(latest.durationMs)) {
+      lines.push(`duration: ${Math.round(latest.durationMs / 1000)}s`);
+    }
+    if (latest.codexErrorMessage) {
+      lines.push(`last result: warning (${compactLogText(latest.codexErrorMessage, 120)})`);
+    } else if (typeof latest.codexExitCode === "number" && latest.codexExitCode !== 0) {
+      lines.push(`last result: warning (exit ${latest.codexExitCode})`);
+    } else {
+      lines.push("last result: ok");
+    }
+    lines.push(`report: ${SELF_IMPROVE_LATEST_REPORT_PATH}`);
+    return lines.join("\n");
+  };
+
+  const buildSelfImproveLatestText = async () => {
+    const latest = await readLatestSelfImproveMeta();
+    if (!latest?.runId) {
+      return [
+        "Local Codex self-improve latest",
+        "latest: no completed runs yet",
+        `report: ${SELF_IMPROVE_LATEST_REPORT_PATH}`,
+      ].join("\n");
+    }
+
+    const lines = [
+      "Local Codex self-improve latest",
+      `run: ${latest.runId}`,
+      latest.finishedAt ? `finished: ${latest.finishedAt}` : undefined,
+      typeof latest.durationMs === "number" && Number.isFinite(latest.durationMs)
+        ? `duration: ${Math.round(latest.durationMs / 1000)}s`
+        : undefined,
+      latest.codexErrorMessage
+        ? `codex: warning (${compactLogText(latest.codexErrorMessage, 120)})`
+        : typeof latest.codexExitCode === "number" && latest.codexExitCode !== 0
+          ? `codex: warning (exit ${latest.codexExitCode})`
+          : "codex: ok",
+      `report: ${SELF_IMPROVE_LATEST_REPORT_PATH}`,
+    ].filter(Boolean) as string[];
+    return lines.join("\n");
+  };
+
   const runRuntimeCommandForTarget = async (
     command: RuntimeCommand,
     target: RuntimeCommandTarget,
@@ -2825,11 +3207,19 @@ function resolveTextEmojiAllowlist() {
       if (command.action === "status") {
         lines.push(describeWorkerRuntime());
       } else if (command.action === "pause") {
-        workerRuntimePaused = true;
-        lines.push("worker paused (listening for resume commands)");
+        if (workerRuntimePaused) {
+          lines.push("worker already paused (listener still active)");
+        } else {
+          workerRuntimePaused = true;
+          lines.push("worker paused (listener still active)");
+        }
       } else if (command.action === "resume") {
-        workerRuntimePaused = false;
-        lines.push("worker resumed");
+        if (!workerRuntimePaused) {
+          lines.push("worker already active");
+        } else {
+          workerRuntimePaused = false;
+          lines.push("worker resumed");
+        }
       } else if (command.action === "restart") {
         workerRuntimePaused = false;
         restartWorker = true;
@@ -2916,11 +3306,83 @@ function resolveTextEmojiAllowlist() {
       detailLines.push("no changes applied");
     }
 
+    const statusLine = hasError
+      ? "status: completed with errors"
+      : shouldRestartWorker
+        ? "status: confirmed (worker restart scheduled)"
+        : "status: confirmed";
+
     return {
       shouldRestartWorker,
       hasError,
-      responseText: `Runtime command: ${command.action} ${command.target}\n${detailLines.join("\n")}`,
+      responseText: [
+        "Runtime command confirmation",
+        `requested: ${command.raw}`,
+        `interpreted: ${command.action} ${command.target}`,
+        statusLine,
+        ...detailLines.map((line) => `- ${line}`),
+      ].join("\n"),
     };
+  };
+
+  const maybeHandleSelfImproveCommand = async (message: {
+    key: SelfControlMessageKey;
+    message?: unknown;
+  }) => {
+    const parsed = parseInboundMessage(message.message as Parameters<typeof parseInboundMessage>[0]);
+    if (parsed.kind !== "text") {
+      return false;
+    }
+
+    const selfControl = resolveSelfControlThread(message.key);
+    if (!selfControl) {
+      return false;
+    }
+    const { threadJid } = selfControl;
+
+    const command = parseSelfImproveCommand(parsed.text);
+    if (!command) {
+      return false;
+    }
+
+    await convex
+      .mutation(convexRefs.systemRecordEvent, {
+        source: "worker",
+        eventType: "self_improve.command.received",
+        detail: compactLogText(command.raw, 260),
+      })
+      .catch(() => undefined);
+
+    let responseText = "";
+    let hasError = false;
+    try {
+      if (command.action === "run") {
+        const started = await launchSelfImproveRun(command);
+        responseText = started.responseText;
+        hasError = started.hasError;
+      } else if (command.action === "status") {
+        responseText = await buildSelfImproveStatusText();
+      } else {
+        responseText = await buildSelfImproveLatestText();
+      }
+    } catch (error) {
+      const err = error instanceof Error ? error.message : String(error);
+      responseText = `Local Codex improvement command failed\nreason: ${compactLogText(err, 240)}`;
+      hasError = true;
+    }
+
+    rememberAutomatedThreadSend(threadJid);
+    const sent = await sock.sendMessage(threadJid, { text: responseText });
+    rememberAutomatedOutboundId(sent?.key?.id || undefined);
+    await convex
+      .mutation(convexRefs.systemRecordEvent, {
+        source: "worker",
+        eventType: hasError ? "self_improve.command.failed" : "self_improve.command.executed",
+        detail: compactLogText(responseText, 280),
+      })
+      .catch(() => undefined);
+
+    return true;
   };
 
   const maybeHandleRuntimeControlCommand = async (message: {
@@ -2932,29 +3394,11 @@ function resolveTextEmojiAllowlist() {
       return false;
     }
 
-    const rawThreadJid = getThreadJid(message.key as Parameters<typeof getThreadJid>[0]);
-    const senderJid = getSenderJid(message.key as Parameters<typeof getSenderJid>[0]);
-    const threadJid = rawThreadJid === "status@broadcast" ? senderJid : rawThreadJid;
-    if (!threadJid || !senderJid) {
+    const selfControl = resolveSelfControlThread(message.key);
+    if (!selfControl) {
       return false;
     }
-
-    const selfJid = getSelfJid();
-    const selfAccount = normalizeAccountJid(selfJid);
-    if (!selfAccount) {
-      return false;
-    }
-
-    const isSelfThread = normalizeAccountJid(threadJid) === selfAccount;
-    if (!isSelfThread) {
-      return false;
-    }
-
-    const senderAccount = normalizeAccountJid(senderJid);
-    const senderIsSelf = senderAccount.length > 0 && senderAccount === selfAccount;
-    if (!senderIsSelf) {
-      return false;
-    }
+    const { threadJid } = selfControl;
 
     const command = parseRuntimeCommand(parsed.text);
     if (!command) {
@@ -3553,6 +3997,9 @@ function resolveTextEmojiAllowlist() {
         maxReplyChars: runtimeSettings?.aiMaxReplyChars,
         historyLineLimit: runtimeSettings?.aiHistoryLineLimit,
         fallbackMode: runtimeSettings?.aiFallbackMode,
+        modelFirstEnabled: runtimeSettings?.aiModelFirstEnabled,
+        deterministicModes: resolveRuntimeDeterministicModes(runtimeSettings?.aiDeterministicModes),
+        ackRoutingEnabled: runtimeSettings?.aiAckRoutingEnabled,
         replyPolicyInstruction: effectiveReplyPolicyInstruction,
         systemInstruction: runtimeSettings?.aiSystemInstruction || "",
         activePersonaPackId: runtimeSettings?.activePersonaPackId || "",
@@ -3826,6 +4273,7 @@ function resolveTextEmojiAllowlist() {
         }
       }
 
+      const toolRunId = createToolRunId("reply", String(ingest.threadId), String(ingest.messageId));
       const forceNightWindDownReply = Boolean(nightWindDownUntil);
       const forcePdfTextReply = Boolean(pdfContext);
       let personalitySetting: PersonalityThreadSetting = null;
@@ -3844,10 +4292,116 @@ function resolveTextEmojiAllowlist() {
           emoji: pickLaughReactionEmoji(statusSignalText || inboundForPolicy.text || "", funnyEmojis),
         };
       } else if ((runtimeSettings?.reactionsEnabled ?? true) && looksLikeAckOnly(inboundForPolicy.text || "")) {
-        outboundPolicy = {
-          mode: "reaction_only",
-          emoji: chooseReactionEmoji(inboundForPolicy.text || ""),
-        };
+        const modelAckRoutingEnabled =
+          (runtimeSettings?.aiModelFirstEnabled ?? false) && (runtimeSettings?.aiAckRoutingEnabled ?? false);
+        if (modelAckRoutingEnabled) {
+          threadContextForPolicy = (await convex
+            .query(convexRefs.threadGet, {
+              threadId: ingest.threadId,
+            })
+            .catch(() => null)) as ThreadContextSnapshot;
+          const ackHistoryLines = (threadContextForPolicy?.messages || []).map((m) => {
+            return `${m.direction === "inbound" ? "Them" : "Me"}: ${m.text}`;
+          });
+          const ackRoute = await routeAckResponseChannel({
+            inboundText: inboundForPolicy.text || "",
+            historyLines: ackHistoryLines,
+            runtime: {
+              fallbackMode: runtimeSettings?.aiFallbackMode,
+              modelFirstEnabled: runtimeSettings?.aiModelFirstEnabled,
+              deterministicModes: resolveRuntimeDeterministicModes(runtimeSettings?.aiDeterministicModes),
+              ackRoutingEnabled: runtimeSettings?.aiAckRoutingEnabled,
+              systemInstruction: runtimeSettings?.aiSystemInstruction || "",
+            },
+          });
+
+          for (let index = 0; index < ackRoute.attempts.length; index += 1) {
+            const attempt = ackRoute.attempts[index];
+            const label = attemptStageLabel(attempt.stage);
+            const usageSuffix = formatAttemptUsage(attempt);
+            const detail = attempt.error
+              ? `Ack route attempt ${index + 1}/${ackRoute.attempts.length} · ${label} · ${attempt.model} · ${attempt.latencyMs}ms${usageSuffix ? ` · ${usageSuffix}` : ""} · ${attempt.error.slice(0, 220)}`
+              : `Ack route attempt ${index + 1}/${ackRoute.attempts.length} · ${label} · ${attempt.model} · ${attempt.latencyMs}ms${usageSuffix ? ` · ${usageSuffix}` : ""}`;
+
+            await convex
+              .mutation(convexRefs.systemRecordProviderRun, {
+                threadId: ingest.threadId,
+                provider: attempt.provider,
+                model: attempt.model,
+                latencyMs: attempt.latencyMs,
+                status: attempt.status,
+                ...(attempt.error ? { error: attempt.error.slice(0, 300) } : {}),
+                ...(attempt.inputTokens === undefined ? {} : { inputTokens: attempt.inputTokens }),
+                ...(attempt.outputTokens === undefined ? {} : { outputTokens: attempt.outputTokens }),
+                ...(attempt.totalTokens === undefined ? {} : { totalTokens: attempt.totalTokens }),
+                ...(attempt.usageSource ? { usageSource: attempt.usageSource } : {}),
+                ...(attempt.estimatedCostUsd === undefined ? {} : { estimatedCostUsd: attempt.estimatedCostUsd }),
+                ...(attempt.costCurrency ? { costCurrency: attempt.costCurrency } : {}),
+                ...(attempt.pricingVersion ? { pricingVersion: attempt.pricingVersion } : {}),
+              })
+              .catch(() => undefined);
+
+            await convex
+              .mutation(convexRefs.systemRecordEvent, {
+                source: "ai",
+                eventType: attemptEventType(attempt),
+                threadId: ingest.threadId,
+                toolRunId,
+                detail,
+              })
+              .catch(() => undefined);
+          }
+
+          await emitAiPipelineMetrics({
+            pipeline: "ack_router",
+            attempts: ackRoute.attempts,
+            latencyMs: ackRoute.latencyMs,
+            manualReview: false,
+            threadId: ingest.threadId as Id<"threads">,
+            toolRunId,
+            detailSuffix: `route=${ackRoute.channel || "fallback_reaction_only"}`,
+          });
+
+          if (ackRoute.channel === "text" || ackRoute.channel === "reaction_plus_text") {
+            personalitySetting = (await convex.query(convexRefs.personalityGetThreadSetting, {
+              threadId: ingest.threadId,
+            })) as PersonalityThreadSetting;
+          }
+
+          if (ackRoute.channel === "text") {
+            outboundPolicy = {
+              mode: "text",
+            };
+          } else if (ackRoute.channel === "reaction_plus_text") {
+            outboundPolicy = {
+              mode: "reaction_plus_text",
+              emoji: chooseReactionEmoji(inboundForPolicy.text || ""),
+            };
+          } else {
+            outboundPolicy = {
+              mode: "reaction_only",
+              emoji: chooseReactionEmoji(inboundForPolicy.text || ""),
+            };
+          }
+
+          await convex
+            .mutation(convexRefs.systemRecordEvent, {
+              source: "ai",
+              eventType: "ai.ack_router.routed",
+              threadId: ingest.threadId,
+              toolRunId,
+              detail: compactLogText(
+                `channel=${outboundPolicy.mode} provider=${ackRoute.provider || "none"} model=${ackRoute.model || "none"} reason=${ackRoute.reason || "n/a"}`,
+                280,
+              ),
+            })
+            .catch(() => undefined);
+        } else {
+          outboundPolicy = {
+            mode: "reaction_only",
+            emoji: chooseReactionEmoji(inboundForPolicy.text || ""),
+          };
+        }
       } else {
         personalitySetting = (await convex.query(convexRefs.personalityGetThreadSetting, {
           threadId: ingest.threadId,
@@ -3872,7 +4426,6 @@ function resolveTextEmojiAllowlist() {
       }
 
       const shouldGenerateAiText = outboundPolicy.mode === "text" || outboundPolicy.mode === "reaction_plus_text" || outboundPolicy.mode === "meme";
-      const toolRunId = createToolRunId("reply", String(ingest.threadId), String(ingest.messageId));
       let threadContext: ThreadContextSnapshot = null;
       let historyLines: string[] = [];
       let styleHints: string[] = [];
@@ -4056,6 +4609,11 @@ function resolveTextEmojiAllowlist() {
                 }
               : undefined,
             runtime: runtimeAiConfigForReply,
+            modelToolContext: buildModelToolContext({
+              convex,
+              threadId: String(ingest.threadId),
+              contactJid: threadJid,
+            }),
           })
         : null;
 
@@ -4121,6 +4679,11 @@ function resolveTextEmojiAllowlist() {
                 }
               : undefined,
             runtime: runtimeAiConfigForReply,
+            modelToolContext: buildModelToolContext({
+              convex,
+              threadId: String(ingest.threadId),
+              contactJid: threadJid,
+            }),
           });
 
           if (!rewritten.guardrailBlocked) {
@@ -4173,8 +4736,17 @@ function resolveTextEmojiAllowlist() {
               toolRunId,
               detail,
             })
-            .catch(() => undefined);
+              .catch(() => undefined);
         }
+
+        await emitAiPipelineMetrics({
+          pipeline: "reply",
+          attempts: ai.attempts,
+          latencyMs: ai.latencyMs,
+          manualReview: ai.guardrailBlocked,
+          threadId: ingest.threadId as Id<"threads">,
+          toolRunId,
+        });
 
         if (ai.contextWindow) {
           await convex
@@ -4509,6 +5081,10 @@ function resolveTextEmojiAllowlist() {
           );
           continue;
         }
+        const selfImproveCommandHandled = await maybeHandleSelfImproveCommand(message);
+        if (selfImproveCommandHandled) {
+          continue;
+        }
         const runtimeCommandHandled = await maybeHandleRuntimeControlCommand(message);
         if (runtimeCommandHandled) {
           continue;
@@ -4678,6 +5254,9 @@ function resolveTextEmojiAllowlist() {
         maxReplyChars: runtimeSettings?.aiMaxReplyChars,
         historyLineLimit: runtimeSettings?.aiHistoryLineLimit,
         fallbackMode: runtimeSettings?.aiFallbackMode,
+        modelFirstEnabled: runtimeSettings?.aiModelFirstEnabled,
+        deterministicModes: resolveRuntimeDeterministicModes(runtimeSettings?.aiDeterministicModes),
+        ackRoutingEnabled: runtimeSettings?.aiAckRoutingEnabled,
         replyPolicyInstruction: runtimeSettings?.aiReplyPolicy || "",
         systemInstruction: runtimeSettings?.aiSystemInstruction || "",
         activePersonaPackId: runtimeSettings?.activePersonaPackId || "",
@@ -4691,6 +5270,11 @@ function resolveTextEmojiAllowlist() {
         typingMinMs: runtimeSettings?.humanTypingMinMs,
         typingMaxMs: runtimeSettings?.humanTypingMaxMs,
       },
+      modelToolContext: buildModelToolContext({
+        convex,
+        threadId: item.threadId,
+        contactJid: threadContext?.thread?.jid,
+      }),
     });
 
     for (let index = 0; index < ai.attempts.length; index += 1) {
@@ -4729,6 +5313,15 @@ function resolveTextEmojiAllowlist() {
         })
         .catch(() => undefined);
     }
+
+    await emitAiPipelineMetrics({
+      pipeline: "outreach",
+      attempts: ai.attempts,
+      latencyMs: ai.latencyMs,
+      manualReview: ai.guardrailBlocked,
+      threadId: item.threadId as Id<"threads">,
+      toolRunId,
+    });
 
     if (ai.contextWindow) {
       await convex
@@ -4946,6 +5539,9 @@ function resolveTextEmojiAllowlist() {
         maxReplyChars: Math.min(runtimeSettings?.aiMaxReplyChars ?? 220, 220),
         historyLineLimit: Math.min(runtimeSettings?.aiHistoryLineLimit ?? 8, 8),
         fallbackMode: runtimeSettings?.aiFallbackMode,
+        modelFirstEnabled: runtimeSettings?.aiModelFirstEnabled,
+        deterministicModes: resolveRuntimeDeterministicModes(runtimeSettings?.aiDeterministicModes),
+        ackRoutingEnabled: runtimeSettings?.aiAckRoutingEnabled,
         replyPolicyInstruction: runtimeSettings?.aiReplyPolicy || "",
         systemInstruction: runtimeSettings?.aiSystemInstruction || "",
         activePersonaPackId: runtimeSettings?.activePersonaPackId || "",
@@ -4955,6 +5551,10 @@ function resolveTextEmojiAllowlist() {
         funnyStatusKeywords: runtimeSettings?.funnyStatusKeywords,
         funnyStatusEmojis: runtimeSettings?.funnyStatusEmojis,
       },
+      modelToolContext: buildModelToolContext({
+        convex,
+        threadId: item.threadId,
+      }),
     });
 
     for (let index = 0; index < ai.attempts.length; index += 1) {
@@ -4993,6 +5593,15 @@ function resolveTextEmojiAllowlist() {
         })
         .catch(() => undefined);
     }
+
+    await emitAiPipelineMetrics({
+      pipeline: "status_builder",
+      attempts: ai.attempts,
+      latencyMs: ai.latencyMs,
+      manualReview: ai.guardrailBlocked,
+      threadId: item.threadId as Id<"threads">,
+      toolRunId,
+    });
 
     const fallbackText =
       requestedFormat === "meme"

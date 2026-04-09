@@ -25,6 +25,9 @@ type SettingsState = {
   funnyStatusKeywords: string[];
   funnyStatusEmojis: string[];
   aiFallbackMode: "all" | "azure_only";
+  aiModelFirstEnabled: boolean;
+  aiDeterministicModes: string[];
+  aiAckRoutingEnabled: boolean;
   aiTemperature: number;
   aiMaxOutputTokens: number;
   aiMaxReplyChars: number;
@@ -110,6 +113,21 @@ type PersonalityProfileVersion = {
   createdAt: number;
 };
 
+type PersonaPacksPayload = {
+  activePersonaPackId: string;
+  qualityGateMode: "auto_rewrite_once" | "manual_review" | "log_only";
+  qualityGateThreshold: number;
+  packs: Array<{
+    id: string;
+    name: string;
+    version: string;
+    description: string;
+    allowedProfileSlugs: string[];
+    cohorts?: string[];
+    scenarioCount?: number;
+  }>;
+};
+
 type ProfileEditorFormProps = {
   profile: PersonalityProfile;
   pending: boolean;
@@ -156,6 +174,9 @@ function toState(source: Partial<SettingsState> | undefined): SettingsState {
       source?.funnyStatusKeywords ?? ["lol", "lmao", "haha", "funny", "joke", "banter", "meme", "roast"],
     funnyStatusEmojis: source?.funnyStatusEmojis ?? ["😂", "🤣", "😹", "😆", "😅", "😄", "😁", "😜", "🤪", "🙃"],
     aiFallbackMode: source?.aiFallbackMode ?? "all",
+    aiModelFirstEnabled: source?.aiModelFirstEnabled ?? false,
+    aiDeterministicModes: source?.aiDeterministicModes ?? ["hard_stop", "anti_beggi_beggi", "anti_sales_pitch"],
+    aiAckRoutingEnabled: source?.aiAckRoutingEnabled ?? false,
     aiTemperature: source?.aiTemperature ?? 0.7,
     aiMaxOutputTokens: source?.aiMaxOutputTokens ?? 140,
     aiMaxReplyChars: source?.aiMaxReplyChars ?? 320,
@@ -236,6 +257,9 @@ function stateEquals(a: SettingsState, b: SettingsState) {
     a.funnyStatusKeywords.join("\n") === b.funnyStatusKeywords.join("\n") &&
     a.funnyStatusEmojis.join("\n") === b.funnyStatusEmojis.join("\n") &&
     a.aiFallbackMode === b.aiFallbackMode &&
+    a.aiModelFirstEnabled === b.aiModelFirstEnabled &&
+    a.aiDeterministicModes.join("\n") === b.aiDeterministicModes.join("\n") &&
+    a.aiAckRoutingEnabled === b.aiAckRoutingEnabled &&
     nearlyEqual(a.aiTemperature, b.aiTemperature) &&
     nearlyEqual(a.aiMaxOutputTokens, b.aiMaxOutputTokens) &&
     nearlyEqual(a.aiMaxReplyChars, b.aiMaxReplyChars) &&
@@ -420,11 +444,13 @@ export function LiveSettings() {
   const instagramSetup = useQuery(api.system.setupStatus, { provider: "instagram" }) as SetupState | null | undefined;
   const contacts = useQuery(api.threads.listContacts, { limit: 300 }) as KnownContact[] | undefined;
   const profilesQuery = useQuery(api.personality.listProfiles, {}) as PersonalityProfile[] | undefined;
+  const personaPacks = useQuery(api.personality.listPersonaPacks, {}) as PersonaPacksPayload | undefined;
   const mediaAssets = useQuery(api.media.listAssets, {}) as MediaAsset[] | undefined;
   const curatedMediaAssets = (mediaAssets || []).filter((asset) => asset.kind === "sticker" || asset.kind === "meme");
   const settingsLoading = settings === undefined || defaults === undefined;
   const contactsLoading = contacts === undefined;
   const profilesLoading = profilesQuery === undefined;
+  const personaPacksLoading = personaPacks === undefined;
   const { runAction, getRecord, notices, dismissNotice } = useActionStateRegistry();
   const key = "settings:save";
   const profileKey = "personality:profile";
@@ -434,6 +460,7 @@ export function LiveSettings() {
   const defaultState = useMemo(() => toState(defaults), [defaults]);
   const knownContacts = useMemo(() => contacts || [], [contacts]);
   const profiles = profilesQuery || [];
+  const availablePersonaPacks = personaPacks?.packs || [];
   const [draft, setDraft] = useState<SettingsState>(remoteState);
   const [editorSlug, setEditorSlug] = useState("");
   const [assetKind, setAssetKind] = useState<"sticker" | "meme">("sticker");
@@ -491,6 +518,9 @@ export function LiveSettings() {
           funnyStatusKeywords: draft.funnyStatusKeywords,
           funnyStatusEmojis: draft.funnyStatusEmojis,
           aiFallbackMode: draft.aiFallbackMode,
+          aiModelFirstEnabled: draft.aiModelFirstEnabled,
+          aiDeterministicModes: draft.aiDeterministicModes,
+          aiAckRoutingEnabled: draft.aiAckRoutingEnabled,
           aiTemperature: draft.aiTemperature,
           aiMaxOutputTokens: Math.round(draft.aiMaxOutputTokens),
           aiMaxReplyChars: Math.round(draft.aiMaxReplyChars),
@@ -839,6 +869,60 @@ export function LiveSettings() {
           </label>
 
           <label className="stack compact">
+            <span className="queue-meta">Model-first generation</span>
+            <select
+              value={draft.aiModelFirstEnabled ? "true" : "false"}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  aiModelFirstEnabled: event.target.value === "true",
+                }))
+              }
+              disabled={record.pending}
+              aria-disabled={record.pending}
+            >
+              <option value="false">Disabled (legacy steering bypass)</option>
+              <option value="true">Enabled (GPT-5.4 first)</option>
+            </select>
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Ack routing via model</span>
+            <select
+              value={draft.aiAckRoutingEnabled ? "true" : "false"}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  aiAckRoutingEnabled: event.target.value === "true",
+                }))
+              }
+              disabled={record.pending}
+              aria-disabled={record.pending}
+            >
+              <option value="false">Disabled (reaction-only heuristic)</option>
+              <option value="true">Enabled (reaction vs text by model)</option>
+            </select>
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Deterministic steering modes</span>
+            <textarea
+              name="aiDeterministicModes"
+              value={draft.aiDeterministicModes.join("\n")}
+              rows={3}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  aiDeterministicModes: parseSimpleList(event.target.value, true),
+                }))
+              }
+              disabled={record.pending}
+              aria-disabled={record.pending}
+            />
+            <span className="queue-meta">One mode per line (or comma separated).</span>
+          </label>
+
+          <label className="stack compact">
             <span className="queue-meta">Primary confidence</span>
             <input
               type="number"
@@ -895,14 +979,29 @@ export function LiveSettings() {
 
           <label className="stack compact">
             <span className="queue-meta">Active persona pack (optional)</span>
-            <input
+            <select
               name="activePersonaPackId"
               value={draft.activePersonaPackId}
-              placeholder="josh_witty_shortcuts.v1"
               onChange={(event) => setDraft((prev) => ({ ...prev, activePersonaPackId: event.target.value }))}
-              disabled={record.pending}
-              aria-disabled={record.pending}
-            />
+              disabled={record.pending || personaPacksLoading}
+              aria-disabled={record.pending || personaPacksLoading}
+            >
+              <option value="">None</option>
+              {draft.activePersonaPackId &&
+              !availablePersonaPacks.some((pack) => pack.id === draft.activePersonaPackId) ? (
+                <option value={draft.activePersonaPackId}>{draft.activePersonaPackId} (Unavailable)</option>
+              ) : null}
+              {availablePersonaPacks.map((pack) => (
+                <option key={pack.id} value={pack.id}>
+                  {pack.name} ({pack.version})
+                </option>
+              ))}
+            </select>
+            {draft.activePersonaPackId ? (
+              <span className="queue-meta">
+                {availablePersonaPacks.find((pack) => pack.id === draft.activePersonaPackId)?.description || "Persona pack selected."}
+              </span>
+            ) : null}
           </label>
 
           <label className="stack compact">

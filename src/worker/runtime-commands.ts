@@ -62,6 +62,23 @@ function detectTarget(tokens: string[]): RuntimeCommandTarget | null {
   return null;
 }
 
+function detectActionAtStart(tokens: string[]): RuntimeCommandAction | null {
+  for (const [action, words] of Object.entries(ACTION_SYNONYMS) as Array<[RuntimeCommandAction, string[]]>) {
+    if (words.includes(tokens[0] || "")) {
+      return action;
+    }
+  }
+  return null;
+}
+
+function isShortDirectCommand(tokens: string[]) {
+  if (tokens.length === 0 || tokens.length > 4) {
+    return false;
+  }
+  const fillerWords = new Set(["now", "pls", "please", "abeg"]);
+  return tokens.slice(1).every((token) => fillerWords.has(token));
+}
+
 function hasCommandIntent(tokens: string[], action: RuntimeCommandAction, target: RuntimeCommandTarget) {
   const first = tokens[0] || "";
   const startsWithAction = ACTION_SYNONYMS[action].includes(first);
@@ -85,9 +102,22 @@ export function parseRuntimeCommand(text: string): RuntimeCommand | null {
   }
 
   const action = detectAction(tokens);
-  const target = detectTarget(tokens);
-  if (!action || !target) {
+  if (!action) {
     return null;
+  }
+
+  let target = detectTarget(tokens);
+  if (!target) {
+    const first = tokens[0] || "";
+    const second = tokens[1] || "";
+    const actionAtStart = detectActionAtStart(tokens);
+    const prefixedAction = PREFIX_WORDS.has(first) ? detectActionAtStart([second]) : null;
+
+    if ((actionAtStart && isShortDirectCommand(tokens)) || (prefixedAction && tokens.length <= 4)) {
+      target = "worker";
+    } else {
+      return null;
+    }
   }
 
   if (!hasCommandIntent(tokens, action, target)) {

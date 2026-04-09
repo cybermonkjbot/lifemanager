@@ -13,6 +13,21 @@ test("parseRuntimeCommand parses direct worker controls", () => {
     target: "worker",
     raw: "restart worker now",
   });
+  assert.deepEqual(parseRuntimeCommand("PAUSE"), {
+    action: "pause",
+    target: "worker",
+    raw: "PAUSE",
+  });
+  assert.deepEqual(parseRuntimeCommand("restart please"), {
+    action: "restart",
+    target: "worker",
+    raw: "restart please",
+  });
+  assert.deepEqual(parseRuntimeCommand("/slm status"), {
+    action: "status",
+    target: "worker",
+    raw: "/slm status",
+  });
 });
 
 test("parseRuntimeCommand parses app controls with prefix", () => {
@@ -38,7 +53,8 @@ test("parseRuntimeCommand parses both target from explicit pair", () => {
 
 test("parseRuntimeCommand rejects ambiguous or non-command notes", () => {
   assert.equal(parseRuntimeCommand("I need to restart app tomorrow"), null);
-  assert.equal(parseRuntimeCommand("resume"), null);
   assert.equal(parseRuntimeCommand("worker app"), null);
   assert.equal(parseRuntimeCommand("pause and resume worker"), null);
+  assert.equal(parseRuntimeCommand("pause this tomorrow morning"), null);
+  assert.equal(parseRuntimeCommand("/slm maybe restart later"), null);
 });

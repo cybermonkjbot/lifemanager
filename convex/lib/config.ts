@@ -2,6 +2,24 @@ import type { MutationCtx, QueryCtx } from "./types";
 import { DEFAULT_AUTONOMY_PAUSED, DEFAULT_IGNORE_GROUPS } from "./constants";
 import { type QualityGateMode } from "./personaPacks";
 
+export type AiDeterministicMode =
+  | "hard_stop"
+  | "anti_beggi_beggi"
+  | "anti_sales_pitch"
+  | "pause"
+  | "loop"
+  | "wrap_up";
+
+const DEFAULT_AI_DETERMINISTIC_MODES: AiDeterministicMode[] = ["hard_stop", "anti_beggi_beggi", "anti_sales_pitch"];
+const ALLOWED_AI_DETERMINISTIC_MODE_SET = new Set<AiDeterministicMode>([
+  "hard_stop",
+  "anti_beggi_beggi",
+  "anti_sales_pitch",
+  "pause",
+  "loop",
+  "wrap_up",
+]);
+
 export type AppConfig = {
   autonomyPaused: boolean;
   ignoreGroupsByDefault: boolean;
@@ -20,6 +38,9 @@ export type AppConfig = {
   funnyStatusKeywords: string[];
   funnyStatusEmojis: string[];
   aiFallbackMode: "all" | "azure_only";
+  aiModelFirstEnabled: boolean;
+  aiDeterministicModes: AiDeterministicMode[];
+  aiAckRoutingEnabled: boolean;
   aiTemperature: number;
   aiMaxOutputTokens: number;
   aiMaxReplyChars: number;
@@ -97,6 +118,9 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
   funnyStatusKeywords: ["lol", "lmao", "haha", "funny", "joke", "banter", "meme", "roast"],
   funnyStatusEmojis: ["😂", "🤣", "😹", "😆", "😅", "😄", "😁", "😜", "🤪", "🙃"],
   aiFallbackMode: "all",
+  aiModelFirstEnabled: false,
+  aiDeterministicModes: DEFAULT_AI_DETERMINISTIC_MODES,
+  aiAckRoutingEnabled: false,
   aiTemperature: 0.7,
   aiMaxOutputTokens: 140,
   aiMaxReplyChars: 320,
@@ -207,6 +231,17 @@ function parseQualityGateMode(value: string | undefined, fallback: QualityGateMo
   return fallback;
 }
 
+function parseAiDeterministicModes(value: string | undefined, fallback: AiDeterministicMode[]) {
+  const parsed = parseList(value)
+    .map((item) => item.trim().toLowerCase())
+    .filter((item): item is AiDeterministicMode => ALLOWED_AI_DETERMINISTIC_MODE_SET.has(item as AiDeterministicMode));
+  const deduped = [...new Set(parsed)];
+  if (deduped.length === 0) {
+    return [...fallback];
+  }
+  return deduped;
+}
+
 export async function getConfig(ctx: QueryCtx | MutationCtx): Promise<AppConfig> {
   const rows = await ctx.db.query("appConfig").take(120);
   const map = new Map(rows.map((row) => [row.key, row.value]));
@@ -242,6 +277,9 @@ export async function getConfig(ctx: QueryCtx | MutationCtx): Promise<AppConfig>
       ? parseList(map.get("funnyStatusEmojis"))
       : DEFAULT_APP_CONFIG.funnyStatusEmojis,
     aiFallbackMode: parseFallbackMode(map.get("aiFallbackMode"), DEFAULT_APP_CONFIG.aiFallbackMode),
+    aiModelFirstEnabled: parseBoolean(map.get("aiModelFirstEnabled"), DEFAULT_APP_CONFIG.aiModelFirstEnabled),
+    aiDeterministicModes: parseAiDeterministicModes(map.get("aiDeterministicModes"), DEFAULT_APP_CONFIG.aiDeterministicModes),
+    aiAckRoutingEnabled: parseBoolean(map.get("aiAckRoutingEnabled"), DEFAULT_APP_CONFIG.aiAckRoutingEnabled),
     aiTemperature: clamp(parseNumber(map.get("aiTemperature"), DEFAULT_APP_CONFIG.aiTemperature), 0, 1.3),
     aiMaxOutputTokens: Math.round(clamp(parseNumber(map.get("aiMaxOutputTokens"), DEFAULT_APP_CONFIG.aiMaxOutputTokens), 40, 1000)),
     aiMaxReplyChars: Math.round(clamp(parseNumber(map.get("aiMaxReplyChars"), DEFAULT_APP_CONFIG.aiMaxReplyChars), 60, 1200)),

@@ -1,6 +1,6 @@
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
-import { DEFAULT_APP_CONFIG, getConfig, setConfigValue } from "./lib/config";
+import { type AiDeterministicMode, DEFAULT_APP_CONFIG, getConfig, setConfigValue } from "./lib/config";
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(value, max));
@@ -8,6 +8,19 @@ function clamp(value: number, min: number, max: number) {
 
 function clampInt(value: number, min: number, max: number) {
   return Math.round(clamp(value, min, max));
+}
+
+const ALLOWED_AI_DETERMINISTIC_MODE_SET = new Set<AiDeterministicMode>([
+  "hard_stop",
+  "anti_beggi_beggi",
+  "anti_sales_pitch",
+  "pause",
+  "loop",
+  "wrap_up",
+]);
+
+function isAiDeterministicMode(value: string): value is AiDeterministicMode {
+  return ALLOWED_AI_DETERMINISTIC_MODE_SET.has(value as AiDeterministicMode);
 }
 
 export const get = query({
@@ -37,6 +50,9 @@ export const save = mutation({
     funnyStatusKeywords: v.optional(v.array(v.string())),
     funnyStatusEmojis: v.optional(v.array(v.string())),
     aiFallbackMode: v.union(v.literal("all"), v.literal("azure_only")),
+    aiModelFirstEnabled: v.optional(v.boolean()),
+    aiDeterministicModes: v.optional(v.array(v.string())),
+    aiAckRoutingEnabled: v.optional(v.boolean()),
     aiTemperature: v.number(),
     aiMaxOutputTokens: v.number(),
     aiMaxReplyChars: v.number(),
@@ -105,6 +121,9 @@ export const save = mutation({
       40,
     );
     const funnyStatusEmojis = [...new Set((args.funnyStatusEmojis || []).map((item) => item.trim()).filter(Boolean))].slice(0, 40);
+    const aiDeterministicModes = [...new Set((args.aiDeterministicModes || []).map((item) => item.trim().toLowerCase()).filter(Boolean))]
+      .filter((item): item is AiDeterministicMode => isAiDeterministicMode(item))
+      .slice(0, 8);
     const normalized = {
       ignoreGroupsByDefault: args.ignoreGroupsByDefault,
       reactionsEnabled: args.reactionsEnabled,
@@ -122,6 +141,9 @@ export const save = mutation({
       funnyStatusKeywords: funnyStatusKeywords.length ? funnyStatusKeywords : DEFAULT_APP_CONFIG.funnyStatusKeywords,
       funnyStatusEmojis: funnyStatusEmojis.length ? funnyStatusEmojis : DEFAULT_APP_CONFIG.funnyStatusEmojis,
       aiFallbackMode: args.aiFallbackMode,
+      aiModelFirstEnabled: args.aiModelFirstEnabled ?? DEFAULT_APP_CONFIG.aiModelFirstEnabled,
+      aiDeterministicModes: aiDeterministicModes.length ? aiDeterministicModes : DEFAULT_APP_CONFIG.aiDeterministicModes,
+      aiAckRoutingEnabled: args.aiAckRoutingEnabled ?? DEFAULT_APP_CONFIG.aiAckRoutingEnabled,
       aiTemperature: clamp(args.aiTemperature, 0, 1.3),
       aiMaxOutputTokens: clampInt(args.aiMaxOutputTokens, 40, 1000),
       aiMaxReplyChars: clampInt(args.aiMaxReplyChars, 60, 1200),
@@ -301,6 +323,9 @@ export const save = mutation({
     await setConfigValue(ctx, "funnyStatusKeywords", normalized.funnyStatusKeywords.join("\n"));
     await setConfigValue(ctx, "funnyStatusEmojis", normalized.funnyStatusEmojis.join("\n"));
     await setConfigValue(ctx, "aiFallbackMode", normalized.aiFallbackMode);
+    await setConfigValue(ctx, "aiModelFirstEnabled", normalized.aiModelFirstEnabled ? "true" : "false");
+    await setConfigValue(ctx, "aiDeterministicModes", normalized.aiDeterministicModes.join("\n"));
+    await setConfigValue(ctx, "aiAckRoutingEnabled", normalized.aiAckRoutingEnabled ? "true" : "false");
     await setConfigValue(ctx, "aiTemperature", String(normalized.aiTemperature));
     await setConfigValue(ctx, "aiMaxOutputTokens", String(normalized.aiMaxOutputTokens));
     await setConfigValue(ctx, "aiMaxReplyChars", String(normalized.aiMaxReplyChars));
