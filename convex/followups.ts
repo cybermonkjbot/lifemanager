@@ -13,6 +13,9 @@ const followupStatusOrAll = v.union(
   v.literal("cancelled"),
 );
 
+const FOLLOWUP_PROMOTION_MIN_CONFIDENCE = 0.78;
+const FOLLOWUP_PROMOTION_STALE_WINDOW_MS = 21 * 24 * 60 * 60 * 1000;
+
 const followupSort = v.union(v.literal("due_asc"), v.literal("due_desc"), v.literal("updated_desc"));
 const followupTimelineFilter = v.union(
   v.literal("all"),
@@ -49,6 +52,78 @@ function statusMatchesTimelineFilter(
     return status === "failed";
   }
   return status === "cancelled";
+}
+
+type PromotionEligibility = {
+  allow: boolean;
+  reasonCode?: string;
+  detail?: string;
+};
+
+export function evaluateFollowupPromotionEligibility(args: {
+  followUp: Pick<Doc<"followUps">, "kind" | "direction" | "confidence" | "dueAt" | "reason">;
+  thread: Pick<Doc<"threads">, "isArchived" | "isIgnored" | "threadKind"> | null;
+  now: number;
+}): PromotionEligibility {
+  if (!args.thread) {
+    return {
+      allow: false,
+      reasonCode: "missing_thread",
+      detail: "Thread not found for follow-up.",
+    };
+  }
+
+  if (args.thread.isArchived) {
+    return {
+      allow: false,
+      reasonCode: "archived_thread",
+      detail: "Thread is archived.",
+    };
+  }
+
+  if (args.thread.isIgnored) {
+    return {
+      allow: false,
+      reasonCode: "ignored_thread",
+      detail: "Thread is ignored.",
+    };
+  }
+
+  if (args.thread.threadKind === "group" || args.thread.threadKind === "broadcast_or_system") {
+    return {
+      allow: false,
+      reasonCode: "non_direct_thread",
+      detail: `Thread kind is ${args.thread.threadKind}.`,
+    };
+  }
+
+  if (args.followUp.kind === "request" && args.followUp.direction === "inbound") {
+    return {
+      allow: false,
+      reasonCode: "inbound_request_kind",
+      detail: "Inbound request follow-ups are filtered from auto-promotion.",
+    };
+  }
+
+  const confidence = Number(args.followUp.confidence ?? 0);
+  if (Number.isFinite(confidence) && confidence > 0 && confidence < FOLLOWUP_PROMOTION_MIN_CONFIDENCE) {
+    return {
+      allow: false,
+      reasonCode: "low_confidence",
+      detail: `Confidence ${confidence.toFixed(2)} is below ${FOLLOWUP_PROMOTION_MIN_CONFIDENCE.toFixed(2)}.`,
+    };
+  }
+
+  const overdueAgeMs = Math.max(0, args.now - args.followUp.dueAt);
+  if (overdueAgeMs > FOLLOWUP_PROMOTION_STALE_WINDOW_MS) {
+    return {
+      allow: false,
+      reasonCode: "stale_due",
+      detail: `Follow-up is stale by ${Math.round(overdueAgeMs / (24 * 60 * 60 * 1000))} days.`,
+    };
+  }
+
+  return { allow: true };
 }
 
 async function enrichFollowups(
@@ -295,8 +370,31 @@ export const promoteDueConfirmed = internalMutation({
       .order("asc")
       .take(limit);
 
+    let promoted = 0;
+    let filtered = 0;
+
     for (const followUp of dueConfirmed) {
       const thread = await ctx.db.get(followUp.threadId);
+      const eligibility = evaluateFollowupPromotionEligibility({
+        followUp,
+        thread,
+        now,
+      });
+      if (!eligibility.allow) {
+        filtered += 1;
+        await ctx.db.patch(followUp._id, {
+          status: "cancelled",
+          updatedAt: now,
+        });
+        await ctx.db.insert("systemEvents", {
+          source: "convex",
+          eventType: "followup.promoted.filtered",
+          threadId: followUp.threadId,
+          detail: `${eligibility.reasonCode || "filtered"}: ${(eligibility.detail || followUp.reason).slice(0, 200)}`,
+          createdAt: now,
+        });
+        continue;
+      }
       const messageProvider = thread?.provider || "whatsapp";
       const draftId = await ctx.db.insert("replyDrafts", {
         messageProvider,
@@ -341,10 +439,13 @@ export const promoteDueConfirmed = internalMutation({
         detail: followUp.reason.slice(0, 240),
         createdAt: now,
       });
+      promoted += 1;
     }
 
     return {
-      promoted: dueConfirmed.length,
+      promoted,
+      filtered,
+      processed: dueConfirmed.length,
     };
   },
 });

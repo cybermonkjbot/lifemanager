@@ -209,6 +209,110 @@ export const getEligibility = query({
   },
 });
 
+export const getEligibilityByJid = query({
+  args: {
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
+    threadJid: v.string(),
+    isGroup: v.optional(v.boolean()),
+    threadKind: v.optional(v.union(v.literal("direct"), v.literal("group"), v.literal("broadcast_or_system"))),
+  },
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    const provider = args.provider || "whatsapp";
+    const config = await getConfig(ctx);
+    const directJidCandidates = (() => {
+      const raw = args.threadJid.trim().toLowerCase();
+      const [userAndDevice = "", domain = ""] = raw.split("@");
+      const [bareUser = ""] = userAndDevice.split(":");
+      if (!bareUser) {
+        return [args.threadJid];
+      }
+      if (domain === "s.whatsapp.net") {
+        return [args.threadJid, `${bareUser}@s.whatsapp.net`];
+      }
+      if (domain === "lid") {
+        return [args.threadJid, `${bareUser}@lid`, `${bareUser}@s.whatsapp.net`];
+      }
+      return [args.threadJid, `${bareUser}@s.whatsapp.net`];
+    })();
+
+    let thread = await ctx.db
+      .query("threads")
+      .withIndex("by_provider_and_jid", (q) => q.eq("provider", provider).eq("jid", args.threadJid))
+      .first();
+    if (!thread) {
+      thread = await ctx.db
+        .query("threads")
+        .withIndex("by_jid", (q) => q.eq("jid", args.threadJid))
+        .first();
+    }
+
+    const threadKind =
+      thread?.threadKind ||
+      args.threadKind ||
+      classifyThreadKind({ jid: args.threadJid, isGroupHint: args.isGroup, provider });
+
+    if (!thread && threadKind === "direct") {
+      for (const candidateJid of directJidCandidates) {
+        if (candidateJid === args.threadJid) {
+          continue;
+        }
+        thread = await ctx.db
+          .query("threads")
+          .withIndex("by_provider_and_jid", (q) => q.eq("provider", provider).eq("jid", candidateJid))
+          .first();
+        if (thread) {
+          break;
+        }
+      }
+    }
+
+    let explicitIgnore = await ctx.db
+      .query("ignoreRules")
+      .withIndex("by_target", (q) =>
+        q.eq("targetType", threadKind === "group" ? "group" : "contact").eq("targetValue", args.threadJid),
+      )
+      .first();
+
+    if (!explicitIgnore && threadKind === "direct") {
+      for (const candidateJid of directJidCandidates) {
+        if (candidateJid === args.threadJid) {
+          continue;
+        }
+        explicitIgnore = await ctx.db
+          .query("ignoreRules")
+          .withIndex("by_target", (q) =>
+            q.eq("targetType", "contact").eq("targetValue", candidateJid),
+          )
+          .first();
+        if (explicitIgnore) {
+          break;
+        }
+      }
+    }
+
+    const eligibility = resolveThreadEligibility({
+      thread: {
+        jid: args.threadJid,
+        isIgnored: thread?.isIgnored || false,
+        isArchived: thread?.isArchived || false,
+        threadKind,
+        ghostedUntil: thread?.ghostedUntil,
+      },
+      ignoreGroupsByDefault: config.ignoreGroupsByDefault,
+      explicitIgnoreEnabled: Boolean(explicitIgnore?.enabled),
+      nowMs: now,
+    });
+
+    return {
+      ...eligibility,
+      threadKind,
+      isArchived: thread?.isArchived || false,
+      detail: eligibility.allowed ? "allowed" : eligibilityReasonLabel(eligibility.reason),
+    };
+  },
+});
+
 export const upsertMetadata = mutation({
   args: {
     provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),

@@ -271,6 +271,10 @@ const TEXT_EMOJI_MAX_PER_WINDOW = 2;
 const TEXT_EMOJI_NON_ALLOWLIST_WARMUP_MAX_PER_WINDOW = 2;
 const TEXT_EMOJI_WINDOW_MS = 6 * 60 * 60 * 1000;
 const STICKER_COMPANION_COOLDOWN_MS = 45 * 60 * 1000;
+const CALL_FALLBACK_COOLDOWN_MS = 20 * 60 * 1000;
+const CALL_AUTO_DECLINE_FALLBACK_TEXT =
+  process.env.SLM_CALL_FALLBACK_TEXT?.trim() ||
+  "I can't take WhatsApp calls here right now. Please send a message and I'll reply here.";
 const STATUS_RETENTION_MS = 40 * 60 * 1000;
 const STATUS_CLEANUP_INTERVAL_MS = 40 * 60 * 1000;
 const STATUS_CLEANUP_BATCH_LIMIT = 160;
@@ -2298,6 +2302,7 @@ function resolveTextEmojiAllowlist() {
   const automatedOutboundThreadSends = new Map<string, number>();
   const recentEmojiOutboundByThread = new Map<string, number>();
   const recentStickerCompanionByThread = new Map<string, number>();
+  const recentCallFallbackByThread = new Map<string, number>();
   const mediaAssetIdByKey = new Map<string, Id<"mediaAssets">>();
   const inboundImageVisionLastSentAtByThread = new Map<string, number>();
   let inboundConcurrency = Math.round(clamp(Number(process.env.SLM_INBOUND_CONCURRENCY || 4), 1, 16));
@@ -2348,6 +2353,33 @@ function resolveTextEmojiAllowlist() {
     }
     pruneRecentStickerCompanionByThread();
     return recentStickerCompanionByThread.get(threadJid);
+  };
+  const pruneRecentCallFallbackByThread = () => {
+    const cutoff = Date.now() - CALL_FALLBACK_COOLDOWN_MS;
+    for (const [threadJid, sentAt] of recentCallFallbackByThread.entries()) {
+      if (sentAt < cutoff) {
+        recentCallFallbackByThread.delete(threadJid);
+      }
+    }
+  };
+  const rememberCallFallbackAt = (threadJid: string, sentAtMs: number) => {
+    if (!threadJid || !Number.isFinite(sentAtMs)) {
+      return;
+    }
+    pruneRecentCallFallbackByThread();
+    const nextAt = Number(sentAtMs);
+    const existing = recentCallFallbackByThread.get(threadJid);
+    if (existing === undefined || nextAt > existing) {
+      recentCallFallbackByThread.set(threadJid, nextAt);
+    }
+  };
+  const hasRecentCallFallback = (threadJid: string) => {
+    if (!threadJid) {
+      return false;
+    }
+    pruneRecentCallFallbackByThread();
+    const sentAt = recentCallFallbackByThread.get(threadJid);
+    return typeof sentAt === "number" && sentAt > 0;
   };
 
   const mediaCacheKey = (kind: CapturableMediaKind, contentHash: string) => `${kind}:${contentHash}`;
@@ -3129,6 +3161,119 @@ function resolveTextEmojiAllowlist() {
         .mutation(convexRefs.systemRecordEvent, {
           source: "worker",
           eventType: "inbound.history.ingest_error",
+          detail: compactLogText(err, 280),
+        })
+        .catch(() => undefined);
+    }
+  };
+
+  const processInboundCallEvent = async (callEvent: {
+    id?: string;
+    from?: string;
+    chatId?: string;
+    groupJid?: string;
+    isGroup?: boolean;
+    status?: string;
+  }) => {
+    try {
+      const callStatus = callEvent.status || "";
+      if (callStatus !== "offer") {
+        return;
+      }
+
+      const callId = (callEvent.id || "").trim();
+      const callFrom = (callEvent.from || "").trim();
+      const threadJid = (callEvent.chatId || callEvent.groupJid || callFrom || "").trim();
+      if (!callId || !callFrom || !threadJid) {
+        return;
+      }
+
+      const threadKind = classifyThreadKindFromJid(threadJid);
+      const isGroupThread = threadKind === "group";
+      const fallbackKey = isGroupThread ? threadJid : normalizeAccountJid(threadJid) || threadJid;
+
+      const eligibility = (await convex
+        .query(convexRefs.threadsGetEligibilityByJid, {
+          provider: "whatsapp",
+          threadJid,
+          isGroup: isGroupThread,
+          threadKind,
+        })
+        .catch(() => null)) as
+        | {
+            allowed: boolean;
+            reason?: "group_ignored" | "archived" | "broadcast_or_system" | "explicit_ignore" | "temporary_ghost";
+            detail?: string;
+          }
+        | null;
+
+      if (!eligibility) {
+        await convex
+          .mutation(convexRefs.systemRecordEvent, {
+            source: "worker",
+            eventType: "inbound.call.rejected_missing_eligibility",
+            detail: compactLogText(`jid=${threadJid}`, 200),
+          })
+          .catch(() => undefined);
+        return;
+      }
+
+      if (!eligibility.allowed && eligibility.reason === "explicit_ignore") {
+        await convex
+          .mutation(convexRefs.systemRecordEvent, {
+            source: "worker",
+            eventType: "inbound.call.ignored_no_reject",
+            detail: compactLogText(`jid=${threadJid} reason=explicit_ignore`, 220),
+          })
+          .catch(() => undefined);
+        return;
+      }
+
+      await sock.rejectCall(callId, callFrom);
+      logger.info({ callId, callFrom, threadJid, threadKind }, "Inbound call rejected");
+
+      if (!eligibility.allowed) {
+        await convex
+          .mutation(convexRefs.systemRecordEvent, {
+            source: "worker",
+            eventType: "inbound.call.rejected_ignored",
+            detail: compactLogText(
+              `jid=${threadJid} reason=${eligibility.reason || "blocked"} detail=${eligibility.detail || "none"}`,
+              280,
+            ),
+          })
+          .catch(() => undefined);
+        return;
+      }
+
+      if (threadKind !== "direct") {
+        return;
+      }
+
+      if (!CALL_AUTO_DECLINE_FALLBACK_TEXT || hasRecentCallFallback(fallbackKey)) {
+        return;
+      }
+
+      rememberAutomatedThreadSend(threadJid);
+      const sent = await sock.sendMessage(threadJid, {
+        text: CALL_AUTO_DECLINE_FALLBACK_TEXT,
+      });
+      rememberAutomatedOutboundId(sent?.key?.id || undefined);
+      rememberCallFallbackAt(fallbackKey, Date.now());
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: "inbound.call.rejected_with_fallback",
+          detail: compactLogText(`jid=${threadJid} status=offer`, 220),
+        })
+        .catch(() => undefined);
+    } catch (error) {
+      const err = error instanceof Error ? error.message : String(error);
+      logger.warn({ err, callId: callEvent.id, callFrom: callEvent.from }, "Inbound call handling error");
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: "inbound.call.error",
           detail: compactLogText(err, 280),
         })
         .catch(() => undefined);
@@ -4326,6 +4471,21 @@ function resolveTextEmojiAllowlist() {
         void enqueueByThreadLane(inboundThreadLanes, laneKey, () =>
           runInboundWithLimit(async () => {
             await processHistoricalMessage(message, ingestMode);
+          }),
+        );
+      }
+    });
+
+    socket.ev.on("call", async (events) => {
+      if (socket !== sock || !Array.isArray(events)) {
+        return;
+      }
+
+      for (const event of events) {
+        const laneKey = event.chatId || event.groupJid || event.from || `call:${event.id || Date.now()}`;
+        void enqueueByThreadLane(inboundThreadLanes, laneKey, () =>
+          runInboundWithLimit(async () => {
+            await processInboundCallEvent(event);
           }),
         );
       }

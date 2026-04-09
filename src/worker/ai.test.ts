@@ -1700,6 +1700,77 @@ test("generateReplyWithFallback injects personal-first anti-corporate instructio
   }
 });
 
+test("generateReplyWithFallback injects micro-reply cadence guidance", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  const requestBodies: string[] = [];
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      requestBodies.push(typeof init?.body === "string" ? init.body : "");
+      return new Response(JSON.stringify({ output_text: "Yes." }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "Can you send it now?",
+      historyLines: ["Them: Can you send it now?"],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "log_only",
+      },
+    });
+
+    assert.equal(result.provider, "azure");
+    assert.ok(requestBodies.some((body) => /Micro-reply cadence/i.test(body)));
+    assert.ok(requestBodies.some((body) => /1-3 word replies are allowed/i.test(body)));
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback accepts one-word binary answers in manual review mode", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async () => {
+      return new Response(JSON.stringify({ output_text: "Yes." }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "Can you send it now?",
+      historyLines: ["Them: Can you send it now?"],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "manual_review",
+      },
+    });
+
+    assert.equal(result.guardrailBlocked, false);
+    assert.equal(result.text, "Yes.");
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
 test("generateReplyWithFallback injects selected contact-memory facts and logs selection tool call", async () => {
   const snapshot = clearAiEnv();
   const originalFetch = globalThis.fetch;

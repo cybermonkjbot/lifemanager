@@ -62,3 +62,29 @@ test("detectFutureCommitment keeps outbound precision by requiring first-person 
 
   assert.equal(detection.outcome, "none");
 });
+
+test("detectFutureCommitment infers shared plan from time-specific scheduling language", () => {
+  const detection = detectFutureCommitment({
+    text: "Tomorrow evening still good?",
+    direction: "outbound",
+    now: Date.parse("2026-04-07T10:00:00.000Z"),
+  });
+
+  assert.equal(detection.outcome, "actionable");
+  if (detection.outcome !== "actionable") {
+    return;
+  }
+  assert.equal(detection.candidate.kind, "plan");
+  assert.equal(detection.candidate.direction, "outbound");
+  assert.ok(detection.candidate.confidence >= 0.72);
+});
+
+test("detectFutureCommitment ignores time-specific statements without conversational context", () => {
+  const detection = detectFutureCommitment({
+    text: "Tomorrow is packed for me.",
+    direction: "outbound",
+    now: Date.parse("2026-04-07T10:00:00.000Z"),
+  });
+
+  assert.equal(detection.outcome, "none");
+});

@@ -1226,6 +1226,11 @@ const DEFAULT_CONTEXT_LINE_CHAR_LIMIT = 220;
 const DEFAULT_ADAPTIVE_CONTEXT_MIN_TOKENS = 16_384;
 const DEFAULT_CONTEXT_UTILIZATION_TARGET = 0.62;
 const DEFAULT_CONTEXT_EXPANSION_LINE_STEP = 6;
+const QUALITY_FIRST_CODEX_TIMEOUT_MS = 180_000;
+const QUALITY_FIRST_DELAY_MIN_MS = 20_000;
+const QUALITY_FIRST_DELAY_MAX_MS = 90_000;
+const QUALITY_FIRST_TYPING_MIN_MS = 3_500;
+const QUALITY_FIRST_TYPING_MAX_MS = 14_000;
 
 type IndexedHistoryLine = {
   index: number;
@@ -1630,6 +1635,47 @@ function countWords(text: string) {
     .trim()
     .split(/\s+/)
     .filter(Boolean).length;
+}
+
+function scoreMicroReplyFit(replyText: string, inboundText: string) {
+  const reply = normalizeOutboundText(replyText || "");
+  const inbound = normalizeOutboundText(inboundText || "");
+  const replyWords = countWords(reply);
+  if (!reply || !inbound || replyWords === 0 || replyWords > 3) {
+    return 0;
+  }
+
+  const normalizedReply = reply.toLowerCase();
+  const normalizedInbound = inbound.toLowerCase();
+  const inboundHasQuestion = /\?/.test(normalizedInbound);
+  const binaryQuestionCue = /\b(can|could|would|will|should|do|did|is|are|am|was|were|have|has|had)\b/i.test(normalizedInbound);
+  const affirmativeReply = /^(yes|yep|yeah|yup|sure|definitely|absolutely|exactly|correct|confirmed|done)$/i.test(normalizedReply);
+  const negativeReply = /^(no|nope|nah|never|cannot|can't|cant|not now|later)$/i.test(normalizedReply);
+  if ((affirmativeReply || negativeReply) && (inboundHasQuestion || binaryQuestionCue)) {
+    return 1;
+  }
+
+  const thanksInbound = /\b(thanks|thank you|thx|ty|tnx)\b/i.test(normalizedInbound);
+  const thanksReply = /^(anytime|you'?re welcome|welcome|no worries|no wahala|sure thing|all good)$/i.test(normalizedReply);
+  if (thanksInbound && thanksReply) {
+    return 0.94;
+  }
+
+  const apologyInbound = /\b(sorry|apolog(?:y|ize|ise)|my bad)\b/i.test(normalizedInbound);
+  const apologyReply = /^(all good|no worries|no wahala|it'?s fine|its fine|you'?re fine|youre fine)$/i.test(normalizedReply);
+  if (apologyInbound && apologyReply) {
+    return 0.9;
+  }
+
+  const closeAckReply = /^(ok|okay|k|kk|cool|great|perfect|bet|safe|seen|sharp|we good|all good)$/i.test(normalizedReply);
+  if (ACK_ONLY_PATTERNS.some((pattern) => pattern.test(normalizedInbound)) && closeAckReply) {
+    return 0.84;
+  }
+
+  if (inbound.length <= 28) {
+    return 0.72;
+  }
+  return 0;
 }
 
 function parseHistoryLine(rawLine: string) {
@@ -2228,6 +2274,8 @@ function buildPrompt(args: {
       "Use an editor-style workflow: first plan quickly from context, then write the final message.",
       "Write like a real person: warm, calm, confident, and practical.",
       "Prefer one concise line. Only use a second short line when it clearly adds needed context.",
+      "Micro-reply cadence: when the inbound is simple (yes/no, quick acknowledgment, or clear close-out), 1-3 word replies are allowed and often best. Default to 2 words in those moments, with occasional 1-word or 3-word variation for natural flow.",
+      "Do not force micro-replies for complex asks; expand when clarity is needed.",
       "Sound conversational and specific, never stiff or corporate.",
       "Avoid customer-support phrasing (ticket, escalation, SLA, thanks for reaching out) and avoid email-style sign-offs.",
       "Directly react to something concrete in the latest inbound message (topic, emotion, or request).",
@@ -3346,10 +3394,12 @@ function evaluateReplyQuality(args: {
     }
   }
 
-  const contextScore =
+  const contextScoreBase =
     inboundKeywords.size === 0
       ? 0.78
       : Math.max(0, Math.min(shared / Math.max(Math.min(inboundKeywords.size, 3), 1), 1));
+  const microReplyFit = scoreMicroReplyFit(text, inbound);
+  const contextScore = Math.max(contextScoreBase, microReplyFit);
   const shortcutTokens = (args.pack?.shortcutDictionary || []).map((item) => item.token.toLowerCase());
   const shortcutHits = shortcutTokens.filter((token) => token && new RegExp(`\\b${token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(text))
     .length;
@@ -3360,7 +3410,7 @@ function evaluateReplyQuality(args: {
   const repeatedPunctHit = /([!?])\1{3,}/.test(text);
   const antiCringeScore = cringeHit ? 0.05 : repeatedPunctHit ? 0.72 : 1;
   const words = countWords(text);
-  const brevityScore = words < 2 ? 0.35 : words <= 24 ? 1 : words <= 36 ? 0.72 : 0.38;
+  const brevityScore = words === 0 ? 0.1 : words <= 3 ? 1 : words <= 24 ? 1 : words <= 36 ? 0.72 : 0.38;
 
   const defaultCriteria: Array<{ id: string; label: string; weight: number; description: string }> = [
     { id: "context_specificity", label: "Context Specificity", weight: 0.3, description: "Reply references inbound specifics." },
@@ -3593,7 +3643,7 @@ async function runHumorJudgeWithCodex(args: {
   const startedAt = Date.now();
   try {
     await execFileAsync(codexPath, ["exec", "--model", model, "--output-last-message", outFile, prompt], {
-      timeout: Math.round(Math.max(20_000, Math.min(args.runtime?.codexTimeoutMs ?? 120_000, 300_000))),
+      timeout: Math.round(Math.max(20_000, Math.min(args.runtime?.codexTimeoutMs ?? QUALITY_FIRST_CODEX_TIMEOUT_MS, 300_000))),
       maxBuffer: 1024 * 1024,
     });
     const rawText = await fs.readFile(outFile, "utf8");
@@ -4730,7 +4780,7 @@ async function runCodex(
   const start = Date.now();
   try {
     await execFileAsync(codexPath, ["exec", "--model", model, "--output-last-message", outFile, prompt], {
-      timeout: Math.round(Math.max(20_000, Math.min(runtime?.codexTimeoutMs ?? 120_000, 300_000))),
+      timeout: Math.round(Math.max(20_000, Math.min(runtime?.codexTimeoutMs ?? QUALITY_FIRST_CODEX_TIMEOUT_MS, 300_000))),
       maxBuffer: 1024 * 1024,
     });
 
@@ -5261,10 +5311,15 @@ export async function generateReplyWithFallback(args: {
 
 export function estimateDelayAndTyping(text: string, runtime?: RuntimeAiTuning) {
   const len = Math.max(text.length, 10);
-  const minDelay = Number(runtime?.delayMinMs ?? process.env.SLM_DELAY_MIN_MS ?? 12_000);
-  const maxDelay = Number(runtime?.delayMaxMs ?? process.env.SLM_DELAY_MAX_MS ?? 65_000);
-  const minTyping = Number(runtime?.typingMinMs ?? process.env.SLM_TYPING_MIN_MS ?? 2_500);
-  const maxTyping = Number(runtime?.typingMaxMs ?? process.env.SLM_TYPING_MAX_MS ?? 9_000);
+  const requestedMinDelay = Number(runtime?.delayMinMs ?? process.env.SLM_DELAY_MIN_MS ?? QUALITY_FIRST_DELAY_MIN_MS);
+  const requestedMaxDelay = Number(runtime?.delayMaxMs ?? process.env.SLM_DELAY_MAX_MS ?? QUALITY_FIRST_DELAY_MAX_MS);
+  const requestedMinTyping = Number(runtime?.typingMinMs ?? process.env.SLM_TYPING_MIN_MS ?? QUALITY_FIRST_TYPING_MIN_MS);
+  const requestedMaxTyping = Number(runtime?.typingMaxMs ?? process.env.SLM_TYPING_MAX_MS ?? QUALITY_FIRST_TYPING_MAX_MS);
+
+  const minDelay = Math.max(requestedMinDelay, QUALITY_FIRST_DELAY_MIN_MS);
+  const maxDelay = Math.max(Math.max(requestedMaxDelay, QUALITY_FIRST_DELAY_MAX_MS), minDelay);
+  const minTyping = Math.max(requestedMinTyping, QUALITY_FIRST_TYPING_MIN_MS);
+  const maxTyping = Math.max(Math.max(requestedMaxTyping, QUALITY_FIRST_TYPING_MAX_MS), minTyping);
 
   const delayMs = Math.round(minDelay + (maxDelay - minDelay) * Math.min(len / 320, 1));
   const typingMs = Math.round(minTyping + (maxTyping - minTyping) * Math.min(len / 220, 1));

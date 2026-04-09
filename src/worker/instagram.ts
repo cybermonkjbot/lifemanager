@@ -63,6 +63,10 @@ type InstagramThreadItem = {
 
 const IG_STORY_JID = "ig:story:broadcast";
 const MAX_SEEN_ITEM_IDS = 12_000;
+const QUALITY_FIRST_IG_DELAY_MIN_MS = 14_000;
+const QUALITY_FIRST_IG_DELAY_MAX_MS = 70_000;
+const QUALITY_FIRST_IG_TYPING_MIN_MS = 2_800;
+const QUALITY_FIRST_IG_TYPING_MAX_MS = 11_000;
 
 const logger = pino({
   name: "slm-instagram-worker",
@@ -502,10 +506,26 @@ async function run() {
     }
 
     const runtime = await readRuntimeSettings(convex);
-    const igDelayMin = Math.round(clamp(runtime.instagramDmDelayMinMs ?? 8_000, 500, 180_000));
-    const igDelayMax = Math.round(clamp(runtime.instagramDmDelayMaxMs ?? 45_000, igDelayMin, 240_000));
-    const igTypingMin = Math.round(clamp(runtime.instagramTypingMinMs ?? 1_500, 200, 60_000));
-    const igTypingMax = Math.round(clamp(runtime.instagramTypingMaxMs ?? 6_500, igTypingMin, 120_000));
+    const igDelayMin = Math.round(
+      clamp(Math.max(runtime.instagramDmDelayMinMs ?? 16_000, QUALITY_FIRST_IG_DELAY_MIN_MS), 500, 180_000),
+    );
+    const igDelayMax = Math.round(
+      clamp(
+        Math.max(runtime.instagramDmDelayMaxMs ?? 75_000, QUALITY_FIRST_IG_DELAY_MAX_MS),
+        igDelayMin,
+        240_000,
+      ),
+    );
+    const igTypingMin = Math.round(
+      clamp(Math.max(runtime.instagramTypingMinMs ?? 3_000, QUALITY_FIRST_IG_TYPING_MIN_MS), 200, 60_000),
+    );
+    const igTypingMax = Math.round(
+      clamp(
+        Math.max(runtime.instagramTypingMaxMs ?? 11_000, QUALITY_FIRST_IG_TYPING_MAX_MS),
+        igTypingMin,
+        120_000,
+      ),
+    );
     const typingMs = Math.round(clamp(item.typingMs || igTypingMin, igTypingMin, igTypingMax));
 
 	    if (item.isStatusPost) {

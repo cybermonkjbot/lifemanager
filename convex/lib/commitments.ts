@@ -35,6 +35,9 @@ const OUTBOUND_INTENT_REGEX = /\b(i(?:'|’)ll|i will|let me|i can|i(?:'|’)m g
 const INBOUND_REQUEST_REGEX = /\b(can you|could you|will you|would you|please|don(?:'|’)t forget|remember to|make sure you)\b/i;
 const PLAN_REGEX = /\b(let(?:'|’)s|lets)\b/i;
 const VAGUE_FUTURE_REGEX = /\b(soon|later|sometime|eventually|next time)\b/i;
+const TIME_SPECIFIC_CONVERSATION_REGEX =
+  /\b(still on|as discussed|as planned|check(?:ing)? in|catch(?:ing)? up|sync(?:ing)? up|see you|meet(?:ing)?|call|chat|talk)\b/i;
+const TIME_SPECIFIC_CONFIRMATION_REGEX = /\?\s*$|\b(works?|okay|ok|good|fine|still)\b/i;
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
@@ -207,8 +210,12 @@ function classifyKind(args: {
   hasOutboundIntent: boolean;
   hasInboundRequest: boolean;
   hasPlan: boolean;
+  hasTimeSpecificContext: boolean;
 }): CommitmentKind {
   if (args.hasPlan) {
+    return "plan";
+  }
+  if (args.hasTimeSpecificContext && !args.hasOutboundIntent && !args.hasInboundRequest) {
     return "plan";
   }
   if (args.direction === "outbound" || args.hasOutboundIntent) {
@@ -234,6 +241,17 @@ function makeReason(args: { kind: CommitmentKind; direction: CommitmentDirection
   return `They requested a follow-up ${args.dueLabel}.`;
 }
 
+function hasTimeSpecificConversationContext(text: string) {
+  const normalized = text.trim();
+  if (!normalized) {
+    return false;
+  }
+  if (TIME_SPECIFIC_CONVERSATION_REGEX.test(normalized)) {
+    return true;
+  }
+  return TIME_SPECIFIC_CONFIRMATION_REGEX.test(normalized);
+}
+
 export function detectFutureCommitment(args: {
   text: string;
   direction: CommitmentDirection;
@@ -250,9 +268,10 @@ export function detectFutureCommitment(args: {
   const hasInboundRequest = INBOUND_REQUEST_REGEX.test(text);
   const hasPlan = PLAN_REGEX.test(text);
   const due = parseDueAt(text, now);
+  const hasTimeSpecificContext = Boolean(due) && hasTimeSpecificConversationContext(text);
 
   const hasFutureSignal = Boolean(due) || VAGUE_FUTURE_REGEX.test(text);
-  if (!hasFutureSignal || !hasActionVerb) {
+  if (!hasFutureSignal || (!hasActionVerb && !hasTimeSpecificContext)) {
     return { outcome: "none" };
   }
 
@@ -270,11 +289,11 @@ export function detectFutureCommitment(args: {
     };
   }
 
-  if (args.direction === "outbound" && !hasOutboundIntent && !hasPlan) {
+  if (args.direction === "outbound" && !hasOutboundIntent && !hasPlan && !hasTimeSpecificContext) {
     return { outcome: "none" };
   }
 
-  if (args.direction === "inbound" && !hasInboundRequest && !hasPlan) {
+  if (args.direction === "inbound" && !hasInboundRequest && !hasPlan && !hasTimeSpecificContext) {
     return { outcome: "none" };
   }
 
@@ -287,6 +306,9 @@ export function detectFutureCommitment(args: {
   }
   if (hasPlan) {
     confidence += 0.1;
+  }
+  if (hasTimeSpecificContext) {
+    confidence += 0.12;
   }
   if (due) {
     confidence += 0.1;
@@ -305,6 +327,7 @@ export function detectFutureCommitment(args: {
     hasOutboundIntent,
     hasInboundRequest,
     hasPlan,
+    hasTimeSpecificContext,
   });
 
   return {
@@ -356,4 +379,3 @@ export async function hasRecentFollowupDuplicate(
     return existingBucket === candidateBucket;
   });
 }
-
