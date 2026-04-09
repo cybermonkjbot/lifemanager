@@ -2,6 +2,7 @@
 
 import { ActionNotices } from "@/components/action-notices";
 import { SharedMediaPreview } from "@/components/media-preview";
+import { ProviderFilter, type ProviderFilterValue } from "@/components/provider-filter";
 import { UIModal } from "@/components/ui-modal";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
 import type { MediaPreviewResource } from "@/lib/ui/media";
@@ -567,9 +568,11 @@ function GroundingForm({ initialMyName, initialTheirName, initialVibeNotes, auto
 function ConversationsContent({ initialThreadId }: { initialThreadId?: string }) {
   const [threadLimit, setThreadLimit] = useState(80);
   const [threadSearch, setThreadSearch] = useState("");
-  const threads = useQuery(api.threads.list, { limit: threadLimit }) as
+  const [providerFilter, setProviderFilter] = useState<ProviderFilterValue>("all");
+  const threads = useQuery(api.threads.list, { limit: threadLimit, provider: providerFilter }) as
     | Array<{
         _id: string;
+        provider?: "whatsapp" | "instagram";
         title?: string;
         jid: string;
         threadKind?: "direct" | "group" | "broadcast_or_system";
@@ -829,6 +832,11 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
     <section className="panel-grid split-view">
       <article className="panel-card">
         <h3>Threads</h3>
+        <ProviderFilter
+          value={providerFilter}
+          onChange={setProviderFilter}
+          label="Conversations provider filter"
+        />
         <div className="queue-actions">
           <label className="setup-input-group inline">
             <span className="queue-meta">Search</span>
@@ -851,6 +859,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
             >
               <p className="queue-title">{item.title || item.jid}</p>
               <p className="queue-meta">
+                {(item.provider || "whatsapp") === "instagram" ? "Instagram" : "WhatsApp"} ·{" "}
                 {item.threadKind === "broadcast_or_system" ? "Broadcast/System" : item.threadKind === "group" ? "Group" : "Direct"}
                 {item.isArchived ? " · Archived" : ""}
               </p>

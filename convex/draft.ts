@@ -139,8 +139,11 @@ export const saveGenerated = mutation({
   },
   handler: async (ctx, args) => {
     const now = Date.now();
+    const thread = await ctx.db.get(args.threadId);
+    const messageProvider = thread?.provider || "whatsapp";
     const draftId = await ctx.db.insert("replyDrafts", {
       ...args,
+      messageProvider,
       sendKind: args.sendKind || "text",
       status: "pending",
       createdAt: now,
@@ -171,11 +174,13 @@ export const saveOrReplacePending = mutation({
   handler: async (ctx, args) => {
     const now = Date.now();
     const config = await getConfig(ctx);
+    const thread = await ctx.db.get(args.threadId);
+    const messageProvider = thread?.provider || "whatsapp";
     const sendKind = args.sendKind || "text";
     const mergeWindowMs = Math.max(2_000, Math.min(config.inboundMergeWindowMs, 180_000));
-    const reactionTargetWhatsAppMessageId = args.reactionTargetMessageId
-      ? (await ctx.db.get(args.reactionTargetMessageId))?.whatsappMessageId
-      : undefined;
+    const reactionTargetMessage = args.reactionTargetMessageId ? await ctx.db.get(args.reactionTargetMessageId) : null;
+    const reactionTargetWhatsAppMessageId = reactionTargetMessage?.whatsappMessageId;
+    const reactionTargetProviderMessageId = reactionTargetMessage?.providerMessageId || reactionTargetMessage?.whatsappMessageId;
 
     const pendingOutbox = await ctx.db
       .query("outbox")
@@ -230,11 +235,13 @@ export const saveOrReplacePending = mutation({
         });
 
         await ctx.db.patch(primaryPending._id, {
+          messageProvider: primaryPending.messageProvider || messageProvider,
           draftId: draft._id,
           toolRunId: args.toolRunId,
           messageText: args.text,
           sendKind,
           reactionEmoji: args.reactionEmoji,
+          reactionTargetProviderMessageId,
           reactionTargetWhatsAppMessageId,
           mediaAssetId: args.mediaAssetId,
           mediaCaption: args.mediaCaption,
@@ -281,6 +288,7 @@ export const saveOrReplacePending = mutation({
 
     const draftId = await ctx.db.insert("replyDrafts", {
       ...args,
+      messageProvider,
       sendKind,
       status: "approved",
       createdAt: now,
@@ -288,12 +296,14 @@ export const saveOrReplacePending = mutation({
     });
 
     const outboxId = await ctx.db.insert("outbox", {
+      messageProvider,
       threadId: args.threadId,
       draftId,
       toolRunId: args.toolRunId,
       messageText: args.text,
       sendKind,
       reactionEmoji: args.reactionEmoji,
+      reactionTargetProviderMessageId,
       reactionTargetWhatsAppMessageId,
       mediaAssetId: args.mediaAssetId,
       mediaCaption: args.mediaCaption,
@@ -335,7 +345,10 @@ export const createGuardrailHold = mutation({
   },
   handler: async (ctx, args) => {
     const now = Date.now();
+    const thread = await ctx.db.get(args.threadId);
+    const messageProvider = thread?.provider || "whatsapp";
     const draftId = await ctx.db.insert("replyDrafts", {
+      messageProvider,
       threadId: args.threadId,
       sourceMessageId: args.sourceMessageId,
       text: "Manual review required before sending.",
@@ -374,15 +387,17 @@ export const approve = mutation({
     }
 
     const now = Date.now();
+    const thread = await ctx.db.get(draft.threadId);
+    const messageProvider = draft.messageProvider || thread?.provider || "whatsapp";
     const existingOutbox = await ctx.db
       .query("outbox")
       .withIndex("by_draft", (q) => q.eq("draftId", draft._id))
       .order("desc")
       .take(20);
     const sendKind = draft.sendKind || "text";
-    const reactionTargetWhatsAppMessageId = draft.reactionTargetMessageId
-      ? (await ctx.db.get(draft.reactionTargetMessageId))?.whatsappMessageId
-      : undefined;
+    const reactionTargetMessage = draft.reactionTargetMessageId ? await ctx.db.get(draft.reactionTargetMessageId) : null;
+    const reactionTargetWhatsAppMessageId = reactionTargetMessage?.whatsappMessageId;
+    const reactionTargetProviderMessageId = reactionTargetMessage?.providerMessageId || reactionTargetMessage?.whatsappMessageId;
 
     const sentOutbox = existingOutbox.find((item) => item.status === "sent");
     if (sentOutbox) {
@@ -416,11 +431,13 @@ export const approve = mutation({
       });
 
       await ctx.db.patch(pendingOutbox._id, {
+        messageProvider: pendingOutbox.messageProvider || messageProvider,
         toolRunId: draft.toolRunId,
         sendAt: now + draft.delayMs,
         messageText: draft.text,
         sendKind,
         reactionEmoji: draft.reactionEmoji,
+        reactionTargetProviderMessageId,
         reactionTargetWhatsAppMessageId,
         mediaAssetId: draft.mediaAssetId,
         mediaCaption: draft.mediaCaption,
@@ -443,12 +460,14 @@ export const approve = mutation({
     });
 
     const outboxId = await ctx.db.insert("outbox", {
+      messageProvider,
       threadId: draft.threadId,
       draftId: draft._id,
       toolRunId: draft.toolRunId,
       messageText: draft.text,
       sendKind,
       reactionEmoji: draft.reactionEmoji,
+      reactionTargetProviderMessageId,
       reactionTargetWhatsAppMessageId,
       mediaAssetId: draft.mediaAssetId,
       mediaCaption: draft.mediaCaption,
@@ -558,6 +577,8 @@ export const snooze = mutation({
     if (!draft) {
       return null;
     }
+    const thread = await ctx.db.get(draft.threadId);
+    const messageProvider = draft.messageProvider || thread?.provider || "whatsapp";
 
     const now = Date.now();
     await ctx.db.patch(draft._id, {
@@ -574,13 +595,16 @@ export const snooze = mutation({
 
     const activeOutbox = existingOutbox.find((item) => item.status === "pending" || item.status === "claimed");
     if (activeOutbox) {
+      const reactionTargetMessage = draft.reactionTargetMessageId ? await ctx.db.get(draft.reactionTargetMessageId) : null;
       await ctx.db.patch(activeOutbox._id, {
+        messageProvider: activeOutbox.messageProvider || messageProvider,
         toolRunId: draft.toolRunId,
         messageText: draft.text,
         sendKind: draft.sendKind || "text",
         reactionEmoji: draft.reactionEmoji,
+        reactionTargetProviderMessageId: reactionTargetMessage?.providerMessageId || reactionTargetMessage?.whatsappMessageId,
         reactionTargetWhatsAppMessageId: draft.reactionTargetMessageId
-          ? (await ctx.db.get(draft.reactionTargetMessageId))?.whatsappMessageId
+          ? reactionTargetMessage?.whatsappMessageId
           : undefined,
         mediaAssetId: draft.mediaAssetId,
         mediaCaption: draft.mediaCaption,
@@ -597,15 +621,18 @@ export const snooze = mutation({
       });
       return activeOutbox._id;
     }
+    const reactionTargetMessage = draft.reactionTargetMessageId ? await ctx.db.get(draft.reactionTargetMessageId) : null;
     const outboxId = await ctx.db.insert("outbox", {
+      messageProvider,
       threadId: draft.threadId,
       draftId: draft._id,
       toolRunId: draft.toolRunId,
       messageText: draft.text,
       sendKind: draft.sendKind || "text",
       reactionEmoji: draft.reactionEmoji,
+      reactionTargetProviderMessageId: reactionTargetMessage?.providerMessageId || reactionTargetMessage?.whatsappMessageId,
       reactionTargetWhatsAppMessageId: draft.reactionTargetMessageId
-        ? (await ctx.db.get(draft.reactionTargetMessageId))?.whatsappMessageId
+        ? reactionTargetMessage?.whatsappMessageId
         : undefined,
       mediaAssetId: draft.mediaAssetId,
       mediaCaption: draft.mediaCaption,

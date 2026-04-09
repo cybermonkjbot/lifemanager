@@ -1,6 +1,7 @@
 "use client";
 
 import { ActionNotices } from "@/components/action-notices";
+import { ProviderFilter, type ProviderFilterValue } from "@/components/provider-filter";
 import { formatDateTime, trim } from "@/lib/format";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
 import { api } from "../../convex/_generated/api";
@@ -152,6 +153,7 @@ function BacklogContent() {
   const { runAction, getRecord, notices, dismissNotice } = useActionStateRegistry();
 
   const [tab, setTab] = useState<BacklogTab>("all");
+  const [providerFilter, setProviderFilter] = useState<ProviderFilterValue>("all");
   const [sort, setSort] = useState<SortMode>("importance");
   const [relationshipFilter, setRelationshipFilter] = useState<"all" | RelationshipValue>("all");
   const [search, setSearch] = useState("");
@@ -164,6 +166,7 @@ function BacklogContent() {
   const queryArgs = useMemo(() => {
     return {
       limit,
+      provider: providerFilter,
       importance: "all",
       recommendation: "all",
       relationship: relationshipFilter,
@@ -172,7 +175,7 @@ function BacklogContent() {
       includeIgnored: true,
       search,
     } as const;
-  }, [limit, relationshipFilter, search, sort]);
+  }, [limit, providerFilter, relationshipFilter, search, sort]);
 
   const backlog = useQuery(api.backlog.list, queryArgs) as BacklogItem[] | undefined;
   const loading = backlog === undefined;
@@ -399,6 +402,11 @@ function BacklogContent() {
         </p>
       </div>
       <div className="backlog-toolbar">
+        <ProviderFilter
+          value={providerFilter}
+          onChange={setProviderFilter}
+          label="Backlog provider filter"
+        />
         <div className="backlog-tabs">
           <button type="button" className={`btn ${tab === "all" ? "btn-primary" : "btn-ghost"}`} onClick={() => setTab("all")}>
             Active ({counts.all - counts.snoozed})

@@ -2,6 +2,7 @@
 
 import { ActionNotices } from "@/components/action-notices";
 import { SharedMediaPreview } from "@/components/media-preview";
+import { ProviderFilter, type ProviderFilterValue } from "@/components/provider-filter";
 import { UIModal } from "@/components/ui-modal";
 import { formatDateTime, formatDateTimeWithRelative, trim } from "@/lib/format";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
@@ -15,6 +16,7 @@ import { useMemo, useState } from "react";
 
 type NeedsReplyItem = {
   _id: string;
+  messageProvider?: "whatsapp" | "instagram";
   provider: string;
   delayMs: number;
   typingMs: number;
@@ -79,9 +81,10 @@ function QueueContent() {
 
   const { runAction, getRecord, isPending, notices, dismissNotice } = useActionStateRegistry();
   const [tab, setTab] = useState<QueueTab>("needsReply");
+  const [providerFilter, setProviderFilter] = useState<ProviderFilterValue>("all");
   const [reviewState, setReviewState] = useState<QueueReviewState>(null);
 
-  const queue = useQuery(api.queue.list, {}) as QueueData | undefined;
+  const queue = useQuery(api.queue.list, { provider: providerFilter }) as QueueData | undefined;
   const queueLoading = queue === undefined;
   const needsReply = queue?.needsReply || [];
   const followupConfirmations = queue?.followupConfirmations || [];
@@ -303,7 +306,7 @@ function QueueContent() {
               <p className="queue-title">{item.thread?.title || item.thread?.jid || "Unknown contact"}</p>
               <p className="queue-body">{trim(item.sourceMessage?.text || item.text || "", 180)}</p>
               <p className="queue-meta">
-                Provider: {item.provider} · Delay: {Math.round(item.delayMs / 1000)}s · Typing: {Math.round(item.typingMs / 1000)}s
+                Channel: {item.messageProvider || "whatsapp"} · Model: {item.provider} · Delay: {Math.round(item.delayMs / 1000)}s · Typing: {Math.round(item.typingMs / 1000)}s
               </p>
             </div>
             <button type="button" className="btn btn-primary" onClick={() => setReviewState({ kind: "needsReply", item })}>
@@ -408,6 +411,11 @@ function QueueContent() {
       <ActionNotices notices={notices} onDismiss={dismissNotice} />
 
       <section className="panel-card">
+        <ProviderFilter
+          value={providerFilter}
+          onChange={setProviderFilter}
+          label="Queue provider filter"
+        />
         <div className="queue-focus-tabs" role="tablist" aria-label="Action queue categories">
           <button
             type="button"
@@ -507,7 +515,7 @@ function QueueContent() {
                   <p className="queue-meta">Media caption: {trim(reviewState.item.mediaCaption.trim(), 240)}</p>
                 ) : null}
                 <p className="queue-meta">
-                  Provider: {reviewState.item.provider} · Delay: {Math.round(reviewState.item.delayMs / 1000)}s · Typing: {Math.round(reviewState.item.typingMs / 1000)}s
+                  Channel: {reviewState.item.messageProvider || "whatsapp"} · Model: {reviewState.item.provider} · Delay: {Math.round(reviewState.item.delayMs / 1000)}s · Typing: {Math.round(reviewState.item.typingMs / 1000)}s
                 </p>
                 <div className="queue-actions">
                   <button

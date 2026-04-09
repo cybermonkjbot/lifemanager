@@ -21,6 +21,11 @@ import {
 const UNANSWERED_OUTBOUND_RECHECK_MS = 5 * 60 * 1000;
 const UNANSWERED_OUTBOUND_SCAN_LIMIT = 25;
 const refStyleLearnFromOutboundEmoji = makeFunctionReference<"mutation">("style:learnFromOutboundEmoji");
+type MessageProvider = "whatsapp" | "instagram";
+
+function normalizeMessageProvider(provider?: MessageProvider): MessageProvider {
+  return provider === "instagram" ? "instagram" : "whatsapp";
+}
 
 function isWithinQuietHours(hour: number, startHour: number, endHour: number) {
   if (startHour === endHour) {
@@ -80,21 +85,41 @@ function toStyleEmojiSendKind(messageType: string | undefined) {
   return undefined;
 }
 
+function resolveSendRateLimits(config: Awaited<ReturnType<typeof getConfig>>, messageProvider: MessageProvider) {
+  if (messageProvider === "instagram") {
+    return {
+      windowMinutes: Math.max(5, config.instagramSendRateWindowMinutes),
+      maxPerThread: Math.max(1, config.instagramSendMaxPerThreadInWindow),
+      maxGlobal: Math.max(1, config.instagramSendMaxGlobalInWindow),
+    };
+  }
+  return {
+    windowMinutes: Math.max(5, config.sendRateWindowMinutes),
+    maxPerThread: Math.max(1, config.sendMaxPerThreadInWindow),
+    maxGlobal: Math.max(1, config.sendMaxGlobalInWindow),
+  };
+}
+
 export const claimDue = mutation({
   args: {
     workerId: v.string(),
+    messageProvider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
     limit: v.optional(v.number()),
     leaseMs: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const now = Date.now();
+    const messageProvider = normalizeMessageProvider(args.messageProvider);
     const leaseMs = args.leaseMs ?? DEFAULT_LEASE_MS;
     const max = Math.min(args.limit ?? 5, 20);
     const config = await getConfig(ctx);
+    const sendRateLimits = resolveSendRateLimits(config, messageProvider);
 
     const expiredClaims = await ctx.db
       .query("outbox")
-      .withIndex("by_status_leaseExpiresAt", (q) => q.eq("status", "claimed").lte("leaseExpiresAt", now))
+      .withIndex("by_messageProvider_and_status_leaseExpiresAt", (q) =>
+        q.eq("messageProvider", messageProvider).eq("status", "claimed").lte("leaseExpiresAt", now),
+      )
       .take(max);
 
     for (const item of expiredClaims) {
@@ -109,7 +134,9 @@ export const claimDue = mutation({
 
     const due = await ctx.db
       .query("outbox")
-      .withIndex("by_status_sendAt", (q) => q.eq("status", "pending").lte("sendAt", now))
+      .withIndex("by_messageProvider_and_status_sendAt", (q) =>
+        q.eq("messageProvider", messageProvider).eq("status", "pending").lte("sendAt", now),
+      )
       .take(max);
 
     const claimed = [] as Array<{
@@ -121,6 +148,7 @@ export const claimDue = mutation({
       typingMs: number;
       jid: string;
       idempotencyKey: string;
+      messageProvider: "whatsapp" | "instagram";
       provider: "azure" | "codex" | "heuristic";
       sendKind: "text" | "reaction" | "sticker" | "meme";
       isStatusPost?: boolean;
@@ -130,10 +158,12 @@ export const claimDue = mutation({
       statusFormat?: "text" | "meme";
       statusReviewRequired?: boolean;
       reactionEmoji?: string;
+      reactionTargetProviderMessageId?: string;
       reactionTargetWhatsAppMessageId?: string;
       preReactionEmoji?: string;
       mediaAssetId?: string;
       mediaCaption?: string;
+      replyTargetProviderMessageId?: string;
       replyTargetWhatsAppMessageId?: string;
       replyTargetSenderJid?: string;
       replyTargetText?: string;
@@ -159,23 +189,51 @@ export const claimDue = mutation({
 
       let deferUntil = 0;
       const deferReasons: string[] = [];
+      if (messageProvider === "instagram" && item.isStatusPost) {
+        const cadenceMs = Math.max(60_000, Math.round(config.instagramStoryCadenceHours * 60 * 60 * 1000));
+        const dailyWindowMs = 24 * 60 * 60 * 1000;
+        const recentStatusMessages = await ctx.db
+          .query("messages")
+          .withIndex("by_thread_messageAt", (q) =>
+            q.eq("threadId", thread._id).gte("messageAt", now - dailyWindowMs),
+          )
+          .order("desc")
+          .take(Math.max(config.instagramStoryDailyMaxPosts + 12, 40));
+        const recentOutboundStories = recentStatusMessages.filter(
+          (message) => message.direction === "outbound" && message.isStatus === true,
+        );
+        const lastStoryAt = recentOutboundStories[0]?.messageAt || 0;
+        if (lastStoryAt > 0 && now - lastStoryAt < cadenceMs) {
+          deferUntil = Math.max(deferUntil, lastStoryAt + cadenceMs + 1_000);
+          deferReasons.push("instagram-story-cadence");
+        }
+        if (recentOutboundStories.length >= config.instagramStoryDailyMaxPosts) {
+          const oldestInWindow = Math.min(
+            ...recentOutboundStories
+              .slice(0, config.instagramStoryDailyMaxPosts)
+              .map((message) => message.messageAt),
+          );
+          deferUntil = Math.max(deferUntil, oldestInWindow + dailyWindowMs + 1_000);
+          deferReasons.push("instagram-story-daily-limit");
+        }
+      }
       const nowHour = new Date(now).getHours();
       if (config.quietHoursEnabled && isWithinQuietHours(nowHour, config.quietHoursStartHour, config.quietHoursEndHour)) {
         deferUntil = Math.max(deferUntil, nextAllowedAfterQuietHours(now, config.quietHoursStartHour, config.quietHoursEndHour));
         deferReasons.push("quiet-hours");
       }
 
-      const windowMs = Math.max(5, config.sendRateWindowMinutes) * 60 * 1000;
+      const windowMs = sendRateLimits.windowMinutes * 60 * 1000;
       const cutoff = now - windowMs;
 
       const recentThread = await ctx.db
         .query("messages")
         .withIndex("by_thread_messageAt", (q) => q.eq("threadId", thread._id).gte("messageAt", cutoff))
         .order("desc")
-        .take(Math.min(config.sendMaxPerThreadInWindow + 5, 120));
+        .take(Math.min(sendRateLimits.maxPerThread + 5, 120));
       const recentThreadOutbound = recentThread.filter((message) => message.direction === "outbound");
-      if (recentThreadOutbound.length >= config.sendMaxPerThreadInWindow) {
-        const oldestThreadWindow = Math.min(...recentThreadOutbound.slice(0, config.sendMaxPerThreadInWindow).map((message) => message.messageAt));
+      if (recentThreadOutbound.length >= sendRateLimits.maxPerThread) {
+        const oldestThreadWindow = Math.min(...recentThreadOutbound.slice(0, sendRateLimits.maxPerThread).map((message) => message.messageAt));
         deferUntil = Math.max(deferUntil, oldestThreadWindow + windowMs + 1_000);
         deferReasons.push("thread-rate-limit");
       }
@@ -184,10 +242,15 @@ export const claimDue = mutation({
         .query("messages")
         .withIndex("by_createdAt", (q) => q.gte("createdAt", cutoff))
         .order("desc")
-        .take(Math.min(config.sendMaxGlobalInWindow + 80, 800));
-      const recentGlobalOutbound = recentGlobal.filter((message) => message.direction === "outbound" && message.messageAt >= cutoff);
-      if (recentGlobalOutbound.length >= config.sendMaxGlobalInWindow) {
-        const oldestGlobalWindow = Math.min(...recentGlobalOutbound.slice(0, config.sendMaxGlobalInWindow).map((message) => message.messageAt));
+        .take(Math.min(sendRateLimits.maxGlobal + 80, 800));
+      const recentGlobalOutbound = recentGlobal.filter(
+        (message) =>
+          message.direction === "outbound" &&
+          message.messageAt >= cutoff &&
+          (message.provider || "whatsapp") === messageProvider,
+      );
+      if (recentGlobalOutbound.length >= sendRateLimits.maxGlobal) {
+        const oldestGlobalWindow = Math.min(...recentGlobalOutbound.slice(0, sendRateLimits.maxGlobal).map((message) => message.messageAt));
         deferUntil = Math.max(deferUntil, oldestGlobalWindow + windowMs + 1_000);
         deferReasons.push("global-rate-limit");
       }
@@ -258,7 +321,8 @@ export const claimDue = mutation({
         continue;
       }
 
-      const isStatusBroadcastSend = item.isStatusPost === true && thread.jid === "status@broadcast";
+      const isStatusBroadcastSend =
+        item.isStatusPost === true && (thread.jid === "status@broadcast" || thread.jid === "ig:story:broadcast");
       if (!isStatusBroadcastSend) {
         const explicitIgnore = await ctx.db
           .query("ignoreRules")
@@ -371,6 +435,7 @@ export const claimDue = mutation({
         typingMs: draft.typingMs,
         jid: thread.jid,
         idempotencyKey: item.idempotencyKey,
+        messageProvider: item.messageProvider || normalizeMessageProvider(thread.provider),
         provider: item.provider,
         sendKind: item.sendKind || "text",
         isStatusPost: item.isStatusPost,
@@ -380,10 +445,14 @@ export const claimDue = mutation({
         statusFormat: item.statusFormat,
         statusReviewRequired: item.statusReviewRequired,
         reactionEmoji: item.reactionEmoji,
+        reactionTargetProviderMessageId: item.reactionTargetProviderMessageId || item.reactionTargetWhatsAppMessageId,
         reactionTargetWhatsAppMessageId: item.reactionTargetWhatsAppMessageId,
         preReactionEmoji: item.preReactionEmoji,
         mediaAssetId: item.mediaAssetId,
         mediaCaption: item.mediaCaption,
+        replyTargetProviderMessageId: shouldQuoteSource
+          ? sourceMessage?.providerMessageId || sourceMessage?.whatsappMessageId
+          : undefined,
         replyTargetWhatsAppMessageId: shouldQuoteSource ? sourceMessage?.whatsappMessageId : undefined,
         replyTargetSenderJid: shouldQuoteSource ? sourceMessage?.senderJid : undefined,
         replyTargetText: shouldQuoteSource ? sourceMessage?.text : undefined,
@@ -445,7 +514,9 @@ export const getSendDisposition = query({
 
 export const suppressForManualIntervention = mutation({
   args: {
+    messageProvider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
     threadJid: v.string(),
+    providerMessageId: v.optional(v.string()),
     whatsappMessageId: v.optional(v.string()),
     text: v.optional(v.string()),
     messageType: v.optional(
@@ -468,12 +539,20 @@ export const suppressForManualIntervention = mutation({
   },
   handler: async (ctx, args) => {
     const now = Date.now();
+    const messageProvider = normalizeMessageProvider(args.messageProvider);
     const config = await getConfig(ctx);
     const messageAt = normalizeTimestampMs(args.messageAt, now);
-    const thread = await ctx.db
+    const effectiveMessageId = args.providerMessageId || args.whatsappMessageId;
+    let thread = await ctx.db
       .query("threads")
-      .withIndex("by_jid", (q) => q.eq("jid", args.threadJid))
+      .withIndex("by_provider_and_jid", (q) => q.eq("provider", messageProvider).eq("jid", args.threadJid))
       .first();
+    if (!thread) {
+      thread = await ctx.db
+        .query("threads")
+        .withIndex("by_jid", (q) => q.eq("jid", args.threadJid))
+        .first();
+    }
 
     if (!thread) {
       return {
@@ -506,11 +585,11 @@ export const suppressForManualIntervention = mutation({
     }
 
     let recordedMessageId: string | undefined;
-    if (args.whatsappMessageId) {
+    if (effectiveMessageId) {
       const existing = await ctx.db
         .query("messages")
-        .withIndex("by_thread_whatsappMessageId", (q) =>
-          q.eq("threadId", thread._id).eq("whatsappMessageId", args.whatsappMessageId),
+        .withIndex("by_thread_providerMessageId", (q) =>
+          q.eq("threadId", thread._id).eq("providerMessageId", effectiveMessageId),
         )
         .first();
       if (existing) {
@@ -521,10 +600,12 @@ export const suppressForManualIntervention = mutation({
     if (!recordedMessageId) {
       const messageText = (args.text || "").trim() || "[Manual outbound message]";
       const inserted = await ctx.db.insert("messages", {
+        provider: messageProvider,
         threadId: thread._id,
         direction: "outbound",
         origin: "live",
         isStatus: args.isStatus ? true : undefined,
+        providerMessageId: effectiveMessageId,
         whatsappMessageId: args.whatsappMessageId,
         senderJid: "me",
         text: messageText,
@@ -570,7 +651,7 @@ export const suppressForManualIntervention = mutation({
         status: "failed",
         workerId: undefined,
         leaseExpiresAt: undefined,
-        error: "Suppressed: manual WhatsApp reply was sent before automated send.",
+        error: "Suppressed: manual reply was sent before automated send.",
         updatedAt: now,
       });
       suppressedOutbox += 1;
@@ -812,6 +893,8 @@ export const rewriteClaimedMessage = mutation({
 export const markSent = mutation({
   args: {
     outboxId: v.id("outbox"),
+    messageProvider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
+    providerMessageId: v.optional(v.string()),
     whatsappMessageId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
@@ -825,6 +908,8 @@ export const markSent = mutation({
     }
 
     const now = Date.now();
+    const messageProvider = normalizeMessageProvider(args.messageProvider || item.messageProvider);
+    const effectiveMessageId = args.providerMessageId || args.whatsappMessageId;
     await ctx.db.patch(item._id, {
       status: "sent",
       updatedAt: now,
@@ -861,11 +946,13 @@ export const markSent = mutation({
     }
 
     const insertedMessageId = await ctx.db.insert("messages", {
+      provider: messageProvider,
       threadId: item.threadId,
       direction: "outbound",
       origin: "live",
       isStatus: item.isStatusPost || sourceMessage?.isStatus ? true : undefined,
       senderJid: "me",
+      providerMessageId: effectiveMessageId,
       whatsappMessageId: args.whatsappMessageId,
       toolRunId: item.toolRunId || `outbox:${item._id}`,
       text: item.messageText,
@@ -953,13 +1040,14 @@ export const markSent = mutation({
 
     if (
       ((item.sendKind || "text") === "reaction" || (item.sendKind || "text") === "text") &&
-      item.reactionTargetWhatsAppMessageId &&
+      (item.reactionTargetProviderMessageId || item.reactionTargetWhatsAppMessageId) &&
       item.reactionEmoji
     ) {
+      const reactionTargetProviderMessageId = item.reactionTargetProviderMessageId || item.reactionTargetWhatsAppMessageId;
       const targetMessage = await ctx.db
         .query("messages")
-        .withIndex("by_thread_whatsappMessageId", (q) =>
-          q.eq("threadId", item.threadId).eq("whatsappMessageId", item.reactionTargetWhatsAppMessageId),
+        .withIndex("by_thread_providerMessageId", (q) =>
+          q.eq("threadId", item.threadId).eq("providerMessageId", reactionTargetProviderMessageId),
         )
         .first();
 
@@ -973,16 +1061,20 @@ export const markSent = mutation({
           await ctx.db.patch(existingReaction._id, {
             emoji: item.reactionEmoji,
             direction: "outbound",
+            provider: messageProvider,
+            providerMessageId: effectiveMessageId,
             whatsappMessageId: args.whatsappMessageId,
             updatedAt: now,
           });
         } else {
           await ctx.db.insert("messageReactions", {
+            provider: messageProvider,
             threadId: item.threadId,
             messageId: targetMessage._id,
             actorJid: "me",
             direction: "outbound",
             emoji: item.reactionEmoji,
+            providerMessageId: effectiveMessageId,
             whatsappMessageId: args.whatsappMessageId,
             createdAt: now,
             updatedAt: now,

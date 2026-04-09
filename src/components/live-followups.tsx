@@ -1,6 +1,7 @@
 "use client";
 
 import { ActionNotices } from "@/components/action-notices";
+import { ProviderFilter, type ProviderFilterValue } from "@/components/provider-filter";
 import { formatDateTimeWithRelative, trim } from "@/lib/format";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
 import { createFollowupActionHandlers, followupCommitmentLabel, followupStatusLabel, type FollowupItem } from "@/lib/ui/followups";
@@ -145,9 +146,14 @@ function FollowupsContent() {
   const cancelFollowup = useMutation(api.followups.cancel);
   const { runAction, getRecord, notices, dismissNotice } = useActionStateRegistry();
 
+  const [providerFilter, setProviderFilter] = useState<ProviderFilterValue>("all");
   const [filter, setFilter] = useState<TimelineFilter>("needs_review");
 
-  const timeline = useQuery(api.followups.timeline, { limit: 180, filter }) as TimelinePayload | undefined;
+  const timeline = useQuery(api.followups.timeline, {
+    limit: 180,
+    filter,
+    provider: providerFilter,
+  }) as TimelinePayload | undefined;
   const loading = timeline === undefined;
   const now = timeline?.now ?? 0;
   const sections = timeline?.sections || { overdue: [], today: [], upcoming: [] };
@@ -198,6 +204,11 @@ function FollowupsContent() {
 
       <article className="panel-card">
         <h3>Timeline Overview</h3>
+        <ProviderFilter
+          value={providerFilter}
+          onChange={setProviderFilter}
+          label="Follow-ups provider filter"
+        />
         <p className="queue-meta">
           Visible: {headerCounts.visible} · Overdue: {headerCounts.overdue} · Today: {headerCounts.today} · Upcoming: {headerCounts.upcoming}
         </p>

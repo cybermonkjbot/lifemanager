@@ -178,6 +178,7 @@ type OutboxClaimedItem = {
   threadId: string;
   toolRunId?: string;
   jid: string;
+  messageProvider: "whatsapp" | "instagram";
   messageText: string;
   typingMs: number;
   provider: "azure" | "codex" | "heuristic";
@@ -189,10 +190,12 @@ type OutboxClaimedItem = {
   statusFormat?: "text" | "meme";
   statusReviewRequired?: boolean;
   reactionEmoji?: string;
+  reactionTargetProviderMessageId?: string;
   reactionTargetWhatsAppMessageId?: string;
   preReactionEmoji?: string;
   mediaAssetId?: string;
   mediaCaption?: string;
+  replyTargetProviderMessageId?: string;
   replyTargetWhatsAppMessageId?: string;
   replyTargetSenderJid?: string;
   replyTargetText?: string;
@@ -1266,7 +1269,7 @@ async function createSocket(auth: Awaited<ReturnType<typeof useMultiFileAuthStat
 }
 
 async function run() {
-  await acquireWorkerLock();
+  await acquireWorkerLock("whatsapp");
   const convex = createConvexClient();
   const workerId = process.env.SLM_WORKER_ID || `worker-${process.pid}`;
   const authPath = process.env.WHATSAPP_AUTH_PATH || ".wa_auth";
@@ -1292,6 +1295,7 @@ async function run() {
   const reportListener = async (listenerActive: boolean, listenerMessage: string) => {
     try {
       await convex.mutation(convexRefs.systemReportSetupListener, {
+        provider: "whatsapp",
         listenerActive,
         listenerWorkerId: workerId,
         listenerMessage,
@@ -1428,7 +1432,7 @@ async function run() {
     isShuttingDown = true;
     clearReconnectTimer();
     await reportListener(false, message);
-    releaseWorkerLockSync();
+    releaseWorkerLockSync("whatsapp");
     process.exit(code);
   };
 
@@ -2612,6 +2616,7 @@ function resolveTextEmojiAllowlist() {
     const threadKind = classifyThreadKindFromJid(threadJid);
     await convex
       .mutation(convexRefs.threadsUpsertMetadata, {
+        provider: "whatsapp",
         threadJid,
         title: threadTitle,
         isGroup: isGroupJid(threadJid),
@@ -2998,7 +3003,9 @@ function resolveTextEmojiAllowlist() {
       }
 
       const ownSync = (await convex.mutation(convexRefs.outboxSuppressForManualIntervention, {
+        messageProvider: "whatsapp",
         threadJid,
+        providerMessageId: outboundMessageId,
         whatsappMessageId: outboundMessageId,
         text: parsed.text,
         messageType,
@@ -3071,6 +3078,7 @@ function resolveTextEmojiAllowlist() {
       }
 
       const ingested = (await convex.mutation(convexRefs.inboundIngestHistorical, {
+        provider: "whatsapp",
         ingestMode,
         direction,
         threadJid,
@@ -3088,6 +3096,7 @@ function resolveTextEmojiAllowlist() {
         isStatus: isStatusBroadcast,
         isGroup: isGroupJid(threadJid),
         threadKind,
+        providerMessageId: message.key.id || undefined,
         whatsappMessageId: message.key.id || undefined,
         messageAt,
       })) as {
@@ -3201,6 +3210,7 @@ function resolveTextEmojiAllowlist() {
       const runtimeSettings = await getRuntimeSettings();
 
       const ingest = (await convex.mutation(convexRefs.inboundIngest, {
+        provider: "whatsapp",
         threadJid,
         senderJid,
         senderTitle: resolveSenderTitle({
@@ -3218,6 +3228,7 @@ function resolveTextEmojiAllowlist() {
         threadKind,
         isArchived: archivedState?.isArchived,
         archivedAt: archivedState?.archivedAt,
+        providerMessageId: message.key.id || undefined,
         whatsappMessageId: message.key.id || undefined,
         messageAt,
         skipDraftGeneration: true,
@@ -4955,6 +4966,7 @@ function resolveTextEmojiAllowlist() {
       const claimLimit = Math.round(clamp(runtimeSettings?.outboxClaimLimit ?? 8, 1, 20));
       const claimed = (await convex.mutation(convexRefs.outboxClaimDue, {
         workerId,
+        messageProvider: "whatsapp",
         limit: claimLimit,
       })) as OutboxClaimedItem[];
       const tasks = claimed.map((item) =>
@@ -5241,6 +5253,8 @@ function resolveTextEmojiAllowlist() {
               rememberAutomatedOutboundId(sent?.key?.id || undefined);
               await convex.mutation(convexRefs.outboxMarkSent, {
                 outboxId: item.outboxId,
+                messageProvider: "whatsapp",
+                providerMessageId: sent?.key?.id || undefined,
                 whatsappMessageId: sent?.key?.id || undefined,
               });
               if (hydrated.sendKind === "meme" && hydrated.mediaAssetId) {
@@ -5460,7 +5474,7 @@ function resolveTextEmojiAllowlist() {
 }
 
 void run().catch((error) => {
-  releaseWorkerLockSync();
+  releaseWorkerLockSync("whatsapp");
   logger.error({ err: error }, "Worker crashed");
   process.exit(1);
 });

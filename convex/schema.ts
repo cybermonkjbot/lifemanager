@@ -9,6 +9,7 @@ export default defineSchema({
   }).index("by_key", ["key"]),
 
   threads: defineTable({
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
     jid: v.string(),
     title: v.optional(v.string()),
     isGroup: v.boolean(),
@@ -23,15 +24,20 @@ export default defineSchema({
     updatedAt: v.number(),
   })
     .index("by_jid", ["jid"])
+    .index("by_provider_and_jid", ["provider", "jid"])
     .index("by_lastMessageAt", ["lastMessageAt"])
+    .index("by_provider_and_lastMessageAt", ["provider", "lastMessageAt"])
     .index("by_threadKind_and_lastMessageAt", ["threadKind", "lastMessageAt"])
+    .index("by_provider_and_threadKind_and_lastMessageAt", ["provider", "threadKind", "lastMessageAt"])
     .index("by_ignored", ["isIgnored"]),
 
   messages: defineTable({
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
     threadId: v.id("threads"),
     direction: v.union(v.literal("inbound"), v.literal("outbound")),
     origin: v.optional(v.union(v.literal("live"), v.literal("history_sync"), v.literal("history_fetch"))),
     isStatus: v.optional(v.boolean()),
+    providerMessageId: v.optional(v.string()),
     whatsappMessageId: v.optional(v.string()),
     toolRunId: v.optional(v.string()),
     senderJid: v.string(),
@@ -57,9 +63,11 @@ export default defineSchema({
   })
     .index("by_thread", ["threadId"])
     .index("by_thread_messageAt", ["threadId", "messageAt"])
+    .index("by_thread_providerMessageId", ["threadId", "providerMessageId"])
     .index("by_thread_whatsappMessageId", ["threadId", "whatsappMessageId"])
     .index("by_isStatus_and_messageAt", ["isStatus", "messageAt"])
     .index("by_mediaAssetId", ["mediaAssetId"])
+    .index("by_provider_and_createdAt", ["provider", "createdAt"])
     .index("by_createdAt", ["createdAt"])
     .index("by_messageType_and_createdAt", ["messageType", "createdAt"])
     .searchIndex("search_text", {
@@ -112,6 +120,7 @@ export default defineSchema({
     .index("by_updatedAt", ["updatedAt"]),
 
   replyDrafts: defineTable({
+    messageProvider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
     threadId: v.id("threads"),
     sourceMessageId: v.id("messages"),
     toolRunId: v.optional(v.string()),
@@ -143,9 +152,11 @@ export default defineSchema({
   })
     .index("by_thread", ["threadId"])
     .index("by_status", ["status"])
+    .index("by_messageProvider_and_status", ["messageProvider", "status"])
     .index("by_sourceMessage", ["sourceMessageId"]),
 
   outbox: defineTable({
+    messageProvider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
     threadId: v.id("threads"),
     draftId: v.id("replyDrafts"),
     toolRunId: v.optional(v.string()),
@@ -159,6 +170,8 @@ export default defineSchema({
     statusFormat: v.optional(v.union(v.literal("text"), v.literal("meme"))),
     statusReviewRequired: v.optional(v.boolean()),
     reactionEmoji: v.optional(v.string()),
+    reactionTargetProviderMessageId: v.optional(v.string()),
+    replyTargetProviderMessageId: v.optional(v.string()),
     reactionTargetWhatsAppMessageId: v.optional(v.string()),
     preReactionEmoji: v.optional(v.string()),
     mediaAssetId: v.optional(v.id("mediaAssets")),
@@ -181,6 +194,8 @@ export default defineSchema({
   })
     .index("by_status_sendAt", ["status", "sendAt"])
     .index("by_status_leaseExpiresAt", ["status", "leaseExpiresAt"])
+    .index("by_messageProvider_and_status_sendAt", ["messageProvider", "status", "sendAt"])
+    .index("by_messageProvider_and_status_leaseExpiresAt", ["messageProvider", "status", "leaseExpiresAt"])
     .index("by_thread_and_status", ["threadId", "status"])
     .index("by_worker", ["workerId"])
     .index("by_draft", ["draftId"]),
@@ -389,33 +404,41 @@ export default defineSchema({
 
   setupRuntime: defineTable({
     key: v.string(),
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
     status: v.union(
       v.literal("idle"),
       v.literal("starting"),
+      v.literal("authenticating"),
       v.literal("qr_ready"),
       v.literal("code_ready"),
+      v.literal("challenge_required"),
       v.literal("syncing"),
       v.literal("connected"),
       v.literal("error"),
     ),
-    mode: v.union(v.literal("qr"), v.literal("pairing_code")),
+    mode: v.union(v.literal("qr"), v.literal("pairing_code"), v.literal("password"), v.literal("challenge_code")),
     message: v.string(),
     qrDataUrl: v.optional(v.string()),
     pairingCode: v.optional(v.string()),
+    challengeContactPoint: v.optional(v.string()),
     hasAuth: v.boolean(),
     listenerActive: v.optional(v.boolean()),
     listenerWorkerId: v.optional(v.string()),
     listenerMessage: v.optional(v.string()),
     listenerLastSeenAt: v.optional(v.number()),
     updatedAt: v.number(),
-  }).index("by_key", ["key"]),
+  })
+    .index("by_key", ["key"])
+    .index("by_provider", ["provider"]),
 
   messageReactions: defineTable({
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
     threadId: v.id("threads"),
     messageId: v.id("messages"),
     actorJid: v.string(),
     direction: v.union(v.literal("inbound"), v.literal("outbound")),
     emoji: v.string(),
+    providerMessageId: v.optional(v.string()),
     whatsappMessageId: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),

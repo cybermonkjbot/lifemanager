@@ -314,12 +314,21 @@ export const setIgnoreGroupsByDefault = mutation({
 });
 
 export const setupStatus = query({
-  args: {},
-  handler: async (ctx) => {
-    const record = await ctx.db
+  args: {
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
+  },
+  handler: async (ctx, args) => {
+    const provider = args.provider || "whatsapp";
+    let record = await ctx.db
       .query("setupRuntime")
-      .withIndex("by_key", (q) => q.eq("key", "whatsapp"))
+      .withIndex("by_provider", (q) => q.eq("provider", provider))
       .first();
+    if (!record && provider === "whatsapp") {
+      record = await ctx.db
+        .query("setupRuntime")
+        .withIndex("by_key", (q) => q.eq("key", "whatsapp"))
+        .first();
+    }
 
     return record || null;
   },
@@ -327,42 +336,56 @@ export const setupStatus = query({
 
 export const upsertSetupStatus = mutation({
   args: {
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
     status: v.union(
       v.literal("idle"),
       v.literal("starting"),
+      v.literal("authenticating"),
       v.literal("qr_ready"),
       v.literal("code_ready"),
+      v.literal("challenge_required"),
       v.literal("syncing"),
       v.literal("connected"),
       v.literal("error"),
     ),
-    mode: v.union(v.literal("qr"), v.literal("pairing_code")),
+    mode: v.union(v.literal("qr"), v.literal("pairing_code"), v.literal("password"), v.literal("challenge_code")),
     message: v.string(),
     qrDataUrl: v.optional(v.string()),
     pairingCode: v.optional(v.string()),
+    challengeContactPoint: v.optional(v.string()),
     hasAuth: v.boolean(),
     updatedAt: v.number(),
   },
   handler: async (ctx, args) => {
-    const existing = await ctx.db
+    const provider = args.provider || "whatsapp";
+    let existing = await ctx.db
       .query("setupRuntime")
-      .withIndex("by_key", (q) => q.eq("key", "whatsapp"))
+      .withIndex("by_provider", (q) => q.eq("provider", provider))
       .first();
+    if (!existing && provider === "whatsapp") {
+      existing = await ctx.db
+        .query("setupRuntime")
+        .withIndex("by_key", (q) => q.eq("key", "whatsapp"))
+        .first();
+    }
+    const payload = {
+      ...args,
+      provider,
+      key: provider,
+    };
 
     if (existing) {
-      await ctx.db.patch(existing._id, args);
+      await ctx.db.patch(existing._id, payload);
       return existing._id;
     }
 
-    return await ctx.db.insert("setupRuntime", {
-      key: "whatsapp",
-      ...args,
-    });
+    return await ctx.db.insert("setupRuntime", payload);
   },
 });
 
 export const reportSetupListener = mutation({
   args: {
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
     listenerActive: v.boolean(),
     listenerWorkerId: v.optional(v.string()),
     listenerMessage: v.optional(v.string()),
@@ -370,13 +393,22 @@ export const reportSetupListener = mutation({
     hasAuth: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
-    const existing = await ctx.db
+    const provider = args.provider || "whatsapp";
+    let existing = await ctx.db
       .query("setupRuntime")
-      .withIndex("by_key", (q) => q.eq("key", "whatsapp"))
+      .withIndex("by_provider", (q) => q.eq("provider", provider))
       .first();
+    if (!existing && provider === "whatsapp") {
+      existing = await ctx.db
+        .query("setupRuntime")
+        .withIndex("by_key", (q) => q.eq("key", "whatsapp"))
+        .first();
+    }
 
     const now = Date.now();
     const patch = {
+      provider,
+      key: provider,
       listenerActive: args.listenerActive,
       listenerWorkerId: args.listenerWorkerId,
       listenerMessage: args.listenerMessage,
@@ -391,10 +423,13 @@ export const reportSetupListener = mutation({
     }
 
     return await ctx.db.insert("setupRuntime", {
-      key: "whatsapp",
       status: "idle",
-      mode: "qr",
-      message: args.listenerActive ? "Worker connected to WhatsApp." : "Setup not started.",
+      mode: provider === "instagram" ? "password" : "qr",
+      message: args.listenerActive
+        ? provider === "instagram"
+          ? "Worker connected to Instagram."
+          : "Worker connected to WhatsApp."
+        : "Setup not started.",
       hasAuth: args.hasAuth ?? false,
       ...patch,
     });

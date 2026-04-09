@@ -59,6 +59,15 @@ type SettingsState = {
   sendRateWindowMinutes: number;
   sendMaxPerThreadInWindow: number;
   sendMaxGlobalInWindow: number;
+  instagramDmDelayMinMs: number;
+  instagramDmDelayMaxMs: number;
+  instagramTypingMinMs: number;
+  instagramTypingMaxMs: number;
+  instagramSendRateWindowMinutes: number;
+  instagramSendMaxPerThreadInWindow: number;
+  instagramSendMaxGlobalInWindow: number;
+  instagramStoryCadenceHours: number;
+  instagramStoryDailyMaxPosts: number;
   outreachEnabled: boolean;
   outreachCadenceHours: number;
   outreachMaxContactsPerRun: number;
@@ -122,6 +131,12 @@ type MediaAsset = {
   enabled: boolean;
 };
 
+type SetupState = {
+  status?: "idle" | "starting" | "authenticating" | "qr_ready" | "code_ready" | "challenge_required" | "syncing" | "connected" | "error";
+  hasAuth?: boolean;
+  listenerActive?: boolean;
+};
+
 function toState(source: Partial<SettingsState> | undefined): SettingsState {
   return {
     ignoreGroupsByDefault: source?.ignoreGroupsByDefault ?? true,
@@ -175,6 +190,15 @@ function toState(source: Partial<SettingsState> | undefined): SettingsState {
     sendRateWindowMinutes: source?.sendRateWindowMinutes ?? 60,
     sendMaxPerThreadInWindow: source?.sendMaxPerThreadInWindow ?? 4,
     sendMaxGlobalInWindow: source?.sendMaxGlobalInWindow ?? 40,
+    instagramDmDelayMinMs: source?.instagramDmDelayMinMs ?? 8000,
+    instagramDmDelayMaxMs: source?.instagramDmDelayMaxMs ?? 45000,
+    instagramTypingMinMs: source?.instagramTypingMinMs ?? 1500,
+    instagramTypingMaxMs: source?.instagramTypingMaxMs ?? 6500,
+    instagramSendRateWindowMinutes: source?.instagramSendRateWindowMinutes ?? 60,
+    instagramSendMaxPerThreadInWindow: source?.instagramSendMaxPerThreadInWindow ?? 4,
+    instagramSendMaxGlobalInWindow: source?.instagramSendMaxGlobalInWindow ?? 40,
+    instagramStoryCadenceHours: source?.instagramStoryCadenceHours ?? 3,
+    instagramStoryDailyMaxPosts: source?.instagramStoryDailyMaxPosts ?? 6,
     outreachEnabled: source?.outreachEnabled ?? false,
     outreachCadenceHours: source?.outreachCadenceHours ?? 36,
     outreachMaxContactsPerRun: source?.outreachMaxContactsPerRun ?? 3,
@@ -246,6 +270,15 @@ function stateEquals(a: SettingsState, b: SettingsState) {
     nearlyEqual(a.sendRateWindowMinutes, b.sendRateWindowMinutes) &&
     nearlyEqual(a.sendMaxPerThreadInWindow, b.sendMaxPerThreadInWindow) &&
     nearlyEqual(a.sendMaxGlobalInWindow, b.sendMaxGlobalInWindow) &&
+    nearlyEqual(a.instagramDmDelayMinMs, b.instagramDmDelayMinMs) &&
+    nearlyEqual(a.instagramDmDelayMaxMs, b.instagramDmDelayMaxMs) &&
+    nearlyEqual(a.instagramTypingMinMs, b.instagramTypingMinMs) &&
+    nearlyEqual(a.instagramTypingMaxMs, b.instagramTypingMaxMs) &&
+    nearlyEqual(a.instagramSendRateWindowMinutes, b.instagramSendRateWindowMinutes) &&
+    nearlyEqual(a.instagramSendMaxPerThreadInWindow, b.instagramSendMaxPerThreadInWindow) &&
+    nearlyEqual(a.instagramSendMaxGlobalInWindow, b.instagramSendMaxGlobalInWindow) &&
+    nearlyEqual(a.instagramStoryCadenceHours, b.instagramStoryCadenceHours) &&
+    nearlyEqual(a.instagramStoryDailyMaxPosts, b.instagramStoryDailyMaxPosts) &&
     a.outreachEnabled === b.outreachEnabled &&
     nearlyEqual(a.outreachCadenceHours, b.outreachCadenceHours) &&
     nearlyEqual(a.outreachMaxContactsPerRun, b.outreachMaxContactsPerRun) &&
@@ -384,6 +417,7 @@ export function LiveSettings() {
   const deleteAsset = useMutation(api.media.deleteAsset);
   const settings = useQuery(api.settings.get, {}) as SettingsState | undefined;
   const defaults = useQuery(api.settings.defaults, {}) as SettingsState | undefined;
+  const instagramSetup = useQuery(api.system.setupStatus, { provider: "instagram" }) as SetupState | null | undefined;
   const contacts = useQuery(api.threads.listContacts, { limit: 300 }) as KnownContact[] | undefined;
   const profilesQuery = useQuery(api.personality.listProfiles, {}) as PersonalityProfile[] | undefined;
   const mediaAssets = useQuery(api.media.listAssets, {}) as MediaAsset[] | undefined;
@@ -418,6 +452,9 @@ export function LiveSettings() {
 
   const selectedEditorSlug = editorSlug || profiles[0]?.slug || "";
   const selectedEditorProfile = profiles.find((profile) => profile.slug === selectedEditorSlug) || null;
+  const instagramConnected = Boolean(
+    instagramSetup?.hasAuth || instagramSetup?.listenerActive || instagramSetup?.status === "connected",
+  );
   const profileVersions = useQuery(
     api.personality.listProfileVersions,
     selectedEditorProfile ? { slug: selectedEditorProfile.slug, limit: 20 } : "skip",
@@ -488,6 +525,15 @@ export function LiveSettings() {
           sendRateWindowMinutes: Math.round(draft.sendRateWindowMinutes),
           sendMaxPerThreadInWindow: Math.round(draft.sendMaxPerThreadInWindow),
           sendMaxGlobalInWindow: Math.round(draft.sendMaxGlobalInWindow),
+          instagramDmDelayMinMs: Math.round(draft.instagramDmDelayMinMs),
+          instagramDmDelayMaxMs: Math.round(draft.instagramDmDelayMaxMs),
+          instagramTypingMinMs: Math.round(draft.instagramTypingMinMs),
+          instagramTypingMaxMs: Math.round(draft.instagramTypingMaxMs),
+          instagramSendRateWindowMinutes: Math.round(draft.instagramSendRateWindowMinutes),
+          instagramSendMaxPerThreadInWindow: Math.round(draft.instagramSendMaxPerThreadInWindow),
+          instagramSendMaxGlobalInWindow: Math.round(draft.instagramSendMaxGlobalInWindow),
+          instagramStoryCadenceHours: Math.round(draft.instagramStoryCadenceHours),
+          instagramStoryDailyMaxPosts: Math.round(draft.instagramStoryDailyMaxPosts),
           outreachEnabled: draft.outreachEnabled,
           outreachCadenceHours: Math.round(draft.outreachCadenceHours),
           outreachMaxContactsPerRun: Math.round(draft.outreachMaxContactsPerRun),
@@ -1565,6 +1611,176 @@ export function LiveSettings() {
               aria-disabled={record.pending}
             />
           </label>
+
+          {instagramConnected ? (
+            <>
+              <div className="queue-item">
+                <p className="queue-title">Instagram DM + Story Runtime</p>
+                <p className="queue-meta">
+                  Separate pacing for Instagram outbound DMs and story posting. WhatsApp settings above remain unchanged.
+                </p>
+              </div>
+
+              <label className="stack compact">
+                <span className="queue-meta">IG DM delay min (ms)</span>
+                <input
+                  type="number"
+                  min={500}
+                  max={180000}
+                  step={100}
+                  value={draft.instagramDmDelayMinMs}
+                  onChange={(event) =>
+                    setDraft((prev) => ({ ...prev, instagramDmDelayMinMs: parseNumber(event.target.value, prev.instagramDmDelayMinMs) }))
+                  }
+                  disabled={record.pending}
+                  aria-disabled={record.pending}
+                />
+              </label>
+
+              <label className="stack compact">
+                <span className="queue-meta">IG DM delay max (ms)</span>
+                <input
+                  type="number"
+                  min={500}
+                  max={240000}
+                  step={100}
+                  value={draft.instagramDmDelayMaxMs}
+                  onChange={(event) =>
+                    setDraft((prev) => ({ ...prev, instagramDmDelayMaxMs: parseNumber(event.target.value, prev.instagramDmDelayMaxMs) }))
+                  }
+                  disabled={record.pending}
+                  aria-disabled={record.pending}
+                />
+              </label>
+
+              <label className="stack compact">
+                <span className="queue-meta">IG typing min (ms)</span>
+                <input
+                  type="number"
+                  min={200}
+                  max={60000}
+                  step={100}
+                  value={draft.instagramTypingMinMs}
+                  onChange={(event) =>
+                    setDraft((prev) => ({ ...prev, instagramTypingMinMs: parseNumber(event.target.value, prev.instagramTypingMinMs) }))
+                  }
+                  disabled={record.pending}
+                  aria-disabled={record.pending}
+                />
+              </label>
+
+              <label className="stack compact">
+                <span className="queue-meta">IG typing max (ms)</span>
+                <input
+                  type="number"
+                  min={200}
+                  max={120000}
+                  step={100}
+                  value={draft.instagramTypingMaxMs}
+                  onChange={(event) =>
+                    setDraft((prev) => ({ ...prev, instagramTypingMaxMs: parseNumber(event.target.value, prev.instagramTypingMaxMs) }))
+                  }
+                  disabled={record.pending}
+                  aria-disabled={record.pending}
+                />
+              </label>
+
+              <label className="stack compact">
+                <span className="queue-meta">IG rate window (minutes)</span>
+                <input
+                  type="number"
+                  min={5}
+                  max={1440}
+                  step={1}
+                  value={draft.instagramSendRateWindowMinutes}
+                  onChange={(event) =>
+                    setDraft((prev) => ({
+                      ...prev,
+                      instagramSendRateWindowMinutes: parseNumber(event.target.value, prev.instagramSendRateWindowMinutes),
+                    }))
+                  }
+                  disabled={record.pending}
+                  aria-disabled={record.pending}
+                />
+              </label>
+
+              <label className="stack compact">
+                <span className="queue-meta">IG max sends per thread in window</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  step={1}
+                  value={draft.instagramSendMaxPerThreadInWindow}
+                  onChange={(event) =>
+                    setDraft((prev) => ({
+                      ...prev,
+                      instagramSendMaxPerThreadInWindow: parseNumber(event.target.value, prev.instagramSendMaxPerThreadInWindow),
+                    }))
+                  }
+                  disabled={record.pending}
+                  aria-disabled={record.pending}
+                />
+              </label>
+
+              <label className="stack compact">
+                <span className="queue-meta">IG max global sends in window</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={1000}
+                  step={1}
+                  value={draft.instagramSendMaxGlobalInWindow}
+                  onChange={(event) =>
+                    setDraft((prev) => ({
+                      ...prev,
+                      instagramSendMaxGlobalInWindow: parseNumber(event.target.value, prev.instagramSendMaxGlobalInWindow),
+                    }))
+                  }
+                  disabled={record.pending}
+                  aria-disabled={record.pending}
+                />
+              </label>
+
+              <label className="stack compact">
+                <span className="queue-meta">IG story cadence (hours)</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={168}
+                  step={1}
+                  value={draft.instagramStoryCadenceHours}
+                  onChange={(event) =>
+                    setDraft((prev) => ({
+                      ...prev,
+                      instagramStoryCadenceHours: parseNumber(event.target.value, prev.instagramStoryCadenceHours),
+                    }))
+                  }
+                  disabled={record.pending}
+                  aria-disabled={record.pending}
+                />
+              </label>
+
+              <label className="stack compact">
+                <span className="queue-meta">IG story daily max posts</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={24}
+                  step={1}
+                  value={draft.instagramStoryDailyMaxPosts}
+                  onChange={(event) =>
+                    setDraft((prev) => ({
+                      ...prev,
+                      instagramStoryDailyMaxPosts: parseNumber(event.target.value, prev.instagramStoryDailyMaxPosts),
+                    }))
+                  }
+                  disabled={record.pending}
+                  aria-disabled={record.pending}
+                />
+              </label>
+            </>
+          ) : null}
 
           <p className="queue-meta">Most values apply live. Restart the worker after changing poll interval.</p>
 

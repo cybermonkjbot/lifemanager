@@ -4,6 +4,7 @@ import { mutation, query } from "./_generated/server";
 
 export const list = query({
   args: {
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("all"))),
     draftLimit: v.optional(v.number()),
     followupLimit: v.optional(v.number()),
     todoLimit: v.optional(v.number()),
@@ -11,17 +12,25 @@ export const list = query({
     includeResolvedGuardrails: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
+    const messageProvider = args.provider || "all";
     const draftLimit = Math.min(args.draftLimit ?? 40, 100);
     const followupLimit = Math.min(args.followupLimit ?? 40, 100);
     const todoLimit = Math.min(args.todoLimit ?? 40, 100);
     const guardrailLimit = Math.min(args.guardrailLimit ?? 20, 100);
     const includeResolvedGuardrails = Boolean(args.includeResolvedGuardrails);
 
-    const pendingDrafts = await ctx.db
-      .query("replyDrafts")
-      .withIndex("by_status", (q) => q.eq("status", "pending"))
-      .order("desc")
-      .take(draftLimit);
+    const pendingDrafts =
+      messageProvider === "all"
+        ? await ctx.db
+            .query("replyDrafts")
+            .withIndex("by_status", (q) => q.eq("status", "pending"))
+            .order("desc")
+            .take(draftLimit)
+        : await ctx.db
+            .query("replyDrafts")
+            .withIndex("by_messageProvider_and_status", (q) => q.eq("messageProvider", messageProvider).eq("status", "pending"))
+            .order("desc")
+            .take(draftLimit);
 
     const followupConfirmations = await ctx.db
       .query("followUps")
@@ -103,32 +112,63 @@ export const list = query({
       }),
     );
 
-    const enrichedFollowups = await Promise.all(
-      followupConfirmations.map(async (followup) => {
-        const [thread, sourceMessage] = await Promise.all([
-          ctx.db.get(followup.threadId),
-          ctx.db.get(followup.sourceMessageId),
-        ]);
+    const enrichedFollowups = (
+      await Promise.all(
+        followupConfirmations.map(async (followup) => {
+          const [thread, sourceMessage] = await Promise.all([
+            ctx.db.get(followup.threadId),
+            ctx.db.get(followup.sourceMessageId),
+          ]);
+          return {
+            ...followup,
+            thread,
+            sourceMessage: sourceMessage
+              ? {
+                  _id: sourceMessage._id,
+                  text: sourceMessage.text,
+                  messageAt: sourceMessage.messageAt,
+                  direction: sourceMessage.direction,
+                }
+              : null,
+          };
+        }),
+      )
+    ).filter((item) => (messageProvider === "all" ? true : (item.thread?.provider || "whatsapp") === messageProvider));
+
+    const enrichedTodoCandidates = await Promise.all(
+      todoCandidates.map(async (candidate) => {
+        const thread = await ctx.db.get(candidate.threadId);
         return {
-          ...followup,
+          ...candidate,
           thread,
-          sourceMessage: sourceMessage
-            ? {
-                _id: sourceMessage._id,
-                text: sourceMessage.text,
-                messageAt: sourceMessage.messageAt,
-                direction: sourceMessage.direction,
-              }
-            : null,
+        };
+      }),
+    );
+
+    const enrichedGuardrailFlags = await Promise.all(
+      guardrailFlags.map(async (item) => {
+        const thread = item.threadId ? await ctx.db.get(item.threadId) : null;
+        return {
+          ...item,
+          thread,
         };
       }),
     );
 
     return {
-      needsReply: enrichedDrafts,
+      needsReply:
+        messageProvider === "all"
+          ? enrichedDrafts
+          : enrichedDrafts.filter((draft) => (draft.thread?.provider || draft.messageProvider || "whatsapp") === messageProvider),
       followupConfirmations: enrichedFollowups,
-      todoCandidates,
-      guardrailFlags,
+      todoCandidates:
+        messageProvider === "all"
+          ? enrichedTodoCandidates
+          : enrichedTodoCandidates.filter((item) => (item.thread?.provider || "whatsapp") === messageProvider),
+      guardrailFlags:
+        messageProvider === "all"
+          ? enrichedGuardrailFlags
+          : enrichedGuardrailFlags.filter((item) => (item.thread?.provider || "whatsapp") === messageProvider),
     };
   },
 });

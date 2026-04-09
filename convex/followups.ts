@@ -79,11 +79,13 @@ async function enrichFollowups(
 
 export const list = query({
   args: {
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("all"))),
     limit: v.optional(v.number()),
     status: v.optional(followupStatusOrAll),
     sort: v.optional(followupSort),
   },
   handler: async (ctx, args) => {
+    const provider = args.provider || "all";
     const limit = Math.min(args.limit ?? 50, 100);
     const status = args.status || "all";
     const sort = args.sort || "due_asc";
@@ -105,16 +107,21 @@ export const list = query({
       items.sort((a, b) => b.updatedAt - a.updatedAt);
     }
 
-    return await enrichFollowups(ctx, items.slice(0, limit));
+    const enriched = await enrichFollowups(ctx, items.slice(0, limit));
+    return provider === "all"
+      ? enriched
+      : enriched.filter((item) => (item.thread?.provider || "whatsapp") === provider);
   },
 });
 
 export const timeline = query({
   args: {
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("all"))),
     limit: v.optional(v.number()),
     filter: v.optional(followupTimelineFilter),
   },
   handler: async (ctx, args) => {
+    const provider = args.provider || "all";
     const now = Date.now();
     const todayStart = startOfDay(now);
     const tomorrowStart = todayStart + 24 * 60 * 60 * 1000;
@@ -128,7 +135,9 @@ export const timeline = query({
       .take(Math.min(limit * 5, 900));
 
     const filtered = base.filter((item) => statusMatchesTimelineFilter(item.status, filter)).slice(0, limit);
-    const enriched = await enrichFollowups(ctx, filtered);
+    const enriched = (await enrichFollowups(ctx, filtered)).filter((item) =>
+      provider === "all" ? true : (item.thread?.provider || "whatsapp") === provider,
+    );
 
     const overdue: typeof enriched = [];
     const today: typeof enriched = [];
@@ -287,7 +296,10 @@ export const promoteDueConfirmed = internalMutation({
       .take(limit);
 
     for (const followUp of dueConfirmed) {
+      const thread = await ctx.db.get(followUp.threadId);
+      const messageProvider = thread?.provider || "whatsapp";
       const draftId = await ctx.db.insert("replyDrafts", {
+        messageProvider,
         threadId: followUp.threadId,
         sourceMessageId: followUp.sourceMessageId,
         text: followUp.draftText,
@@ -302,6 +314,7 @@ export const promoteDueConfirmed = internalMutation({
       });
 
       const outboxId = await ctx.db.insert("outbox", {
+        messageProvider,
         threadId: followUp.threadId,
         draftId,
         followUpId: followUp._id,

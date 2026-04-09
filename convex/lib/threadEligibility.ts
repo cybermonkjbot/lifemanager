@@ -1,5 +1,7 @@
 import type { Doc } from "../_generated/dataModel";
 
+export type MessageProvider = "whatsapp" | "instagram";
+
 export type ThreadKind = "direct" | "group" | "broadcast_or_system";
 export type EligibilityReason = "group_ignored" | "archived" | "broadcast_or_system" | "explicit_ignore" | "temporary_ghost";
 
@@ -14,13 +16,20 @@ export type EligibilityResult =
 
 const BROADCAST_OR_SYSTEM_SUFFIXES = ["@broadcast", "@newsletter"];
 
-export function isGroupJid(jid: string) {
+export function isGroupJid(jid: string, provider: MessageProvider = "whatsapp") {
+  if (provider === "instagram") {
+    return false;
+  }
   return jid.endsWith("@g.us");
 }
 
-export function isBroadcastOrSystemJid(jid: string) {
+export function isBroadcastOrSystemJid(jid: string, provider: MessageProvider = "whatsapp") {
   if (!jid) {
     return false;
+  }
+  if (provider === "instagram") {
+    // Keep legacy alias plus current story broadcast jid.
+    return jid === "instagram:story" || jid === "ig:story:broadcast";
   }
   if (jid === "status@broadcast") {
     return true;
@@ -31,11 +40,12 @@ export function isBroadcastOrSystemJid(jid: string) {
   return BROADCAST_OR_SYSTEM_SUFFIXES.some((suffix) => jid.endsWith(suffix));
 }
 
-export function classifyThreadKind(args: { jid: string; isGroupHint?: boolean }): ThreadKind {
-  if (isBroadcastOrSystemJid(args.jid)) {
+export function classifyThreadKind(args: { jid: string; isGroupHint?: boolean; provider?: MessageProvider }): ThreadKind {
+  const provider = args.provider || "whatsapp";
+  if (isBroadcastOrSystemJid(args.jid, provider)) {
     return "broadcast_or_system";
   }
-  if (args.isGroupHint || isGroupJid(args.jid)) {
+  if (args.isGroupHint || isGroupJid(args.jid, provider)) {
     return "group";
   }
   return "direct";

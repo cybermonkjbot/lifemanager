@@ -104,11 +104,12 @@ export function extractKeywords(text: string) {
 async function ensureStatusThread(args: { ctx: MutationCtx; now: number }) {
   const existing = await args.ctx.db
     .query("threads")
-    .withIndex("by_jid", (q) => q.eq("jid", STATUS_JID))
+    .withIndex("by_provider_and_jid", (q) => q.eq("provider", "whatsapp").eq("jid", STATUS_JID))
     .first();
 
   if (existing) {
     await args.ctx.db.patch(existing._id, {
+      provider: existing.provider || "whatsapp",
       title: existing.title || "My Status",
       isGroup: false,
       isIgnored: false,
@@ -122,6 +123,7 @@ async function ensureStatusThread(args: { ctx: MutationCtx; now: number }) {
   }
 
   return (await args.ctx.db.insert("threads", {
+    provider: "whatsapp",
     jid: STATUS_JID,
     title: "My Status",
     isGroup: false,
@@ -229,7 +231,7 @@ export const run = internalMutation({
     let audienceJids = configuredAudience;
     const indexedDirectThreads = await ctx.db
       .query("threads")
-      .withIndex("by_threadKind_and_lastMessageAt", (q) => q.eq("threadKind", "direct"))
+      .withIndex("by_provider_and_threadKind_and_lastMessageAt", (q) => q.eq("provider", "whatsapp").eq("threadKind", "direct"))
       .order("desc")
       .take(260);
     const directThreads = [...indexedDirectThreads];
@@ -357,6 +359,7 @@ export const run = internalMutation({
     });
 
     const outboxId = await ctx.db.insert("outbox", {
+      messageProvider: "whatsapp",
       threadId: statusThreadId,
       draftId,
       messageText: AI_STATUS_PLACEHOLDER,

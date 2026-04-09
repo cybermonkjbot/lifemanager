@@ -35,18 +35,28 @@ function safeJsonParse(raw: string | undefined) {
 export const list = query({
   args: {
     limit: v.optional(v.number()),
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("all"))),
   },
   handler: async (ctx, args) => {
     const limit = Math.min(args.limit ?? 30, 100);
-    const threads = await ctx.db
-      .query("threads")
-      .withIndex("by_lastMessageAt")
-      .order("desc")
-      .take(limit);
+    const provider = args.provider || "all";
+    const threads =
+      provider === "all"
+        ? await ctx.db
+            .query("threads")
+            .withIndex("by_lastMessageAt")
+            .order("desc")
+            .take(limit)
+        : await ctx.db
+            .query("threads")
+            .withIndex("by_provider_and_lastMessageAt", (q) => q.eq("provider", provider))
+            .order("desc")
+            .take(limit);
 
     return await Promise.all(
       threads.map(async (thread) => {
-        const threadKind = thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup });
+        const threadKind =
+          thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup, provider: thread.provider });
         const drafts = await ctx.db
           .query("replyDrafts")
           .withIndex("by_thread", (q) => q.eq("threadId", thread._id))
@@ -67,22 +77,34 @@ export const list = query({
 export const listContacts = query({
   args: {
     limit: v.optional(v.number()),
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("all"))),
   },
   handler: async (ctx, args) => {
     const limit = Math.min(args.limit ?? 200, 500);
-    const directCandidates = await ctx.db
-      .query("threads")
-      .withIndex("by_threadKind_and_lastMessageAt", (q) => q.eq("threadKind", "direct"))
-      .order("desc")
-      .take(limit);
+    const provider = args.provider || "all";
+    const directCandidates =
+      provider === "all"
+        ? await ctx.db
+            .query("threads")
+            .withIndex("by_threadKind_and_lastMessageAt", (q) => q.eq("threadKind", "direct"))
+            .order("desc")
+            .take(limit)
+        : await ctx.db
+            .query("threads")
+            .withIndex("by_provider_and_threadKind_and_lastMessageAt", (q) =>
+              q.eq("provider", provider).eq("threadKind", "direct"),
+            )
+            .order("desc")
+            .take(limit);
     const directThreads = directCandidates.filter((thread) => {
-      const kind = thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup });
+      const kind = thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup, provider: thread.provider });
       return kind === "direct";
     });
 
     if (directThreads.length >= limit) {
       return directThreads.map((thread) => ({
         _id: thread._id,
+        provider: thread.provider || "whatsapp",
         jid: thread.jid,
         title: thread.title,
         lastMessageAt: thread.lastMessageAt,
@@ -94,11 +116,18 @@ export const listContacts = query({
     }
 
     const legacyScanLimit = Math.min(limit * 4, 2000);
-    const legacyThreads = await ctx.db
-      .query("threads")
-      .withIndex("by_lastMessageAt")
-      .order("desc")
-      .take(legacyScanLimit);
+    const legacyThreads =
+      provider === "all"
+        ? await ctx.db
+            .query("threads")
+            .withIndex("by_lastMessageAt")
+            .order("desc")
+            .take(legacyScanLimit)
+        : await ctx.db
+            .query("threads")
+            .withIndex("by_provider_and_lastMessageAt", (q) => q.eq("provider", provider))
+            .order("desc")
+            .take(legacyScanLimit);
 
     const seen = new Set(directThreads.map((thread) => thread._id));
     const merged = [...directThreads];
@@ -107,7 +136,7 @@ export const listContacts = query({
       if (seen.has(thread._id)) {
         continue;
       }
-      const kind = thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup });
+      const kind = thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup, provider: thread.provider });
       if (kind !== "direct") {
         continue;
       }
@@ -122,6 +151,7 @@ export const listContacts = query({
       .slice(0, limit)
       .map((thread) => ({
         _id: thread._id,
+        provider: thread.provider || "whatsapp",
         jid: thread.jid,
         title: thread.title,
         lastMessageAt: thread.lastMessageAt,
@@ -148,7 +178,8 @@ export const getEligibility = query({
     }
 
     const config = await getConfig(ctx);
-    const threadKind = thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup });
+    const threadKind =
+      thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup, provider: thread.provider });
     const explicitIgnore = await ctx.db
       .query("ignoreRules")
       .withIndex("by_target", (q) =>
@@ -180,6 +211,7 @@ export const getEligibility = query({
 
 export const upsertMetadata = mutation({
   args: {
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
     threadJid: v.string(),
     title: v.optional(v.string()),
     isGroup: v.optional(v.boolean()),
@@ -190,21 +222,30 @@ export const upsertMetadata = mutation({
   },
   handler: async (ctx, args) => {
     const now = Date.now();
+    const provider = args.provider || "whatsapp";
     const config = await getConfig(ctx);
     const threadKind = args.threadKind || classifyThreadKind({
       jid: args.threadJid,
       isGroupHint: args.isGroup,
+      provider,
     });
     const normalizedArchivedAt = args.archivedAt && args.archivedAt > 0 ? args.archivedAt : now;
     const lastMessageAt = Math.max(args.lastMessageAt ?? now, 0);
 
-    const existing = await ctx.db
+    let existing = await ctx.db
       .query("threads")
-      .withIndex("by_jid", (q) => q.eq("jid", args.threadJid))
+      .withIndex("by_provider_and_jid", (q) => q.eq("provider", provider).eq("jid", args.threadJid))
       .first();
+    if (!existing) {
+      existing = await ctx.db
+        .query("threads")
+        .withIndex("by_jid", (q) => q.eq("jid", args.threadJid))
+        .first();
+    }
 
     if (!existing) {
       return await ctx.db.insert("threads", {
+        provider,
         jid: args.threadJid,
         title: args.title,
         isGroup: threadKind === "group",
@@ -219,6 +260,7 @@ export const upsertMetadata = mutation({
     }
 
     await ctx.db.patch(existing._id, {
+      provider: existing.provider || provider,
       title: args.title ?? existing.title,
       isGroup: threadKind === "group",
       threadKind,
@@ -295,6 +337,7 @@ export const backfillEligibilityFields = mutation({
       const computedKind = classifyThreadKind({
         jid: thread.jid,
         isGroupHint: thread.isGroup,
+        provider: thread.provider,
       });
       const patch: {
         threadKind?: "direct" | "group" | "broadcast_or_system";
@@ -336,7 +379,8 @@ export const get = query({
     if (!thread) {
       return null;
     }
-    const threadKind = thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup });
+    const threadKind =
+      thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup, provider: thread.provider });
 
     const messages = await ctx.db
       .query("messages")

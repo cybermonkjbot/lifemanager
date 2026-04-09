@@ -68,6 +68,15 @@ export type AppConfig = {
   statusBuilderReviewRatio: number;
   statusBuilderAudienceJids: string[];
   statusBuilderAudienceSampleSize: number;
+  instagramDmDelayMinMs: number;
+  instagramDmDelayMaxMs: number;
+  instagramTypingMinMs: number;
+  instagramTypingMaxMs: number;
+  instagramSendRateWindowMinutes: number;
+  instagramSendMaxPerThreadInWindow: number;
+  instagramSendMaxGlobalInWindow: number;
+  instagramStoryCadenceHours: number;
+  instagramStoryDailyMaxPosts: number;
 };
 
 export const DEFAULT_APP_CONFIG: AppConfig = {
@@ -136,6 +145,15 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
   statusBuilderReviewRatio: 0.35,
   statusBuilderAudienceJids: [],
   statusBuilderAudienceSampleSize: 80,
+  instagramDmDelayMinMs: 8_000,
+  instagramDmDelayMaxMs: 45_000,
+  instagramTypingMinMs: 1_500,
+  instagramTypingMaxMs: 6_500,
+  instagramSendRateWindowMinutes: 60,
+  instagramSendMaxPerThreadInWindow: 4,
+  instagramSendMaxGlobalInWindow: 40,
+  instagramStoryCadenceHours: 3,
+  instagramStoryDailyMaxPosts: 6,
 };
 
 function parseBoolean(value: string | undefined, fallback: boolean) {
@@ -345,6 +363,45 @@ export async function getConfig(ctx: QueryCtx | MutationCtx): Promise<AppConfig>
         10,
         256,
       ),
+    ),
+    instagramDmDelayMinMs: Math.round(
+      clamp(parseNumber(map.get("instagramDmDelayMinMs"), DEFAULT_APP_CONFIG.instagramDmDelayMinMs), 500, 180_000),
+    ),
+    instagramDmDelayMaxMs: Math.round(
+      clamp(parseNumber(map.get("instagramDmDelayMaxMs"), DEFAULT_APP_CONFIG.instagramDmDelayMaxMs), 500, 240_000),
+    ),
+    instagramTypingMinMs: Math.round(
+      clamp(parseNumber(map.get("instagramTypingMinMs"), DEFAULT_APP_CONFIG.instagramTypingMinMs), 200, 60_000),
+    ),
+    instagramTypingMaxMs: Math.round(
+      clamp(parseNumber(map.get("instagramTypingMaxMs"), DEFAULT_APP_CONFIG.instagramTypingMaxMs), 200, 120_000),
+    ),
+    instagramSendRateWindowMinutes: Math.round(
+      clamp(
+        parseNumber(map.get("instagramSendRateWindowMinutes"), DEFAULT_APP_CONFIG.instagramSendRateWindowMinutes),
+        5,
+        24 * 60,
+      ),
+    ),
+    instagramSendMaxPerThreadInWindow: Math.round(
+      clamp(
+        parseNumber(map.get("instagramSendMaxPerThreadInWindow"), DEFAULT_APP_CONFIG.instagramSendMaxPerThreadInWindow),
+        1,
+        100,
+      ),
+    ),
+    instagramSendMaxGlobalInWindow: Math.round(
+      clamp(
+        parseNumber(map.get("instagramSendMaxGlobalInWindow"), DEFAULT_APP_CONFIG.instagramSendMaxGlobalInWindow),
+        1,
+        1000,
+      ),
+    ),
+    instagramStoryCadenceHours: Math.round(
+      clamp(parseNumber(map.get("instagramStoryCadenceHours"), DEFAULT_APP_CONFIG.instagramStoryCadenceHours), 1, 24 * 7),
+    ),
+    instagramStoryDailyMaxPosts: Math.round(
+      clamp(parseNumber(map.get("instagramStoryDailyMaxPosts"), DEFAULT_APP_CONFIG.instagramStoryDailyMaxPosts), 1, 24),
     ),
   };
 }

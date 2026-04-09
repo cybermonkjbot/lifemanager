@@ -15,6 +15,7 @@ test("extractAliasesFromText ignores text without alias cues", () => {
 
 test("classifyThreadKind detects broadcast/system JIDs", () => {
   assert.equal(classifyThreadKind({ jid: "status@broadcast" }), "broadcast_or_system");
+  assert.equal(classifyThreadKind({ jid: "ig:story:broadcast", provider: "instagram" }), "broadcast_or_system");
   assert.equal(classifyThreadKind({ jid: "12345@g.us" }), "group");
   assert.equal(classifyThreadKind({ jid: "5551999999999@s.whatsapp.net" }), "direct");
 });

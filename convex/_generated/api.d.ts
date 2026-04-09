@@ -32,6 +32,7 @@ import type * as lib_types from "../lib/types.js";
 import type * as media from "../media.js";
 import type * as memory from "../memory.js";
 import type * as memoryBatch from "../memoryBatch.js";
+import type * as migrationsProviders from "../migrationsProviders.js";
 import type * as outbox from "../outbox.js";
 import type * as outreach from "../outreach.js";
 import type * as personality from "../personality.js";
@@ -76,6 +77,7 @@ declare const fullApi: ApiFromModules<{
   media: typeof media;
   memory: typeof memory;
   memoryBatch: typeof memoryBatch;
+  migrationsProviders: typeof migrationsProviders;
   outbox: typeof outbox;
   outreach: typeof outreach;
   personality: typeof personality;

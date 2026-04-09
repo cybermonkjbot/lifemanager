@@ -94,7 +94,7 @@ class WhatsAppSetupManager {
     this.isAutoStartingWorker = true;
 
     try {
-      const before = await getWorkerRuntimeStatus();
+      const before = await getWorkerRuntimeStatus("whatsapp");
       if (before.running) {
         this.setState({
           status: "connected",
@@ -132,7 +132,7 @@ class WhatsAppSetupManager {
 
       for (let i = 0; i < 16; i += 1) {
         await this.sleep(300);
-        const status = await getWorkerRuntimeStatus();
+        const status = await getWorkerRuntimeStatus("whatsapp");
         if (status.running) {
           this.setState({
             status: "connected",
@@ -231,6 +231,7 @@ class WhatsAppSetupManager {
 
     try {
       await client.mutation(convexRefs.systemUpsertSetupStatus, {
+        provider: "whatsapp",
         status: snapshot.status,
         mode: snapshot.mode,
         message: snapshot.message,
@@ -254,6 +255,7 @@ class WhatsAppSetupManager {
 
     try {
       await client.mutation(convexRefs.systemReportSetupListener, {
+        provider: "whatsapp",
         listenerActive,
         listenerMessage,
         hasAuth: authState,
@@ -703,7 +705,7 @@ class WhatsAppSetupManager {
         };
       }
 
-      const worker = await getWorkerRuntimeStatus();
+      const worker = await getWorkerRuntimeStatus("whatsapp");
       if (worker.running) {
         const snapshot: SetupState = {
           ...this.state,
@@ -748,7 +750,7 @@ class WhatsAppSetupManager {
         return snapshot;
       }
 
-      const worker = await getWorkerRuntimeStatus();
+      const worker = await getWorkerRuntimeStatus("whatsapp");
       if (worker.running) {
         const snapshot: SetupState = {
           ...this.state,
@@ -816,7 +818,7 @@ class WhatsAppSetupManager {
     this.setupMode = mode;
     this.pairingPhoneNumber = mode === "pairing_code" ? normalizedPhone : undefined;
 
-    const workerStop = await ensureWorkerStopped();
+    const workerStop = await ensureWorkerStopped(3500, "whatsapp");
     if (workerStop.action === "failed") {
       this.setState({
         status: "error",
@@ -886,7 +888,7 @@ class WhatsAppSetupManager {
     this.clearRetryTimer();
     this.retryCount = 0;
     this.closeSocket();
-    const workerStop = await ensureWorkerStopped();
+    const workerStop = await ensureWorkerStopped(3500, "whatsapp");
     if (workerStop.action === "failed") {
       this.setState({
         status: "error",
@@ -926,7 +928,7 @@ class WhatsAppSetupManager {
     this.closeSocket();
     this.setupMode = "qr";
     this.pairingPhoneNumber = undefined;
-    const workerStop = await ensureWorkerStopped();
+    const workerStop = await ensureWorkerStopped(3500, "whatsapp");
     if (workerStop.action === "failed") {
       this.setState({
         status: "error",
@@ -989,7 +991,7 @@ class WhatsAppSetupManager {
       return this.getState();
     }
 
-    const workerStop = await ensureWorkerStopped();
+    const workerStop = await ensureWorkerStopped(3500, "whatsapp");
     if (workerStop.action === "failed") {
       this.setState({
         status: "error",

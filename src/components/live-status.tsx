@@ -1,14 +1,16 @@
 "use client";
 
 import { SharedMediaPreview } from "@/components/media-preview";
+import { ProviderFilter, type ProviderFilterValue } from "@/components/provider-filter";
 import { formatDateTime, trim } from "@/lib/format";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { useQuery } from "convex/react";
 import Link from "next/link";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 
-const STATUS_JID = "status@broadcast";
+const STATUS_JID_WHATSAPP = "status@broadcast";
+const STATUS_JID_INSTAGRAM = "ig:story:broadcast";
 
 type ThreadSummary = {
   _id: string;
@@ -48,6 +50,8 @@ type QueueNeedsReplyItem = {
   _id: string;
   text: string;
   provider: string;
+  messageProvider?: "whatsapp" | "instagram";
+  isStatusPost?: boolean;
   sendKind?: "text" | "reaction" | "sticker" | "meme";
   mediaCaption?: string;
   mediaPreview?: {
@@ -82,18 +86,44 @@ function statusMessageText(message: ThreadMessage) {
 }
 
 export function LiveStatus() {
-  const threads = useQuery(api.threads.list, { limit: 260 }) as ThreadSummary[] | undefined;
-  const statusThread = useMemo(() => (threads || []).find((thread) => thread.jid === STATUS_JID) || null, [threads]);
+  const [providerFilter, setProviderFilter] = useState<ProviderFilterValue>("all");
+  const threads = useQuery(api.threads.list, { limit: 260, provider: providerFilter }) as ThreadSummary[] | undefined;
+  const statusThread = useMemo(() => {
+    const rows = threads || [];
+    if (providerFilter === "whatsapp") {
+      return rows.find((thread) => thread.jid === STATUS_JID_WHATSAPP) || null;
+    }
+    if (providerFilter === "instagram") {
+      return rows.find((thread) => thread.jid === STATUS_JID_INSTAGRAM) || null;
+    }
+    const whatsapp = rows.find((thread) => thread.jid === STATUS_JID_WHATSAPP) || null;
+    const instagram = rows.find((thread) => thread.jid === STATUS_JID_INSTAGRAM) || null;
+    if (!whatsapp) return instagram;
+    if (!instagram) return whatsapp;
+    return whatsapp.lastMessageAt >= instagram.lastMessageAt ? whatsapp : instagram;
+  }, [providerFilter, threads]);
   const statusThreadId = statusThread?._id;
   const statusData = useQuery(
     api.threads.get,
     statusThreadId ? { threadId: statusThreadId as Id<"threads"> } : "skip",
   ) as StatusThreadPayload | undefined;
 
-  const queue = useQuery(api.queue.list, { draftLimit: 120 }) as QueuePayload | undefined;
+  const queue = useQuery(api.queue.list, {
+    draftLimit: 120,
+    provider: providerFilter,
+  }) as QueuePayload | undefined;
   const pendingStatusDrafts = useMemo(
-    () => (queue?.needsReply || []).filter((item) => item.thread?.jid === STATUS_JID),
-    [queue?.needsReply],
+    () =>
+      (queue?.needsReply || []).filter((item) => {
+        if (providerFilter === "instagram") {
+          return item.isStatusPost === true || item.thread?.jid === STATUS_JID_INSTAGRAM;
+        }
+        if (providerFilter === "whatsapp") {
+          return item.thread?.jid === STATUS_JID_WHATSAPP;
+        }
+        return item.isStatusPost === true || item.thread?.jid === STATUS_JID_WHATSAPP || item.thread?.jid === STATUS_JID_INSTAGRAM;
+      }),
+    [providerFilter, queue?.needsReply],
   );
 
   const messages = useMemo(() => statusData?.messages || [], [statusData?.messages]);
@@ -110,6 +140,11 @@ export function LiveStatus() {
     <section className="panel-grid split-view">
       <article className="panel-card">
         <h3>Queue</h3>
+        <ProviderFilter
+          value={providerFilter}
+          onChange={setProviderFilter}
+          label="Status provider filter"
+        />
         <div className="stack compact">
           <p className="queue-meta">
             Pending review: <strong>{pendingStatusDrafts.length}</strong>
@@ -142,7 +177,7 @@ export function LiveStatus() {
                     <p className="queue-title">{item.thread?.title || "My Status"}</p>
                     <p className="queue-body">{trim(item.mediaCaption || item.text || "", 180)}</p>
                     <p className="queue-meta">
-                      Provider: {item.provider} · Type: {item.sendKind || "text"}
+                      Channel: {item.messageProvider || "whatsapp"} · Model: {item.provider} · Type: {item.sendKind || "text"}
                     </p>
                   </div>
                 </div>

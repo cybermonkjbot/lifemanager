@@ -85,6 +85,15 @@ export const save = mutation({
     statusBuilderReviewRatio: v.optional(v.number()),
     statusBuilderAudienceJids: v.optional(v.array(v.string())),
     statusBuilderAudienceSampleSize: v.optional(v.number()),
+    instagramDmDelayMinMs: v.optional(v.number()),
+    instagramDmDelayMaxMs: v.optional(v.number()),
+    instagramTypingMinMs: v.optional(v.number()),
+    instagramTypingMaxMs: v.optional(v.number()),
+    instagramSendRateWindowMinutes: v.optional(v.number()),
+    instagramSendMaxPerThreadInWindow: v.optional(v.number()),
+    instagramSendMaxGlobalInWindow: v.optional(v.number()),
+    instagramStoryCadenceHours: v.optional(v.number()),
+    instagramStoryDailyMaxPosts: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const outreachContactJids = [...new Set(args.outreachContactJids.map((item) => item.trim()).filter(Boolean))];
@@ -207,6 +216,51 @@ export const save = mutation({
         10,
         256,
       ),
+      instagramDmDelayMinMs: clampInt(
+        args.instagramDmDelayMinMs ?? DEFAULT_APP_CONFIG.instagramDmDelayMinMs,
+        500,
+        180_000,
+      ),
+      instagramDmDelayMaxMs: clampInt(
+        args.instagramDmDelayMaxMs ?? DEFAULT_APP_CONFIG.instagramDmDelayMaxMs,
+        500,
+        240_000,
+      ),
+      instagramTypingMinMs: clampInt(
+        args.instagramTypingMinMs ?? DEFAULT_APP_CONFIG.instagramTypingMinMs,
+        200,
+        60_000,
+      ),
+      instagramTypingMaxMs: clampInt(
+        args.instagramTypingMaxMs ?? DEFAULT_APP_CONFIG.instagramTypingMaxMs,
+        200,
+        120_000,
+      ),
+      instagramSendRateWindowMinutes: clampInt(
+        args.instagramSendRateWindowMinutes ?? DEFAULT_APP_CONFIG.instagramSendRateWindowMinutes,
+        5,
+        24 * 60,
+      ),
+      instagramSendMaxPerThreadInWindow: clampInt(
+        args.instagramSendMaxPerThreadInWindow ?? DEFAULT_APP_CONFIG.instagramSendMaxPerThreadInWindow,
+        1,
+        100,
+      ),
+      instagramSendMaxGlobalInWindow: clampInt(
+        args.instagramSendMaxGlobalInWindow ?? DEFAULT_APP_CONFIG.instagramSendMaxGlobalInWindow,
+        1,
+        1000,
+      ),
+      instagramStoryCadenceHours: clampInt(
+        args.instagramStoryCadenceHours ?? DEFAULT_APP_CONFIG.instagramStoryCadenceHours,
+        1,
+        24 * 7,
+      ),
+      instagramStoryDailyMaxPosts: clampInt(
+        args.instagramStoryDailyMaxPosts ?? DEFAULT_APP_CONFIG.instagramStoryDailyMaxPosts,
+        1,
+        24,
+      ),
     };
 
     // Keep ranges valid after clamping.
@@ -219,6 +273,16 @@ export const save = mutation({
       const swapped = normalized.humanTypingMinMs;
       normalized.humanTypingMinMs = normalized.humanTypingMaxMs;
       normalized.humanTypingMaxMs = swapped;
+    }
+    if (normalized.instagramDmDelayMinMs > normalized.instagramDmDelayMaxMs) {
+      const swapped = normalized.instagramDmDelayMinMs;
+      normalized.instagramDmDelayMinMs = normalized.instagramDmDelayMaxMs;
+      normalized.instagramDmDelayMaxMs = swapped;
+    }
+    if (normalized.instagramTypingMinMs > normalized.instagramTypingMaxMs) {
+      const swapped = normalized.instagramTypingMinMs;
+      normalized.instagramTypingMinMs = normalized.instagramTypingMaxMs;
+      normalized.instagramTypingMaxMs = swapped;
     }
 
     await setConfigValue(ctx, "ignoreGroupsByDefault", normalized.ignoreGroupsByDefault ? "true" : "false");
@@ -285,6 +349,15 @@ export const save = mutation({
     await setConfigValue(ctx, "statusBuilderReviewRatio", String(normalized.statusBuilderReviewRatio));
     await setConfigValue(ctx, "statusBuilderAudienceJids", normalized.statusBuilderAudienceJids.join("\n"));
     await setConfigValue(ctx, "statusBuilderAudienceSampleSize", String(normalized.statusBuilderAudienceSampleSize));
+    await setConfigValue(ctx, "instagramDmDelayMinMs", String(normalized.instagramDmDelayMinMs));
+    await setConfigValue(ctx, "instagramDmDelayMaxMs", String(normalized.instagramDmDelayMaxMs));
+    await setConfigValue(ctx, "instagramTypingMinMs", String(normalized.instagramTypingMinMs));
+    await setConfigValue(ctx, "instagramTypingMaxMs", String(normalized.instagramTypingMaxMs));
+    await setConfigValue(ctx, "instagramSendRateWindowMinutes", String(normalized.instagramSendRateWindowMinutes));
+    await setConfigValue(ctx, "instagramSendMaxPerThreadInWindow", String(normalized.instagramSendMaxPerThreadInWindow));
+    await setConfigValue(ctx, "instagramSendMaxGlobalInWindow", String(normalized.instagramSendMaxGlobalInWindow));
+    await setConfigValue(ctx, "instagramStoryCadenceHours", String(normalized.instagramStoryCadenceHours));
+    await setConfigValue(ctx, "instagramStoryDailyMaxPosts", String(normalized.instagramStoryDailyMaxPosts));
 
     await ctx.db.insert("systemEvents", {
       source: "dashboard",

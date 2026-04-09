@@ -24,6 +24,7 @@
 .DS_Store
 *.pem
 .wa_auth/
+.ig_auth/
 .slm/*.pid
 .slm/self-improvement/
 

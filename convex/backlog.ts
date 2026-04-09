@@ -504,7 +504,7 @@ function firstNameFromThread(thread: { title?: string; jid: string }) {
   if (title) {
     return title.split(/\s+/)[0] || title;
   }
-  return thread.jid.replace(/@s\.whatsapp\.net$/i, "").slice(0, 16);
+  return thread.jid.replace(/(@s\.whatsapp\.net|@ig\.instagram|@instagram)$/i, "").slice(0, 16);
 }
 
 function buildAnswerDraftText(args: {
@@ -557,6 +557,7 @@ function buildRestartDraftText(args: {
 
 export const list = query({
   args: {
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("all"))),
     limit: v.optional(v.number()),
     importance: v.optional(importanceOrAllValidator),
     recommendation: v.optional(recommendationOrAllValidator),
@@ -567,6 +568,7 @@ export const list = query({
     search: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const provider = args.provider || "all";
     const limit = clamp(Math.round(args.limit ?? 80), 1, 200);
     const importanceFilter = args.importance || "all";
     const recommendationFilter = args.recommendation || "all";
@@ -587,6 +589,9 @@ export const list = query({
       stateRows.map(async (state) => {
         const thread = await ctx.db.get(state.threadId);
         if (!thread || resolveThreadKind(thread) === "group") {
+          return null;
+        }
+        if (provider !== "all" && (thread.provider || "whatsapp") !== provider) {
           return null;
         }
 

@@ -23,6 +23,7 @@ const GHOST_ACTIVITY_MIN_TURNS = 4;
 const GHOST_TRIGGER_PROBABILITY = 0.2;
 type IngestMode = "live" | "history_sync" | "history_fetch";
 type InboundMessageType = "text" | "reaction" | "sticker" | "meme" | "image" | "video" | "audio" | "document";
+type MessageProvider = "whatsapp" | "instagram";
 
 type IngestHistoricalResult = {
   threadId: Id<"threads">;
@@ -48,6 +49,10 @@ function normalizeTimestampMs(raw: number | undefined, fallbackMs: number) {
     return value * 1000;
   }
   return value;
+}
+
+function normalizeProvider(provider?: MessageProvider): MessageProvider {
+  return provider === "instagram" ? "instagram" : "whatsapp";
 }
 
 export function extractAliasesFromText(text: string) {
@@ -150,6 +155,7 @@ async function updateAutoAliases(args: {
 
 export const ingest = mutation({
   args: {
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
     threadJid: v.string(),
     senderJid: v.string(),
     senderTitle: v.optional(v.string()),
@@ -175,6 +181,7 @@ export const ingest = mutation({
     threadKind: v.optional(v.union(v.literal("direct"), v.literal("group"), v.literal("broadcast_or_system"))),
     isArchived: v.optional(v.boolean()),
     archivedAt: v.optional(v.number()),
+    providerMessageId: v.optional(v.string()),
     whatsappMessageId: v.optional(v.string()),
     messageAt: v.optional(v.number()),
     skipDraftGeneration: v.optional(v.boolean()),
@@ -182,6 +189,7 @@ export const ingest = mutation({
   },
   handler: async (ctx, args) => {
     const now = Date.now();
+    const messageProvider = normalizeProvider(args.provider);
     const ingestMode: IngestMode = args.ingestMode || "live";
     const isHistoryIngest = ingestMode !== "live";
     const messageAt = normalizeTimestampMs(args.messageAt, now);
@@ -190,16 +198,24 @@ export const ingest = mutation({
 
     let thread = await ctx.db
       .query("threads")
-      .withIndex("by_jid", (q) => q.eq("jid", args.threadJid))
+      .withIndex("by_provider_and_jid", (q) => q.eq("provider", messageProvider).eq("jid", args.threadJid))
       .first();
+    if (!thread) {
+      thread = await ctx.db
+        .query("threads")
+        .withIndex("by_jid", (q) => q.eq("jid", args.threadJid))
+        .first();
+    }
 
     const config = await getConfig(ctx);
-    const inputThreadKind = args.threadKind || classifyThreadKind({ jid: args.threadJid, isGroupHint: args.isGroup });
+    const inputThreadKind =
+      args.threadKind || classifyThreadKind({ jid: args.threadJid, isGroupHint: args.isGroup, provider: messageProvider });
     const shouldIgnoreGroup = inputThreadKind === "group" && config.ignoreGroupsByDefault;
     const normalizedArchivedAt = normalizeTimestampMs(args.archivedAt, messageAt);
 
     if (!thread) {
       const threadId = await ctx.db.insert("threads", {
+        provider: messageProvider,
         jid: args.threadJid,
         title: args.senderTitle,
         isGroup: inputThreadKind === "group",
@@ -219,6 +235,7 @@ export const ingest = mutation({
       }
     } else {
       await ctx.db.patch(thread._id, {
+        provider: thread.provider || messageProvider,
         title: args.senderTitle ?? thread.title,
         isGroup: inputThreadKind === "group",
         threadKind: inputThreadKind,
@@ -253,11 +270,12 @@ export const ingest = mutation({
       )
       .first();
 
-    if (args.whatsappMessageId) {
+    const effectiveMessageId = args.providerMessageId || args.whatsappMessageId;
+    if (effectiveMessageId) {
       const existing = await ctx.db
         .query("messages")
-        .withIndex("by_thread_whatsappMessageId", (q) =>
-          q.eq("threadId", thread._id).eq("whatsappMessageId", args.whatsappMessageId),
+        .withIndex("by_thread_providerMessageId", (q) =>
+          q.eq("threadId", thread._id).eq("providerMessageId", effectiveMessageId),
         )
         .first();
 
@@ -338,21 +356,24 @@ export const ingest = mutation({
     const ignored = isHistoryIngest ? false : !eligibility.allowed;
 
     let reactionTargetMessageId: Id<"messages"> | undefined;
-    if (messageType === "reaction" && args.reactionTargetWhatsAppMessageId) {
+    const reactionTargetProviderMessageId = args.reactionTargetWhatsAppMessageId;
+    if (messageType === "reaction" && reactionTargetProviderMessageId) {
       const targetMessage = await ctx.db
         .query("messages")
-        .withIndex("by_thread_whatsappMessageId", (q) =>
-          q.eq("threadId", thread._id).eq("whatsappMessageId", args.reactionTargetWhatsAppMessageId),
+        .withIndex("by_thread_providerMessageId", (q) =>
+          q.eq("threadId", thread._id).eq("providerMessageId", reactionTargetProviderMessageId),
         )
         .first();
       reactionTargetMessageId = targetMessage?._id;
     }
 
     const messageId = await ctx.db.insert("messages", {
+      provider: messageProvider,
       threadId: thread._id,
       direction: "inbound",
       origin: ingestMode,
       isStatus: args.isStatus ? true : undefined,
+      providerMessageId: effectiveMessageId,
       whatsappMessageId: args.whatsappMessageId,
       senderJid: args.senderJid,
       text: normalizedText,
@@ -381,16 +402,20 @@ export const ingest = mutation({
         await ctx.db.patch(existingReaction._id, {
           emoji,
           direction: "inbound",
+          provider: messageProvider,
+          providerMessageId: effectiveMessageId,
           whatsappMessageId: args.whatsappMessageId,
           updatedAt: now,
         });
       } else {
         await ctx.db.insert("messageReactions", {
+          provider: messageProvider,
           threadId: thread._id,
           messageId: reactionTargetMessageId,
           actorJid,
           direction: "inbound",
           emoji,
+          providerMessageId: effectiveMessageId,
           whatsappMessageId: args.whatsappMessageId,
           createdAt: now,
           updatedAt: now,
@@ -547,6 +572,7 @@ export const ingest = mutation({
 
 export const ingestHistorical = mutation({
   args: {
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
     ingestMode: v.union(v.literal("history_sync"), v.literal("history_fetch")),
     direction: v.union(v.literal("inbound"), v.literal("outbound")),
     threadJid: v.string(),
@@ -574,23 +600,33 @@ export const ingestHistorical = mutation({
     threadKind: v.optional(v.union(v.literal("direct"), v.literal("group"), v.literal("broadcast_or_system"))),
     isArchived: v.optional(v.boolean()),
     archivedAt: v.optional(v.number()),
+    providerMessageId: v.optional(v.string()),
     whatsappMessageId: v.optional(v.string()),
     messageAt: v.optional(v.number()),
   },
   handler: async (ctx, args): Promise<IngestHistoricalResult> => {
     const now = Date.now();
+    const messageProvider = normalizeProvider(args.provider);
     const messageAt = normalizeTimestampMs(args.messageAt, now);
-    const threadKind = args.threadKind || classifyThreadKind({ jid: args.threadJid, isGroupHint: args.isGroup });
+    const threadKind =
+      args.threadKind || classifyThreadKind({ jid: args.threadJid, isGroupHint: args.isGroup, provider: messageProvider });
     const normalizedArchivedAt = normalizeTimestampMs(args.archivedAt, messageAt);
     const normalizedText = args.text.trim() || (args.direction === "outbound" ? "[Historical outbound message]" : "[Historical inbound message]");
     let thread = await ctx.db
       .query("threads")
-      .withIndex("by_jid", (q) => q.eq("jid", args.threadJid))
+      .withIndex("by_provider_and_jid", (q) => q.eq("provider", messageProvider).eq("jid", args.threadJid))
       .first();
+    if (!thread) {
+      thread = await ctx.db
+        .query("threads")
+        .withIndex("by_jid", (q) => q.eq("jid", args.threadJid))
+        .first();
+    }
 
     if (!thread) {
       const config = await getConfig(ctx);
       const threadId = await ctx.db.insert("threads", {
+        provider: messageProvider,
         jid: args.threadJid,
         title: args.senderTitle,
         isGroup: threadKind === "group",
@@ -609,6 +645,7 @@ export const ingestHistorical = mutation({
       }
     } else {
       await ctx.db.patch(thread._id, {
+        provider: thread.provider || messageProvider,
         title: args.senderTitle ?? thread.title,
         isGroup: threadKind === "group",
         threadKind,
@@ -624,11 +661,12 @@ export const ingestHistorical = mutation({
       });
     }
 
-    if (args.whatsappMessageId) {
+    const effectiveMessageId = args.providerMessageId || args.whatsappMessageId;
+    if (effectiveMessageId) {
       const existing = await ctx.db
         .query("messages")
-        .withIndex("by_thread_whatsappMessageId", (q) =>
-          q.eq("threadId", thread._id).eq("whatsappMessageId", args.whatsappMessageId),
+        .withIndex("by_thread_providerMessageId", (q) =>
+          q.eq("threadId", thread._id).eq("providerMessageId", effectiveMessageId),
         )
         .first();
       if (existing) {
@@ -642,10 +680,12 @@ export const ingestHistorical = mutation({
     }
 
     const messageId = await ctx.db.insert("messages", {
+      provider: messageProvider,
       threadId: thread._id,
       direction: args.direction,
       origin: args.ingestMode,
       isStatus: args.isStatus ? true : undefined,
+      providerMessageId: effectiveMessageId,
       whatsappMessageId: args.whatsappMessageId,
       senderJid: args.senderJid,
       text: normalizedText,

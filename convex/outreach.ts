@@ -107,6 +107,7 @@ export const run = internalMutation({
 
     const eligible: Array<{
       threadId: Id<"threads">;
+      messageProvider: "whatsapp" | "instagram";
       jid: string;
       name: string;
       sourceMessageId: Id<"messages">;
@@ -189,6 +190,7 @@ export const run = internalMutation({
 
       eligible.push({
         threadId: thread._id,
+        messageProvider: thread.provider || "whatsapp",
         jid,
         name: extractDisplayName(thread.title, jid),
         sourceMessageId: latestMessage._id,
@@ -210,6 +212,7 @@ export const run = internalMutation({
       const timing = estimateHumanTiming(text);
 
       const draftId = await ctx.db.insert("replyDrafts", {
+        messageProvider: target.messageProvider,
         threadId: target.threadId,
         sourceMessageId: target.sourceMessageId,
         text: AI_OUTREACH_PLACEHOLDER,
@@ -225,6 +228,7 @@ export const run = internalMutation({
       });
 
       const outboxId = await ctx.db.insert("outbox", {
+        messageProvider: target.messageProvider,
         threadId: target.threadId,
         draftId,
         messageText: AI_OUTREACH_PLACEHOLDER,
