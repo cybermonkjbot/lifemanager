@@ -215,6 +215,25 @@ test("postProcessReplyText strips awkward catchphrase prefix while keeping core 
   assert.equal(output, "I can send the update now.");
 });
 
+test("postProcessReplyText strips follow-up questions in steering close modes", () => {
+  const output = postProcessReplyText({
+    text: "Sure, what time should I text you?",
+    inboundText: "I'm driving rn, talk later",
+    historyLines: [],
+  });
+  assert.equal(output.includes("?"), false);
+});
+
+test("postProcessReplyText strips close-mode reopen cues even without question marks", () => {
+  const output = postProcessReplyText({
+    text: "All good, let me know what you think.",
+    inboundText: "Thanks, all good.",
+    historyLines: [],
+  });
+  assert.doesNotMatch(output, /\blet me know\b/i);
+  assert.doesNotMatch(output, /\bwhat you think\b/i);
+});
+
 test("hasBossAddressCue detects vocative boss forms and ignores plain references", () => {
   assert.equal(hasBossAddressCue("Boss, can you send the update?"), true);
   assert.equal(hasBossAddressCue("Hi oga please check this."), true);
@@ -369,6 +388,30 @@ test("detectConversationSteeringMode flags hard stop requests", () => {
 test("detectConversationSteeringMode flags pause requests", () => {
   const mode = detectConversationSteeringMode({
     inboundText: "I'm in a meeting right now, talk later",
+    historyLines: [],
+  });
+  assert.equal(mode, "pause");
+});
+
+test("detectConversationSteeringMode flags driving-now pause requests", () => {
+  const mode = detectConversationSteeringMode({
+    inboundText: "I'm driving rn, will text later",
+    historyLines: [],
+  });
+  assert.equal(mode, "pause");
+});
+
+test("detectConversationSteeringMode flags driving typo shorthand as pause", () => {
+  const mode = detectConversationSteeringMode({
+    inboundText: "im drivin rn",
+    historyLines: [],
+  });
+  assert.equal(mode, "pause");
+});
+
+test("detectConversationSteeringMode flags cannot-text-while-driving pauses", () => {
+  const mode = detectConversationSteeringMode({
+    inboundText: "can't text while driving",
     historyLines: [],
   });
   assert.equal(mode, "pause");
@@ -1500,7 +1543,7 @@ test("generateReplyWithFallback records response workbench diagnostics", async (
 
     const workbenchCall = result.contextToolCalls?.find((call) => call.name === "response_workbench");
     assert.ok(workbenchCall);
-    assert.ok(["answer", "confirm", "clarify", "close"].includes(String(workbenchCall?.output?.replyMode || "")));
+    assert.ok(["answer", "confirm", "clarify", "close", "lead"].includes(String(workbenchCall?.output?.replyMode || "")));
     assert.equal(typeof workbenchCall?.output?.confidence, "number");
   } finally {
     restoreAiEnv(snapshot);
@@ -1544,6 +1587,43 @@ test("generateReplyWithFallback injects clarify reply-mode instruction for ambig
   }
 });
 
+test("generateReplyWithFallback injects lead reply-mode instruction for decision handoff inbound text", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  const requestBodies: string[] = [];
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      requestBodies.push(typeof init?.body === "string" ? init.body : "");
+      return new Response(JSON.stringify({ output_text: "Let's start with the urgent task first." }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "up to you, you choose",
+      historyLines: ["Them: either one works for me"],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "log_only",
+      },
+    });
+
+    assert.equal(result.provider, "azure");
+    assert.ok(requestBodies.some((body) => /Reply mode is LEAD/i.test(body)));
+    assert.ok(requestBodies.some((body) => /Drive momentum/i.test(body)));
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
 test("generateReplyWithFallback injects AI-disclosure consistency instruction when prior disclosure exists", async () => {
   const snapshot = clearAiEnv();
   const originalFetch = globalThis.fetch;
@@ -1577,6 +1657,88 @@ test("generateReplyWithFallback injects AI-disclosure consistency instruction wh
       requestBodies.some((body) => /already disclosed in this chat that an AI assistant helps you/i.test(body)),
     );
     assert.ok(requestBodies.some((body) => /Do not deny or contradict that/i.test(body)));
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback injects personal-first anti-corporate instruction", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  const requestBodies: string[] = [];
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      requestBodies.push(typeof init?.body === "string" ? init.body : "");
+      return new Response(JSON.stringify({ output_text: "Yep, tomorrow evening works." }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "Can we lock tomorrow evening?",
+      historyLines: ["Them: Can we lock tomorrow evening?"],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "log_only",
+      },
+    });
+
+    assert.equal(result.provider, "azure");
+    assert.ok(requestBodies.some((body) => /personal life assistant/i.test(body)));
+    assert.ok(requestBodies.some((body) => /Avoid customer-support phrasing/i.test(body)));
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback injects selected contact-memory facts and logs selection tool call", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  const requestBodies: string[] = [];
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      requestBodies.push(typeof init?.body === "string" ? init.body : "");
+      return new Response(JSON.stringify({ output_text: "Yes, birthday dinner still stands for tonight." }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "Are we still on for your birthday dinner tonight?",
+      historyLines: ["Them: Are we still on for your birthday dinner tonight?"],
+      contactFacts: [
+        { factType: "relationship", factValue: "Her birthday is April 20.", confidence: 0.92 },
+        { factType: "preference", factValue: "She likes direct plans over vague replies.", confidence: 0.78 },
+        { factType: "other", factValue: "Favorite color is teal.", confidence: 0.4 },
+      ],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "log_only",
+      },
+    });
+
+    assert.equal(result.provider, "azure");
+    assert.ok(requestBodies.some((body) => /Known personal context about this contact/i.test(body)));
+    assert.ok(requestBodies.some((body) => /birthday/i.test(body)));
+    const factCall = result.contextToolCalls?.find((call) => call.name === "contact_memory_fact_selection");
+    assert.ok(factCall);
+    assert.ok(Number(factCall?.output?.selectedFacts || 0) >= 1);
   } finally {
     globalThis.fetch = originalFetch;
     restoreAiEnv(snapshot);

@@ -36,6 +36,7 @@ type StyleProfile = {
 type ContactMemoryFact = {
   factValue: string;
   factType: "preference" | "profile" | "schedule" | "relationship" | "promise" | "other";
+  confidence?: number;
 };
 
 type ThreadContext = {
@@ -108,6 +109,7 @@ export async function POST(request: Request) {
 
     let historyLines: string[] = [];
     let styleHints: string[] = [];
+    let contactFacts: ContactMemoryFact[] = [];
     let personality: {
       profileSlug?: string;
       profileName?: string;
@@ -138,7 +140,8 @@ export async function POST(request: Request) {
           limit: 8,
         })
         .catch(() => null)) as { facts?: ContactMemoryFact[] } | null;
-      const factHints = (factsBundle?.facts || []).map((fact) => `Known contact fact (${fact.factType}): ${fact.factValue}`);
+      contactFacts = factsBundle?.facts || [];
+      const factHints = contactFacts.map((fact) => `Known contact fact (${fact.factType}): ${fact.factValue}`);
       styleHints = [...styleHints, ...factHints];
 
       const personalitySetting = (await convex
@@ -169,6 +172,7 @@ export async function POST(request: Request) {
     const aiResult = await generateReplyWithFallback({
       inboundText: message,
       historyLines,
+      contactFacts,
       styleHints,
       styleProfile: scopedStyleProfile || globalStyleProfile || undefined,
       personality,

@@ -124,6 +124,14 @@ type GroundingContext = {
   vibeNotes?: string;
 };
 
+type ContactMemoryFactType = "preference" | "profile" | "schedule" | "relationship" | "promise" | "other";
+
+type ContactMemoryFactContext = {
+  factValue: string;
+  factType: ContactMemoryFactType;
+  confidence?: number;
+};
+
 type AzureApiStyle = "auto" | "chat_completions" | "responses";
 type FallbackMode = "all" | "azure_only";
 type AntiBeggiBeggiTone = "soft" | "firm" | "funny";
@@ -132,6 +140,7 @@ export type ContextToolName =
   | "context_window_detection"
   | "context_window_cleaning"
   | "conversation_history_search"
+  | "contact_memory_fact_selection"
   | "response_workbench";
 
 export type ContextToolCall = {
@@ -150,7 +159,7 @@ export type ContextWindowStats = {
   relevantHistoryLines: number;
 };
 
-type ResponseReplyMode = "answer" | "confirm" | "clarify" | "close";
+type ResponseReplyMode = "answer" | "confirm" | "clarify" | "close" | "lead";
 
 type RuntimeAiTuning = {
   model?: string;
@@ -445,8 +454,13 @@ const PAUSE_PATTERNS = [
   /\b(afk|hmu later|hit me up later|text you later|ping you later)\b/i,
   /\b(busy rn|in class rn|at work rn|in traffic rn)\b/i,
   /\b(i dey (?:road|class|work|traffic|wrk|trafic) rn)\b/i,
+  /\b(i dey drive(?:\s*(?:rn|now))?|i dey drivin(?:\s*(?:rn|now))?)\b/i,
   /\b(i dey waka now|i dey commute now)\b/i,
   /\b(outside rn|outside right now|on the road|in transit)\b/i,
+  /\b(i(?:'|’)m|im|i am)\s+driv(?:ing|in)\b/i,
+  /\bdriv(?:ing|in)\s+(?:rn|right now|now)\b/i,
+  /\b(?:on|behind)\s+the\s+wheel\b/i,
+  /\b(?:can(?:not|'t)|cant)\s+(?:text|chat|talk)\s+(?:while|when)\s+driv(?:ing|in)\b/i,
   /\b(i('|’)m busy|in a meeting|driving right now|about to sleep|heading out)\b/i,
 ];
 const MONEY_REQUEST_PATTERNS = [
@@ -566,6 +580,20 @@ const ACK_ONLY_PATTERNS = [
   /^(safe|safee|we move|we mov|no wahala|nwahala|sharp|copy o|na true|alright na|all good sha|we good abeg|noted boss|thanks o|thank you o+|thx abeg|na so|ehen|sharp sharp)[.!]*$/i,
   /^(thanks|thank you|thx|ty|appreciate it|appreciate you|preciate you)(?:\s+\w{2,12})?[.!]*$/i,
   /^(thanks|thank you|thx|ty|appreciate it|appreciate you)\s*,\s*(all good|we good|sounds good|got it|that helps|done|resolved|all set)[.!]*$/i,
+];
+const LEAD_HANDOFF_PATTERNS = [
+  /\b(up to you|you decide|your call|you choose|pick for me|surprise me)\b/i,
+  /\b(anything works|whatever works|either one works|any option is fine)\b/i,
+  /\b(i (?:do(?:n't|nt) know|dont know)|not sure|no preference)\b/i,
+];
+const LOW_MOMENTUM_PATTERNS = [
+  /^(hmm+|hmmm+|idk|i don't know|i dont know|not sure|whatever|anything|either one|you choose|up to you)[.!]*$/i,
+];
+const CLOSE_MODE_REOPEN_PATTERNS = [
+  /\b(let me know|keep me posted)\b/i,
+  /\b(what do you think|how does that sound|does that work|is that okay)\b/i,
+  /\b(anything else|any other thing|any thoughts?)\b/i,
+  /\b(feel free to .*reach out|reach out if you need)\b/i,
 ];
 
 function clamp01(value: number) {
@@ -998,6 +1026,36 @@ function steeringInstructionForMode(mode: ConversationSteeringMode) {
   return "";
 }
 
+function shouldForceNoFollowUpQuestion(mode: ConversationSteeringMode) {
+  return (
+    mode === "hard_stop" ||
+    mode === "anti_beggi_beggi" ||
+    mode === "anti_sales_pitch" ||
+    mode === "pause" ||
+    mode === "loop" ||
+    mode === "wrap_up"
+  );
+}
+
+function hasLeadHandoffCue(text: string) {
+  const normalized = normalizeOutboundText(text || "");
+  if (!normalized) {
+    return false;
+  }
+  if (LEAD_HANDOFF_PATTERNS.some((pattern) => pattern.test(normalized))) {
+    return true;
+  }
+  return LOW_MOMENTUM_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+function hasCloseModeReopenCue(text: string) {
+  const normalized = normalizeOutboundText(text || "");
+  if (!normalized) {
+    return false;
+  }
+  return CLOSE_MODE_REOPEN_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
 function heuristicReply(input: string, historyLines: string[] = []) {
   const steeringMode = detectConversationSteeringMode({
     inboundText: input,
@@ -1051,6 +1109,22 @@ function heuristicReply(input: string, historyLines: string[] = []) {
       pidginMode
         ? pickVariant(input, ["Sharp, we good here.", "No wahala, talk later.", "Nice one, thanks for update."])
         : pickVariant(input, ["Perfect, we're good here.", "Sounds good, talk soon.", "Great, thanks for the update."]),
+    );
+  }
+
+  if (hasLeadHandoffCue(input)) {
+    return finalize(
+      pidginMode
+        ? pickVariant(input, [
+            "Make we no overthink am, make we start with the most urgent part first.",
+            "I go run with the simple option first so we fit move fast.",
+            "No shaking, make we pick one and move, we fit adjust later if need be.",
+          ])
+        : pickVariant(input, [
+            "Let's not overthink it, we should start with the most urgent part first.",
+            "I'll go with the simpler option first so we can move quickly.",
+            "Let's pick one and move now; we can adjust later if needed.",
+          ]),
     );
   }
 
@@ -1195,6 +1269,12 @@ type ConversationSearchInput = {
   limit: number;
 };
 
+type ContactFactSelectionInput = {
+  contactFacts: ContactMemoryFactContext[];
+  query: string;
+  limit: number;
+};
+
 type ResponseWorkbenchInput = {
   inboundText: string;
   recentHistory: IndexedHistoryLine[];
@@ -1210,7 +1290,24 @@ type ResponseWorkbench = {
   explicitAsks: string[];
   ambiguitySignals: string[];
   confidence: number;
+  personalDomain: PersonalConversationDomain;
+  toneNeed: PersonalToneNeed;
+  businessStyleRisk: boolean;
+  emotionalCue: boolean;
+  planningCue: boolean;
 };
+
+type PersonalConversationDomain =
+  | "relationship"
+  | "family"
+  | "friend"
+  | "plans"
+  | "wellbeing"
+  | "finances"
+  | "work_admin"
+  | "general";
+
+type PersonalToneNeed = "empathy_first" | "direct_action" | "balanced";
 
 function parseBoundedNumber(value: string | undefined, fallback: number, min: number, max: number) {
   const parsed = Number(value);
@@ -1304,6 +1401,101 @@ function hasAmbiguityCue(text: string) {
   return false;
 }
 
+function detectPersonalConversationDomain(text: string): PersonalConversationDomain {
+  const normalized = normalizeOutboundText(text).toLowerCase();
+  if (!normalized) {
+    return "general";
+  }
+  if (
+    /\b(miss you|love you|babe|baby|date|relationship|boyfriend|girlfriend|romantic|us two|kiss|hug)\b/i.test(normalized)
+  ) {
+    return "relationship";
+  }
+  if (
+    /\b(mom|mum|mama|dad|papa|brother|sister|family|wife|husband|son|daughter|aunt|uncle|cousin|in-law)\b/i.test(normalized)
+  ) {
+    return "family";
+  }
+  if (/\b(friend|bestie|bro|sis|homie|fam)\b/i.test(normalized)) {
+    return "friend";
+  }
+  if (
+    /\b(plan|schedule|meeting|meet|tomorrow|tonight|weekend|next week|eta|available|time works|calendar|reschedule)\b/i.test(normalized)
+  ) {
+    return "plans";
+  }
+  if (/\b(stress|anxious|upset|sad|depressed|sick|hospital|therapy|overwhelmed|tired|hurt|pain|panic)\b/i.test(normalized)) {
+    return "wellbeing";
+  }
+  if (/\b(rent|salary|budget|cash|money|transfer|owe|debt|loan|invoice|payment)\b/i.test(normalized)) {
+    return "finances";
+  }
+  if (/\b(client|deliverable|deadline|kpi|sla|ticket|escalat|stakeholder|proposal|quote)\b/i.test(normalized)) {
+    return "work_admin";
+  }
+  return "general";
+}
+
+function inferPersonalToneNeed(args: { inboundText: string; personalDomain: PersonalConversationDomain }): PersonalToneNeed {
+  const normalized = normalizeOutboundText(args.inboundText).toLowerCase();
+  if (!normalized) {
+    return "balanced";
+  }
+  const emotionalCue =
+    /\b(feel|felt|sorry|hurt|lonely|miss|worried|scared|proud|congrats|congratulations|appreciate|thanks)\b/i.test(normalized) ||
+    /[!?]{2,}/.test(normalized);
+  const planningCue =
+    /\b(when|what time|where|how|can you|could you|please|send|share|confirm|book|schedule|set|arrange)\b/i.test(normalized) ||
+    /\?/.test(normalized);
+
+  if (args.personalDomain === "wellbeing" || (emotionalCue && !planningCue)) {
+    return "empathy_first";
+  }
+  if (
+    planningCue ||
+    args.personalDomain === "plans" ||
+    args.personalDomain === "finances" ||
+    args.personalDomain === "work_admin"
+  ) {
+    return "direct_action";
+  }
+  return "balanced";
+}
+
+function inferPersonalContextProfile(args: {
+  inboundText: string;
+  recentHistory: IndexedHistoryLine[];
+  relevantHistory: IndexedHistoryLine[];
+}) {
+  const corpus = [
+    args.inboundText,
+    ...args.recentHistory.slice(-6).map((line) => line.body),
+    ...args.relevantHistory.slice(-4).map((line) => line.body),
+  ]
+    .join(" ")
+    .trim();
+  const personalDomain = detectPersonalConversationDomain(corpus);
+  const toneNeed = inferPersonalToneNeed({
+    inboundText: args.inboundText,
+    personalDomain,
+  });
+  const emotionalCue =
+    /\b(feel|felt|sorry|hurt|lonely|miss|worried|scared|proud|congrats|congratulations|appreciate|thanks|love)\b/i.test(corpus) ||
+    /[!?]{2,}/.test(args.inboundText);
+  const planningCue =
+    /\b(when|where|time|schedule|plan|send|share|confirm|book|arrange|tomorrow|tonight|weekend|eta)\b/i.test(corpus) ||
+    /\?/.test(args.inboundText);
+  const businessStyleRisk = /\b(client|deliverable|deadline|kpi|sla|ticket|escalat|stakeholder|proposal|quote)\b/i.test(corpus);
+
+  return {
+    personalDomain,
+    toneNeed,
+    businessStyleRisk,
+    emotionalCue,
+    planningCue,
+  };
+}
+
 function inferIntentLabel(args: { inboundText: string; steeringMode: ConversationSteeringMode }) {
   if (args.steeringMode === "hard_stop") {
     return "conversation_end";
@@ -1338,8 +1530,16 @@ function buildResponseWorkbench(args: ResponseWorkbenchInput) {
   const startedAt = Date.now();
   const explicitAsks = extractQuestionFragments(args.inboundText);
   const ambiguitySignals: string[] = [];
+  const personalContext = inferPersonalContextProfile({
+    inboundText: args.inboundText,
+    recentHistory: args.recentHistory,
+    relevantHistory: args.relevantHistory,
+  });
   if (hasAmbiguityCue(args.inboundText)) {
     ambiguitySignals.push("ambiguous_reference");
+  }
+  if (hasLeadHandoffCue(args.inboundText)) {
+    ambiguitySignals.push("decision_handoff");
   }
   if (explicitAsks.length === 0 && /\b(can|could|would|will|should)\b/i.test(args.inboundText)) {
     ambiguitySignals.push("implicit_request_without_question_mark");
@@ -1358,6 +1558,8 @@ function buildResponseWorkbench(args: ResponseWorkbenchInput) {
     args.steeringMode === "anti_sales_pitch"
   ) {
     replyMode = "close";
+  } else if (explicitAsks.length === 0 && hasLeadHandoffCue(args.inboundText)) {
+    replyMode = "lead";
   } else if (explicitAsks.length === 0 && /\b(confirm|is that fine|is that okay|still on|we good)\b/i.test(args.inboundText)) {
     replyMode = "confirm";
   } else if (ambiguitySignals.length > 0 && explicitAsks.length === 0) {
@@ -1379,6 +1581,11 @@ function buildResponseWorkbench(args: ResponseWorkbenchInput) {
     explicitAsks,
     ambiguitySignals,
     confidence,
+    personalDomain: personalContext.personalDomain,
+    toneNeed: personalContext.toneNeed,
+    businessStyleRisk: personalContext.businessStyleRisk,
+    emotionalCue: personalContext.emotionalCue,
+    planningCue: personalContext.planningCue,
   };
 
   return {
@@ -1400,6 +1607,11 @@ function buildResponseWorkbench(args: ResponseWorkbenchInput) {
         explicitAskCount: workbench.explicitAsks.length,
         ambiguityCount: workbench.ambiguitySignals.length,
         confidence: workbench.confidence,
+        personalDomain: workbench.personalDomain,
+        toneNeed: workbench.toneNeed,
+        businessStyleRisk: workbench.businessStyleRisk,
+        emotionalCue: workbench.emotionalCue,
+        planningCue: workbench.planningCue,
       },
     },
   };
@@ -1573,6 +1785,72 @@ function runConversationHistorySearchTool(args: ConversationSearchInput) {
   };
 }
 
+function runContactMemoryFactSelectionTool(args: ContactFactSelectionInput) {
+  const startedAt = Date.now();
+  const limit = Math.round(Math.max(1, Math.min(args.limit, 8)));
+  const queryKeywords = Array.from(new Set(extractKeywords(args.query))).slice(0, 20);
+  const factTypeWeight: Record<ContactMemoryFactType, number> = {
+    relationship: 1.1,
+    schedule: 1.05,
+    preference: 1,
+    profile: 0.95,
+    promise: 0.9,
+    other: 0.8,
+  };
+
+  const scored = args.contactFacts
+    .map((fact) => {
+      const normalized = normalizeOutboundText(fact.factValue || "");
+      if (!normalized) {
+        return null;
+      }
+      const factKeywords = new Set(extractKeywords(normalized));
+      let overlap = 0;
+      for (const keyword of queryKeywords) {
+        if (factKeywords.has(keyword)) {
+          overlap += 1;
+        }
+      }
+      const overlapScore = overlap * 2.2;
+      const confidenceScore = clamp01(Number(fact.confidence ?? 0.55));
+      const typeWeight = factTypeWeight[fact.factType] ?? 0.8;
+      const score = (overlapScore + confidenceScore) * typeWeight;
+      return {
+        factType: fact.factType,
+        factValue: normalized,
+        confidence: confidenceScore,
+        overlap,
+        score,
+      };
+    })
+    .filter((item): item is NonNullable<typeof item> => Boolean(item))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
+
+  const matchedCount = scored.filter((item) => item.overlap > 0).length;
+  const selectedFacts =
+    matchedCount > 0 ? scored.filter((item) => item.overlap > 0).slice(0, limit) : scored.slice(0, Math.min(3, limit));
+  const latencyMs = Date.now() - startedAt;
+
+  return {
+    selectedFacts,
+    call: {
+      name: "contact_memory_fact_selection" as const,
+      latencyMs,
+      input: {
+        queryKeywords: queryKeywords.slice(0, 12),
+        availableFacts: args.contactFacts.length,
+        limit,
+      },
+      output: {
+        selectedFacts: selectedFacts.length,
+        matchedFacts: matchedCount,
+        selectedTypes: Array.from(new Set(selectedFacts.map((fact) => fact.factType))),
+      },
+    },
+  };
+}
+
 function runContextWindowDetectionTool(args: ContextWindowDetectionInput) {
   const startedAt = Date.now();
   const maxContextTokens = Math.max(512, Math.min(args.maxContextTokens, 200_000));
@@ -1615,6 +1893,7 @@ function buildPrompt(args: {
   inboundText: string;
   historyLines: string[];
   historySearchOverride?: HistorySearchOverride;
+  contactFacts?: ContactMemoryFactContext[];
   styleHints: string[];
   styleProfile?: StyleProfileContext;
   personality?: PersonalityContext;
@@ -1782,6 +2061,21 @@ function buildPrompt(args: {
   let relevantHistory = historySearchHits
     .filter((hit) => !recentHistory.some((recent) => recent.index === hit.index))
     .slice(-contextSearchLineLimit);
+  let selectedContactFacts: Array<{
+    factType: ContactMemoryFactType;
+    factValue: string;
+    confidence: number;
+    overlap: number;
+  }> = [];
+  if (Array.isArray(args.contactFacts) && args.contactFacts.length > 0) {
+    const selected = runContactMemoryFactSelectionTool({
+      contactFacts: args.contactFacts,
+      query: args.inboundText,
+      limit: 5,
+    });
+    selectedContactFacts = selected.selectedFacts;
+    toolCalls.push(selected.call);
+  }
 
   const outboundSamples = cleanedHistory.cleaned
     .filter((line) => line.line.startsWith("Me:"))
@@ -1907,12 +2201,17 @@ function buildPrompt(args: {
       ? "Reply mode is CLARIFY. Ask one concise clarifying question before making assumptions."
       : responseWorkbench.workbench.replyMode === "confirm"
         ? "Reply mode is CONFIRM. Confirm succinctly and keep the response brief."
+        : responseWorkbench.workbench.replyMode === "lead"
+          ? "Reply mode is LEAD. Drive momentum: propose one concrete next step or recommendation. Ask at most one narrow question only if required to unblock action."
         : responseWorkbench.workbench.replyMode === "close"
           ? "Reply mode is CLOSE. End gracefully in one short line without reopening the topic."
           : "Reply mode is ANSWER. Give a direct answer/action-focused reply grounded in the latest ask.";
   const responseWorkbenchSummary = [
     `Intent label: ${responseWorkbench.workbench.intentLabel}`,
     `Reply mode: ${responseWorkbench.workbench.replyMode}`,
+    `Personal domain: ${responseWorkbench.workbench.personalDomain}`,
+    `Tone need: ${responseWorkbench.workbench.toneNeed}`,
+    `Business-style risk: ${responseWorkbench.workbench.businessStyleRisk ? "yes" : "no"}`,
     responseWorkbench.workbench.explicitAsks.length > 0
       ? `Explicit asks: ${responseWorkbench.workbench.explicitAsks.join(" | ")}`
       : "Explicit asks: none",
@@ -1925,16 +2224,19 @@ function buildPrompt(args: {
   const buildPromptText = () =>
     [
       "You are writing one WhatsApp reply as the account owner.",
+      "This is a personal life assistant for everyday chats (friends, family, relationships, plans), not a business support bot.",
       "Use an editor-style workflow: first plan quickly from context, then write the final message.",
       "Write like a real person: warm, calm, confident, and practical.",
       "Prefer one concise line. Only use a second short line when it clearly adds needed context.",
       "Sound conversational and specific, never stiff or corporate.",
+      "Avoid customer-support phrasing (ticket, escalation, SLA, thanks for reaching out) and avoid email-style sign-offs.",
       "Directly react to something concrete in the latest inbound message (topic, emotion, or request).",
       aiDisclosureContext
         ? "You have already disclosed in this chat that an AI assistant helps you. Do not deny or contradict that. Keep references brief and only when relevant."
         : "Do not mention AI, policies, prompt rules, or internal reasoning.",
       "Do not overpromise. If timing is uncertain, say you'll confirm shortly.",
       "Do not prolong the conversation unnecessarily. If the intent is complete, close gracefully in one short line.",
+      "When the other person hands you the choice or sounds indecisive, take the lead with one practical recommendation instead of bouncing back vague follow-up prompts.",
       "Do not use emoji characters.",
       "Avoid direct name address by default. Only use the contact's name if they used your name first in the latest message or disambiguation is required.",
       "Avoid generic fillers like 'Noted', 'As an AI', 'I hope this message finds you well', or repetitive templates.",
@@ -1956,6 +2258,14 @@ function buildPrompt(args: {
       bossEscalationInstruction,
       mimicryInjectionInstruction,
       responseWorkbenchInstruction,
+      responseWorkbench.workbench.toneNeed === "empathy_first"
+        ? "Tone mode is EMPATHY_FIRST. Start with one short acknowledgment of their feeling, then move to the practical reply."
+        : responseWorkbench.workbench.toneNeed === "direct_action"
+          ? "Tone mode is DIRECT_ACTION. Prioritize a concrete answer, recommendation, or next step quickly."
+          : "Tone mode is BALANCED. Blend warmth and action in one concise reply.",
+      responseWorkbench.workbench.businessStyleRisk
+        ? "Keep wording personal and human; avoid sounding like account management, customer support, or business ops."
+        : "",
       replyPolicyInstruction ? `Additional reply policy: ${replyPolicyInstruction}` : "",
       mimicryInstruction,
       personalityLevelInstruction,
@@ -1977,6 +2287,11 @@ function buildPrompt(args: {
         : "",
       args.grounding?.autoAliases?.length ? `Known contact aliases: ${args.grounding.autoAliases.slice(0, 8).join(", ")}` : "",
       args.grounding?.vibeNotes ? `Conversation vibe notes: ${args.grounding.vibeNotes}` : "",
+      selectedContactFacts.length > 0
+        ? `Known personal context about this contact (use naturally only if relevant):\n${selectedContactFacts
+            .map((fact) => `- ${fact.factType}: ${fact.factValue}`)
+            .join("\n")}`
+        : "",
       hints ? `Style hints: ${hints}` : "",
       phrases ? `Optional lexical fingerprints (inspiration only, do not copy verbatim): ${phrases}` : "",
       outboundSamples ? `Recent sent-message examples: ${outboundSamples}` : "",
@@ -2374,7 +2689,13 @@ export function postProcessReplyText(args: {
   });
   const withoutGenderedWording = stripGenderedWording(withoutAiContradiction, knownGender, jokeContext);
   const withoutAwkwardCatchphrase = stripAwkwardCatchphrases(withoutGenderedWording);
-  const finalText = withoutAwkwardCatchphrase || fallback;
+  const shouldForceCloseOut =
+    shouldForceNoFollowUpQuestion(steeringMode) &&
+    (/\?/.test(withoutAwkwardCatchphrase) || hasCloseModeReopenCue(withoutAwkwardCatchphrase));
+  const withoutFollowUpQuestion = shouldForceCloseOut
+    ? normalizeOutboundText(heuristicReply(args.inboundText, args.historyLines || []))
+    : withoutAwkwardCatchphrase;
+  const finalText = withoutFollowUpQuestion || fallback;
   return hasAwkwardCatchphrase(finalText) ? fallback : finalText;
 }
 
@@ -4753,6 +5074,7 @@ export async function generateReplyWithFallback(args: {
   inboundText: string;
   historyLines: string[];
   historySearchOverride?: HistorySearchOverride;
+  contactFacts?: ContactMemoryFactContext[];
   styleHints: string[];
   styleProfile?: StyleProfileContext;
   personality?: PersonalityContext;

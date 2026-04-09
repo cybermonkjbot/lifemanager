@@ -824,7 +824,11 @@ function inferWorkerContextHints(inboundText: string): WorkerContextToolName[] {
   if (/(before|earlier|previous|remember|recall|mentioned|as discussed)/i.test(normalized)) {
     hints.push("history_search");
   }
-  if (/(birthday|prefer|likes|profile|fact|call me|remember about)/i.test(normalized)) {
+  if (
+    /(birthday|anniversary|prefer|likes|profile|fact|call me|remember about|my mom|my dad|my family|we planned|schedule|tomorrow|weekend|trip)/i.test(
+      normalized,
+    )
+  ) {
     hints.push("contact_facts_list");
   }
   return [...new Set(hints)];
@@ -3790,7 +3794,11 @@ function resolveTextEmojiAllowlist() {
         }
 
         const historySearchLimit = Math.max(8, Math.min(runtimeSettings?.aiHistoryLineLimit ?? 12, 20));
-        const shouldRefreshFacts = olderContextDecision.explicitRecallCue || /(birthday|prefer|likes|profile|fact|call me)/i.test(inboundTextForAi);
+        const shouldRefreshFacts =
+          olderContextDecision.explicitRecallCue ||
+          /(birthday|anniversary|prefer|likes|profile|fact|call me|remember|my mom|my dad|my family|plan|schedule|trip|weekend|tomorrow)/i.test(
+            inboundTextForAi,
+          );
         const orchestration = await runWorkerContextToolOrchestration({
           convex,
           threadId: ingest.threadId,
@@ -3879,6 +3887,7 @@ function resolveTextEmojiAllowlist() {
             inboundText: inboundTextForAi,
             historyLines,
             historySearchOverride,
+            contactFacts,
             styleHints,
             styleProfile: styleProfile || undefined,
             personality: personalitySetting
@@ -3943,6 +3952,7 @@ function resolveTextEmojiAllowlist() {
             inboundText: inboundTextForAi,
             historyLines,
             historySearchOverride,
+            contactFacts,
             styleHints: [...styleHints, ...guardrailHints],
             styleProfile: styleProfile || undefined,
             personality: personalitySetting
@@ -4460,18 +4470,27 @@ function resolveTextEmojiAllowlist() {
       inboundText: promptSeed,
       historyLines,
       allowHistorySearch: true,
-      includeContactFacts: false,
+      includeContactFacts: true,
       allowFactExtraction: false,
       historySearchLimit: Math.max(8, Math.min(runtimeSettings?.aiHistoryLineLimit ?? 12, 20)),
       factsLimit: 8,
     });
     const outreachHistoryOverride = outreachContextTools.historySearchOverride;
+    const outreachContactFacts = outreachContextTools.contactFacts;
+    const outreachStyleHints =
+      outreachContactFacts.length > 0
+        ? [
+            ...styleHints,
+            ...outreachContactFacts.map((fact) => `Known contact fact (${fact.factType}): ${fact.factValue}`),
+          ]
+        : styleHints;
 
     const ai = await generateReplyWithFallback({
       inboundText: promptSeed,
       historyLines,
       historySearchOverride: outreachHistoryOverride,
-      styleHints,
+      contactFacts: outreachContactFacts,
+      styleHints: outreachStyleHints,
       styleProfile: styleProfile || undefined,
       personality: personalitySetting
         ? {

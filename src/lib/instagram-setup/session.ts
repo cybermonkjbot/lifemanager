@@ -32,8 +32,19 @@ type PersistedSessionMeta = {
 };
 
 type PersistedChallenge = {
+  kind: "checkpoint";
   username: string;
   serializedState: Record<string, unknown>;
+  updatedAt: number;
+};
+
+type PersistedTwoFactor = {
+  kind: "two_factor";
+  username: string;
+  serializedState: Record<string, unknown>;
+  twoFactorIdentifier: string;
+  verificationMethod: "1" | "3";
+  trustThisDevice: "1" | "0";
   updatedAt: number;
 };
 
@@ -83,6 +94,10 @@ class InstagramSetupManager {
 
   private get challengePath() {
     return join(this.authDir, "challenge.json");
+  }
+
+  private get twoFactorPath() {
+    return join(this.authDir, "two-factor.json");
   }
 
   private getConvexClient() {
@@ -205,6 +220,7 @@ class InstagramSetupManager {
     delete (serialized as { constants?: unknown }).constants;
 
     const payload: PersistedChallenge = {
+      kind: "checkpoint",
       username,
       serializedState: serialized,
       updatedAt: Date.now(),
@@ -212,10 +228,36 @@ class InstagramSetupManager {
     await writeFile(this.challengePath, JSON.stringify(payload), "utf8");
   }
 
+  private async writeTwoFactorState(
+    ig: IgApiClient,
+    options: {
+      username: string;
+      twoFactorIdentifier: string;
+      verificationMethod: "1" | "3";
+      trustThisDevice?: "1" | "0";
+    },
+  ) {
+    await this.ensureAuthDir();
+    const serialized = (await ig.state.serialize()) as Record<string, unknown>;
+    delete (serialized as { constants?: unknown }).constants;
+
+    const payload: PersistedTwoFactor = {
+      kind: "two_factor",
+      username: options.username,
+      serializedState: serialized,
+      twoFactorIdentifier: options.twoFactorIdentifier,
+      verificationMethod: options.verificationMethod,
+      trustThisDevice: options.trustThisDevice || "1",
+      updatedAt: Date.now(),
+    };
+    await writeFile(this.twoFactorPath, JSON.stringify(payload), "utf8");
+  }
+
   private async clearChallengeState() {
     this.challengeClient = null;
     this.challengeUsername = null;
     await rm(this.challengePath, { force: true }).catch(() => undefined);
+    await rm(this.twoFactorPath, { force: true }).catch(() => undefined);
   }
 
   private async restoreChallengeClient() {
@@ -226,7 +268,7 @@ class InstagramSetupManager {
     try {
       const raw = await readFile(this.challengePath, "utf8");
       const parsed = JSON.parse(raw) as PersistedChallenge;
-      if (!parsed.username || !parsed.serializedState) {
+      if ((parsed.kind && parsed.kind !== "checkpoint") || !parsed.username || !parsed.serializedState) {
         return null;
       }
 
@@ -236,6 +278,34 @@ class InstagramSetupManager {
       this.challengeClient = ig;
       this.challengeUsername = parsed.username;
       return { ig, username: parsed.username };
+    } catch {
+      return null;
+    }
+  }
+
+  private async restoreTwoFactorClient() {
+    try {
+      const raw = await readFile(this.twoFactorPath, "utf8");
+      const parsed = JSON.parse(raw) as PersistedTwoFactor;
+      if (
+        parsed.kind !== "two_factor" ||
+        !parsed.username ||
+        !parsed.serializedState ||
+        !parsed.twoFactorIdentifier
+      ) {
+        return null;
+      }
+
+      const ig = new IgApiClient();
+      ig.state.generateDevice(parsed.username);
+      await ig.state.deserialize(parsed.serializedState);
+      return {
+        ig,
+        username: parsed.username,
+        twoFactorIdentifier: parsed.twoFactorIdentifier,
+        verificationMethod: parsed.verificationMethod || "1",
+        trustThisDevice: parsed.trustThisDevice || "1",
+      };
     } catch {
       return null;
     }
@@ -262,7 +332,13 @@ class InstagramSetupManager {
     const ig = new IgApiClient();
     ig.state.generateDevice(username);
     await ig.simulate.preLoginFlow().catch(() => undefined);
-    await ig.account.login(username, password);
+    try {
+      await ig.account.login(username, password);
+    } catch (error) {
+      const withClient = error as Error & { igClient?: IgApiClient };
+      withClient.igClient = ig;
+      throw withClient;
+    }
     process.nextTick(async () => {
       await ig.simulate.postLoginFlow().catch(() => undefined);
     });
@@ -350,6 +426,38 @@ class InstagramSetupManager {
       };
     };
     return body.challenge?.step_data?.contact_point || body.challenge?.step_data?.email;
+  }
+
+  private describeResponseError(error: IgResponseError) {
+    const body = (error.response?.body || {}) as {
+      message?: unknown;
+      error_type?: unknown;
+      checkpoint_url?: unknown;
+    };
+
+    const message = typeof body.message === "string" ? body.message.trim() : "";
+    const errorType = typeof body.error_type === "string" ? body.error_type.trim() : "";
+    const hasCheckpointUrl = typeof body.checkpoint_url === "string" && body.checkpoint_url.length > 0;
+
+    if (hasCheckpointUrl) {
+      return "Instagram requested a verification checkpoint. Retry sign-in and enter the challenge code when prompted.";
+    }
+
+    if (message) {
+      if (/please wait a few minutes/i.test(message)) {
+        return "Instagram is rate-limiting login attempts. Wait a few minutes, then retry.";
+      }
+      if (/suspicious login|unusual login attempt/i.test(message)) {
+        return "Instagram flagged this as a suspicious login attempt. Confirm the challenge and retry.";
+      }
+      return message;
+    }
+
+    if (errorType) {
+      return `Instagram authentication failed (${errorType}).`;
+    }
+
+    return "";
   }
 
   async getState(): Promise<InstagramSetupState> {
@@ -475,26 +583,70 @@ class InstagramSetupManager {
         return this.getState();
       }
 
-      if (error instanceof IgLoginBadPasswordError || error instanceof IgLoginInvalidUserError) {
+      if (error instanceof IgLoginTwoFactorRequiredError) {
+        const body = (error.response?.body || {}) as {
+          two_factor_info?: {
+            two_factor_identifier?: string;
+            sms_two_factor_on?: boolean;
+            totp_two_factor_on?: boolean;
+            obfuscated_phone_number?: string;
+          };
+        };
+        const info = body.two_factor_info || {};
+        const twoFactorIdentifier = String(info.two_factor_identifier || "").trim();
+        const verificationMethod: "1" | "3" = info.totp_two_factor_on ? "3" : "1";
+        const contactPoint = info.obfuscated_phone_number || "your authenticator app";
+        const maybeClient = (error as Error & { igClient?: IgApiClient }).igClient;
+
+        if (!maybeClient || !twoFactorIdentifier) {
+          this.setState({
+            status: "error",
+            mode: "password",
+            message: "Instagram requested two-factor authentication. Retry login and enter code when prompted.",
+          });
+          return this.getState();
+        }
+
+        await this.writeTwoFactorState(maybeClient, {
+          username,
+          twoFactorIdentifier,
+          verificationMethod,
+          trustThisDevice: "1",
+        }).catch(() => undefined);
+
+        await rm(this.challengePath, { force: true }).catch(() => undefined);
+        this.challengeClient = null;
+        this.challengeUsername = null;
+
         this.setState({
-          status: "error",
-          mode: "password",
-          message: "Instagram login failed. Check username/password and try again.",
+          status: "challenge_required",
+          mode: "challenge_code",
+          challengeContactPoint: contactPoint,
+          message:
+            verificationMethod === "3"
+              ? "Two-factor required. Enter the code from your authenticator app."
+              : `Two-factor required. Enter the code sent to ${contactPoint}.`,
         });
+        await this.reportListenerRuntimeState(false, "Instagram two-factor required.", false);
         return this.getState();
       }
 
-      if (error instanceof IgLoginTwoFactorRequiredError) {
+      if (error instanceof IgLoginBadPasswordError || error instanceof IgLoginInvalidUserError) {
+        const responseMessage = this.describeResponseError(error);
         this.setState({
           status: "error",
           mode: "password",
-          message: "Instagram requested two-factor authentication not supported in this flow yet.",
+          message:
+            responseMessage ||
+            (error instanceof IgLoginInvalidUserError
+              ? "Instagram could not find that username. Use your Instagram username (not email/phone) and try again."
+              : "Instagram rejected the password for this account. Re-enter password and retry."),
         });
         return this.getState();
       }
 
       if (error instanceof IgResponseError) {
-        const responseMessage = String((error.response?.body as { message?: string } | undefined)?.message || "").trim();
+        const responseMessage = this.describeResponseError(error);
         this.setState({
           status: "error",
           mode: "password",
@@ -521,6 +673,71 @@ class InstagramSetupManager {
         message: "Challenge code is required.",
       });
       return this.getState();
+    }
+
+    const twoFactor = await this.restoreTwoFactorClient();
+    if (twoFactor) {
+      this.setState({
+        status: "authenticating",
+        mode: "challenge_code",
+        message: "Submitting two-factor code...",
+      });
+
+      try {
+        await twoFactor.ig.account.twoFactorLogin({
+          username: twoFactor.username,
+          verificationCode: code,
+          twoFactorIdentifier: twoFactor.twoFactorIdentifier,
+          verificationMethod: twoFactor.verificationMethod,
+          trustThisDevice: twoFactor.trustThisDevice,
+        });
+        process.nextTick(async () => {
+          await twoFactor.ig.simulate.postLoginFlow().catch(() => undefined);
+        });
+        await this.writeSessionState(twoFactor.ig, twoFactor.username);
+        await this.clearChallengeState();
+        await this.reportListenerRuntimeState(false, "Instagram worker listener is offline.", true);
+        this.setState({
+          status: "connected",
+          mode: "password",
+          challengeContactPoint: undefined,
+          message: "Instagram verified. Starting worker automatically...",
+        });
+        void this.autoStartWorker();
+        return this.getState();
+      } catch (error) {
+        if (error instanceof IgCheckpointError) {
+          const contactPoint = this.extractChallengeContactPoint(error) || this.state.challengeContactPoint;
+          await this.writeChallengeState(twoFactor.ig, twoFactor.username).catch(() => undefined);
+          await rm(this.twoFactorPath, { force: true }).catch(() => undefined);
+          this.setState({
+            status: "challenge_required",
+            mode: "challenge_code",
+            challengeContactPoint: contactPoint,
+            message: contactPoint
+              ? `Challenge still pending. Enter the code sent to ${contactPoint}.`
+              : "Challenge still pending. Enter the latest code and retry.",
+          });
+          return this.getState();
+        }
+
+        if (error instanceof IgResponseError) {
+          const responseMessage = this.describeResponseError(error);
+          this.setState({
+            status: "challenge_required",
+            mode: "challenge_code",
+            message: responseMessage || "Invalid two-factor code. Check the latest code and retry.",
+          });
+          return this.getState();
+        }
+
+        this.setState({
+          status: "error",
+          mode: "challenge_code",
+          message: error instanceof Error ? error.message : "Failed to submit two-factor code.",
+        });
+        return this.getState();
+      }
     }
 
     const challenge = await this.restoreChallengeClient();
