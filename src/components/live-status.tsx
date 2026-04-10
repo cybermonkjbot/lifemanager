@@ -1,5 +1,6 @@
 "use client";
 
+import { LoadingBlock } from "@/components/loading-state";
 import { SharedMediaPreview } from "@/components/media-preview";
 import { ProviderFilter, type ProviderFilterValue } from "@/components/provider-filter";
 import { formatDateTime, trim } from "@/lib/format";
@@ -134,6 +135,7 @@ export function LiveStatus() {
   const timeline = useMemo(() => [...outboundStatuses].reverse(), [outboundStatuses]);
 
   const threadsLoading = threads === undefined;
+  const queueLoading = queue === undefined;
   const statusLoading = statusThreadId ? statusData === undefined : false;
 
   return (
@@ -147,12 +149,12 @@ export function LiveStatus() {
         />
         <div className="stack compact">
           <p className="queue-meta">
-            Pending review: <strong>{pendingStatusDrafts.length}</strong>
+            Pending review: <strong>{queueLoading ? "…" : pendingStatusDrafts.length}</strong>
           </p>
           <p className="queue-meta">
-            Posted statuses: <strong>{outboundStatuses.length}</strong>
+            Posted statuses: <strong>{threadsLoading || statusLoading ? "…" : outboundStatuses.length}</strong>
           </p>
-          {outboundStatuses.length > 0 ? (
+          {!threadsLoading && !statusLoading && outboundStatuses.length > 0 ? (
             <p className="queue-meta">Last posted: {formatDateTime(outboundStatuses[outboundStatuses.length - 1].messageAt)}</p>
           ) : null}
 
@@ -167,7 +169,9 @@ export function LiveStatus() {
             ) : null}
           </div>
 
-          {pendingStatusDrafts.length === 0 ? (
+          {queueLoading ? (
+            <LoadingBlock label="Loading status queue…" rows={2} compact />
+          ) : pendingStatusDrafts.length === 0 ? (
             <p className="empty-line">No pending status drafts.</p>
           ) : (
             <div className="stack compact">
@@ -190,7 +194,7 @@ export function LiveStatus() {
       <article className="panel-card">
         <h3>Timeline</h3>
         {threadsLoading || statusLoading ? (
-          <p className="empty-line">Loading statuses...</p>
+          <LoadingBlock label="Loading statuses..." rows={3} />
         ) : !statusThread ? (
           <p className="empty-line">No status thread yet.</p>
         ) : timeline.length === 0 ? (

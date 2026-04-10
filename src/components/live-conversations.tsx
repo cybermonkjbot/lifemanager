@@ -1,16 +1,18 @@
 "use client";
 
 import { ActionNotices } from "@/components/action-notices";
+import { LoadingBlock, LoadingIndicator } from "@/components/loading-state";
 import { SharedMediaPreview } from "@/components/media-preview";
 import { ProviderFilter, type ProviderFilterValue } from "@/components/provider-filter";
 import { UIModal } from "@/components/ui-modal";
+import { followupRescheduleDueAt } from "@/lib/ui/followups";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
 import type { MediaPreviewResource } from "@/lib/ui/media";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { useMutation, useQuery } from "convex/react";
 import Link from "next/link";
-import { formatDateTime, trim } from "@/lib/format";
+import { formatDateTime, formatDateTimeWithRelative, trim } from "@/lib/format";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 type LiveConversationsProps = {
@@ -102,6 +104,86 @@ type ThreadMessage = {
   mediaCaption?: string;
   mediaPreview?: MessageMediaPreview | null;
   messageAt: number;
+};
+
+type ThreadReviewNeedsReplyItem = {
+  _id: string;
+  messageProvider?: "whatsapp" | "instagram";
+  provider: string;
+  delayMs: number;
+  typingMs: number;
+  text: string;
+  sendKind?: "text" | "reaction" | "sticker" | "meme";
+  mediaAssetId?: string;
+  mediaCaption?: string;
+  mediaPreview?: MessageMediaPreview | null;
+  sourceMessageId: string;
+  sourceMessage?:
+    | {
+        _id: string;
+        text?: string;
+        mediaAssetId?: string;
+        mediaCaption?: string;
+        mediaPreview?: MessageMediaPreview | null;
+      }
+    | null;
+};
+
+type ThreadReviewFollowupItem = {
+  _id: string;
+  sourceMessageId: string;
+  reason: string;
+  dueAt: number;
+  confidence?: number;
+  sourceSnippet?: string;
+  sourceMessage?:
+    | {
+        _id: string;
+        text?: string;
+        messageAt?: number;
+        direction?: "inbound" | "outbound";
+        mediaAssetId?: string;
+        mediaCaption?: string;
+        mediaPreview?: MessageMediaPreview | null;
+      }
+    | null;
+};
+
+type ThreadReviewTodoItem = {
+  _id: string;
+  sourceMessageId: string;
+  title: string;
+  suggestedDueAt?: number;
+  sourceMessage?:
+    | {
+        _id: string;
+        text?: string;
+        messageAt?: number;
+        direction?: "inbound" | "outbound";
+      }
+    | null;
+};
+
+type ThreadReviewGuardrailItem = {
+  _id: string;
+  severity: "low" | "medium" | "high";
+  reason: string;
+  sourceMessageId?: string;
+  sourceMessage?:
+    | {
+        _id: string;
+        text?: string;
+        messageAt?: number;
+        direction?: "inbound" | "outbound";
+      }
+    | null;
+};
+
+type ThreadReviewQueue = {
+  needsReply: ThreadReviewNeedsReplyItem[];
+  followupConfirmations: ThreadReviewFollowupItem[];
+  todoCandidates: ThreadReviewTodoItem[];
+  guardrailFlags: ThreadReviewGuardrailItem[];
 };
 
 type ThreadToolEvent = {
@@ -594,13 +676,23 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
   const profilesQuery = useQuery(api.personality.listProfiles, {}) as PersonalityProfile[] | undefined;
   const profilesLoading = profilesQuery === undefined;
   const profiles = profilesQuery || [];
+  const approveDraft = useMutation(api.draft.approve);
+  const snoozeDraft = useMutation(api.draft.snooze);
+  const rejectDraft = useMutation(api.draft.reject);
+  const updateDraftContent = useMutation(api.draft.updateDraftContent);
+  const confirmFollowup = useMutation(api.followups.confirm);
+  const snoozeFollowup = useMutation(api.followups.snooze);
+  const rescheduleFollowup = useMutation(api.followups.reschedule);
+  const cancelFollowup = useMutation(api.followups.cancel);
+  const createTodoFromCandidate = useMutation(api.todos.fromCandidate);
+  const resolveGuardrail = useMutation(api.queue.resolveGuardrail);
   const setThreadPersonality = useMutation(api.personality.setThreadSetting);
   const setThreadPromptProfile = useMutation(api.personality.setThreadPromptProfile);
   const autoBuildThreadPromptProfile = useMutation(api.personality.autoBuildThreadPromptProfile);
   const saveGroundingMutation = useMutation(api.grounding.saveThreadGrounding);
   const ignoreThreadMutation = useMutation(api.backlog.ignoreThread);
   const recordEvent = useMutation(api.system.recordEvent);
-  const { runAction, getRecord, notices, dismissNotice } = useActionStateRegistry();
+  const { runAction, getRecord, isPending, notices, dismissNotice } = useActionStateRegistry();
 
   const selectedThreadId =
     (initialThreadId && threadList.some((thread) => thread._id === initialThreadId) ? initialThreadId : undefined) || threadList[0]?._id;
@@ -624,6 +716,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
           direction: "inbound" | "outbound";
         }>;
         grounding?: ThreadGrounding | null;
+        reviewQueue?: ThreadReviewQueue;
       }
     | null
     | undefined;
@@ -797,6 +890,160 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
     );
   };
 
+  const onReviewSend = (draftId: string) => {
+    const key = `send:${draftId}`;
+    void runAction(
+      key,
+      async () => {
+        await approveDraft({ draftId: draftId as Id<"replyDrafts"> });
+      },
+      {
+        pendingLabel: "Sending...",
+        successMessage: "Reply approved and queued.",
+      },
+    );
+  };
+
+  const onReviewSnooze = (draftId: string) => {
+    const key = `snooze:${draftId}`;
+    void runAction(
+      key,
+      async () => {
+        await snoozeDraft({ draftId: draftId as Id<"replyDrafts">, minutes: 30 });
+      },
+      {
+        pendingLabel: "Snoozing...",
+        successMessage: "Reply snoozed for 30 minutes.",
+      },
+    );
+  };
+
+  const onReviewReject = (draftId: string) => {
+    const key = `reject:${draftId}`;
+    void runAction(
+      key,
+      async () => {
+        await rejectDraft({ draftId: draftId as Id<"replyDrafts"> });
+      },
+      {
+        pendingLabel: "Rejecting...",
+        successMessage: "Draft rejected.",
+      },
+    );
+  };
+
+  const onReviewEdit = (draftId: string, text: string) => {
+    const edited = window.prompt("Edit draft text", text);
+    if (edited === null || !edited.trim()) {
+      return;
+    }
+    const key = `edit:${draftId}`;
+    void runAction(
+      key,
+      async () => {
+        await updateDraftContent({
+          draftId: draftId as Id<"replyDrafts">,
+          text: edited,
+        });
+      },
+      {
+        pendingLabel: "Saving edit...",
+        successMessage: "Draft updated.",
+      },
+    );
+  };
+
+  const onReviewConfirmFollowup = (followUpId: string) => {
+    const key = `followup:${followUpId}`;
+    void runAction(
+      key,
+      async () => {
+        await confirmFollowup({ followUpId: followUpId as Id<"followUps"> });
+      },
+      {
+        pendingLabel: "Confirming...",
+        successMessage: "Follow-up confirmed.",
+      },
+    );
+  };
+
+  const onReviewSnoozeFollowup = (followUpId: string, minutes: number) => {
+    const key = `followup:snooze:${followUpId}`;
+    void runAction(
+      key,
+      async () => {
+        await snoozeFollowup({ followUpId: followUpId as Id<"followUps">, minutes });
+      },
+      {
+        pendingLabel: "Snoozing...",
+        successMessage: "Follow-up snoozed.",
+      },
+    );
+  };
+
+  const onReviewRescheduleFollowup = (followUpId: string, hoursAhead: number) => {
+    const key = `followup:reschedule:${followUpId}`;
+    void runAction(
+      key,
+      async () => {
+        await rescheduleFollowup({
+          followUpId: followUpId as Id<"followUps">,
+          dueAt: followupRescheduleDueAt(hoursAhead),
+        });
+      },
+      {
+        pendingLabel: "Rescheduling...",
+        successMessage: "Follow-up rescheduled.",
+      },
+    );
+  };
+
+  const onReviewDismissFollowup = (followUpId: string) => {
+    const key = `followup:cancel:${followUpId}`;
+    void runAction(
+      key,
+      async () => {
+        await cancelFollowup({ followUpId: followUpId as Id<"followUps"> });
+      },
+      {
+        pendingLabel: "Dismissing...",
+        successMessage: "Follow-up dismissed.",
+      },
+    );
+  };
+
+  const onReviewConvertTodo = (candidateId: string) => {
+    const key = `todo:${candidateId}`;
+    void runAction(
+      key,
+      async () => {
+        await createTodoFromCandidate({ candidateId: candidateId as Id<"todoCandidates"> });
+      },
+      {
+        pendingLabel: "Converting...",
+        successMessage: "Candidate converted to TODO.",
+      },
+    );
+  };
+
+  const onReviewResolveGuardrail = (guardrailEventId: string) => {
+    const key = `guardrail:resolve:${guardrailEventId}`;
+    void runAction(
+      key,
+      async () => {
+        await resolveGuardrail({
+          guardrailEventId: guardrailEventId as Id<"guardrailEvents">,
+          resolutionNote: "Reviewed and resolved from conversation thread.",
+          closeDraft: true,
+        });
+      },
+      {
+        pendingLabel: "Resolving guardrail...",
+        successMessage: "Guardrail resolved.",
+      },
+    );
+  };
+
   const reactionsByMessage = useMemo(() => {
     const map = new Map<string, Array<{ actorJid: string; emoji: string; direction: "inbound" | "outbound" }>>();
     const rows = thread?.reactions || [];
@@ -828,6 +1075,262 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
   const selectedToolSummary = toolSummaryMessageId ? toolEventSummary.byMessageId.get(toolSummaryMessageId) || null : null;
   const selectedToolSummaryMessage = toolSummaryMessageId ? threadMessagesById.get(toolSummaryMessageId) || null : null;
 
+  const threadReviewQueue = thread?.reviewQueue || {
+    needsReply: [],
+    followupConfirmations: [],
+    todoCandidates: [],
+    guardrailFlags: [],
+  };
+
+  const reviewCount =
+    threadReviewQueue.needsReply.length +
+    threadReviewQueue.followupConfirmations.length +
+    threadReviewQueue.todoCandidates.length +
+    threadReviewQueue.guardrailFlags.length;
+
+  const threadReviewBySourceMessageId = useMemo(() => {
+    type ReviewEntry =
+      | { kind: "needsReply"; item: ThreadReviewNeedsReplyItem }
+      | { kind: "followup"; item: ThreadReviewFollowupItem }
+      | { kind: "todo"; item: ThreadReviewTodoItem }
+      | { kind: "guardrail"; item: ThreadReviewGuardrailItem };
+
+    const bySource = new Map<string, ReviewEntry[]>();
+    const unanchored: ReviewEntry[] = [];
+
+    const push = (sourceMessageId: string | undefined, entry: ReviewEntry) => {
+      if (sourceMessageId && threadMessagesById.has(sourceMessageId)) {
+        const list = bySource.get(sourceMessageId) || [];
+        list.push(entry);
+        bySource.set(sourceMessageId, list);
+        return;
+      }
+      unanchored.push(entry);
+    };
+
+    for (const item of threadReviewQueue.needsReply) {
+      push(item.sourceMessageId, { kind: "needsReply", item });
+    }
+    for (const item of threadReviewQueue.followupConfirmations) {
+      push(item.sourceMessageId, { kind: "followup", item });
+    }
+    for (const item of threadReviewQueue.todoCandidates) {
+      push(item.sourceMessageId, { kind: "todo", item });
+    }
+    for (const item of threadReviewQueue.guardrailFlags) {
+      push(item.sourceMessageId, { kind: "guardrail", item });
+    }
+
+    return { bySource, unanchored };
+  }, [threadMessagesById, threadReviewQueue.followupConfirmations, threadReviewQueue.guardrailFlags, threadReviewQueue.needsReply, threadReviewQueue.todoCandidates]);
+
+  const renderThreadReviewEntry = (
+    entry:
+      | { kind: "needsReply"; item: ThreadReviewNeedsReplyItem }
+      | { kind: "followup"; item: ThreadReviewFollowupItem }
+      | { kind: "todo"; item: ThreadReviewTodoItem }
+      | { kind: "guardrail"; item: ThreadReviewGuardrailItem },
+  ) => {
+    if (entry.kind === "needsReply") {
+      const item = entry.item;
+      const sendOrSnoozePending = isPending(`send:${item._id}`) || isPending(`snooze:${item._id}`);
+      return (
+        <div key={`review:draft:${item._id}`} className="thread-review-item" aria-busy={sendOrSnoozePending}>
+          <p className="thread-review-title">Needs Reply Review</p>
+          <p className="queue-body">{trim(item.sourceMessage?.text || item.text || "", 240)}</p>
+          <SharedMediaPreview preview={item.sourceMessage?.mediaPreview} mediaAssetId={item.sourceMessage?.mediaAssetId} />
+          {item.text ? <p className="queue-meta">Draft: {trim(item.text, 200)}</p> : null}
+          <SharedMediaPreview preview={item.mediaPreview} mediaAssetId={item.mediaAssetId} />
+          {item.mediaCaption?.trim() ? <p className="queue-meta">Media caption: {trim(item.mediaCaption.trim(), 220)}</p> : null}
+          <p className="queue-meta">
+            Channel: {item.messageProvider || "whatsapp"} · Model: {item.provider} · Delay: {Math.round(item.delayMs / 1000)}s · Typing:{" "}
+            {Math.round(item.typingMs / 1000)}s
+          </p>
+          <div className="queue-actions">
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => onReviewSend(item._id)}
+              disabled={sendOrSnoozePending}
+              aria-disabled={sendOrSnoozePending}
+            >
+              Send
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={() => onReviewSnooze(item._id)}
+              disabled={sendOrSnoozePending}
+              aria-disabled={sendOrSnoozePending}
+            >
+              Snooze 30m
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={() => onReviewEdit(item._id, item.text)}
+              disabled={isPending(`edit:${item._id}`)}
+              aria-disabled={isPending(`edit:${item._id}`)}
+            >
+              Edit
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={() => onReviewReject(item._id)}
+              disabled={isPending(`reject:${item._id}`)}
+              aria-disabled={isPending(`reject:${item._id}`)}
+            >
+              Reject
+            </button>
+          </div>
+          {getRecord(`send:${item._id}`).error || getRecord(`snooze:${item._id}`).error ? (
+            <p className="queue-meta action-inline-error" role="alert">
+              {getRecord(`send:${item._id}`).error || getRecord(`snooze:${item._id}`).error}
+            </p>
+          ) : null}
+          {getRecord(`edit:${item._id}`).error ? (
+            <p className="queue-meta action-inline-error" role="alert">
+              {getRecord(`edit:${item._id}`).error}
+            </p>
+          ) : null}
+          {getRecord(`reject:${item._id}`).error ? (
+            <p className="queue-meta action-inline-error" role="alert">
+              {getRecord(`reject:${item._id}`).error}
+            </p>
+          ) : null}
+        </div>
+      );
+    }
+
+    if (entry.kind === "followup") {
+      const item = entry.item;
+      return (
+        <div key={`review:followup:${item._id}`} className="thread-review-item">
+          <p className="thread-review-title">Follow-up Confirmation</p>
+          <p className="queue-meta">Due: {formatDateTimeWithRelative(item.dueAt)}</p>
+          <p className="queue-body">{item.reason}</p>
+          {item.sourceSnippet?.trim() || item.sourceMessage?.text?.trim() ? (
+            <p className="queue-meta">Source: {trim(item.sourceSnippet?.trim() || item.sourceMessage?.text?.trim() || "", 220)}</p>
+          ) : null}
+          {typeof item.confidence === "number" ? (
+            <p className="queue-meta">Detector confidence: {Math.round(item.confidence * 100)}%</p>
+          ) : null}
+          <div className="queue-actions">
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => onReviewConfirmFollowup(item._id)}
+              disabled={isPending(`followup:${item._id}`)}
+              aria-disabled={isPending(`followup:${item._id}`)}
+            >
+              {isPending(`followup:${item._id}`) ? "Confirming..." : "Confirm"}
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={() => onReviewSnoozeFollowup(item._id, 24 * 60)}
+              disabled={isPending(`followup:snooze:${item._id}`)}
+              aria-disabled={isPending(`followup:snooze:${item._id}`)}
+            >
+              {isPending(`followup:snooze:${item._id}`) ? "Snoozing..." : "Snooze 1d"}
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={() => onReviewRescheduleFollowup(item._id, 24)}
+              disabled={isPending(`followup:reschedule:${item._id}`)}
+              aria-disabled={isPending(`followup:reschedule:${item._id}`)}
+            >
+              {isPending(`followup:reschedule:${item._id}`) ? "Rescheduling..." : "+24h"}
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={() => onReviewDismissFollowup(item._id)}
+              disabled={isPending(`followup:cancel:${item._id}`)}
+              aria-disabled={isPending(`followup:cancel:${item._id}`)}
+            >
+              {isPending(`followup:cancel:${item._id}`) ? "Dismissing..." : "Dismiss"}
+            </button>
+          </div>
+          {getRecord(`followup:${item._id}`).error ? (
+            <p className="queue-meta action-inline-error" role="alert">
+              {getRecord(`followup:${item._id}`).error}
+            </p>
+          ) : null}
+          {getRecord(`followup:snooze:${item._id}`).error ? (
+            <p className="queue-meta action-inline-error" role="alert">
+              {getRecord(`followup:snooze:${item._id}`).error}
+            </p>
+          ) : null}
+          {getRecord(`followup:reschedule:${item._id}`).error ? (
+            <p className="queue-meta action-inline-error" role="alert">
+              {getRecord(`followup:reschedule:${item._id}`).error}
+            </p>
+          ) : null}
+          {getRecord(`followup:cancel:${item._id}`).error ? (
+            <p className="queue-meta action-inline-error" role="alert">
+              {getRecord(`followup:cancel:${item._id}`).error}
+            </p>
+          ) : null}
+        </div>
+      );
+    }
+
+    if (entry.kind === "todo") {
+      const item = entry.item;
+      return (
+        <div key={`review:todo:${item._id}`} className="thread-review-item">
+          <p className="thread-review-title">TODO Candidate</p>
+          <p className="queue-body">{item.title}</p>
+          <p className="queue-meta">Suggested due: {formatDateTime(item.suggestedDueAt)}</p>
+          <div className="queue-actions">
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => onReviewConvertTodo(item._id)}
+              disabled={isPending(`todo:${item._id}`)}
+              aria-disabled={isPending(`todo:${item._id}`)}
+            >
+              {isPending(`todo:${item._id}`) ? "Converting..." : "Convert to TODO"}
+            </button>
+          </div>
+          {getRecord(`todo:${item._id}`).error ? (
+            <p className="queue-meta action-inline-error" role="alert">
+              {getRecord(`todo:${item._id}`).error}
+            </p>
+          ) : null}
+        </div>
+      );
+    }
+
+    const item = entry.item;
+    return (
+      <div key={`review:guardrail:${item._id}`} className="thread-review-item">
+        <p className="thread-review-title">Guardrail Flag</p>
+        <p className="queue-meta">Severity: {item.severity}</p>
+        <p className="queue-body">{item.reason}</p>
+        <div className="queue-actions">
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={() => onReviewResolveGuardrail(item._id)}
+            disabled={isPending(`guardrail:resolve:${item._id}`)}
+            aria-disabled={isPending(`guardrail:resolve:${item._id}`)}
+          >
+            {isPending(`guardrail:resolve:${item._id}`) ? "Resolving..." : "Resolve"}
+          </button>
+        </div>
+        {getRecord(`guardrail:resolve:${item._id}`).error ? (
+          <p className="queue-meta action-inline-error" role="alert">
+            {getRecord(`guardrail:resolve:${item._id}`).error}
+          </p>
+        ) : null}
+      </div>
+    );
+  };
+
   return (
     <section className="panel-grid split-view">
       <article className="panel-card">
@@ -849,7 +1352,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
           </label>
         </div>
         <div className="stack thread-list">
-          {threadsLoading ? <p className="empty-line">Loading threads…</p> : null}
+          {threadsLoading ? <LoadingBlock label="Loading threads…" rows={5} compact /> : null}
           {threadList.map((item) => (
             <Link
               key={item._id}
@@ -887,7 +1390,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
           </button>
         </div>
         {threadLoading ? (
-          <p className="empty-line">Loading timeline...</p>
+          <LoadingBlock label="Loading timeline..." rows={4} />
         ) : thread ? (
           <div className="conversation-chat">
             <header className="conversation-chat-header">
@@ -904,6 +1407,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
               <p className="queue-meta">
                 Auto-respond: {thread.thread.isIgnored ? "Disabled (ignored)" : "Enabled"}
               </p>
+              <p className="queue-meta">Needs review in this thread: {reviewCount}</p>
               <div className="queue-actions">
                 <button
                   type="button"
@@ -931,6 +1435,12 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
               {(thread.messages || []).length === 0 ? (
                 <p className="empty-line">No messages in this thread yet.</p>
               ) : null}
+              {threadReviewBySourceMessageId.unanchored.length > 0 ? (
+                <div className="thread-review-stack thread-review-floating">
+                  <p className="thread-review-group-title">Review items from older messages</p>
+                  {threadReviewBySourceMessageId.unanchored.map((entry) => renderThreadReviewEntry(entry))}
+                </div>
+              ) : null}
               {(thread.messages || []).map((message) => {
                 const outbound = message.direction === "outbound";
                 const senderName = outbound
@@ -946,6 +1456,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
                   : 0;
                 const plannerEvent = messageToolSummary?.toolCalls.find((event) => event.toolName === "response_workbench");
                 const plannerSummary = parsePlannerSummary(plannerEvent?.parsedOutput);
+                const reviewEntries = threadReviewBySourceMessageId.bySource.get(message._id) || [];
 
                 return (
                   <div key={message._id} className={`chat-row ${outbound ? "outbound" : "inbound"}`}>
@@ -990,6 +1501,12 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
                           ) : null}
                         </div>
                       ) : null}
+                      {reviewEntries.length > 0 ? (
+                        <div className="thread-review-stack">
+                          <p className="thread-review-group-title">Needs review ({reviewEntries.length})</p>
+                          {reviewEntries.map((entry) => renderThreadReviewEntry(entry))}
+                        </div>
+                      ) : null}
                       <span>{formatDateTime(message.messageAt)}</span>
                     </div>
                   </div>
@@ -999,8 +1516,10 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
           </div>
         ) : threadMissing ? (
           <p className="empty-line">This thread is no longer available.</p>
+        ) : threadsLoading ? (
+          <LoadingIndicator label="Loading threads..." />
         ) : (
-          <p className="empty-line">{threadsLoading ? "Loading threads..." : "Choose a thread from the left."}</p>
+          <p className="empty-line">Choose a thread from the left.</p>
         )}
 
         <UIModal
@@ -1011,7 +1530,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
         >
           <div className="conversation-controls">
             {selectedThreadId && (threadPersonalityLoading || profilesLoading) ? (
-              <p className="empty-line">Loading personality settings…</p>
+              <LoadingIndicator label="Loading personality settings…" />
             ) : null}
 
             {selectedThreadId && !threadLoading && !threadMissing && !threadPersonalityLoading && profiles.length > 0 ? (

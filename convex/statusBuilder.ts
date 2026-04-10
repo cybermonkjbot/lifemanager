@@ -227,8 +227,7 @@ export const run = internalMutation({
       return { queued: false, reason: "too_soon" as const, waitMs: cadenceMs - (now - lastStatusAt) };
     }
 
-    const configuredAudience = [...new Set((config.statusBuilderAudienceJids || []).map((jid) => jid.trim()).filter(Boolean))];
-    let audienceJids = configuredAudience;
+    let audienceJids = [] as string[];
     const indexedDirectThreads = await ctx.db
       .query("threads")
       .withIndex("by_provider_and_threadKind_and_lastMessageAt", (q) => q.eq("provider", "whatsapp").eq("threadKind", "direct"))
@@ -266,11 +265,6 @@ export const run = internalMutation({
     }
 
     audienceJids = [...new Set(audienceJids)].slice(0, config.statusBuilderAudienceSampleSize);
-    if (audienceJids.length === 0) {
-      await shouldLogSkip("no_audience");
-      return { queued: false, reason: "no_audience" as const };
-    }
-
     const relationshipRows = await ctx.db
       .query("backlogThreadState")
       .withIndex("by_updatedAt")
@@ -344,7 +338,6 @@ export const run = internalMutation({
       text: AI_STATUS_PLACEHOLDER,
       sendKind,
       isStatusPost: true,
-      statusAudienceJids: audienceJids,
       statusTrendTheme: trendTheme,
       statusDemographicHint: dominantRelationship,
       statusFormat,
@@ -365,7 +358,6 @@ export const run = internalMutation({
       messageText: AI_STATUS_PLACEHOLDER,
       sendKind,
       isStatusPost: true,
-      statusAudienceJids: audienceJids,
       statusTrendTheme: trendTheme,
       statusDemographicHint: dominantRelationship,
       statusFormat,
@@ -384,7 +376,7 @@ export const run = internalMutation({
       eventType: "status_builder.queued",
       threadId: statusThreadId,
       outboxId,
-      detail: `Queued ${statusFormat} status for ${audienceJids.length} audience members. review=${requiresReview ? "sampled" : "auto"}. trend=${trendTheme}. demographic=${dominantRelationship}. context=${trendSnippet.slice(0, 120)}`,
+      detail: `Queued ${statusFormat} status for default status privacy audience. review=${requiresReview ? "sampled" : "auto"}. trend=${trendTheme}. demographic=${dominantRelationship}. context=${trendSnippet.slice(0, 120)}`,
       createdAt: now,
     });
 

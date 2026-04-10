@@ -1,4 +1,5 @@
 import { v } from "convex/values";
+import type { Id } from "./_generated/dataModel";
 import { internalQuery, mutation, query } from "./_generated/server";
 import { getConfig } from "./lib/config";
 import {
@@ -492,21 +493,152 @@ export const get = query({
       .order("desc")
       .take(80);
 
-    const mediaAssetIds = [
-      ...new Set(messages.map((message) => message.mediaAssetId).filter((assetId): assetId is NonNullable<typeof assetId> => Boolean(assetId))),
-    ];
+    const draftRows = await ctx.db
+      .query("replyDrafts")
+      .withIndex("by_thread", (q) => q.eq("threadId", args.threadId))
+      .order("desc")
+      .take(220);
+    const pendingDrafts = draftRows.filter((draft) => draft.status === "pending").slice(0, 40);
+
+    const followupRows = await ctx.db
+      .query("followUps")
+      .withIndex("by_thread", (q) => q.eq("threadId", args.threadId))
+      .take(220);
+    const followupConfirmations = followupRows
+      .filter((row) => row.status === "suggested")
+      .sort((left, right) => left.dueAt - right.dueAt)
+      .slice(0, 40);
+
+    const todoRows = await ctx.db
+      .query("todoCandidates")
+      .withIndex("by_thread", (q) => q.eq("threadId", args.threadId))
+      .take(220);
+    const todoCandidates = todoRows
+      .filter((row) => row.status === "suggested")
+      .sort((left, right) => right.createdAt - left.createdAt)
+      .slice(0, 40);
+
+    const unresolvedGuardrails = await ctx.db
+      .query("guardrailEvents")
+      .withIndex("by_resolvedAt_and_createdAt", (q) => q.eq("resolvedAt", undefined))
+      .order("desc")
+      .take(260);
+
+    const draftById = new Map<Id<"replyDrafts">, (typeof draftRows)[number]>();
+    for (const draft of draftRows) {
+      draftById.set(draft._id, draft);
+    }
+
+    const getDraftById = async (draftId: Id<"replyDrafts">) => {
+      const cached = draftById.get(draftId);
+      if (cached) {
+        return cached;
+      }
+      const loaded = await ctx.db.get(draftId);
+      if (loaded) {
+        draftById.set(loaded._id, loaded);
+      }
+      return loaded;
+    };
+
+    const guardrailFlags: Array<{
+      _id: Id<"guardrailEvents">;
+      severity: "low" | "medium" | "high";
+      reason: string;
+      draftId?: Id<"replyDrafts">;
+      sourceMessageId?: Id<"messages">;
+      createdAt: number;
+    }> = [];
+
+    for (const row of unresolvedGuardrails) {
+      let include = row.threadId === args.threadId;
+      let sourceMessageId: Id<"messages"> | undefined;
+
+      if (row.draftId) {
+        const draft = await getDraftById(row.draftId);
+        if (draft?.threadId === args.threadId) {
+          include = true;
+          sourceMessageId = draft.sourceMessageId;
+        }
+      }
+
+      if (!include) {
+        continue;
+      }
+
+      guardrailFlags.push({
+        _id: row._id,
+        severity: row.severity,
+        reason: row.reason,
+        draftId: row.draftId,
+        sourceMessageId,
+        createdAt: row.createdAt,
+      });
+
+      if (guardrailFlags.length >= 24) {
+        break;
+      }
+    }
+
+    const sourceMessageIds = new Set<Id<"messages">>();
+    for (const draft of pendingDrafts) {
+      sourceMessageIds.add(draft.sourceMessageId);
+    }
+    for (const followup of followupConfirmations) {
+      sourceMessageIds.add(followup.sourceMessageId);
+    }
+    for (const todo of todoCandidates) {
+      sourceMessageIds.add(todo.sourceMessageId);
+    }
+    for (const guardrail of guardrailFlags) {
+      if (guardrail.sourceMessageId) {
+        sourceMessageIds.add(guardrail.sourceMessageId);
+      }
+    }
+
+    const sourceMessages = await Promise.all(
+      [...sourceMessageIds].map(async (messageId) => {
+        const row = await ctx.db.get(messageId);
+        return row ? ([messageId, row] as const) : null;
+      }),
+    );
+    const sourceMessageById = new Map<Id<"messages">, (typeof messages)[number]>();
+    for (const pair of sourceMessages) {
+      if (!pair) {
+        continue;
+      }
+      sourceMessageById.set(pair[0], pair[1]);
+    }
+
     const mediaById = new Map<
-      string,
+      Id<"mediaAssets">,
       {
-        assetId: string;
+        assetId: Id<"mediaAssets">;
         kind: "sticker" | "meme" | "image" | "video" | "audio" | "document";
         mimeType: string;
         label: string;
         url: string | null;
       }
     >();
+    const mediaAssetIds = new Set<Id<"mediaAssets">>();
+    for (const message of messages) {
+      if (message.mediaAssetId) {
+        mediaAssetIds.add(message.mediaAssetId);
+      }
+    }
+    for (const draft of pendingDrafts) {
+      if (draft.mediaAssetId) {
+        mediaAssetIds.add(draft.mediaAssetId);
+      }
+    }
+    for (const sourceMessage of sourceMessageById.values()) {
+      if (sourceMessage.mediaAssetId) {
+        mediaAssetIds.add(sourceMessage.mediaAssetId);
+      }
+    }
+
     await Promise.all(
-      mediaAssetIds.map(async (assetId) => {
+      [...mediaAssetIds].map(async (assetId) => {
         const asset = await ctx.db.get(assetId);
         if (!asset) {
           return;
@@ -555,6 +687,70 @@ export const get = query({
       .withIndex("by_threadId", (q) => q.eq("threadId", args.threadId))
       .first();
 
+    const reviewQueue = {
+      needsReply: pendingDrafts.map((draft) => {
+        const sourceMessage = sourceMessageById.get(draft.sourceMessageId);
+        return {
+          ...draft,
+          mediaPreview: draft.mediaAssetId ? mediaById.get(draft.mediaAssetId) || null : null,
+          sourceMessageId: draft.sourceMessageId,
+          sourceMessage: sourceMessage
+            ? {
+                ...sourceMessage,
+                mediaPreview: sourceMessage.mediaAssetId ? mediaById.get(sourceMessage.mediaAssetId) || null : null,
+              }
+            : null,
+        };
+      }),
+      followupConfirmations: followupConfirmations.map((item) => {
+        const sourceMessage = sourceMessageById.get(item.sourceMessageId);
+        return {
+          ...item,
+          sourceMessageId: item.sourceMessageId,
+          sourceMessage: sourceMessage
+            ? {
+                _id: sourceMessage._id,
+                text: sourceMessage.text,
+                messageAt: sourceMessage.messageAt,
+                direction: sourceMessage.direction,
+                mediaAssetId: sourceMessage.mediaAssetId,
+                mediaCaption: sourceMessage.mediaCaption,
+                mediaPreview: sourceMessage.mediaAssetId ? mediaById.get(sourceMessage.mediaAssetId) || null : null,
+              }
+            : null,
+        };
+      }),
+      todoCandidates: todoCandidates.map((item) => {
+        const sourceMessage = sourceMessageById.get(item.sourceMessageId);
+        return {
+          ...item,
+          sourceMessageId: item.sourceMessageId,
+          sourceMessage: sourceMessage
+            ? {
+                _id: sourceMessage._id,
+                text: sourceMessage.text,
+                messageAt: sourceMessage.messageAt,
+                direction: sourceMessage.direction,
+              }
+            : null,
+        };
+      }),
+      guardrailFlags: guardrailFlags.map((item) => {
+        const sourceMessage = item.sourceMessageId ? sourceMessageById.get(item.sourceMessageId) : null;
+        return {
+          ...item,
+          sourceMessage: sourceMessage
+            ? {
+                _id: sourceMessage._id,
+                text: sourceMessage.text,
+                messageAt: sourceMessage.messageAt,
+                direction: sourceMessage.direction,
+              }
+            : null,
+        };
+      }),
+    };
+
     return {
       thread: {
         ...thread,
@@ -570,6 +766,7 @@ export const get = query({
       reactions,
       memory,
       grounding: grounding || null,
+      reviewQueue,
     };
   },
 });

@@ -2,6 +2,7 @@
 
 import { formatDateTime, trim } from "@/lib/format";
 import { isImageLikeMedia, type UnifiedMediaItem } from "@/lib/ui/media";
+import { LoadingIndicator } from "@/components/loading-state";
 import { UIModal } from "@/components/ui-modal";
 import { api } from "../../convex/_generated/api";
 import { useQuery } from "convex/react";
@@ -628,7 +629,7 @@ export function LiveActivityCore({ splineSceneUrl }: LiveActivityCoreProps) {
         </p>
       </div>
 
-      {loading ? <p className="empty-line">Streaming activity + media signals and status glow states…</p> : null}
+      {loading ? <LoadingIndicator label="Streaming activity + media signals and status glow states…" /> : null}
       {!loading && filteredNodes.length === 0 ? <p className="empty-line">No activity nodes match the current filters yet.</p> : null}
 
       <UIModal

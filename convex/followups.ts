@@ -1,7 +1,7 @@
 import { v } from "convex/values";
 import type { Doc } from "./_generated/dataModel";
 import { internalMutation, mutation, query } from "./_generated/server";
-import type { QueryCtx } from "./_generated/server";
+import type { MutationCtx, QueryCtx } from "./_generated/server";
 
 const followupStatusOrAll = v.union(
   v.literal("all"),
@@ -25,6 +25,7 @@ const followupTimelineFilter = v.union(
   v.literal("failed"),
   v.literal("dismissed"),
 );
+const OPEN_FOLLOWUP_STATUSES = ["suggested", "confirmed", "queued"] as const;
 
 function startOfDay(ms: number) {
   const date = new Date(ms);
@@ -150,6 +151,76 @@ async function enrichFollowups(
       };
     }),
   );
+}
+
+function isClosedFollowupStatus(status: Doc<"followUps">["status"]) {
+  return status === "sent" || status === "failed" || status === "cancelled";
+}
+
+async function suppressQueuedOutboxForFollowup(
+  ctx: MutationCtx,
+  followUp: Doc<"followUps">,
+  now: number,
+) {
+  const [pendingOutbox, claimedOutbox] = await Promise.all([
+    ctx.db
+      .query("outbox")
+      .withIndex("by_thread_and_status", (q) => q.eq("threadId", followUp.threadId).eq("status", "pending"))
+      .take(80),
+    ctx.db
+      .query("outbox")
+      .withIndex("by_thread_and_status", (q) => q.eq("threadId", followUp.threadId).eq("status", "claimed"))
+      .take(80),
+  ]);
+
+  for (const outboxItem of [...pendingOutbox, ...claimedOutbox]) {
+    if (outboxItem.followUpId !== followUp._id) {
+      continue;
+    }
+
+    await ctx.db.patch(outboxItem._id, {
+      status: "failed",
+      workerId: undefined,
+      leaseExpiresAt: undefined,
+      error: "Suppressed: follow-up was dismissed.",
+      updatedAt: now,
+    });
+
+    const draft = await ctx.db.get(outboxItem.draftId);
+    if (draft && draft.status !== "sent" && draft.status !== "rejected") {
+      await ctx.db.patch(draft._id, {
+        status: "rejected",
+        updatedAt: now,
+      });
+    }
+  }
+}
+
+async function cancelFollowupRow(
+  ctx: MutationCtx,
+  followUp: Doc<"followUps">,
+  now: number,
+) {
+  if (isClosedFollowupStatus(followUp.status)) {
+    return false;
+  }
+
+  if (followUp.status === "queued") {
+    await suppressQueuedOutboxForFollowup(ctx, followUp, now);
+  }
+
+  await ctx.db.patch(followUp._id, {
+    status: "cancelled",
+    updatedAt: now,
+  });
+  await ctx.db.insert("systemEvents", {
+    source: "dashboard",
+    eventType: "followup.dismissed",
+    threadId: followUp.threadId,
+    detail: followUp.reason.slice(0, 240),
+    createdAt: now,
+  });
+  return true;
 }
 
 export const list = query({
@@ -335,23 +406,52 @@ export const cancel = mutation({
       return null;
     }
 
-    if (row.status === "sent" || row.status === "failed" || row.status === "cancelled") {
+    if (isClosedFollowupStatus(row.status)) {
       return row._id;
     }
 
     const now = Date.now();
-    await ctx.db.patch(row._id, {
-      status: "cancelled",
-      updatedAt: now,
-    });
-    await ctx.db.insert("systemEvents", {
-      source: "dashboard",
-      eventType: "followup.dismissed",
-      threadId: row.threadId,
-      detail: row.reason.slice(0, 240),
-      createdAt: now,
-    });
+    await cancelFollowupRow(ctx, row, now);
     return row._id;
+  },
+});
+
+export const clearAll = mutation({
+  args: {
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    const batchSize = Math.min(Math.max(5, Math.round(args.limit ?? 30)), 60);
+    let cleared = 0;
+    let scanned = 0;
+    let hasMore = false;
+
+    for (const status of OPEN_FOLLOWUP_STATUSES) {
+      const rows = await ctx.db
+        .query("followUps")
+        .withIndex("by_status_dueAt", (q) => q.eq("status", status))
+        .order("asc")
+        .take(batchSize);
+
+      scanned += rows.length;
+      if (rows.length === batchSize) {
+        hasMore = true;
+      }
+
+      for (const row of rows) {
+        const dismissed = await cancelFollowupRow(ctx, row, now);
+        if (dismissed) {
+          cleared += 1;
+        }
+      }
+    }
+
+    return {
+      cleared,
+      scanned,
+      hasMore,
+    };
   },
 });
 

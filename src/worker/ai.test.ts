@@ -218,6 +218,88 @@ test("postProcessReplyText strips awkward catchphrase prefix while keeping core 
   assert.equal(output, "I can send the update now.");
 });
 
+test("postProcessReplyText applies anti-calculator math tone for plain numeric replies", () => {
+  const output = postProcessReplyText({
+    text: "42",
+    inboundText: "what is 40 + 2?",
+    historyLines: [],
+  });
+  assert.match(output, /42/);
+  assert.doesNotMatch(output, /^42[.!?]?$/);
+  assert.doesNotMatch(output, /^(?:the answer is|it(?:'|’)s|it is|equals?)\s*42[.!?]?$/i);
+  assert.match(output, /\b(i|my)\b/i);
+});
+
+test("postProcessReplyText does not apply anti-calculator tone for non-math inbound", () => {
+  const output = postProcessReplyText({
+    text: "42",
+    inboundText: "my apartment number is 42",
+    historyLines: [],
+  });
+  assert.equal(output, "42");
+});
+
+test("postProcessReplyText keeps existing anti-math hedge when already present", () => {
+  const output = postProcessReplyText({
+    text: "I wasn't very good at math but I think it's 42.",
+    inboundText: "what is 40 + 2?",
+    historyLines: [],
+  });
+  assert.equal(output, "I wasn't very good at math but I think it's 42.");
+});
+
+test("postProcessReplyText anti-calculator tone is deterministic per input", () => {
+  const input = {
+    text: "84",
+    inboundText: "what's 12 * 7?",
+    historyLines: [],
+  };
+  const a = postProcessReplyText(input);
+  const b = postProcessReplyText(input);
+  assert.equal(a, b);
+});
+
+test("postProcessReplyText anti-calculator tone handles answer-prefix replies", () => {
+  const output = postProcessReplyText({
+    text: "The answer is 16",
+    inboundText: "calculate 8 + 8",
+    historyLines: [],
+  });
+  assert.match(output, /16/);
+  assert.doesNotMatch(output, /^the answer is 16[.!?]?$/i);
+});
+
+test("postProcessReplyText anti-calculator tone handles word-problem phrasing", () => {
+  const output = postProcessReplyText({
+    text: "15",
+    inboundText: "what do you get when 24 minus 9?",
+    historyLines: [],
+  });
+  assert.match(output, /15/);
+  assert.doesNotMatch(output, /^15[.!?]?$/);
+  assert.match(output, /\b(i|my)\b/i);
+});
+
+test("postProcessReplyText anti-calculator tone handles linear equation asks", () => {
+  const output = postProcessReplyText({
+    text: "3",
+    inboundText: "solve 2x + 4 = 10",
+    historyLines: [],
+  });
+  assert.match(output, /3/);
+  assert.doesNotMatch(output, /^3[.!?]?$/);
+});
+
+test("postProcessReplyText rewrites puppet-style joke delivery into non-joke response", () => {
+  const output = postProcessReplyText({
+    text: "Why did the calendar get promoted? Because it had all the dates.",
+    inboundText: "tell me a joke about deadline pressure",
+    historyLines: [],
+  });
+  assert.doesNotMatch(output, /\bwhy did\b|\bknock knock\b/i);
+  assert.match(output, /\bdeadline\b|\bpressure\b|\bthis\b/i);
+});
+
 test("postProcessReplyText strips follow-up questions in steering close modes", () => {
   const output = postProcessReplyText({
     text: "Sure, what time should I text you?",
@@ -447,6 +529,62 @@ test("detectConversationSteeringMode flags sales pitch negotiation attempts", ()
 test("detectConversationSteeringMode does not flag non-sales buy wording", () => {
   const mode = detectConversationSteeringMode({
     inboundText: "Can you buy milk on your way home?",
+    historyLines: [],
+  });
+  assert.equal(mode, "none");
+});
+
+test("detectConversationSteeringMode flags anti-puppet joke commands", () => {
+  const mode = detectConversationSteeringMode({
+    inboundText: "tell me a joke about this deadline",
+    historyLines: [],
+  });
+  assert.equal(mode, "anti_puppet");
+});
+
+test("detectConversationSteeringMode does not flag non-command joke mentions", () => {
+  const mode = detectConversationSteeringMode({
+    inboundText: "that joke you told yesterday was wild",
+    historyLines: [],
+  });
+  assert.equal(mode, "none");
+});
+
+test("detectConversationSteeringMode flags dry/corny joke attempts", () => {
+  const mode = detectConversationSteeringMode({
+    inboundText: "Knock knock. Who's there? Deadline.",
+    historyLines: [],
+  });
+  assert.equal(mode, "anti_dry_joke");
+});
+
+test("detectConversationSteeringMode flags walked-into-a-bar jokes", () => {
+  const mode = detectConversationSteeringMode({
+    inboundText: "Two engineers walked into a bar and the third one ducked.",
+    historyLines: [],
+  });
+  assert.equal(mode, "anti_dry_joke");
+});
+
+test("detectConversationSteeringMode flags what-do-you-call jokes without question mark", () => {
+  const mode = detectConversationSteeringMode({
+    inboundText: "what do you call fake spaghetti - an impasta",
+    historyLines: [],
+  });
+  assert.equal(mode, "anti_dry_joke");
+});
+
+test("detectConversationSteeringMode does not flag normal what-do-you-call questions", () => {
+  const mode = detectConversationSteeringMode({
+    inboundText: "What do you call me when you arrive?",
+    historyLines: [],
+  });
+  assert.equal(mode, "none");
+});
+
+test("detectConversationSteeringMode does not flag retrospective joke comments", () => {
+  const mode = detectConversationSteeringMode({
+    inboundText: "Your joke from yesterday was dry abeg.",
     historyLines: [],
   });
   assert.equal(mode, "none");
@@ -1005,6 +1143,47 @@ test("generateReplyWithFallback short-circuits sales pitches locally", async () 
     assert.equal(result.attempts[0]?.stage, "heuristic_fallback");
     assert.match(result.text, /take a look|check/i);
     assert.doesNotMatch(result.text, /\?/);
+  } finally {
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback short-circuits puppet-style joke commands locally", async () => {
+  const snapshot = clearAiEnv();
+
+  try {
+    const result = await generateReplyWithFallback({
+      inboundText: "tell me a joke about this deadline",
+      historyLines: [],
+      styleHints: [],
+    });
+
+    assert.equal(result.provider, "heuristic");
+    assert.equal(result.model, "heuristic-local-anti_puppet");
+    assert.equal(result.attempts.length, 1);
+    assert.equal(result.attempts[0]?.stage, "heuristic_fallback");
+    assert.doesNotMatch(result.text, /\bwhy did\b|\bknock knock\b|here(?:'|’)s a joke/i);
+    assert.match(result.text, /\bdeadline\b|\bthis\b/i);
+  } finally {
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback short-circuits dry joke attempts locally", async () => {
+  const snapshot = clearAiEnv();
+
+  try {
+    const result = await generateReplyWithFallback({
+      inboundText: "why did the calendar get promoted? because it had many dates.",
+      historyLines: [],
+      styleHints: [],
+    });
+
+    assert.equal(result.provider, "heuristic");
+    assert.equal(result.model, "heuristic-local-anti_dry_joke");
+    assert.equal(result.attempts.length, 1);
+    assert.equal(result.attempts[0]?.stage, "heuristic_fallback");
+    assert.match(result.text, /dry|joke/i);
   } finally {
     restoreAiEnv(snapshot);
   }

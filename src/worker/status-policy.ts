@@ -22,6 +22,15 @@ const MARKETING_CTA_PATTERN = /\b(dm|dms|inbox|message|whatsapp|call|text|tap|cl
 const MARKETING_TAG_PATTERN = /#(?:ad|ads|advert|advertisement|sponsored|promo)\b/i;
 const MARKETING_PRICE_PATTERN = /(?:[$£€₦]|usd|ngn|naira)\s?\d|\b\d{2,}\s?(?:usd|ngn|naira|bucks)\b/i;
 const MARKETING_DISCOUNT_PATTERN = /\b\d{1,3}\s?%\s?off\b/i;
+const STATUS_QUESTION_WORD_PATTERN = /\b(what|why|when|where|who|how|which)\b/i;
+const STATUS_DIRECT_QUESTION_START_PATTERN = /^(can|could|would|will|should|do|does|did|is|are|am|was|were|have|has|had|anyone)\b/i;
+const STATUS_QUESTION_CUE_PATTERN = /\b(let me know|tell me|thoughts|opinion|opinions)\b/i;
+const DECLARATIVE_STATUS_FALLBACKS = [
+  "Little progress still counts today.",
+  "Good energy and steady focus all day.",
+  "Small wins are stacking up nicely.",
+  "Keeping it simple and moving forward.",
+];
 
 function finiteTimestamp(value: unknown): number | undefined {
   const parsed = Number(value);
@@ -127,6 +136,27 @@ export function shouldUseLaughReactionOnly(args: {
 
   const hash = computeStableHash(`${normalized}:${Math.round(args.messageAt / 60_000)}`);
   return hash % 3 === 0;
+}
+
+export function forceDeclarativeStatusText(text: string) {
+  const collapsed = text.replace(/\s+/g, " ").trim();
+  if (!collapsed) {
+    return DECLARATIVE_STATUS_FALLBACKS[0];
+  }
+
+  const normalized = collapsed.toLowerCase();
+  const questionLike =
+    /[?]/.test(collapsed) ||
+    STATUS_DIRECT_QUESTION_START_PATTERN.test(normalized) ||
+    STATUS_QUESTION_WORD_PATTERN.test(normalized) ||
+    STATUS_QUESTION_CUE_PATTERN.test(normalized);
+
+  if (!questionLike) {
+    return collapsed.replace(/[?]+/g, "").trim();
+  }
+
+  const index = computeStableHash(normalized) % DECLARATIVE_STATUS_FALLBACKS.length;
+  return DECLARATIVE_STATUS_FALLBACKS[index];
 }
 
 export function isLikelyMarketingStatus(text: string): boolean {

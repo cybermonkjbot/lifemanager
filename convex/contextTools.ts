@@ -224,7 +224,7 @@ export const contextWindowDetection = query({
     relevantHistoryLines: v.optional(v.number()),
   },
   handler: async (_ctx, args) => {
-    const maxContextTokens = Math.max(512, Math.min(args.maxContextTokens ?? 8192, 200_000));
+    const maxContextTokens = Math.max(512, Math.min(args.maxContextTokens ?? 1_000_000, 1_000_000));
     const reserveOutputTokens = Math.max(
       64,
       Math.min(args.reserveOutputTokens ?? 220, Math.floor(maxContextTokens * 0.5)),

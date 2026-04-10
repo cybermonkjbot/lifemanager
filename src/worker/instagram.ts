@@ -375,6 +375,16 @@ async function run() {
   process.on("SIGTERM", () => {
     void shutdown(0, "Instagram worker stopped.");
   });
+  process.on("uncaughtException", (error) => {
+    const detail = error instanceof Error ? error.message : String(error);
+    logger.error({ err: detail }, "Instagram worker uncaught exception");
+    void shutdown(1, "Instagram worker stopped after uncaught exception.");
+  });
+  process.on("unhandledRejection", (reason) => {
+    const detail = reason instanceof Error ? reason.message : String(reason);
+    logger.error({ err: detail }, "Instagram worker unhandled rejection");
+    void shutdown(1, "Instagram worker stopped after unhandled rejection.");
+  });
 
   try {
     const restored = await restoreInstagramClient(authDir);
@@ -668,6 +678,16 @@ async function run() {
           });
         }
       }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      logger.warn({ err: detail }, "Instagram outbox poll failed");
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: "instagram.outbox.poll_error",
+          detail: detail.slice(0, 300),
+        })
+        .catch(() => undefined);
     } finally {
       processingOutbox = false;
     }
@@ -700,16 +720,30 @@ async function run() {
     "Instagram worker started",
   );
 
+  const runBackgroundTask = (taskName: string, task: () => Promise<void>) => {
+    void task().catch((error) => {
+      const detail = error instanceof Error ? error.message : String(error);
+      logger.error({ err: detail, taskName }, "Instagram background task failed");
+      void convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: "instagram.background_task_error",
+          detail: `${taskName}: ${detail}`.slice(0, 300),
+        })
+        .catch(() => undefined);
+    });
+  };
+
   setInterval(() => {
-    void pollInbox();
+    runBackgroundTask("instagram.inbox.poll", pollInbox);
   }, inboxPollMs);
 
   setInterval(() => {
-    void pollOutbox();
+    runBackgroundTask("instagram.outbox.poll", pollOutbox);
   }, outboxPollMs);
 
-  void pollInbox();
-  void pollOutbox();
+  runBackgroundTask("instagram.inbox.poll.startup", pollInbox);
+  runBackgroundTask("instagram.outbox.poll.startup", pollOutbox);
 }
 
 const shouldBootWorkerProcess = Boolean(process.argv[1] && /instagram\.(ts|js)$/.test(process.argv[1]));

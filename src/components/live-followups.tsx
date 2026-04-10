@@ -1,6 +1,7 @@
 "use client";
 
 import { ActionNotices } from "@/components/action-notices";
+import { LoadingBlock, LoadingIndicator } from "@/components/loading-state";
 import { ProviderFilter, type ProviderFilterValue } from "@/components/provider-filter";
 import { formatDateTimeWithRelative, trim } from "@/lib/format";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
@@ -29,6 +30,12 @@ type TimelinePayload = {
     today: TimelineItem[];
     upcoming: TimelineItem[];
   };
+};
+
+type ClearAllBatchResult = {
+  cleared: number;
+  scanned: number;
+  hasMore: boolean;
 };
 
 function TimelineCard(args: {
@@ -144,7 +151,8 @@ function FollowupsContent() {
   const rescheduleFollowup = useMutation(api.followups.reschedule);
   const snoozeFollowup = useMutation(api.followups.snooze);
   const cancelFollowup = useMutation(api.followups.cancel);
-  const { runAction, getRecord, notices, dismissNotice } = useActionStateRegistry();
+  const clearAllFollowups = useMutation(api.followups.clearAll);
+  const { runAction, getRecord, notices, pushNotice, dismissNotice } = useActionStateRegistry();
 
   const [providerFilter, setProviderFilter] = useState<ProviderFilterValue>("all");
   const [filter, setFilter] = useState<TimelineFilter>("needs_review");
@@ -176,11 +184,59 @@ function FollowupsContent() {
       cancelFollowup: async (args) => await cancelFollowup(args),
     },
   });
+  const clearAllRecord = getRecord("followup:clear-all");
+
+  const onClearAll = () => {
+    const confirmed = window.confirm(
+      "Clear all open follow-ups? This dismisses suggested, confirmed, and queued follow-ups across providers.",
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    void (async () => {
+      const result = await runAction(
+        "followup:clear-all",
+        async () => {
+          let totalCleared = 0;
+
+          for (let i = 0; i < 20; i += 1) {
+            const batch = (await clearAllFollowups({
+              limit: 30,
+            })) as ClearAllBatchResult;
+            totalCleared += batch.cleared;
+
+            if (!batch.hasMore || batch.cleared === 0) {
+              break;
+            }
+          }
+
+          return totalCleared;
+        },
+        {
+          pendingLabel: "Clearing follow-ups…",
+          suppressSuccessNotice: true,
+        },
+      );
+
+      if (!result.executed || result.error) {
+        return;
+      }
+
+      const totalCleared = result.value ?? 0;
+      if (totalCleared > 0) {
+        pushNotice("success", `Cleared ${totalCleared} follow-up${totalCleared === 1 ? "" : "s"}.`);
+        return;
+      }
+      pushNotice("info", "No open follow-ups to clear.");
+    })();
+  };
 
   const renderSection = (title: string, items: TimelineItem[]) => (
     <article className="panel-card">
       <h3>{title}</h3>
       <div className="stack">
+        {loading ? <LoadingBlock label={`Loading ${title.toLowerCase()} follow-ups…`} rows={2} compact /> : null}
         {items.map((item) => (
           <TimelineCard
             key={item._id}
@@ -212,6 +268,22 @@ function FollowupsContent() {
         <p className="queue-meta">
           Visible: {headerCounts.visible} · Overdue: {headerCounts.overdue} · Today: {headerCounts.today} · Upcoming: {headerCounts.upcoming}
         </p>
+        <div className="queue-actions">
+          <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={onClearAll}
+            disabled={loading || clearAllRecord.pending}
+            aria-disabled={loading || clearAllRecord.pending}
+          >
+            {clearAllRecord.pending ? "Clearing…" : "Clear all open"}
+          </button>
+        </div>
+        {clearAllRecord.error ? (
+          <p className="queue-meta action-inline-error" role="alert">
+            {clearAllRecord.error}
+          </p>
+        ) : null}
         <div className="queue-focus-tabs" role="tablist" aria-label="Follow-up timeline filters">
           <button
             type="button"
@@ -268,7 +340,7 @@ function FollowupsContent() {
             All
           </button>
         </div>
-        {loading ? <p className="empty-line">Loading follow-up timeline…</p> : null}
+        {loading ? <LoadingIndicator label="Loading follow-up timeline…" /> : null}
       </article>
 
       {renderSection("Overdue", sections.overdue)}

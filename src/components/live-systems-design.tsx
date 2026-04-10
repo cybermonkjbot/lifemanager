@@ -1,5 +1,6 @@
 "use client";
 
+import { LoadingBlock } from "@/components/loading-state";
 import { formatDateTime, trim } from "@/lib/format";
 import { api } from "../../convex/_generated/api";
 import { useQuery } from "convex/react";
@@ -497,7 +498,7 @@ export function LiveSystemsDesign() {
 
           <div className="systems-log-list">
             <p className="queue-title">Recent Logs</p>
-            {loading ? <p className="empty-line">Loading live logs…</p> : null}
+            {loading ? <LoadingBlock label="Loading live logs…" rows={3} compact /> : null}
             {!loading && activeLogs.length === 0 ? <p className="empty-line">No logs mapped yet for this service.</p> : null}
             {activeLogs.slice(0, 10).map((row) => (
               <article key={`${row.id}:${row.createdAt}`} className="queue-item">

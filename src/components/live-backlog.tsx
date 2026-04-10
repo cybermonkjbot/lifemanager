@@ -1,6 +1,7 @@
 "use client";
 
 import { ActionNotices } from "@/components/action-notices";
+import { LoadingBlock } from "@/components/loading-state";
 import { ProviderFilter, type ProviderFilterValue } from "@/components/provider-filter";
 import { formatDateTime, trim } from "@/lib/format";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
@@ -509,7 +510,7 @@ function BacklogContent() {
       </div>
 
       <div className="stack">
-        {loading ? <p className="empty-line">Loading unread backlog…</p> : null}
+        {loading ? <LoadingBlock label="Loading unread backlog…" rows={4} /> : null}
 
         {visibleItems.map((item) => {
           const answerKey = `backlog:draft:answer:${item.threadId}`;

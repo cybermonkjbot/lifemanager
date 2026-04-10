@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   STATUS_OUTREACH_MIN_GAP_MS,
   evaluateStatusOutreachLimit,
+  forceDeclarativeStatusText,
   isLikelyMarketingStatus,
   pickLaughReactionEmoji,
   shouldUseLaughReactionOnly,
@@ -75,6 +76,17 @@ test("shouldUseLaughReactionOnly is stable for same input", () => {
   const first = shouldUseLaughReactionOnly(args);
   const second = shouldUseLaughReactionOnly(args);
   assert.equal(first, second);
+});
+
+test("forceDeclarativeStatusText rewrites question-style statuses", () => {
+  const rewritten = forceDeclarativeStatusText("Quick check: what's one win from your day?");
+  assert.equal(/\?/.test(rewritten), false);
+  assert.equal(/\b(what|why|when|where|who|how|which)\b/i.test(rewritten), false);
+});
+
+test("forceDeclarativeStatusText keeps declarative statuses unchanged", () => {
+  const value = forceDeclarativeStatusText("Small wins are stacking up nicely.");
+  assert.equal(value, "Small wins are stacking up nicely.");
 });
 
 test("isLikelyMarketingStatus flags status promotions with CTA", () => {

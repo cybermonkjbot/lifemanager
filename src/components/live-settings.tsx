@@ -1,6 +1,7 @@
 "use client";
 
 import { ActionNotices } from "@/components/action-notices";
+import { LoadingBlock } from "@/components/loading-state";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
 import { formatDateTime } from "@/lib/format";
 import { api } from "../../convex/_generated/api";
@@ -154,6 +155,7 @@ type SetupState = {
   hasAuth?: boolean;
   listenerActive?: boolean;
 };
+const STATUS_BUILDER_MAX_TEXT_POST_RATIO = 0.45;
 
 function toState(source: Partial<SettingsState> | undefined): SettingsState {
   return {
@@ -228,7 +230,7 @@ function toState(source: Partial<SettingsState> | undefined): SettingsState {
     statusBuilderEnabled: source?.statusBuilderEnabled ?? true,
     statusBuilderCadenceHours: source?.statusBuilderCadenceHours ?? 2,
     statusBuilderDailyMaxPosts: source?.statusBuilderDailyMaxPosts ?? 10,
-    statusBuilderTextPostRatio: source?.statusBuilderTextPostRatio ?? 0.4,
+    statusBuilderTextPostRatio: Math.min(source?.statusBuilderTextPostRatio ?? 0.25, STATUS_BUILDER_MAX_TEXT_POST_RATIO),
     statusBuilderReviewRatio: source?.statusBuilderReviewRatio ?? 0.35,
     statusBuilderAudienceJids: source?.statusBuilderAudienceJids ?? [],
     statusBuilderAudienceSampleSize: source?.statusBuilderAudienceSampleSize ?? 80,
@@ -447,6 +449,7 @@ export function LiveSettings() {
   const personaPacks = useQuery(api.personality.listPersonaPacks, {}) as PersonaPacksPayload | undefined;
   const mediaAssets = useQuery(api.media.listAssets, {}) as MediaAsset[] | undefined;
   const curatedMediaAssets = (mediaAssets || []).filter((asset) => asset.kind === "sticker" || asset.kind === "meme");
+  const mediaAssetsLoading = mediaAssets === undefined;
   const settingsLoading = settings === undefined || defaults === undefined;
   const contactsLoading = contacts === undefined;
   const profilesLoading = profilesQuery === undefined;
@@ -486,6 +489,7 @@ export function LiveSettings() {
     api.personality.listProfileVersions,
     selectedEditorProfile ? { slug: selectedEditorProfile.slug, limit: 20 } : "skip",
   ) as PersonalityProfileVersion[] | undefined;
+  const profileVersionsLoading = Boolean(selectedEditorProfile) && profileVersions === undefined;
 
   const hasChanged = useMemo(() => !stateEquals(draft, remoteState), [draft, remoteState]);
   const record = getRecord(key);
@@ -778,11 +782,11 @@ export function LiveSettings() {
         <article className="panel-card">
           <ActionNotices notices={notices} onDismiss={dismissNotice} />
           <h3>AI Runtime</h3>
-          <p className="empty-line">Loading settings…</p>
+          <LoadingBlock label="Loading settings…" rows={3} />
         </article>
         <article className="panel-card">
           <h3>Pacing & Queue</h3>
-          <p className="empty-line">Loading worker defaults…</p>
+          <LoadingBlock label="Loading worker defaults…" rows={3} />
         </article>
       </section>
     );
@@ -2090,7 +2094,7 @@ export function LiveSettings() {
             <input
               type="range"
               min={0}
-              max={1}
+              max={STATUS_BUILDER_MAX_TEXT_POST_RATIO}
               step={0.05}
               value={draft.statusBuilderTextPostRatio}
               onChange={(event) =>
@@ -2102,7 +2106,7 @@ export function LiveSettings() {
               disabled={record.pending || !draft.statusBuilderEnabled}
               aria-disabled={record.pending || !draft.statusBuilderEnabled}
             />
-            <span className="queue-meta">Lower = more meme-image statuses; higher = more text statuses.</span>
+            <span className="queue-meta">Lower = more meme-image statuses; text share is capped so memes stay the majority.</span>
           </label>
 
           <label className="stack compact">
@@ -2128,7 +2132,7 @@ export function LiveSettings() {
           </label>
 
           <label className="stack compact">
-            <span className="queue-meta">Audience size cap per status post</span>
+            <span className="queue-meta">Trend sampling audience cap</span>
             <input
               type="number"
               min={10}
@@ -2144,10 +2148,11 @@ export function LiveSettings() {
               disabled={record.pending || !draft.statusBuilderEnabled}
               aria-disabled={record.pending || !draft.statusBuilderEnabled}
             />
+            <span className="queue-meta">Used for trend sampling only. Auto status posts always use WhatsApp default status privacy audience.</span>
           </label>
 
           <label className="stack compact">
-            <span className="queue-meta">Fixed audience JIDs (optional; leave empty to auto-pick active contacts)</span>
+            <span className="queue-meta">Audience JIDs for trend sampling (optional)</span>
             <select
               value=""
               onChange={(event) => {
@@ -2206,7 +2211,7 @@ export function LiveSettings() {
       <article className="panel-card">
         <h3>Personality Profiles</h3>
         {profilesLoading ? (
-          <p className="empty-line">Loading personality profiles…</p>
+          <LoadingBlock label="Loading personality profiles…" rows={4} />
         ) : profiles.length > 0 ? (
           <div className="stack compact">
             <div className="personality-config-block">
@@ -2288,6 +2293,7 @@ export function LiveSettings() {
             <div className="personality-config-block">
               <h3>Profile Version History</h3>
               <div className="stack">
+                {profileVersionsLoading ? <LoadingBlock label="Loading profile history…" rows={2} compact /> : null}
                 {(profileVersions || []).map((version) => (
                   <div key={version._id} className="queue-item">
                     <p className="queue-title">
@@ -2374,6 +2380,7 @@ export function LiveSettings() {
             {mediaRecord.pending ? "Uploading..." : "Upload Asset"}
           </button>
           <div className="stack">
+            {mediaAssetsLoading ? <LoadingBlock label="Loading media assets…" rows={3} compact /> : null}
             {curatedMediaAssets.map((asset) => (
               <div key={asset._id} className="queue-item">
                 <p className="queue-title">
@@ -2427,7 +2434,7 @@ export function LiveSettings() {
                 </div>
               </div>
             ))}
-            {curatedMediaAssets.length === 0 ? <p className="empty-line">No media assets yet.</p> : null}
+            {!mediaAssetsLoading && curatedMediaAssets.length === 0 ? <p className="empty-line">No media assets yet.</p> : null}
           </div>
         </div>
       </article>

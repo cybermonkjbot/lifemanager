@@ -1,6 +1,7 @@
 "use client";
 
 import { ActionNotices } from "@/components/action-notices";
+import { LoadingBlock, LoadingIndicator } from "@/components/loading-state";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
@@ -138,8 +139,7 @@ function RulesContent() {
             {record.pending ? "Adding..." : "Add Ignore Rule"}
           </button>
         </form>
-        {rulesLoading ? <p className="empty-line">Loading rules…</p> : null}
-        {contactsLoading ? <p className="empty-line">Loading previous conversations…</p> : null}
+        {rulesLoading || contactsLoading ? <LoadingIndicator label="Loading rules and previous conversations…" /> : null}
 
         {duplicateActiveRule ? (
           <p className="queue-meta action-inline-error" role="status">
@@ -157,7 +157,7 @@ function RulesContent() {
       <article className="panel-card">
         <h3>Active Ignore Rules</h3>
         <div className="stack">
-          {rulesLoading ? <p className="empty-line">Loading active ignore rules…</p> : null}
+          {rulesLoading ? <LoadingBlock label="Loading active ignore rules…" rows={3} compact /> : null}
           {ignoreRules.map((rule) => (
             <div key={rule._id} className="queue-item">
               <p className="queue-title">{rule.targetType}</p>

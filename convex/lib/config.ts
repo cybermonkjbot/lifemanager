@@ -11,6 +11,7 @@ export type AiDeterministicMode =
   | "wrap_up";
 
 const DEFAULT_AI_DETERMINISTIC_MODES: AiDeterministicMode[] = ["hard_stop", "anti_beggi_beggi", "anti_sales_pitch"];
+const STATUS_BUILDER_MAX_TEXT_POST_RATIO = 0.45;
 const ALLOWED_AI_DETERMINISTIC_MODE_SET = new Set<AiDeterministicMode>([
   "hard_stop",
   "anti_beggi_beggi",
@@ -165,7 +166,7 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
   statusBuilderEnabled: true,
   statusBuilderCadenceHours: 2,
   statusBuilderDailyMaxPosts: 10,
-  statusBuilderTextPostRatio: 0.4,
+  statusBuilderTextPostRatio: 0.25,
   statusBuilderReviewRatio: 0.35,
   statusBuilderAudienceJids: [],
   statusBuilderAudienceSampleSize: 80,
@@ -387,7 +388,7 @@ export async function getConfig(ctx: QueryCtx | MutationCtx): Promise<AppConfig>
     statusBuilderTextPostRatio: clamp(
       parseNumber(map.get("statusBuilderTextPostRatio"), DEFAULT_APP_CONFIG.statusBuilderTextPostRatio),
       0,
-      1,
+      STATUS_BUILDER_MAX_TEXT_POST_RATIO,
     ),
     statusBuilderReviewRatio: clamp(
       parseNumber(map.get("statusBuilderReviewRatio"), DEFAULT_APP_CONFIG.statusBuilderReviewRatio),

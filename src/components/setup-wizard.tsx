@@ -1,6 +1,7 @@
 "use client";
 
 import { ActionNotices } from "@/components/action-notices";
+import { LoadingIndicator } from "@/components/loading-state";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
 import { api } from "../../convex/_generated/api";
 import { useQuery } from "convex/react";
@@ -486,7 +487,7 @@ function SetupWizardContent({
                 <span className={`status-pill ${statusToneClass(status, state?.listenerActive)}`}>{whatsappStatusText}</span>
                 <span className="queue-meta">{uiStatusMessage}</span>
               </div>
-              {liveStateLoading ? <p className="empty-line">Connecting to live setup state…</p> : null}
+              {liveStateLoading ? <LoadingIndicator label="Connecting to live setup state…" /> : null}
 
               {retryGuidance ? (
                 <p className="setup-retry-notice" role="status" aria-live="polite">
@@ -870,7 +871,7 @@ function InstagramSetupPanel({
         </span>
         <span className="queue-meta">{uiStatusMessage}</span>
       </div>
-      {liveStateLoading ? <p className="empty-line">Connecting to live setup state…</p> : null}
+      {liveStateLoading ? <LoadingIndicator label="Connecting to live setup state…" /> : null}
 
       {state?.challengeContactPoint ? (
         <p className="queue-meta">Challenge destination: {state.challengeContactPoint}</p>

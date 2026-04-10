@@ -1,6 +1,7 @@
 "use client";
 
 import { ActionNotices } from "@/components/action-notices";
+import { LoadingIndicator } from "@/components/loading-state";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
@@ -376,6 +377,7 @@ export function LiveTools() {
         <ActionNotices notices={notices} onDismiss={dismissNotice} />
         <h3>Shared Inputs</h3>
         <p className="queue-meta">Set common inputs once, then run any tool.</p>
+        {contactsLoading ? <LoadingIndicator label="Loading contact threads…" /> : null}
 
         <div className="stack compact" style={{ marginTop: 10 }}>
           <label className="setup-input-group">

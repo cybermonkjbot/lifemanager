@@ -67,6 +67,7 @@ import {
 import { transcribeWithWhisperCpp, type WhisperTranscriptionResult } from "./stt";
 import {
   evaluateStatusOutreachLimit,
+  forceDeclarativeStatusText,
   isLikelyMarketingStatus,
   pickLaughReactionEmoji,
   shouldUseLaughReactionOnly,
@@ -90,6 +91,8 @@ import { parseRuntimeCommand, type RuntimeCommand, type RuntimeCommandTarget } f
 import { parseSelfImproveCommand, type SelfImproveCommand } from "./self-improve-command";
 import { isSelfControlHelpCommand } from "./control-help-command";
 import { shouldAttemptSelfControlOnUpsert } from "./self-control-routing";
+import { isStrictSelfControlScope } from "./self-control-scope";
+import { parseSelfControlCommandText } from "./self-control-command-text";
 
 const logger = pino({
   name: "slm-worker",
@@ -1523,16 +1526,18 @@ async function run() {
       }
     }
 
+    const statusJidList = [...statusAudience];
+    if (statusJidList.length === 0) {
+      return { broadcast: true } as Parameters<typeof sock.sendMessage>[2];
+    }
+
     const selfAccount = normalizeAccountJid(getSelfJid());
     if (selfAccount) {
       statusAudience.add(`${selfAccount}@s.whatsapp.net`);
     }
 
-    const statusJidList = [...statusAudience];
-    if (statusJidList.length > 0) {
-      return { broadcast: true, statusJidList } as Parameters<typeof sock.sendMessage>[2];
-    }
-    return { broadcast: true } as Parameters<typeof sock.sendMessage>[2];
+    const statusJidListWithSelf = [...statusAudience];
+    return { broadcast: true, statusJidList: statusJidListWithSelf } as Parameters<typeof sock.sendMessage>[2];
   };
 
   const reconnectDelay = (attempt: number) => {
@@ -1585,6 +1590,14 @@ async function run() {
   });
   process.once("SIGTERM", () => {
     void shutdown(0, "Worker stopped.");
+  });
+  process.on("uncaughtException", (error) => {
+    logger.error({ err: error instanceof Error ? error.message : String(error) }, "Worker uncaught exception");
+    void shutdown(1, "Worker stopped after uncaught exception.");
+  });
+  process.on("unhandledRejection", (reason) => {
+    logger.error({ err: reason instanceof Error ? reason.message : String(reason) }, "Worker unhandled rejection");
+    void shutdown(1, "Worker stopped after unhandled rejection.");
   });
 
   type CacheState<T> = {
@@ -3032,17 +3045,23 @@ function resolveTextEmojiAllowlist() {
     participant?: string | null;
   };
 
+  type ResolvedSelfControlThread = {
+    threadJid: string;
+    replyJids: string[];
+  };
+
   const SELF_IMPROVE_MAX_PROMPT_CHARS = 1200;
   const SELF_IMPROVE_ROOT = resolve(process.cwd(), ".slm", "self-improvement");
   const SELF_IMPROVE_LOCK_PATH = join(SELF_IMPROVE_ROOT, "runner.lock");
   const SELF_IMPROVE_LATEST_META_PATH = join(SELF_IMPROVE_ROOT, "latest-meta.json");
   const SELF_IMPROVE_LATEST_REPORT_PATH = join(SELF_IMPROVE_ROOT, "latest.md");
+  const SELF_CONTROL_MESSAGE_PREFIX = (process.env.SLM_SELF_CONTROL_MESSAGE_PREFIX || "").trim();
 
-  const resolveSelfControlThread = (messageKey: SelfControlMessageKey) => {
+  const resolveSelfControlThread = (messageKey: SelfControlMessageKey): ResolvedSelfControlThread | null => {
     const rawThreadJid = getThreadJid(messageKey as Parameters<typeof getThreadJid>[0]);
     const senderJid = getSenderJid(messageKey as Parameters<typeof getSenderJid>[0]);
     const threadJid = rawThreadJid === "status@broadcast" ? senderJid : rawThreadJid;
-    if (!threadJid || !senderJid) {
+    if (!threadJid && !senderJid) {
       return null;
     }
 
@@ -3052,18 +3071,61 @@ function resolveTextEmojiAllowlist() {
       return null;
     }
 
-    const isSelfThread = normalizeAccountJid(threadJid) === selfAccount;
-    if (!isSelfThread) {
-      return null;
-    }
-
+    const threadAccount = normalizeAccountJid(threadJid);
     const senderAccount = normalizeAccountJid(senderJid);
-    const senderIsSelf = senderAccount.length > 0 && senderAccount === selfAccount;
-    if (!senderIsSelf) {
+    const selfScoped = isStrictSelfControlScope({
+      selfAccount,
+      threadAccount,
+      senderAccount,
+      fromMe: Boolean(messageKey.fromMe),
+    });
+    if (!selfScoped) {
       return null;
     }
 
-    return { threadJid };
+    const replyJids: string[] = [];
+    const seen = new Set<string>();
+    const pushReplyJid = (jid: string | null | undefined) => {
+      const trimmed = (jid || "").trim();
+      if (!trimmed) {
+        return;
+      }
+      const lowered = trimmed.toLowerCase();
+      if (seen.has(lowered)) {
+        return;
+      }
+      seen.add(lowered);
+      replyJids.push(trimmed);
+    };
+
+    pushReplyJid(threadJid);
+    pushReplyJid(senderJid);
+    pushReplyJid(`${selfAccount}@s.whatsapp.net`);
+    pushReplyJid(`${selfAccount}@lid`);
+
+    return {
+      threadJid: threadJid || senderJid || `${selfAccount}@s.whatsapp.net`,
+      replyJids,
+    };
+  };
+
+  const sendSelfControlText = async (args: { selfControl: ResolvedSelfControlThread; text: string }) => {
+    let lastError: unknown = null;
+
+    for (const jid of args.selfControl.replyJids) {
+      try {
+        rememberAutomatedThreadSend(jid);
+        const sent = await sock.sendMessage(jid, { text: args.text });
+        rememberAutomatedOutboundId(sent?.key?.id || undefined);
+        return;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    const fallbackError =
+      lastError instanceof Error ? lastError.message : lastError ? String(lastError) : "no reply JID available";
+    throw new Error(`self-control reply send failed: ${fallbackError}`);
   };
 
   const isSelfImproveRunActive = async () => {
@@ -3217,6 +3279,13 @@ function resolveTextEmojiAllowlist() {
       "- help",
       "- /slm help",
       "- improve help",
+      ...(SELF_CONTROL_MESSAGE_PREFIX
+        ? [
+            "",
+            `Prefix mode active: start commands with "${SELF_CONTROL_MESSAGE_PREFIX}"`,
+            `Example: ${SELF_CONTROL_MESSAGE_PREFIX} help`,
+          ]
+        : []),
     ].join("\n");
   };
 
@@ -3233,16 +3302,17 @@ function resolveTextEmojiAllowlist() {
     if (!selfControl) {
       return false;
     }
-    const { threadJid } = selfControl;
 
-    if (!isSelfControlHelpCommand(parsed.text)) {
+    const commandText = parseSelfControlCommandText({
+      rawText: parsed.text,
+      prefix: SELF_CONTROL_MESSAGE_PREFIX,
+    });
+    if (!commandText || !isSelfControlHelpCommand(commandText)) {
       return false;
     }
 
     const responseText = buildSelfControlHelpText();
-    rememberAutomatedThreadSend(threadJid);
-    const sent = await sock.sendMessage(threadJid, { text: responseText });
-    rememberAutomatedOutboundId(sent?.key?.id || undefined);
+    await sendSelfControlText({ selfControl, text: responseText });
     await convex
       .mutation(convexRefs.systemRecordEvent, {
         source: "worker",
@@ -3397,9 +3467,16 @@ function resolveTextEmojiAllowlist() {
     if (!selfControl) {
       return false;
     }
-    const { threadJid } = selfControl;
 
-    const command = parseSelfImproveCommand(parsed.text);
+    const commandText = parseSelfControlCommandText({
+      rawText: parsed.text,
+      prefix: SELF_CONTROL_MESSAGE_PREFIX,
+    });
+    if (!commandText) {
+      return false;
+    }
+
+    const command = parseSelfImproveCommand(commandText);
     if (!command) {
       return false;
     }
@@ -3430,9 +3507,7 @@ function resolveTextEmojiAllowlist() {
       hasError = true;
     }
 
-    rememberAutomatedThreadSend(threadJid);
-    const sent = await sock.sendMessage(threadJid, { text: responseText });
-    rememberAutomatedOutboundId(sent?.key?.id || undefined);
+    await sendSelfControlText({ selfControl, text: responseText });
     await convex
       .mutation(convexRefs.systemRecordEvent, {
         source: "worker",
@@ -3457,9 +3532,16 @@ function resolveTextEmojiAllowlist() {
     if (!selfControl) {
       return false;
     }
-    const { threadJid } = selfControl;
 
-    const command = parseRuntimeCommand(parsed.text);
+    const commandText = parseSelfControlCommandText({
+      rawText: parsed.text,
+      prefix: SELF_CONTROL_MESSAGE_PREFIX,
+    });
+    if (!commandText) {
+      return false;
+    }
+
+    const command = parseRuntimeCommand(commandText);
     if (!command) {
       return false;
     }
@@ -3474,11 +3556,7 @@ function resolveTextEmojiAllowlist() {
 
     try {
       const outcome = await runRuntimeCommand(command);
-      rememberAutomatedThreadSend(threadJid);
-      const sent = await sock.sendMessage(threadJid, {
-        text: outcome.responseText,
-      });
-      rememberAutomatedOutboundId(sent?.key?.id || undefined);
+      await sendSelfControlText({ selfControl, text: outcome.responseText });
       await convex
         .mutation(convexRefs.systemRecordEvent, {
           source: "worker",
@@ -3493,11 +3571,10 @@ function resolveTextEmojiAllowlist() {
       }
     } catch (error) {
       const err = error instanceof Error ? error.message : String(error);
-      rememberAutomatedThreadSend(threadJid);
-      const sent = await sock.sendMessage(threadJid, {
+      await sendSelfControlText({
+        selfControl,
         text: `Runtime command failed: ${compactLogText(err, 260)}`,
       });
-      rememberAutomatedOutboundId(sent?.key?.id || undefined);
       await convex
         .mutation(convexRefs.systemRecordEvent, {
           source: "worker",
@@ -5007,173 +5084,209 @@ function resolveTextEmojiAllowlist() {
   };
 
   const attachListeners = (socket: typeof sock) => {
-    socket.ev.on("creds.update", saveCreds);
+    const runSocketTask = (eventType: string, task: () => Promise<void>) => {
+      void task().catch((error) => {
+        const err = error instanceof Error ? error.message : String(error);
+        logger.error({ err, eventType }, "WhatsApp socket handler failed");
+        void convex
+          .mutation(convexRefs.systemRecordEvent, {
+            source: "worker",
+            eventType: "whatsapp.socket.handler_error",
+            detail: compactLogText(`${eventType}: ${err}`, 300),
+          })
+          .catch(() => undefined);
+      });
+    };
 
-    socket.ev.on("connection.update", async (update) => {
-      if (socket !== sock || isShuttingDown) {
-        return;
-      }
+    socket.ev.on("creds.update", () => {
+      runSocketTask("creds.update", async () => {
+        await saveCreds();
+      });
+    });
 
-      if (update.connection === "close") {
-        const statusCode = getStatusCode(update.lastDisconnect?.error);
-        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-        logger.warn({ statusCode, shouldReconnect }, "WhatsApp connection closed");
-
-        if (!shouldReconnect) {
-          clearReconnectTimer();
-          reconnectAttempts = 0;
-          const invalidated = await invalidateCredentials();
-          await shutdown(
-            1,
-            invalidated
-              ? "WhatsApp logged out this device. Credentials cleared. Re-link in setup."
-              : "WhatsApp logged out this device. Failed to clear credentials automatically; reset credentials in setup, then re-link.",
-          );
+    socket.ev.on("connection.update", (update) => {
+      runSocketTask("connection.update", async () => {
+        if (socket !== sock || isShuttingDown) {
           return;
         }
 
-        await scheduleReconnect(statusCode);
-      }
+        if (update.connection === "close") {
+          const statusCode = getStatusCode(update.lastDisconnect?.error);
+          const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+          logger.warn({ statusCode, shouldReconnect }, "WhatsApp connection closed");
 
-      if (update.connection === "open") {
-        clearReconnectTimer();
-        reconnectAttempts = 0;
-        logger.info("WhatsApp connection established");
-        await reportListener(true, "Worker listener is active. AI reply automation is running.");
-      }
+          if (!shouldReconnect) {
+            clearReconnectTimer();
+            reconnectAttempts = 0;
+            const invalidated = await invalidateCredentials();
+            await shutdown(
+              1,
+              invalidated
+                ? "WhatsApp logged out this device. Credentials cleared. Re-link in setup."
+                : "WhatsApp logged out this device. Failed to clear credentials automatically; reset credentials in setup, then re-link.",
+            );
+            return;
+          }
+
+          await scheduleReconnect(statusCode);
+        }
+
+        if (update.connection === "open") {
+          clearReconnectTimer();
+          reconnectAttempts = 0;
+          logger.info("WhatsApp connection established");
+          await reportListener(true, "Worker listener is active. AI reply automation is running.");
+        }
+      });
     });
 
-    socket.ev.on("chats.upsert", async (chats) => {
-      if (socket !== sock || !Array.isArray(chats)) {
-        return;
-      }
-      for (const chat of chats) {
-        await syncThreadMetadata(chat);
-      }
+    socket.ev.on("chats.upsert", (chats) => {
+      runSocketTask("chats.upsert", async () => {
+        if (socket !== sock || !Array.isArray(chats)) {
+          return;
+        }
+        for (const chat of chats) {
+          await syncThreadMetadata(chat);
+        }
+      });
     });
 
-    socket.ev.on("chats.update", async (updates) => {
-      if (socket !== sock || !Array.isArray(updates)) {
-        return;
-      }
-      for (const chat of updates) {
-        await syncThreadMetadata(chat);
-      }
+    socket.ev.on("chats.update", (updates) => {
+      runSocketTask("chats.update", async () => {
+        if (socket !== sock || !Array.isArray(updates)) {
+          return;
+        }
+        for (const chat of updates) {
+          await syncThreadMetadata(chat);
+        }
+      });
     });
 
     socket.ev.on("contacts.upsert", (contacts) => {
-      if (socket !== sock || !Array.isArray(contacts)) {
-        return;
-      }
-      for (const contact of contacts) {
-        syncContactMetadata(contact);
-      }
+      runSocketTask("contacts.upsert", async () => {
+        if (socket !== sock || !Array.isArray(contacts)) {
+          return;
+        }
+        for (const contact of contacts) {
+          syncContactMetadata(contact);
+        }
+      });
     });
 
     socket.ev.on("contacts.update", (updates) => {
-      if (socket !== sock || !Array.isArray(updates)) {
-        return;
-      }
-      for (const update of updates) {
-        syncContactMetadata(update);
-      }
-    });
-
-    socket.ev.on("messaging-history.set", async (event) => {
-      if (socket !== sock || !event) {
-        return;
-      }
-      const ingestMode: "history_sync" | "history_fetch" = event.peerDataRequestSessionId ? "history_fetch" : "history_sync";
-      if (Array.isArray(event.chats)) {
-        for (const chat of event.chats) {
-          await syncThreadMetadata(chat);
+      runSocketTask("contacts.update", async () => {
+        if (socket !== sock || !Array.isArray(updates)) {
+          return;
         }
-      }
-      if (Array.isArray(event.contacts)) {
-        for (const contact of event.contacts) {
-          syncContactMetadata(contact);
+        for (const update of updates) {
+          syncContactMetadata(update);
         }
-      }
-      if (!Array.isArray(event.messages)) {
-        return;
-      }
-      for (const message of event.messages) {
-        const laneKey = getThreadJid(message.key) || `unknown:${message.key?.id || Date.now()}`;
-        void enqueueByThreadLane(inboundThreadLanes, laneKey, () =>
-          runInboundWithLimit(async () => {
-            await processHistoricalMessage(message, ingestMode);
-          }),
-        );
-      }
+      });
     });
 
-    socket.ev.on("call", async (events) => {
-      if (socket !== sock || !Array.isArray(events)) {
-        return;
-      }
-
-      for (const event of events) {
-        const laneKey = event.chatId || event.groupJid || event.from || `call:${event.id || Date.now()}`;
-        void enqueueByThreadLane(inboundThreadLanes, laneKey, () =>
-          runInboundWithLimit(async () => {
-            await processInboundCallEvent(event);
-          }),
-        );
-      }
-    });
-
-    socket.ev.on("messages.upsert", async (event) => {
-      if (socket !== sock || !event || !Array.isArray(event.messages)) {
-        return;
-      }
-
-      const ingestMode: "history_sync" | "history_fetch" | null =
-        event.type === "notify" ? null : event.requestId ? "history_fetch" : "history_sync";
-
-      for (const message of event.messages) {
-        const laneKey = getThreadJid(message.key) || `unknown:${message.key.id || Date.now()}`;
-        const messageAt = normalizeIncomingMessageTimestamp(message.messageTimestamp, Date.now());
-        const allowSelfControlHandling = shouldAttemptSelfControlOnUpsert({
-          ingestMode,
-          upsertType: event.type,
-          fromMe: Boolean(message.key?.fromMe),
-          messageAt,
-        });
-
-        if (!allowSelfControlHandling && ingestMode) {
+    socket.ev.on("messaging-history.set", (event) => {
+      runSocketTask("messaging-history.set", async () => {
+        if (socket !== sock || !event) {
+          return;
+        }
+        const ingestMode: "history_sync" | "history_fetch" = event.peerDataRequestSessionId
+          ? "history_fetch"
+          : "history_sync";
+        if (Array.isArray(event.chats)) {
+          for (const chat of event.chats) {
+            await syncThreadMetadata(chat);
+          }
+        }
+        if (Array.isArray(event.contacts)) {
+          for (const contact of event.contacts) {
+            syncContactMetadata(contact);
+          }
+        }
+        if (!Array.isArray(event.messages)) {
+          return;
+        }
+        for (const message of event.messages) {
+          const laneKey = getThreadJid(message.key) || `unknown:${message.key?.id || Date.now()}`;
           void enqueueByThreadLane(inboundThreadLanes, laneKey, () =>
             runInboundWithLimit(async () => {
               await processHistoricalMessage(message, ingestMode);
             }),
           );
-          continue;
         }
-        const helpCommandHandled = await maybeHandleSelfControlHelpCommand(message);
-        if (helpCommandHandled) {
-          continue;
+      });
+    });
+
+    socket.ev.on("call", (events) => {
+      runSocketTask("call", async () => {
+        if (socket !== sock || !Array.isArray(events)) {
+          return;
         }
-        const selfImproveCommandHandled = await maybeHandleSelfImproveCommand(message);
-        if (selfImproveCommandHandled) {
-          continue;
-        }
-        const runtimeCommandHandled = await maybeHandleRuntimeControlCommand(message);
-        if (runtimeCommandHandled) {
-          continue;
-        }
-        if (message.key.fromMe) {
+
+        for (const event of events) {
+          const laneKey = event.chatId || event.groupJid || event.from || `call:${event.id || Date.now()}`;
           void enqueueByThreadLane(inboundThreadLanes, laneKey, () =>
             runInboundWithLimit(async () => {
-              await processOwnMessage(message);
+              await processInboundCallEvent(event);
             }),
           );
-          continue;
         }
-        void enqueueByThreadLane(inboundThreadLanes, laneKey, () =>
-          runInboundWithLimit(async () => {
-            await processInboundMessage(message);
-          }),
-        );
-      }
+      });
+    });
+
+    socket.ev.on("messages.upsert", (event) => {
+      runSocketTask("messages.upsert", async () => {
+        if (socket !== sock || !event || !Array.isArray(event.messages)) {
+          return;
+        }
+
+        const ingestMode: "history_sync" | "history_fetch" | null =
+          event.type === "notify" ? null : event.requestId ? "history_fetch" : "history_sync";
+
+        for (const message of event.messages) {
+          const laneKey = getThreadJid(message.key) || `unknown:${message.key.id || Date.now()}`;
+          const messageAt = normalizeIncomingMessageTimestamp(message.messageTimestamp, Date.now());
+          const allowSelfControlHandling = shouldAttemptSelfControlOnUpsert({
+            ingestMode,
+            upsertType: event.type,
+            fromMe: Boolean(message.key?.fromMe),
+            messageAt,
+          });
+
+          if (!allowSelfControlHandling && ingestMode) {
+            void enqueueByThreadLane(inboundThreadLanes, laneKey, () =>
+              runInboundWithLimit(async () => {
+                await processHistoricalMessage(message, ingestMode);
+              }),
+            );
+            continue;
+          }
+          const helpCommandHandled = await maybeHandleSelfControlHelpCommand(message);
+          if (helpCommandHandled) {
+            continue;
+          }
+          const selfImproveCommandHandled = await maybeHandleSelfImproveCommand(message);
+          if (selfImproveCommandHandled) {
+            continue;
+          }
+          const runtimeCommandHandled = await maybeHandleRuntimeControlCommand(message);
+          if (runtimeCommandHandled) {
+            continue;
+          }
+          if (message.key.fromMe) {
+            void enqueueByThreadLane(inboundThreadLanes, laneKey, () =>
+              runInboundWithLimit(async () => {
+                await processOwnMessage(message);
+              }),
+            );
+            continue;
+          }
+          void enqueueByThreadLane(inboundThreadLanes, laneKey, () =>
+            runInboundWithLimit(async () => {
+              await processInboundMessage(message);
+            }),
+          );
+        }
+      });
     });
   };
 
@@ -5579,7 +5692,7 @@ function resolveTextEmojiAllowlist() {
     const blendedTrendTheme = [trendTheme, internetTrendTheme].filter(Boolean).join(", ");
 
     const promptSeed = [
-      "Generate one WhatsApp status update designed to spark genuine conversation replies.",
+      "Generate one WhatsApp status update as a confident, relatable statement.",
       `Audience size: ${audienceCount}.`,
       `Audience mix: ${demographic}.`,
       `Trending topics from my chats: ${trendTheme}.`,
@@ -5587,6 +5700,7 @@ function resolveTextEmojiAllowlist() {
       `Required format: ${requestedFormat === "meme" ? "short meme caption" : "text-only status"}.`,
       "Style: concise, playful, human, and natural.",
       "Do not sound like marketing, spam, or clickbait.",
+      "Do not ask questions or invite answers.",
       "Keep under 140 characters. Use at most one emoji.",
     ].join("\n");
 
@@ -5676,16 +5790,16 @@ function resolveTextEmojiAllowlist() {
 
     const fallbackText =
       requestedFormat === "meme"
-        ? "Small chaos, big laughs. Who can relate? 😅"
-        : "Quick check: what's one win from your day?";
+        ? "Small chaos, big laughs all around. 😅"
+        : "Small wins are stacking up nicely today.";
     const aiText = normalizeOutboundText(ai.guardrailBlocked ? fallbackText : ai.text);
-    const normalizedText = aiText.slice(0, 220).trim() || fallbackText;
+    const normalizedTextBase = aiText.slice(0, 220).trim() || fallbackText;
     let resolvedFormat: "text" | "meme" = requestedFormat;
     let mediaAssetId: Id<"mediaAssets"> | undefined;
     let mediaCaption: string | undefined;
 
     if (requestedFormat === "meme") {
-      mediaCaption = normalizedText;
+      mediaCaption = normalizedTextBase;
       mediaAssetId = await generateAndStoreThreadMeme({
         threadId: item.threadId,
         threadJid: "status@broadcast",
@@ -5711,6 +5825,7 @@ function resolveTextEmojiAllowlist() {
         mediaCaption = undefined;
       }
     }
+    const normalizedText = resolvedFormat === "text" ? forceDeclarativeStatusText(normalizedTextBase) : normalizedTextBase;
 
     const primaryConfidence = clamp(runtimeSettings?.aiPrimaryConfidence ?? 0.78, 0.01, 1);
     const fallbackConfidence = clamp(runtimeSettings?.aiFallbackConfidence ?? 0.58, 0.01, 1);
@@ -6020,7 +6135,7 @@ function resolveTextEmojiAllowlist() {
               let sent: { key?: { id?: string | null } } | undefined;
               const destinationJid = isStatusBroadcastSend ? "status@broadcast" : item.jid;
               if (isStatusBroadcastSend) {
-                const statusSendOptions = buildStatusSendOptions(hydrated.statusAudienceJids);
+                const statusSendOptions = buildStatusSendOptions(undefined);
                 if (hydrated.sendKind === "meme") {
                   if (!hydrated.mediaAssetId) {
                     throw new Error("Status meme outbox item missing media asset id.");
@@ -6130,6 +6245,16 @@ function resolveTextEmojiAllowlist() {
         ),
       );
       await Promise.allSettled(tasks);
+    } catch (error) {
+      const err = error instanceof Error ? error.message : String(error);
+      logger.error({ err }, "WhatsApp outbox poll failed");
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: "whatsapp.outbox.poll_error",
+          detail: compactLogText(err, 300),
+        })
+        .catch(() => undefined);
     } finally {
       processingOutbox = false;
     }
@@ -6287,25 +6412,39 @@ function resolveTextEmojiAllowlist() {
     await runContextCompactionPass(runtimeSettings);
   };
 
+  const runBackgroundTask = (taskName: string, task: () => Promise<void>) => {
+    void task().catch((error) => {
+      const err = error instanceof Error ? error.message : String(error);
+      logger.error({ err, taskName }, "Worker background task failed");
+      void convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: "worker.background_task_error",
+          detail: compactLogText(`${taskName}: ${err}`, 300),
+        })
+        .catch(() => undefined);
+    });
+  };
+
   const startupSettings = await getRuntimeSettings();
   const intervalMs = Math.round(
     clamp(startupSettings?.outboxPollMs ?? Number(process.env.SLM_OUTBOX_POLL_MS || 3000), 500, 60_000),
   );
   setInterval(() => {
-    void pollOutbox();
+    runBackgroundTask("whatsapp.outbox.poll", pollOutbox);
   }, intervalMs);
   setInterval(() => {
-    void runStickerContextBackfillPass();
+    runBackgroundTask("whatsapp.sticker.context_backfill", runStickerContextBackfillPass);
   }, STICKER_CONTEXT_PASS_INTERVAL_MS);
   setInterval(() => {
-    void maybeRunStatusCleanup();
+    runBackgroundTask("whatsapp.maintenance.status_cleanup", maybeRunStatusCleanup);
   }, MAINTENANCE_TICK_MS);
   setInterval(() => {
-    void maybeRunContextCompaction();
+    runBackgroundTask("whatsapp.maintenance.context_compaction", maybeRunContextCompaction);
   }, MAINTENANCE_TICK_MS);
-  void runStickerContextBackfillPass();
-  void maybeRunStatusCleanup(true);
-  void maybeRunContextCompaction(true);
+  runBackgroundTask("whatsapp.sticker.context_backfill.startup", runStickerContextBackfillPass);
+  runBackgroundTask("whatsapp.maintenance.status_cleanup.startup", () => maybeRunStatusCleanup(true));
+  runBackgroundTask("whatsapp.maintenance.context_compaction.startup", () => maybeRunContextCompaction(true));
 
   logger.info(
     {

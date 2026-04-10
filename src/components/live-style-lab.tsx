@@ -1,6 +1,7 @@
 "use client";
 
 import { ActionNotices } from "@/components/action-notices";
+import { LoadingBlock, LoadingIndicator } from "@/components/loading-state";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
@@ -67,6 +68,7 @@ function StyleLabContent() {
         }>;
       }
     | undefined;
+  const historyLoading = history === undefined;
 
   const currentLevel = profile?.mimicryLevel ?? 0.72;
   const [mimicryLevel, setMimicryLevel] = useState(currentLevel);
@@ -153,9 +155,11 @@ function StyleLabContent() {
       <article className="panel-card">
         <ActionNotices notices={notices} onDismiss={dismissNotice} />
         <h3>Mimicry Control</h3>
-        <p className="queue-meta">
-          {profileLoading ? "Loading style profile..." : `Current mimicry: ${Math.round(currentLevel * 100)}%`}
-        </p>
+        {profileLoading ? (
+          <LoadingIndicator label="Loading style profile..." />
+        ) : (
+          <p className="queue-meta">Current mimicry: {Math.round(currentLevel * 100)}%</p>
+        )}
         <form onSubmit={onSubmit} className="stack compact" aria-busy={record.pending}>
           <input
             type="range"
@@ -264,7 +268,7 @@ function StyleLabContent() {
         </div>
         <div className="stack">
           {profileLoading ? (
-            <p className="empty-line">Loading learned traits…</p>
+            <LoadingBlock label="Loading learned traits…" rows={4} />
           ) : (
             LEARNED_TRAIT_SECTIONS.map((section) => {
               const values = traitsByField[section.trait];
@@ -507,6 +511,7 @@ function StyleLabContent() {
 
         <h3>Mimicry History</h3>
         <div className="stack">
+          {historyLoading ? <LoadingBlock label="Loading mimicry history…" rows={2} compact /> : null}
           {(history || []).map((item) => (
             <div key={item._id} className="queue-item">
               <p className="queue-title">{Math.round(item.mimicryLevel * 100)}%</p>
@@ -546,7 +551,7 @@ function StyleLabContent() {
         </p>
         <div className="stack">
           {personaPacks === undefined ? (
-            <p className="empty-line">Loading persona packs…</p>
+            <LoadingBlock label="Loading persona packs…" rows={2} compact />
           ) : personaPacks.packs.length === 0 ? (
             <p className="empty-line">No persona packs available.</p>
           ) : (

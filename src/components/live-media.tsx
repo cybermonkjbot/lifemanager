@@ -1,5 +1,6 @@
 "use client";
 
+import { LoadingBlock } from "@/components/loading-state";
 import { SharedMediaPreview } from "@/components/media-preview";
 import { UIModal } from "@/components/ui-modal";
 import { formatDateTime, trim } from "@/lib/format";
@@ -67,7 +68,7 @@ export function LiveMedia() {
           </button>
         </div>
 
-        {loading ? <p className="empty-line">Loading media…</p> : null}
+        {loading ? <LoadingBlock label="Loading media…" rows={4} /> : null}
         {!loading && (mediaItems || []).length === 0 ? <p className="empty-line">No media found for this filter yet.</p> : null}
 
         <div className="stack">

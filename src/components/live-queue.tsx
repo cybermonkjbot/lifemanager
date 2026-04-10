@@ -1,6 +1,7 @@
 "use client";
 
 import { ActionNotices } from "@/components/action-notices";
+import { LoadingBlock } from "@/components/loading-state";
 import { SharedMediaPreview } from "@/components/media-preview";
 import { ProviderFilter, type ProviderFilterValue } from "@/components/provider-filter";
 import { UIModal } from "@/components/ui-modal";
@@ -294,7 +295,7 @@ function QueueContent() {
 
   const renderNeedsReply = () => (
     <div className="stack">
-      {queueLoading ? <p className="empty-line">Loading reply queue…</p> : null}
+      {queueLoading ? <LoadingBlock label="Loading reply queue…" rows={3} compact /> : null}
       {needsReply.map((item) => {
         const sendKey = `send:${item._id}`;
         const snoozeKey = `snooze:${item._id}`;
@@ -321,7 +322,7 @@ function QueueContent() {
 
   const renderFollowups = () => (
     <div className="stack">
-      {queueLoading ? <p className="empty-line">Loading follow-up confirmations…</p> : null}
+      {queueLoading ? <LoadingBlock label="Loading follow-up confirmations…" rows={3} compact /> : null}
       {followupConfirmations.map((item) => {
         const key = `followup:${item._id}`;
         const record = getRecord(key);
@@ -368,7 +369,7 @@ function QueueContent() {
 
   const renderTodos = () => (
     <div className="stack">
-      {queueLoading ? <p className="empty-line">Loading TODO candidates…</p> : null}
+      {queueLoading ? <LoadingBlock label="Loading TODO candidates…" rows={2} compact /> : null}
       {todoCandidates.map((item) => {
         const key = `todo:${item._id}`;
         const record = getRecord(key);
@@ -390,7 +391,7 @@ function QueueContent() {
 
   const renderGuardrails = () => (
     <div className="stack">
-      {queueLoading ? <p className="empty-line">Loading guardrail flags…</p> : null}
+      {queueLoading ? <LoadingBlock label="Loading guardrail flags…" rows={2} compact /> : null}
       {guardrailFlags.map((item) => (
         <div key={item._id} className="queue-item queue-item-condensed">
           <div>

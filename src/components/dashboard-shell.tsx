@@ -1,5 +1,6 @@
 import { ConvexAppProvider } from "@/components/convex-app-provider";
 import { LogWatcher } from "@/components/log-watcher";
+import { RuntimeStateOverlay } from "@/components/runtime-state-overlay";
 import { ShellControlsModal } from "@/components/shell-controls-modal";
 import { ShellNavigation } from "@/components/shell-navigation";
 import { SetupNotice } from "@/components/setup-notice";
@@ -103,6 +104,7 @@ export function DashboardShell({
   return (
     <div className="shell-root">
       <ConvexAppProvider convexUrl={convexUrl}>
+        {realtimeEnabled ? <RuntimeStateOverlay /> : null}
         <div className="shell-main-wrap">
           <header className="shell-topbar">
             <div className="brand-block">

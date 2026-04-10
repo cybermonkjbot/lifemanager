@@ -102,6 +102,7 @@ Notes:
 - Commands only execute from your self chat (your own JID).
 - Shortcuts are supported for worker control: `pause`, `resume`, `restart`, `status` (and `/slm pause`, etc.).
 - Send `help` anytime to get the full command list in chat.
+- Optional hard gate: set `SLM_SELF_CONTROL_MESSAGE_PREFIX` (for example `slm`) to require prefixed commands like `slm help`.
 - `pause worker` pauses automation while keeping the listener alive, so `resume worker` still works.
 - App controls use `.slm/app.pid` and start with `SLM_APP_START_CMD` (default `bun run dev:next`).
 

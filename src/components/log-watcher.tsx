@@ -1,5 +1,6 @@
 "use client";
 
+import { LoadingBlock } from "@/components/loading-state";
 import { formatDateTime, trim } from "@/lib/format";
 import { api } from "../../convex/_generated/api";
 import { useQuery } from "convex/react";
@@ -33,7 +34,7 @@ export function LogWatcher() {
       </div>
 
       <div className="logwatcher-list">
-        {logsLoading ? <p className="empty-line">Connecting to runtime log stream…</p> : null}
+        {logsLoading ? <LoadingBlock label="Connecting to runtime log stream…" rows={3} compact /> : null}
         {logRows.map((log) => (
           <div key={log.id} className="logwatcher-row">
             <p className="logwatcher-title">

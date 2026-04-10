@@ -226,7 +226,7 @@ export const save = mutation({
       statusBuilderEnabled: args.statusBuilderEnabled,
       statusBuilderCadenceHours: clampInt(args.statusBuilderCadenceHours, 1, 24 * 7),
       statusBuilderDailyMaxPosts: clampInt(args.statusBuilderDailyMaxPosts, 1, 24),
-      statusBuilderTextPostRatio: clamp(args.statusBuilderTextPostRatio, 0, 1),
+      statusBuilderTextPostRatio: clamp(args.statusBuilderTextPostRatio, 0, 0.45),
       statusBuilderReviewRatio: clamp(
         args.statusBuilderReviewRatio ?? DEFAULT_APP_CONFIG.statusBuilderReviewRatio,
         0,

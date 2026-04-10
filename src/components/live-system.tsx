@@ -1,6 +1,7 @@
 "use client";
 
 import { ActionNotices } from "@/components/action-notices";
+import { LoadingBlock } from "@/components/loading-state";
 import { formatDateTime, trim } from "@/lib/format";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
 import { api } from "../../convex/_generated/api";
@@ -308,7 +309,7 @@ function SystemContent() {
       <article className="panel-card">
         <h3>SLO Snapshot</h3>
         {healthLoading ? (
-          <p className="empty-line">Loading SLO metrics…</p>
+          <LoadingBlock label="Loading SLO metrics…" rows={4} />
         ) : metrics ? (
           <div className="stack">
             <p className="queue-meta">
@@ -340,7 +341,7 @@ function SystemContent() {
       <article className="panel-card">
         <h3>Active Alerts</h3>
         <div className="stack">
-          {healthLoading ? <p className="empty-line">Loading alerts…</p> : null}
+          {healthLoading ? <LoadingBlock label="Loading alerts…" rows={2} compact /> : null}
           {alerts.map((alert, index) => (
             <div key={`${index}:${alert}`} className="queue-item">
               <p className="queue-body">{alert}</p>
@@ -353,7 +354,7 @@ function SystemContent() {
       <article className="panel-card">
         <h3>Provider Runs</h3>
         <div className="stack">
-          {healthLoading ? <p className="empty-line">Loading provider runs…</p> : null}
+          {healthLoading ? <LoadingBlock label="Loading provider runs…" rows={3} compact /> : null}
           {providerRuns.map((run) => (
             <div key={run._id} className="queue-item">
               <p className="queue-title">
@@ -380,7 +381,7 @@ function SystemContent() {
       <article className="panel-card">
         <h3>Transcription Runs</h3>
         <div className="stack">
-          {healthLoading ? <p className="empty-line">Loading transcription runs…</p> : null}
+          {healthLoading ? <LoadingBlock label="Loading transcription runs…" rows={2} compact /> : null}
           {latestTranscriptions.map((event) => (
             <div key={event._id} className="queue-item">
               <p className="queue-title">{event.eventType}</p>
@@ -397,7 +398,7 @@ function SystemContent() {
       <article className="panel-card">
         <h3>System Events</h3>
         <div className="stack">
-          {healthLoading ? <p className="empty-line">Loading system events…</p> : null}
+          {healthLoading ? <LoadingBlock label="Loading system events…" rows={3} compact /> : null}
           {latestEvents.map((event) => (
             <div key={event._id} className="queue-item">
               <p className="queue-title">
@@ -414,7 +415,7 @@ function SystemContent() {
       <article className="panel-card">
         <h3>Runbooks</h3>
         <div className="stack">
-          {healthLoading ? <p className="empty-line">Loading runbooks…</p> : null}
+          {healthLoading ? <LoadingBlock label="Loading runbooks…" rows={2} compact /> : null}
           {runbooks.map((book) => (
             <div key={book.key} className="queue-item">
               <p className="queue-title">{book.title}</p>

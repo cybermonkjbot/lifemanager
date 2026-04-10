@@ -155,7 +155,16 @@ export type ProfessionalLinguaInference = {
 type AzureApiStyle = "auto" | "chat_completions" | "responses";
 type FallbackMode = "all" | "azure_only";
 type AntiBeggiBeggiTone = "soft" | "firm" | "funny";
-export type ConversationSteeringMode = "none" | "hard_stop" | "pause" | "wrap_up" | "loop" | "anti_beggi_beggi" | "anti_sales_pitch";
+export type ConversationSteeringMode =
+  | "none"
+  | "hard_stop"
+  | "pause"
+  | "wrap_up"
+  | "loop"
+  | "anti_beggi_beggi"
+  | "anti_sales_pitch"
+  | "anti_puppet"
+  | "anti_dry_joke";
 export type AckRoutingChannel = "reaction_only" | "reaction_plus_text" | "text";
 export type ContextToolName =
   | "context_window_detection"
@@ -355,6 +364,78 @@ const AI_DENIAL_PATTERNS = [
   /\b(?:just|only)\s+me\b/i,
   /\bi\s+reply\s+myself(?:\s+only)?\b/i,
   /\bmanual(?:ly)?\s+only\b/i,
+];
+const MATH_CUE_PATTERNS = [
+  /\b(calculate|calc|solve|equation|evaluate|simplify|work out|find)\b/i,
+  /\b(sum|difference|total|average|mean|remainder|plus|minus|times|multipl(?:y|ied)|divide|divided|percentage|percent)\b/i,
+  /\b(add|subtract)\b/i,
+  /\b(what do you get when|difference between|sum of)\b/i,
+  /\b(squared|square root|cube|cubed)\b/i,
+  /\bwhat(?:'|’)s\s+\d/i,
+  /\bwhat\s+is\s+\d/i,
+  /\bhow much is\b/i,
+  /\bwork out\b/i,
+];
+const MATH_OPERATOR_EXPRESSION_PATTERN = /\b\d+(?:\.\d+)?\s*(?:[+\-*x×/])\s*\d+(?:\.\d+)?\b/i;
+const MATH_LINEAR_EQUATION_PATTERN = /\b-?\d*\s*[a-z]\s*(?:[+\-]\s*\d+(?:\.\d+)?)?\s*=\s*-?\d+(?:\.\d+)?\b/i;
+const MATH_DIRECT_ASK_PATTERN =
+  /\b(what(?:'|’)s|what is|how much|find|solve|evaluate|work out|calculate|calc|what do you get when|difference between|sum of)\b/i;
+const MATH_WORD_NUMBER_PATTERN =
+  /\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)\b/i;
+const CALCULATOR_STYLE_REPLY_PATTERNS = [
+  /^=?\s*(?:the answer is\s*)?-?\d[\d,]*(?:\.\d+)?(?:\s*%| percent)?[.!?]?$/i,
+  /^(?:it(?:'|’)s|it is|equals?)\s*-?\d[\d,]*(?:\.\d+)?(?:\s*%| percent)?[.!?]?$/i,
+  /^(?:result|answer)\s*[:\-]\s*-?\d[\d,]*(?:\.\d+)?(?:\s*%| percent)?[.!?]?$/i,
+  /^-?\d[\d,]*(?:\.\d+)?\s*(?:[+\-*/x×]\s*-?\d[\d,]*(?:\.\d+)?\s*)*=\s*-?\d[\d,]*(?:\.\d+)?[.!?]?$/i,
+  /^[\d\s+\-*/x×=().,%]+$/,
+];
+const ANTI_CALCULATOR_MATH_OPENERS = [
+  "I wasn't very good at math",
+  "I'm no calculator",
+  "Math is not my strongest suit",
+  "My mental math is a little rusty",
+  "I might be off here",
+  "I'm doing this in my head",
+  "I'm not in calculator mode",
+  "I had to think through that one",
+  "I am a bit rusty with numbers",
+  "I can be wrong on quick math",
+  "I'm estimating from memory",
+  "I'm not a math machine",
+  "I usually double-check numbers",
+  "I had to do quick head math",
+  "I might be overthinking this",
+  "I'm working it out mentally",
+  "I am trying to keep this human",
+  "I could be slightly off",
+  "I'm giving this a quick estimate",
+  "I'm not perfect with arithmetic",
+  "I might have done that too fast",
+  "I had to rough-calc it",
+  "I'm keeping it simple",
+  "I'm taking a practical guess",
+];
+const ANTI_CALCULATOR_MATH_ENDINGS = [
+  "but I think it's {{result}}.",
+  "and I think it's {{result}}.",
+  "so I think it's {{result}}.",
+  "my best guess is {{result}}.",
+  "I'd call it {{result}}.",
+  "I'd say {{result}}.",
+  "it should be {{result}}.",
+  "I get {{result}}.",
+  "I come out at {{result}}.",
+  "I landed on {{result}}.",
+  "I still think it's {{result}}.",
+  "so I'd go with {{result}}.",
+  "unless I slipped, it's {{result}}.",
+  "if I did that right, it's {{result}}.",
+  "from a quick check, it's {{result}}.",
+  "my rough answer is {{result}}.",
+  "I'd put it at {{result}}.",
+  "that comes to {{result}}.",
+  "it looks like {{result}} to me.",
+  "I'd peg it at {{result}}.",
 ];
 const MALE_GENDERED_TERMS = ["bro", "broski", "brother", "dude", "guy", "boy", "king", "sir", "mr", "handsome", "gentleman"];
 const FEMALE_GENDERED_TERMS = ["sis", "sister", "girl", "queen", "maam", "madam", "mrs", "miss", "lady", "beautiful", "princess"];
@@ -574,6 +655,102 @@ const SALES_PITCH_CTA_PATTERN = /\b(dm|dms|inbox|message|whatsapp|call|text|tap|
 const SALES_PITCH_PRICE_PATTERN = /(?:[$£€₦]|usd|ngn|naira)\s?\d|\b\d{2,}\s?(?:usd|ngn|naira|bucks|k)\b/i;
 const SALES_PITCH_DISCOUNT_PATTERN = /\b\d{1,3}\s?%\s?off\b/i;
 const SALES_PITCH_PATRONIZE_PATTERN = /\b(patroni[sz]e|place an? order|interested\??|available now)\b/i;
+const PUPPET_JOKE_REQUEST_PATTERNS = [
+  /\b(?:tell|give|say|drop|share|crack)\s+(?:me\s+)?(?:a\s+|one\s+|some\s+)?(?:joke|jokes|pun|something funny)\b/i,
+  /\bmake\s+me\s+laugh\b/i,
+  /\b(?:be|sound)\s+funny\b/i,
+  /\bentertain\s+me\b/i,
+  /\bjokes?\s+please\b/i,
+  /\bdo\s+(?:a\s+)?joke\b/i,
+];
+const PUPPET_BOT_FRAMING_PATTERN = /\b(chatgpt|ai\s*bot|bot|assistant)\b/i;
+const PUPPET_HUMOR_KEYWORD_PATTERN = /\b(joke|jokes|funny|laugh|banter|pun)\b/i;
+const PUPPET_TOPIC_STOPWORDS = new Set([
+  "tell",
+  "give",
+  "say",
+  "drop",
+  "share",
+  "crack",
+  "joke",
+  "jokes",
+  "pun",
+  "funny",
+  "laugh",
+  "entertain",
+  "chatgpt",
+  "assistant",
+  "bot",
+  "make",
+  "about",
+  "please",
+  "pls",
+  "like",
+  "something",
+]);
+const ANTI_PUPPET_EN_VARIANTS = [
+  "Comedy mode is off-duty, but I can still keep it real on {{topic}}.",
+  "No chatbot stand-up today, but I can still talk straight about {{topic}}.",
+  "I parked the joke script, so let's just handle {{topic}} like normal humans.",
+  "My inner comedian is on break, but I'm still here for {{topic}}.",
+  "No punchline package from me right now, just a real response on {{topic}}.",
+];
+const ANTI_PUPPET_PIDGIN_VARIANTS = [
+  "No be comedy show today, but we fit handle {{topic}} like normal people.",
+  "Joke mode don sleep, make we just keep am real for {{topic}}.",
+  "No bot cruise for now, but I still dey here for {{topic}}.",
+  "My comedian side dey on break, make we reason {{topic}} straight.",
+  "No punchline package today, make we just sort {{topic}} normal.",
+];
+const DRY_JOKE_CALL_OUT_EN_VARIANTS = [
+  "That joke was so dry it came with a humidity warning.",
+  "Dry humor level: Sahara deluxe, but I respect your confidence.",
+  "That punchline arrived with desert vibes and no water break.",
+  "That joke was bone-dry, but the commitment was elite.",
+];
+const DRY_JOKE_SOFT_EN_VARIANTS = [
+  "That one dry small, but keep going, you go land one soon.",
+  "Joke dry tiny, but I see the vision, run another one.",
+];
+const DRY_JOKE_CALL_OUT_PIDGIN_VARIANTS = [
+  "That joke dry pass harmattan, but your confidence strong.",
+  "Dry humor full ground here, e still funny for spirit sha.",
+  "That punchline dry like Sunday sun, but I respect the effort.",
+  "That joke dry die, but the vibes still dey.",
+];
+const DRY_JOKE_SOFT_PIDGIN_VARIANTS = [
+  "That one dry small, but drop another one make we check am.",
+  "Joke dry tiny, but I see wetin you try do, run am again.",
+];
+const DRY_JOKE_TEMPLATE_PATTERNS = [
+  /\bknock knock\b/i,
+  /\bwhy did the\b/i,
+  /\bdad joke\b/i,
+  /\bpun intended\b/i,
+  /\b(?:two|three)\s+[\w'-]+(?:\s+[\w'-]+){0,5}\s+walked into (?:a|the)\s+bar\b/i,
+  /\bhow many\s+[\w\s'-]{1,40}\s+does it take to change a light bulb\b/i,
+  /\broses are red\b[\s\S]{0,90}\bviolets are blue\b/i,
+];
+const DRY_JOKE_SETUP_PATTERNS = [
+  /\bwhat do you call\b[\s\S]{0,120}(?:\?|$)/i,
+  /\b(?:here(?:'|’)s|here is|i have|got)\s+(?:a\s+)?(?:corny\s+|dry\s+|dad\s+)?(?:joke|pun)\b/i,
+  /\b(?:let me|lemme)\s+(?:drop|tell)\s+(?:you\s+)?(?:a\s+)?(?:joke|pun)\b/i,
+];
+const DRY_JOKE_PUNCHLINE_PATTERNS = [
+  /\?\s*(?:because|cos|cuz|cause)\b/i,
+  /\b(?:ba[\s-]?dum[\s-]?tss|rimshot|get it\??)\b/i,
+  /\b(?:that(?:'|’)s|thats)\s+the\s+joke\b/i,
+  /\bno\s+pun\s+intended\b/i,
+];
+const DRY_JOKE_META_PATTERNS = [
+  /\b(?:corny|cheesy|lame)\s+(?:joke|humou?r)\b/i,
+  /\b(?:one[-\s]?liner|punchline|dry\s+humou?r)\b/i,
+];
+const DRY_JOKE_RETROSPECTIVE_PATTERNS = [
+  /\bthat joke you told\b/i,
+  /\b(?:remember|about)\s+(?:that|the|your)\s+joke\b/i,
+  /\b(?:your|that|the)\s+joke\b[\s\S]{0,50}\b(?:yesterday|last\s+(?:night|time|week)|earlier|before)\b/i,
+];
 const ANTI_BEGGI_BEGGI_PIDGIN_VARIANTS: Record<AntiBeggiBeggiTone, string[]> = {
   soft: [
     "Omohhh, things no really good here mehn. Money tight, I no fit send now.",
@@ -934,6 +1111,104 @@ function hasSalesPitchCue(text: string) {
   return (hasIntent && hasCta) || (hasIntent && hasPrice) || (hasIntent && hasPatronize);
 }
 
+function hasPuppetJokeRequestCue(text: string) {
+  const normalized = normalizeOutboundText(text || "");
+  if (!normalized) {
+    return false;
+  }
+  if (PUPPET_JOKE_REQUEST_PATTERNS.some((pattern) => pattern.test(normalized))) {
+    return true;
+  }
+  if (PUPPET_BOT_FRAMING_PATTERN.test(normalized) && PUPPET_HUMOR_KEYWORD_PATTERN.test(normalized)) {
+    return true;
+  }
+  return false;
+}
+
+function extractPuppetTopicHint(text: string) {
+  const normalized = normalizeOutboundText(text || "").toLowerCase();
+  if (!normalized) {
+    return "";
+  }
+  const tokens = normalized
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length > 2)
+    .filter((token) => !STOPWORDS.has(token))
+    .filter((token) => !PUPPET_TOPIC_STOPWORDS.has(token));
+  return tokens.slice(0, 3).join(" ");
+}
+
+function buildAntiPuppetReply(input: string, pidginMode: boolean) {
+  const topicHint = extractPuppetTopicHint(input);
+  const topic = topicHint || (pidginMode ? "this gist" : "this");
+  const options = pidginMode ? ANTI_PUPPET_PIDGIN_VARIANTS : ANTI_PUPPET_EN_VARIANTS;
+  const template = pickVariant(`${input}:anti_puppet:${topic}:${pidginMode ? "pidgin" : "en"}`, options);
+  return normalizeOutboundText(template.replaceAll("{{topic}}", topic));
+}
+
+function countPatternHits(text: string, patterns: RegExp[]) {
+  return patterns.reduce((hits, pattern) => (pattern.test(text) ? hits + 1 : hits), 0);
+}
+
+function hasDryJokeAttemptCue(text: string) {
+  const normalized = normalizeOutboundText(text || "");
+  if (!normalized) {
+    return false;
+  }
+  if (hasPuppetJokeRequestCue(normalized)) {
+    return false;
+  }
+  if (DRY_JOKE_RETROSPECTIVE_PATTERNS.some((pattern) => pattern.test(normalized))) {
+    return false;
+  }
+
+  const templateHits = countPatternHits(normalized, DRY_JOKE_TEMPLATE_PATTERNS);
+  const setupHits = countPatternHits(normalized, DRY_JOKE_SETUP_PATTERNS);
+  const punchlineHits = countPatternHits(normalized, DRY_JOKE_PUNCHLINE_PATTERNS);
+  const metaHits = countPatternHits(normalized, DRY_JOKE_META_PATTERNS);
+
+  let score = 0;
+  if (templateHits > 0) {
+    score += 2;
+  }
+  if (setupHits > 0) {
+    score += 1;
+  }
+  if (punchlineHits > 0) {
+    score += 1;
+  }
+  if (metaHits > 0) {
+    score += 1;
+  }
+  if (setupHits > 0 && /\?\s*[a-z0-9'"-]{1,20}(?:\s+[a-z0-9'"-]{1,20}){0,5}[.!]*$/i.test(normalized)) {
+    score += 1;
+  }
+  if (
+    /\bwhat do you call\b[\s\S]{0,120}\s[-:]\s*[a-z0-9'"-]{1,20}(?:\s+[a-z0-9'"-]{1,20}){0,5}[.!]*$/i.test(
+      normalized,
+    )
+  ) {
+    score += 1;
+  }
+
+  return score >= 2;
+}
+
+function buildDryJokeReply(input: string, pidginMode: boolean) {
+  const mode = pickVariant(`${input}:anti_dry_joke:mode`, ["callout", "callout", "soft"]);
+  const options =
+    mode === "callout"
+      ? pidginMode
+        ? DRY_JOKE_CALL_OUT_PIDGIN_VARIANTS
+        : DRY_JOKE_CALL_OUT_EN_VARIANTS
+      : pidginMode
+        ? DRY_JOKE_SOFT_PIDGIN_VARIANTS
+        : DRY_JOKE_SOFT_EN_VARIANTS;
+  return normalizeOutboundText(pickVariant(`${input}:anti_dry_joke:${mode}:${pidginMode ? "pidgin" : "en"}`, options));
+}
+
 function detectAntiBeggiBeggiToneFromInbound(input: string): AntiBeggiBeggiTone {
   const normalized = normalizeOutboundText(input || "");
   if (!normalized) {
@@ -974,6 +1249,14 @@ export function detectConversationSteeringMode(args: {
 
   if (hasSalesPitchCue(inbound)) {
     return "anti_sales_pitch";
+  }
+
+  if (hasPuppetJokeRequestCue(inbound)) {
+    return "anti_puppet";
+  }
+
+  if (hasDryJokeAttemptCue(inbound)) {
+    return "anti_dry_joke";
   }
 
   if (PAUSE_PATTERNS.some((pattern) => pattern.test(inbound)) || hasPidginPauseCue(inbound)) {
@@ -1111,6 +1394,12 @@ function steeringInstructionForMode(mode: ConversationSteeringMode) {
   if (mode === "anti_sales_pitch") {
     return "The latest message appears to be a sales pitch or negotiation attempt. Send one short close-out line like you'll take a look/check, and do not negotiate, ask follow-up questions, or continue the sales thread.";
   }
+  if (mode === "anti_puppet") {
+    return "The latest message is framing you like a chatbot entertainer (for example asking for a joke on command). Send one short, playful-but-not-joke human line that keeps things real and does not deliver a punchline.";
+  }
+  if (mode === "anti_dry_joke") {
+    return "The latest message is a clearly dry/corny joke attempt. Respond with one short silly call-out line (playful, not hostile) and avoid long explanations or follow-up questions.";
+  }
   if (mode === "pause") {
     return "The latest message signals they are busy or want to continue later. Send a short sign-off that confirms the pause. Do not introduce new topics.";
   }
@@ -1120,7 +1409,7 @@ function steeringInstructionForMode(mode: ConversationSteeringMode) {
   if (mode === "wrap_up") {
     return "This exchange appears complete. Give a brief closing response and avoid adding new asks or follow-up questions.";
   }
-  return "";
+  return "No hard close-out steering mode is active. Stay direct, context-specific, and momentum-focused without drifting into generic filler.";
 }
 
 function shouldForceNoFollowUpQuestion(mode: ConversationSteeringMode) {
@@ -1128,6 +1417,8 @@ function shouldForceNoFollowUpQuestion(mode: ConversationSteeringMode) {
     mode === "hard_stop" ||
     mode === "anti_beggi_beggi" ||
     mode === "anti_sales_pitch" ||
+    mode === "anti_puppet" ||
+    mode === "anti_dry_joke" ||
     mode === "pause" ||
     mode === "loop" ||
     mode === "wrap_up"
@@ -1138,6 +1429,8 @@ const LEGACY_HEURISTIC_ONLY_STEERING_MODES: ConversationSteeringMode[] = [
   "hard_stop",
   "anti_beggi_beggi",
   "anti_sales_pitch",
+  "anti_puppet",
+  "anti_dry_joke",
   "pause",
   "loop",
   "wrap_up",
@@ -1147,6 +1440,8 @@ const DEFAULT_MODEL_FIRST_DETERMINISTIC_MODES: ConversationSteeringMode[] = [
   "hard_stop",
   "anti_beggi_beggi",
   "anti_sales_pitch",
+  "anti_puppet",
+  "anti_dry_joke",
 ];
 
 const ALLOWED_DETERMINISTIC_STEERING_MODE_SET = new Set<ConversationSteeringMode>(LEGACY_HEURISTIC_ONLY_STEERING_MODES);
@@ -1193,7 +1488,11 @@ function heuristicReply(input: string, historyLines: string[] = []) {
   });
   const pidginMode = detectPidginSignal({ inboundText: input, historyLines });
   const allowBossEscalation =
-    steeringMode !== "hard_stop" && steeringMode !== "anti_beggi_beggi" && steeringMode !== "anti_sales_pitch";
+    steeringMode !== "hard_stop" &&
+    steeringMode !== "anti_beggi_beggi" &&
+    steeringMode !== "anti_sales_pitch" &&
+    steeringMode !== "anti_puppet" &&
+    steeringMode !== "anti_dry_joke";
   const finalize = (candidate: string) =>
     applyBossAddressEscalation({
       inboundText: input,
@@ -1224,6 +1523,14 @@ function heuristicReply(input: string, historyLines: string[] = []) {
         ? pickVariant(input, ["I don see am, I go check am.", "Noted, I go take look and check.", "Thanks, I go check am on my side."])
         : pickVariant(input, ["Thanks for sharing. I'll take a look and check.", "Noted, I'll check it out on my end.", "I see it. I'll take a look and review."]),
     );
+  }
+
+  if (steeringMode === "anti_puppet") {
+    return finalize(buildAntiPuppetReply(input, pidginMode));
+  }
+
+  if (steeringMode === "anti_dry_joke") {
+    return finalize(buildDryJokeReply(input, pidginMode));
   }
 
   if (steeringMode === "pause") {
@@ -1350,7 +1657,8 @@ const HISTORY_ACK_ONLY_PATTERNS = [
   /^(thanks|thank you|thx|ty|appreciate it|appreciate you)\s*,\s*(all good|we good|sounds good|got it|that helps|done|resolved|all set)[.!]*$/i,
   /^[🙏👍❤️😂🤣😅🔥💀]+$/,
 ];
-const DEFAULT_MAX_CONTEXT_TOKENS = 8192;
+const GPT_5_4_CONTEXT_WINDOW_TOKENS = 1_000_000;
+const DEFAULT_MAX_CONTEXT_TOKENS = GPT_5_4_CONTEXT_WINDOW_TOKENS;
 const DEFAULT_CONTEXT_SEARCH_LIMIT = 4;
 const DEFAULT_CONTEXT_LINE_CHAR_LIMIT = 220;
 const DEFAULT_ADAPTIVE_CONTEXT_MIN_TOKENS = 16_384;
@@ -1827,6 +2135,12 @@ function inferIntentLabel(args: { inboundText: string; steeringMode: Conversatio
   if (args.steeringMode === "anti_sales_pitch") {
     return "sales_pitch_close_out";
   }
+  if (args.steeringMode === "anti_puppet") {
+    return "anti_puppet_deflect";
+  }
+  if (args.steeringMode === "anti_dry_joke") {
+    return "dry_joke_callout";
+  }
 
   const inbound = normalizeOutboundText(args.inboundText);
   if (/\?/.test(inbound)) {
@@ -1870,7 +2184,9 @@ function buildResponseWorkbench(args: ResponseWorkbenchInput) {
     args.steeringMode === "wrap_up" ||
     args.steeringMode === "loop" ||
     args.steeringMode === "anti_beggi_beggi" ||
-    args.steeringMode === "anti_sales_pitch"
+    args.steeringMode === "anti_sales_pitch" ||
+    args.steeringMode === "anti_puppet" ||
+    args.steeringMode === "anti_dry_joke"
   ) {
     replyMode = "close";
   } else if (explicitAsks.length === 0 && hasLeadHandoffCue(args.inboundText)) {
@@ -2219,7 +2535,7 @@ function runContactMemoryFactSelectionTool(args: ContactFactSelectionInput) {
 
 function runContextWindowDetectionTool(args: ContextWindowDetectionInput) {
   const startedAt = Date.now();
-  const maxContextTokens = Math.max(512, Math.min(args.maxContextTokens, 200_000));
+  const maxContextTokens = Math.max(512, Math.min(args.maxContextTokens, GPT_5_4_CONTEXT_WINDOW_TOKENS));
   const reserveOutputTokens = Math.max(64, Math.min(args.reserveOutputTokens, Math.floor(maxContextTokens * 0.5)));
   const availablePromptTokens = Math.max(128, maxContextTokens - reserveOutputTokens);
   const estimatedPromptTokens = estimateTokenCount(args.prompt);
@@ -2271,8 +2587,13 @@ function buildPrompt(args: {
       512,
       Math.min(
         args.runtime?.maxContextTokens ??
-          parseBoundedNumber(process.env.SLM_AI_MAX_CONTEXT_TOKENS, DEFAULT_MAX_CONTEXT_TOKENS, 512, 200_000),
-        200_000,
+          parseBoundedNumber(
+            process.env.SLM_AI_MAX_CONTEXT_TOKENS,
+            DEFAULT_MAX_CONTEXT_TOKENS,
+            512,
+            GPT_5_4_CONTEXT_WINDOW_TOKENS,
+          ),
+        GPT_5_4_CONTEXT_WINDOW_TOKENS,
       ),
     ),
   );
@@ -2285,9 +2606,9 @@ function buildPrompt(args: {
             process.env.SLM_AI_ADAPTIVE_CONTEXT_MIN_TOKENS,
             DEFAULT_ADAPTIVE_CONTEXT_MIN_TOKENS,
             2048,
-            200_000,
+            GPT_5_4_CONTEXT_WINDOW_TOKENS,
           ),
-        200_000,
+        GPT_5_4_CONTEXT_WINDOW_TOKENS,
       ),
     ),
   );
@@ -2562,6 +2883,12 @@ function buildPrompt(args: {
     historyLines: args.historyLines,
   });
   const steeringInstruction = steeringInstructionForMode(steeringMode);
+  const steeringPriorityInstruction =
+    "Steering priority order: (1) explicit safety/closure cues, (2) latest inbound ask, (3) relevant conversation context, (4) style/persona polish. If these conflict, follow this order.";
+  const steeringExecutionInstruction =
+    steeringMode === "none"
+      ? "Steering mode: NONE. Keep the reply decisive, concrete, and context-anchored; avoid vague acknowledgments."
+      : `Steering mode: ${steeringMode.toUpperCase()}. Execute this mode strictly even if other style hints pull in a different direction.`;
   const insultHandlingInstruction = hasAggressiveInsultCue(args.inboundText)
     ? "The latest message includes insulting or aggressive language. Ignore the insult and do not attempt de-escalation, conflict coaching, or tone policing. Respond only to the concrete request/topic. If there is no concrete request, send one short neutral acknowledgment and stop."
     : "";
@@ -2670,6 +2997,8 @@ function buildPrompt(args: {
       "Avoid direct name address by default. Only use the contact's name if they used your name first in the latest message or disambiguation is required.",
       "Avoid generic fillers like 'Noted', 'As an AI', 'I hope this message finds you well', or repetitive templates.",
       "Never send placeholder lines like 'Sounds good, I'll handle it and update you soon' or 'Got it, I'm on it.'",
+      "If someone prompts you like a chatbot performer (for example 'tell me a joke'), do not do a joke routine. Give a short silly-but-human line that stays context-aware and real.",
+      "If the inbound asks a basic math question, do not sound like a calculator. Prefer a light human hedge, for example: 'I wasn't very good at math but I think it's ...'.",
       "Mirror style safely: borrow broad tone only, never exact catchphrases or signature phrasing.",
       "Do not imitate private identifiers, unusual typos, punctuation quirks, or language patterns that could feel like impersonation.",
       "Never use awkward stock catchphrases or borrowed signature slogans.",
@@ -2681,6 +3010,8 @@ function buildPrompt(args: {
       jokeSafetyInstruction,
       antiJokeChainInstruction,
       steeringInstruction,
+      steeringPriorityInstruction,
+      steeringExecutionInstruction,
       insultHandlingInstruction,
       friendshipRoutingInstruction,
       professionalLinguaInstruction,
@@ -3003,6 +3334,87 @@ function stripGenderedWording(text: string, knownGender: "male" | "female" | nul
   );
 }
 
+function applyAntiPuppetTone(args: { inboundText: string; replyText: string; pidginMode: boolean }) {
+  const reply = normalizeOutboundText(args.replyText || "");
+  if (!reply) {
+    return reply;
+  }
+  if (!hasPuppetJokeRequestCue(args.inboundText)) {
+    return reply;
+  }
+  return buildAntiPuppetReply(args.inboundText, args.pidginMode);
+}
+
+function isLikelyMathInbound(text: string) {
+  const normalized = normalizeOutboundText(text || "").toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  const hasDigits = /\d/.test(normalized);
+  const hasWordNumber = MATH_WORD_NUMBER_PATTERN.test(normalized);
+  if (!hasDigits && !hasWordNumber) {
+    return false;
+  }
+  const hasMathCue = MATH_CUE_PATTERNS.some((pattern) => pattern.test(normalized));
+  const hasOperatorExpression = MATH_OPERATOR_EXPRESSION_PATTERN.test(normalized);
+  const hasLinearEquation = MATH_LINEAR_EQUATION_PATTERN.test(normalized);
+  const asksForResult = /\?/.test(normalized) || MATH_DIRECT_ASK_PATTERN.test(normalized);
+  return ((hasOperatorExpression || hasLinearEquation) && asksForResult) || (hasMathCue && (hasDigits || hasWordNumber));
+}
+
+function looksCalculatorStyleReply(text: string) {
+  const normalized = normalizeOutboundText(text || "");
+  if (!normalized) {
+    return false;
+  }
+  return CALCULATOR_STYLE_REPLY_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+function extractMathResultToken(text: string) {
+  const normalized = normalizeOutboundText(text || "");
+  if (!normalized) {
+    return "";
+  }
+  const expressionResultMatch = normalized.match(/=\s*(-?\d[\d,]*(?:\.\d+)?(?:\s*%| percent)?)(?:[.!?])?$/i);
+  if (expressionResultMatch?.[1]) {
+    return expressionResultMatch[1].trim();
+  }
+  const canonicalValueMatch = normalized.match(/-?\d[\d,]*(?:\.\d+)?(?:\s*%| percent)?/i);
+  if (canonicalValueMatch?.[0]) {
+    return canonicalValueMatch[0].trim();
+  }
+  return normalized.replace(/[.!?]+$/g, "").trim();
+}
+
+function applyAntiCalculatorMathTone(args: { inboundText: string; replyText: string }) {
+  const reply = normalizeOutboundText(args.replyText || "");
+  if (!reply) {
+    return reply;
+  }
+  if (!isLikelyMathInbound(args.inboundText) || !looksCalculatorStyleReply(reply)) {
+    return reply;
+  }
+  if (/\bi\s+(?:wasn(?:'|’)t|am not|i'm not)\s+(?:very\s+)?good\s+at\s+math\b/i.test(reply)) {
+    return reply;
+  }
+
+  const core = reply
+    .replace(/^=?\s*/i, "")
+    .replace(/^(?:the answer is|it(?:'|’)s|it is|equals?)\s*/i, "")
+    .replace(/^(?:result|answer)\s*[:\-]\s*/i, "")
+    .trim();
+  const resolved = extractMathResultToken(core || reply);
+  if (!resolved) {
+    return reply;
+  }
+  const seed = `${args.inboundText}:${resolved}:anti_calculator_math`;
+  const opener = pickVariant(`${seed}:opener`, ANTI_CALCULATOR_MATH_OPENERS);
+  const endingTemplate = pickVariant(`${seed}:ending`, ANTI_CALCULATOR_MATH_ENDINGS);
+  const ending = endingTemplate.includes("{{result}}") ? endingTemplate.replace("{{result}}", resolved) : endingTemplate;
+  const variant = `${opener}, ${ending}`;
+  return normalizeOutboundText(variant);
+}
+
 export function normalizeOutboundText(input: string) {
   let text = input
     .replace(/[—–]+/g, ", ")
@@ -3100,7 +3512,12 @@ export function postProcessReplyText(args: {
     inboundText: args.inboundText,
     replyText: normalized,
     pidginMode,
-    allow: steeringMode !== "hard_stop" && steeringMode !== "anti_beggi_beggi" && steeringMode !== "anti_sales_pitch",
+    allow:
+      steeringMode !== "hard_stop" &&
+      steeringMode !== "anti_beggi_beggi" &&
+      steeringMode !== "anti_sales_pitch" &&
+      steeringMode !== "anti_puppet" &&
+      steeringMode !== "anti_dry_joke",
   });
   const oldEnglishMode = detectOldEnglishSignal({
     inboundText: args.inboundText,
@@ -3124,12 +3541,21 @@ export function postProcessReplyText(args: {
   });
   const withoutGenderedWording = stripGenderedWording(withoutAiContradiction, knownGender, jokeContext);
   const withoutAwkwardCatchphrase = stripAwkwardCatchphrases(withoutGenderedWording);
+  const withAntiPuppetTone = applyAntiPuppetTone({
+    inboundText: args.inboundText,
+    replyText: withoutAwkwardCatchphrase,
+    pidginMode,
+  });
+  const withAntiCalculatorTone = applyAntiCalculatorMathTone({
+    inboundText: args.inboundText,
+    replyText: withAntiPuppetTone,
+  });
   const shouldForceCloseOut =
     shouldForceNoFollowUpQuestion(steeringMode) &&
-    (/\?/.test(withoutAwkwardCatchphrase) || hasCloseModeReopenCue(withoutAwkwardCatchphrase));
+    (/\?/.test(withAntiCalculatorTone) || hasCloseModeReopenCue(withAntiCalculatorTone));
   const withoutFollowUpQuestion = shouldForceCloseOut
     ? normalizeOutboundText(heuristicReply(args.inboundText, args.historyLines || []))
-    : withoutAwkwardCatchphrase;
+    : withAntiCalculatorTone;
   const finalText = withoutFollowUpQuestion || fallback;
   return hasAwkwardCatchphrase(finalText) ? fallback : finalText;
 }
