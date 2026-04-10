@@ -2938,10 +2938,28 @@ function buildPrompt(args: {
       : responseWorkbench.workbench.replyMode === "confirm"
         ? "Reply mode is CONFIRM. Confirm succinctly and keep the response brief."
         : responseWorkbench.workbench.replyMode === "lead"
-          ? "Reply mode is LEAD. Drive momentum: propose one concrete next step or recommendation. Ask at most one narrow question only if required to unblock action."
+          ? "Reply mode is LEAD conversation. Drive momentum: start with a concrete recommendation in the first sentence, then one practical next step. Ask at most one narrow question only if required to unblock action."
         : responseWorkbench.workbench.replyMode === "close"
           ? "Reply mode is CLOSE. End gracefully in one short line without reopening the topic."
-          : "Reply mode is ANSWER. Give a direct answer/action-focused reply grounded in the latest ask.";
+          : "Reply mode is FOLLOW conversation. Continue the thread naturally, put the direct answer in the first sentence, then add only the minimum practical detail needed.";
+  const isLeadOrFollowConversation =
+    responseWorkbench.workbench.replyMode === "lead" || responseWorkbench.workbench.replyMode === "answer";
+  const decisionFirstSteeringInstruction =
+    isLeadOrFollowConversation
+      ? "Decision-first steering is active: lead with a concrete answer/recommendation immediately. Do not open with generic acknowledgments."
+      : "";
+  const antiHedgeSteeringInstruction =
+    isLeadOrFollowConversation
+      ? "Keep uncertainty language tight. Avoid hedge-heavy phrasing like 'maybe/perhaps/might' unless uncertainty is real and material."
+      : "";
+  const noBounceBackSteeringInstruction =
+    isLeadOrFollowConversation
+      ? "Do not bounce the decision back with broad prompts (for example: 'what do you think?', 'let me know', 'any thoughts?') unless the inbound explicitly asks for options."
+      : "";
+  const followConversationContinuityInstruction =
+    responseWorkbench.workbench.replyMode === "answer"
+      ? "FOLLOW conversation steering: stay anchored to the current thread and respond as a continuation, not a reset."
+      : "";
   const responseWorkbenchSummary = [
     `Intent label: ${responseWorkbench.workbench.intentLabel}`,
     `Reply mode: ${responseWorkbench.workbench.replyMode}`,
@@ -3022,6 +3040,10 @@ function buildPrompt(args: {
       bossEscalationInstruction,
       mimicryInjectionInstruction,
       responseWorkbenchInstruction,
+      decisionFirstSteeringInstruction,
+      antiHedgeSteeringInstruction,
+      noBounceBackSteeringInstruction,
+      followConversationContinuityInstruction,
       responseWorkbench.workbench.toneNeed === "empathy_first"
         ? "Tone mode is EMPATHY_FIRST. Start with one short acknowledgment of their feeling, then move to the practical reply."
         : responseWorkbench.workbench.toneNeed === "direct_action"

@@ -103,6 +103,15 @@ async function runSupervisor(provider: WorkerProvider) {
         return;
       }
 
+      if (code === 0) {
+        logger.info(
+          { provider, code, signal, pid: exitedPid, uptimeMs },
+          "Worker child exited cleanly; stopping supervisor without restart",
+        );
+        void shutdown(0, "Worker child exited cleanly.");
+        return;
+      }
+
       if (uptimeMs > QUICK_CRASH_RESET_MS) {
         restartAttempt = 0;
       }

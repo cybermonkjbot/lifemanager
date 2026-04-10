@@ -176,9 +176,15 @@ class InstagramSetupManager {
 
   private async hasPersistedSession() {
     try {
-      const raw = await readFile(this.sessionPath, "utf8");
-      const parsed = JSON.parse(raw) as Record<string, unknown>;
-      return Object.keys(parsed || {}).length > 0;
+      const [sessionRaw, sessionMetaRaw] = await Promise.all([
+        readFile(this.sessionPath, "utf8"),
+        readFile(this.sessionMetaPath, "utf8"),
+      ]);
+      const parsedSession = JSON.parse(sessionRaw) as Record<string, unknown>;
+      const parsedMeta = JSON.parse(sessionMetaRaw) as Partial<PersistedSessionMeta>;
+      const hasSessionPayload = Object.keys(parsedSession || {}).length > 0;
+      const hasUsername = typeof parsedMeta.username === "string" && parsedMeta.username.trim().length > 0;
+      return hasSessionPayload && hasUsername;
     } catch {
       return false;
     }

@@ -95,6 +95,7 @@ type ConversationMessageType = "text" | "reaction" | "sticker" | "meme" | "image
 type ThreadMessage = {
   _id: string;
   direction: "inbound" | "outbound";
+  isStatus?: boolean;
   toolRunId?: string;
   text: string;
   messageType?: ConversationMessageType;
@@ -223,6 +224,8 @@ type PlannerSummary = {
   confidence: number;
 };
 
+const STATUS_THREAD_JIDS = new Set(["status@broadcast", "ig:story:broadcast"]);
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
@@ -290,6 +293,13 @@ function messageKindLabel(kind?: string) {
   return "Text";
 }
 
+function isStatusPostMessage(message: Pick<ThreadMessage, "isStatus">, threadJid?: string) {
+  if (message.isStatus === true) {
+    return true;
+  }
+  return Boolean(threadJid && STATUS_THREAD_JIDS.has(threadJid));
+}
+
 function messageDisplayText(message: {
   text: string;
   messageType?: ConversationMessageType;
@@ -338,6 +348,33 @@ function clamp01(value: number) {
     return 0.7;
   }
   return Math.max(0, Math.min(value, 1));
+}
+
+async function readApiError(response: Response) {
+  try {
+    const payload = (await response.json()) as { error?: string };
+    if (payload?.error && payload.error.trim()) {
+      return payload.error;
+    }
+  } catch {
+    // Ignore non-JSON payloads.
+  }
+
+  return `Request failed (${response.status}).`;
+}
+
+function buildDraftImprovementPrompt(args: { sourceText: string; draftText: string }) {
+  const sourceText = args.sourceText.trim() || "(No inbound text available)";
+  const draftText = args.draftText.trim();
+
+  return [
+    "You are polishing a reply draft for a private chat conversation.",
+    "Improve clarity, flow, and tone while preserving the exact intent and commitments.",
+    "Keep it concise and natural. Do not add new promises, facts, or unrelated questions.",
+    "Return only the improved reply text.",
+    `Inbound message:\n${sourceText}`,
+    `Draft reply:\n${draftText}`,
+  ].join("\n\n");
 }
 
 const TOOL_EVENT_MAX_LAG_MS = 2 * 60 * 1000;
@@ -739,6 +776,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
   const [toolSummaryMessageId, setToolSummaryMessageId] = useState<string | null>(null);
   const [mediaPreviewModal, setMediaPreviewModal] = useState<MessageMediaPreview | null>(null);
+  const [draftEdits, setDraftEdits] = useState<Record<string, string>>({});
 
   const settingsKey = selectedThreadId ? `personality:thread:${selectedThreadId}` : "personality:thread:none";
   const promptProfileKey = selectedThreadId ? `personality:promptprofile:${selectedThreadId}` : "personality:promptprofile:none";
@@ -779,6 +817,29 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
       threadId: selectedThreadId as Id<"threads">,
     });
   }, [recordEvent, selectedThreadId, thread]);
+
+  const draftEditKey = (draftId: string) => {
+    return `${selectedThreadId || "none"}:${draftId}`;
+  };
+
+  const getDraftEditorText = (item: ThreadReviewNeedsReplyItem) => {
+    return draftEdits[draftEditKey(item._id)] ?? item.text ?? "";
+  };
+
+  const saveReviewDraftText = async (item: ThreadReviewNeedsReplyItem) => {
+    const nextText = getDraftEditorText(item).trim();
+    if (!nextText) {
+      throw new Error("Reply text cannot be empty.");
+    }
+    if (nextText === (item.text || "").trim()) {
+      return nextText;
+    }
+    await updateDraftContent({
+      draftId: item._id as Id<"replyDrafts">,
+      text: nextText,
+    });
+    return nextText;
+  };
 
   const saveThreadSetting = (values: {
     profileSlug: string;
@@ -890,12 +951,13 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
     );
   };
 
-  const onReviewSend = (draftId: string) => {
-    const key = `send:${draftId}`;
+  const onReviewSend = (item: ThreadReviewNeedsReplyItem) => {
+    const key = `send:${item._id}`;
     void runAction(
       key,
       async () => {
-        await approveDraft({ draftId: draftId as Id<"replyDrafts"> });
+        await saveReviewDraftText(item);
+        await approveDraft({ draftId: item._id as Id<"replyDrafts"> });
       },
       {
         pendingLabel: "Sending...",
@@ -904,12 +966,13 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
     );
   };
 
-  const onReviewSnooze = (draftId: string) => {
-    const key = `snooze:${draftId}`;
+  const onReviewSnooze = (item: ThreadReviewNeedsReplyItem) => {
+    const key = `snooze:${item._id}`;
     void runAction(
       key,
       async () => {
-        await snoozeDraft({ draftId: draftId as Id<"replyDrafts">, minutes: 30 });
+        await saveReviewDraftText(item);
+        await snoozeDraft({ draftId: item._id as Id<"replyDrafts">, minutes: 30 });
       },
       {
         pendingLabel: "Snoozing...",
@@ -932,23 +995,77 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
     );
   };
 
-  const onReviewEdit = (draftId: string, text: string) => {
-    const edited = window.prompt("Edit draft text", text);
-    if (edited === null || !edited.trim()) {
+  const onReviewSave = (item: ThreadReviewNeedsReplyItem) => {
+    const key = `edit:${item._id}`;
+    if (!getDraftEditorText(item).trim()) {
       return;
     }
-    const key = `edit:${draftId}`;
     void runAction(
       key,
       async () => {
-        await updateDraftContent({
-          draftId: draftId as Id<"replyDrafts">,
-          text: edited,
-        });
+        await saveReviewDraftText(item);
       },
       {
         pendingLabel: "Saving edit...",
         successMessage: "Draft updated.",
+      },
+    );
+  };
+
+  const onReviewAiImprove = (item: ThreadReviewNeedsReplyItem) => {
+    const key = `improve:${item._id}`;
+    const draftText = getDraftEditorText(item).trim();
+    if (!draftText) {
+      return;
+    }
+
+    const sourceText = (item.sourceMessage?.text || "").trim() || (item.text || "").trim();
+    const message = buildDraftImprovementPrompt({
+      sourceText,
+      draftText,
+    });
+
+    void runAction(
+      key,
+      async () => {
+        const response = await fetch("/api/actions/test-ai", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            message,
+            threadId: selectedThreadId,
+          }),
+        });
+
+        if (!response.ok) {
+          throw new Error(await readApiError(response));
+        }
+
+        const payload = (await response.json()) as {
+          replyText?: string;
+          guardrailBlocked?: boolean;
+          guardrailReason?: string;
+        };
+
+        if (payload.guardrailBlocked) {
+          throw new Error(payload.guardrailReason?.trim() || "AI improvement was blocked by guardrail.");
+        }
+
+        const improvedText = typeof payload.replyText === "string" ? payload.replyText.trim() : "";
+        if (!improvedText) {
+          throw new Error("AI returned an empty improvement.");
+        }
+
+        setDraftEdits((current) => ({
+          ...current,
+          [draftEditKey(item._id)]: improvedText,
+        }));
+      },
+      {
+        pendingLabel: "Improving draft with AI...",
+        successMessage: "AI improvement ready. Review before sending.",
       },
     );
   };
@@ -1133,13 +1250,35 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
   ) => {
     if (entry.kind === "needsReply") {
       const item = entry.item;
+      const editorText = getDraftEditorText(item);
+      const hasDraftText = Boolean(editorText.trim());
+      const isDirty = editorText.trim() !== (item.text || "").trim();
+      const savePending = isPending(`edit:${item._id}`);
+      const improvePending = isPending(`improve:${item._id}`);
       const sendOrSnoozePending = isPending(`send:${item._id}`) || isPending(`snooze:${item._id}`);
+      const rejectPending = isPending(`reject:${item._id}`);
+      const actionPending = sendOrSnoozePending || savePending || improvePending || rejectPending;
       return (
-        <div key={`review:draft:${item._id}`} className="thread-review-item" aria-busy={sendOrSnoozePending}>
+        <div key={`review:draft:${item._id}`} className="thread-review-item" aria-busy={actionPending}>
           <p className="thread-review-title">Needs Reply Review</p>
           <p className="queue-body">{trim(item.sourceMessage?.text || item.text || "", 240)}</p>
           <SharedMediaPreview preview={item.sourceMessage?.mediaPreview} mediaAssetId={item.sourceMessage?.mediaAssetId} />
-          {item.text ? <p className="queue-meta">Draft: {trim(item.text, 200)}</p> : null}
+          <label className="setup-input-group">
+            <span className="queue-meta">Manual response (editable)</span>
+            <textarea
+              rows={4}
+              value={editorText}
+              onChange={(event) =>
+                setDraftEdits((current) => ({
+                  ...current,
+                  [draftEditKey(item._id)]: event.target.value,
+                }))
+              }
+              placeholder="Write your response, then optionally click AI Improve."
+              disabled={sendOrSnoozePending || improvePending}
+              aria-disabled={sendOrSnoozePending || improvePending}
+            />
+          </label>
           <SharedMediaPreview preview={item.mediaPreview} mediaAssetId={item.mediaAssetId} />
           {item.mediaCaption?.trim() ? <p className="queue-meta">Media caption: {trim(item.mediaCaption.trim(), 220)}</p> : null}
           <p className="queue-meta">
@@ -1150,36 +1289,45 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
             <button
               type="button"
               className="btn btn-primary"
-              onClick={() => onReviewSend(item._id)}
-              disabled={sendOrSnoozePending}
-              aria-disabled={sendOrSnoozePending}
+              onClick={() => onReviewSend(item)}
+              disabled={sendOrSnoozePending || savePending || improvePending || !hasDraftText}
+              aria-disabled={sendOrSnoozePending || savePending || improvePending || !hasDraftText}
             >
               Send
             </button>
             <button
               type="button"
               className="btn btn-ghost"
-              onClick={() => onReviewSnooze(item._id)}
-              disabled={sendOrSnoozePending}
-              aria-disabled={sendOrSnoozePending}
+              onClick={() => onReviewSnooze(item)}
+              disabled={sendOrSnoozePending || savePending || improvePending || !hasDraftText}
+              aria-disabled={sendOrSnoozePending || savePending || improvePending || !hasDraftText}
             >
               Snooze 30m
             </button>
             <button
               type="button"
               className="btn btn-ghost"
-              onClick={() => onReviewEdit(item._id, item.text)}
-              disabled={isPending(`edit:${item._id}`)}
-              aria-disabled={isPending(`edit:${item._id}`)}
+              onClick={() => onReviewSave(item)}
+              disabled={!isDirty || savePending || sendOrSnoozePending || improvePending || !hasDraftText}
+              aria-disabled={!isDirty || savePending || sendOrSnoozePending || improvePending || !hasDraftText}
             >
-              Edit
+              {savePending ? "Saving..." : "Save"}
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={() => onReviewAiImprove(item)}
+              disabled={improvePending || sendOrSnoozePending || savePending || !hasDraftText}
+              aria-disabled={improvePending || sendOrSnoozePending || savePending || !hasDraftText}
+            >
+              {improvePending ? "Improving..." : "AI Improve"}
             </button>
             <button
               type="button"
               className="btn btn-ghost"
               onClick={() => onReviewReject(item._id)}
-              disabled={isPending(`reject:${item._id}`)}
-              aria-disabled={isPending(`reject:${item._id}`)}
+              disabled={actionPending}
+              aria-disabled={actionPending}
             >
               Reject
             </button>
@@ -1192,6 +1340,11 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
           {getRecord(`edit:${item._id}`).error ? (
             <p className="queue-meta action-inline-error" role="alert">
               {getRecord(`edit:${item._id}`).error}
+            </p>
+          ) : null}
+          {getRecord(`improve:${item._id}`).error ? (
+            <p className="queue-meta action-inline-error" role="alert">
+              {getRecord(`improve:${item._id}`).error}
             </p>
           ) : null}
           {getRecord(`reject:${item._id}`).error ? (
@@ -1443,6 +1596,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
               ) : null}
               {(thread.messages || []).map((message) => {
                 const outbound = message.direction === "outbound";
+                const isStatusPost = isStatusPostMessage(message, thread.thread.jid);
                 const senderName = outbound
                   ? threadGrounding?.myName?.trim() || "You"
                   : threadGrounding?.theirName?.trim() || thread.thread.title || "Contact";
@@ -1469,6 +1623,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
                       {renderMessageMediaPreview(message, (preview) => setMediaPreviewModal(preview))}
                       {showMediaCaption ? <p className="message-media-caption">{mediaCaption}</p> : null}
                       <p className="queue-meta">{messageKindLabel(message.messageType)}</p>
+                      {isStatusPost ? <p className="message-status-chip">Status Post</p> : null}
                       {(reactionsByMessage.get(message._id) || []).length > 0 ? (
                         <div className="queue-actions">
                           {(reactionsByMessage.get(message._id) || []).map((reaction, index) => (

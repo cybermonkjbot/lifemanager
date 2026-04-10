@@ -102,6 +102,18 @@ function normalizeInstagramAuthDir() {
   return join(process.cwd(), configured);
 }
 
+function isMissingInstagramSessionError(error: unknown) {
+  const detail = error instanceof Error ? error.message : String(error);
+  const normalized = detail.toLowerCase();
+  if (normalized.includes("session metadata missing username")) {
+    return true;
+  }
+  const missingSessionFile =
+    normalized.includes("enoent") &&
+    (normalized.includes("session-meta.json") || normalized.includes("session.json"));
+  return missingSessionFile;
+}
+
 export function parseInstagramTimestampMs(raw: unknown, fallback: number) {
   if (raw === undefined || raw === null) {
     return fallback;
@@ -405,6 +417,19 @@ async function run() {
     await reportListener(true, "Instagram worker listener is online.", true);
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
+    if (isMissingInstagramSessionError(error)) {
+      await reportSetupStatus({
+        status: "idle",
+        mode: "password",
+        message: "Instagram not signed in. Open setup and connect to start the worker.",
+        hasAuth: false,
+        updatedAt: Date.now(),
+      }).catch(() => undefined);
+      await reportListener(false, "Instagram worker idle: sign-in required.", false).catch(() => undefined);
+      logger.info("Instagram worker exiting cleanly because no session is configured yet");
+      releaseWorkerLockSync("instagram");
+      return;
+    }
     await reportSetupStatus({
       status: "error",
       mode: "password",

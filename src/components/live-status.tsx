@@ -137,84 +137,117 @@ export function LiveStatus() {
   const threadsLoading = threads === undefined;
   const queueLoading = queue === undefined;
   const statusLoading = statusThreadId ? statusData === undefined : false;
+  const pendingCountLabel = queueLoading ? "…" : String(pendingStatusDrafts.length);
+  const postedCountLabel = threadsLoading || statusLoading ? "…" : String(outboundStatuses.length);
+  const lastPostedAt =
+    !threadsLoading && !statusLoading && outboundStatuses.length > 0
+      ? formatDateTime(outboundStatuses[outboundStatuses.length - 1].messageAt)
+      : null;
 
   return (
-    <section className="panel-grid split-view">
-      <article className="panel-card">
-        <h3>Queue</h3>
-        <ProviderFilter
-          value={providerFilter}
-          onChange={setProviderFilter}
-          label="Status provider filter"
-        />
-        <div className="stack compact">
-          <p className="queue-meta">
-            Pending review: <strong>{queueLoading ? "…" : pendingStatusDrafts.length}</strong>
-          </p>
-          <p className="queue-meta">
-            Posted statuses: <strong>{threadsLoading || statusLoading ? "…" : outboundStatuses.length}</strong>
-          </p>
-          {!threadsLoading && !statusLoading && outboundStatuses.length > 0 ? (
-            <p className="queue-meta">Last posted: {formatDateTime(outboundStatuses[outboundStatuses.length - 1].messageAt)}</p>
-          ) : null}
+    <section className="status-surface">
+      <div className="status-overview" aria-live="polite">
+        <p className="status-overview-item">
+          <span className="status-overview-label">Pending review</span>
+          <strong>{pendingCountLabel}</strong>
+        </p>
+        <p className="status-overview-item">
+          <span className="status-overview-label">Posted statuses</span>
+          <strong>{postedCountLabel}</strong>
+        </p>
+        <p className="status-overview-item">
+          <span className="status-overview-label">Last posted</span>
+          <strong>{lastPostedAt || "—"}</strong>
+        </p>
+      </div>
 
-          <div className="queue-actions">
-            <Link href="/" className="btn btn-primary">
-              Open Action Queue
-            </Link>
-            {statusThreadId ? (
-              <Link href={`/conversations?threadId=${statusThreadId}`} className="btn btn-ghost">
-                Open in Conversations
-              </Link>
-            ) : null}
+      <div className="panel-grid split-view status-split-view">
+        <article className="panel-card">
+          <div className="status-section-heading">
+            <h3>Queue</h3>
+            <span className="status-count-chip">{pendingCountLabel}</span>
           </div>
+          <ProviderFilter
+            value={providerFilter}
+            onChange={setProviderFilter}
+            label="Status provider filter"
+          />
+          <div className="stack compact">
+            <div className="queue-actions">
+              <Link href="/" className="btn btn-primary">
+                Open Action Queue
+              </Link>
+              {statusThreadId ? (
+                <Link href={`/conversations?threadId=${statusThreadId}`} className="btn btn-ghost">
+                  Open in Conversations
+                </Link>
+              ) : null}
+            </div>
 
-          {queueLoading ? (
-            <LoadingBlock label="Loading status queue…" rows={2} compact />
-          ) : pendingStatusDrafts.length === 0 ? (
-            <p className="empty-line">No pending status drafts.</p>
+            {queueLoading ? (
+              <LoadingBlock label="Loading status queue…" rows={2} compact />
+            ) : pendingStatusDrafts.length === 0 ? (
+              <p className="empty-line">No pending status drafts.</p>
+            ) : (
+              <div className="stack compact">
+                {pendingStatusDrafts.map((item) => (
+                  <div key={item._id} className="queue-item queue-item-condensed status-draft-row">
+                    <div>
+                      <p className="queue-title status-draft-title">
+                        <span>{item.thread?.title || "My Status"}</span>
+                        <span className="status-inline-chip">{item.messageProvider || "whatsapp"}</span>
+                      </p>
+                      <p className="queue-body">{trim(item.mediaCaption || item.text || "", 180)}</p>
+                      <p className="queue-meta">
+                        Model: {item.provider} · Type: {item.sendKind || "text"}
+                      </p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </article>
+
+        <article className="panel-card">
+          <div className="status-section-heading">
+            <h3>Timeline</h3>
+            <span className="status-count-chip">{postedCountLabel}</span>
+          </div>
+          {threadsLoading || statusLoading ? (
+            <LoadingBlock label="Loading statuses..." rows={3} />
+          ) : !statusThread ? (
+            <div className="status-empty-shell">
+              <p className="empty-line">No status thread yet.</p>
+              <p className="queue-meta">Post your first update and timeline history will appear here.</p>
+            </div>
+          ) : timeline.length === 0 ? (
+            <div className="status-empty-shell">
+              <p className="empty-line">No outbound status posts yet.</p>
+              <p className="queue-meta">Approve one draft to start building timeline history.</p>
+              <div className="queue-actions">
+                <Link href="/" className="btn btn-ghost">
+                  Review pending drafts
+                </Link>
+              </div>
+            </div>
           ) : (
-            <div className="stack compact">
-              {pendingStatusDrafts.map((item) => (
-                <div key={item._id} className="queue-item queue-item-condensed">
+            <div className="stack">
+              {timeline.map((message) => (
+                <div key={message._id} className="queue-item status-timeline-item">
                   <div>
-                    <p className="queue-title">{item.thread?.title || "My Status"}</p>
-                    <p className="queue-body">{trim(item.mediaCaption || item.text || "", 180)}</p>
+                    <p className="queue-body">{trim(statusMessageText(message), 280)}</p>
                     <p className="queue-meta">
-                      Channel: {item.messageProvider || "whatsapp"} · Model: {item.provider} · Type: {item.sendKind || "text"}
+                      {message.messageType || "text"} · {formatDateTime(message.messageAt)}
                     </p>
                   </div>
+                  <SharedMediaPreview preview={message.mediaPreview} mediaAssetId={message.mediaAssetId} />
                 </div>
               ))}
             </div>
           )}
-        </div>
-      </article>
-
-      <article className="panel-card">
-        <h3>Timeline</h3>
-        {threadsLoading || statusLoading ? (
-          <LoadingBlock label="Loading statuses..." rows={3} />
-        ) : !statusThread ? (
-          <p className="empty-line">No status thread yet.</p>
-        ) : timeline.length === 0 ? (
-          <p className="empty-line">No outbound status posts yet.</p>
-        ) : (
-          <div className="stack">
-            {timeline.map((message) => (
-              <div key={message._id} className="queue-item">
-                <div>
-                  <p className="queue-body">{trim(statusMessageText(message), 280)}</p>
-                  <p className="queue-meta">
-                    {message.messageType || "text"} · {formatDateTime(message.messageAt)}
-                  </p>
-                </div>
-                <SharedMediaPreview preview={message.mediaPreview} mediaAssetId={message.mediaAssetId} />
-              </div>
-            ))}
-          </div>
-        )}
-      </article>
+        </article>
+      </div>
     </section>
   );
 }
