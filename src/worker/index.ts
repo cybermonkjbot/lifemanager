@@ -10,7 +10,7 @@ import makeWASocket, {
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFile, rm, stat } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { basename, extname, join, resolve } from "node:path";
 import pino from "pino";
 import { ConvexHttpClient } from "convex/browser";
 import type { Id } from "../../convex/_generated/dataModel";
@@ -102,6 +102,7 @@ import { shouldAttemptSelfControlOnUpsert } from "./self-control-routing";
 import { isStrictSelfControlScope } from "./self-control-scope";
 import { parseSelfControlCommandText } from "./self-control-command-text";
 import { parseOpenClawCommand, type OpenClawCommand } from "./openclaw-command";
+import { extractOpenClawReplyFiles, type OpenClawReplyFile } from "./openclaw-output-files";
 
 const logger = pino({
   name: "slm-worker",
@@ -565,6 +566,17 @@ function hasStickerCue(text: string) {
   return /\b(sticker|stickerify|drop (a|that) sticker|send (a|that) sticker|sticker me)\b/i.test(text);
 }
 
+function shouldPreferVideoMeme(args: { inboundText: string; recentHistoryLines: string[] }) {
+  const signalText = [args.inboundText, ...args.recentHistoryLines.slice(-4)]
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .join("\n");
+  if (!signalText) {
+    return false;
+  }
+  return /\b(video|clip|reel|animated|animation|moving|motion|gif|giphy|shorts?)\b/i.test(signalText);
+}
+
 type StoredMessageType = "text" | "reaction" | "sticker" | "meme" | "image" | "video" | "audio" | "document";
 type CapturableMediaKind = "sticker" | "image" | "video" | "audio" | "document";
 
@@ -760,6 +772,10 @@ function computeNextWindowEnd(nowMs: number, startHour: number, endHour: number)
     return next.getTime();
   }
   return nowMs;
+}
+
+function isVideoMimeType(mimeType: string | undefined) {
+  return (mimeType || "").trim().toLowerCase().startsWith("video/");
 }
 
 function buildNightWindDownInstruction(resumeAtMs: number) {
@@ -2170,11 +2186,16 @@ function resolveTextEmojiAllowlist() {
       return undefined;
     }
 
+    const preferVideo = shouldPreferVideoMeme({
+      inboundText: args.inboundText,
+      recentHistoryLines: args.recentHistoryLines,
+    });
     const generation = await generateMemeImageWithAzure({
       inboundText: args.inboundText,
       recentHistoryLines: args.recentHistoryLines,
       styleHints: args.styleHints,
       threadTitle: args.threadTitle,
+      preferVideo,
     });
 
     if (!generation.imageBytes || generation.error) {
@@ -3635,6 +3656,8 @@ function resolveTextEmojiAllowlist() {
   const OPENCLAW_PROBE_TIMEOUT_MS = Math.max(1_000, Math.min(OPENCLAW_AGENT_TIMEOUT_MS, 8_000));
   const OPENCLAW_MAX_COMMAND_CHARS = 2_000;
   const OPENCLAW_MAX_STDIO_CHARS = 1_024 * 1_024;
+  const OPENCLAW_MAX_FILES_PER_REPLY = 4;
+  const OPENCLAW_MAX_FILE_BYTES = 24 * 1024 * 1024;
 
   const resolveSelfControlThread = (messageKey: SelfControlMessageKey): ResolvedSelfControlThread | null => {
     const rawThreadJid = getThreadJid(messageKey as Parameters<typeof getThreadJid>[0]);
@@ -3709,6 +3732,131 @@ function resolveTextEmojiAllowlist() {
     const fallbackError =
       lastError instanceof Error ? lastError.message : lastError ? String(lastError) : "no reply JID available";
     throw new Error(`self-control reply send failed: ${fallbackError}`);
+  };
+
+  const sendSelfControlDocument = async (args: {
+    selfControl: ResolvedSelfControlThread;
+    document: Buffer;
+    fileName: string;
+    mimeType: string;
+    caption?: string;
+  }) => {
+    let lastError: unknown = null;
+
+    for (const jid of args.selfControl.replyJids) {
+      try {
+        rememberAutomatedThreadSend(jid);
+        const sent = await sock.sendMessage(
+          jid,
+          {
+            document: args.document,
+            fileName: args.fileName,
+            mimetype: args.mimeType,
+            caption: args.caption,
+          },
+        );
+        rememberAutomatedOutboundId(sent?.key?.id || undefined);
+        return;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    const fallbackError =
+      lastError instanceof Error ? lastError.message : lastError ? String(lastError) : "no reply JID available";
+    throw new Error(`self-control document send failed: ${fallbackError}`);
+  };
+
+  const normalizeOpenClawMimeType = (value: string | undefined) => {
+    const mimeType = (value || "").trim().toLowerCase();
+    if (!mimeType.includes("/")) {
+      return undefined;
+    }
+    return mimeType.split(";")[0]?.trim() || undefined;
+  };
+
+  const inferOpenClawMimeTypeFromFileName = (fileName: string) => {
+    const extension = extname(fileName || "").trim().toLowerCase();
+    if (!extension) {
+      return undefined;
+    }
+    const mimeTypeByExtension: Record<string, string> = {
+      ".txt": "text/plain",
+      ".md": "text/markdown",
+      ".json": "application/json",
+      ".csv": "text/csv",
+      ".pdf": "application/pdf",
+      ".png": "image/png",
+      ".jpg": "image/jpeg",
+      ".jpeg": "image/jpeg",
+      ".webp": "image/webp",
+      ".gif": "image/gif",
+      ".mp4": "video/mp4",
+      ".mov": "video/quicktime",
+      ".mp3": "audio/mpeg",
+      ".wav": "audio/wav",
+      ".zip": "application/zip",
+      ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    };
+    return mimeTypeByExtension[extension];
+  };
+
+  const sanitizeOpenClawFileName = (fileName: string | undefined, fallback: string) => {
+    const sanitized = (fileName || "").trim().replace(/[/\\]+/g, "_");
+    if (!sanitized) {
+      return fallback;
+    }
+    return sanitized.slice(0, 160);
+  };
+
+  const resolveOpenClawFilePayload = async (candidate: OpenClawReplyFile) => {
+    let buffer: Buffer;
+    let inferredName = "";
+    let inferredMimeType = normalizeOpenClawMimeType(candidate.mimeType);
+
+    if (candidate.source === "path") {
+      const absolutePath = candidate.value.startsWith("/") ? candidate.value : resolve(process.cwd(), candidate.value);
+      buffer = await readFile(absolutePath);
+      inferredName = basename(absolutePath) || "";
+    } else if (candidate.source === "url") {
+      if (candidate.value.startsWith("file://")) {
+        const filePath = decodeURIComponent(new URL(candidate.value).pathname);
+        buffer = await readFile(filePath);
+        inferredName = basename(filePath) || "";
+      } else {
+        const response = await fetch(candidate.value, { redirect: "follow" });
+        if (!response.ok) {
+          throw new Error(`download failed (${response.status})`);
+        }
+        const contentType = response.headers.get("content-type") || undefined;
+        inferredMimeType = inferredMimeType || normalizeOpenClawMimeType(contentType || undefined);
+        const urlPath = new URL(candidate.value).pathname;
+        inferredName = basename(urlPath) || "";
+        buffer = Buffer.from(await response.arrayBuffer());
+      }
+    } else {
+      buffer = Buffer.from(candidate.value, "base64");
+    }
+
+    if (buffer.byteLength === 0) {
+      throw new Error("empty file");
+    }
+    if (buffer.byteLength > OPENCLAW_MAX_FILE_BYTES) {
+      throw new Error(`file too large (${buffer.byteLength} bytes, max ${OPENCLAW_MAX_FILE_BYTES})`);
+    }
+
+    const fallbackName = inferredName || `openclaw-${Date.now().toString(36)}.bin`;
+    const fileName = sanitizeOpenClawFileName(candidate.fileName || inferredName, fallbackName);
+    const mimeType = inferredMimeType || inferOpenClawMimeTypeFromFileName(fileName) || "application/octet-stream";
+
+    return {
+      buffer,
+      fileName,
+      mimeType,
+      caption: candidate.caption,
+    };
   };
 
   const formatAssistantReply = (speaker: "openclaw" | "codex", text: string) => {
@@ -4122,7 +4270,7 @@ function resolveTextEmojiAllowlist() {
     };
   };
 
-  const parseOpenClawReplyText = (payload: unknown): string => {
+  const extractOpenClawReplyText = (payload: unknown): string => {
     if (!payload || typeof payload !== "object") {
       return "";
     }
@@ -4131,7 +4279,7 @@ function resolveTextEmojiAllowlist() {
     const directCandidates = [record.reply, record.message, record.text, record.output, record.result];
     for (const candidate of directCandidates) {
       if (typeof candidate === "string" && candidate.trim()) {
-        return compactLogText(candidate.trim(), 520);
+        return candidate.trim();
       }
     }
 
@@ -4142,26 +4290,34 @@ function resolveTextEmojiAllowlist() {
         }
         const text = (item as Record<string, unknown>).text;
         if (typeof text === "string" && text.trim()) {
-          return compactLogText(text.trim(), 520);
+          return text.trim();
         }
       }
     }
 
     if (record.data && typeof record.data === "object") {
-      const nested = parseOpenClawReplyText(record.data);
+      const nested = extractOpenClawReplyText(record.data);
       if (nested) {
         return nested;
       }
     }
 
     if (record.result && typeof record.result === "object") {
-      const nested = parseOpenClawReplyText(record.result);
+      const nested = extractOpenClawReplyText(record.result);
       if (nested) {
         return nested;
       }
     }
 
     return "";
+  };
+
+  const parseOpenClawReplyText = (payload: unknown): string => {
+    const replyText = extractOpenClawReplyText(payload);
+    if (!replyText) {
+      return "";
+    }
+    return compactLogText(replyText, 520);
   };
 
   const parseOpenClawJsonObject = (raw: string): Record<string, unknown> | null => {
@@ -4391,10 +4547,14 @@ function resolveTextEmojiAllowlist() {
         OPENCLAW_AGENT_TIMEOUT_MS,
       );
       const parsed = parseOpenClawJsonFromStdout(cli.stdout);
-      const replyText =
-        parseOpenClawReplyText(parsed) ||
-        compactLogText([cli.stdout, cli.stderr].filter(Boolean).join(" | "), 420) ||
-        "no output";
+      const rawReplyText = extractOpenClawReplyText(parsed);
+      const replyText = compactLogText(rawReplyText || [cli.stdout, cli.stderr].filter(Boolean).join(" | "), 420) || "no output";
+      const replyFileText = rawReplyText || [cli.stdout, cli.stderr].filter(Boolean).join("\n");
+      const replyFiles = extractOpenClawReplyFiles({
+        payload: parsed,
+        replyText: replyFileText,
+        maxItems: OPENCLAW_MAX_FILES_PER_REPLY,
+      });
 
       let responseText = "";
       let hasError = false;
@@ -4408,7 +4568,40 @@ function resolveTextEmojiAllowlist() {
         responseText = formatAssistantReply("openclaw", "sorry, that task failed.");
         hasError = true;
       } else {
-        responseText = formatAssistantReply("openclaw", replyText);
+        const sentFiles: string[] = [];
+        const fileErrors: string[] = [];
+        for (const file of replyFiles) {
+          try {
+            const resolvedFile = await resolveOpenClawFilePayload(file);
+            await sendSelfControlDocument({
+              selfControl: args.selfControl,
+              document: resolvedFile.buffer,
+              fileName: resolvedFile.fileName,
+              mimeType: resolvedFile.mimeType,
+              caption: resolvedFile.caption,
+            });
+            sentFiles.push(resolvedFile.fileName);
+          } catch (error) {
+            const err = error instanceof Error ? error.message : String(error);
+            fileErrors.push(compactLogText(err, 180));
+          }
+        }
+
+        const fileSummary =
+          sentFiles.length === 0
+            ? ""
+            : sentFiles.length === 1
+              ? `Sent file: ${sentFiles[0]}.`
+              : `Sent ${sentFiles.length} files: ${sentFiles.join(", ")}.`;
+        const errorSummary =
+          fileErrors.length === 0
+            ? ""
+            : `File delivery issue${fileErrors.length === 1 ? "" : "s"}: ${compactLogText(fileErrors.join(" | "), 220)}.`;
+        const body = [replyText, fileSummary, errorSummary]
+          .map((part) => part.trim())
+          .filter(Boolean)
+          .join("\n\n");
+        responseText = formatAssistantReply("openclaw", body || "done.");
       }
 
       await sendSelfControlText({ selfControl: args.selfControl, text: responseText }).catch(async (error) => {
@@ -7133,7 +7326,7 @@ function resolveTextEmojiAllowlist() {
     };
   };
 
-  const fetchMediaAssetBuffer = async (assetId: string) => {
+  const fetchMediaAssetBuffer = async (assetId: string, resolvedUrl?: string) => {
     pruneMediaAssetBufferCache();
     const cached = mediaAssetBufferCache.get(assetId);
     const now = Date.now();
@@ -7148,13 +7341,15 @@ function resolveTextEmojiAllowlist() {
     }
 
     const loadPromise = (async () => {
-      const asset = (await convex.query(convexRefs.mediaGetAssetDownloadUrl, {
-        assetId,
-      })) as null | { url: string };
-      if (!asset?.url) {
+      const assetUrl =
+        resolvedUrl ||
+        ((await convex.query(convexRefs.mediaGetAssetDownloadUrl, {
+          assetId,
+        })) as null | { url?: string })?.url;
+      if (!assetUrl) {
         throw new Error(`Media asset unavailable: ${assetId}`);
       }
-      const response = await fetch(asset.url);
+      const response = await fetch(assetUrl);
       if (!response.ok) {
         throw new Error(`Failed to download media asset ${assetId}: ${response.status}`);
       }
@@ -7178,6 +7373,20 @@ function resolveTextEmojiAllowlist() {
     } finally {
       mediaAssetBufferInFlight.delete(assetId);
     }
+  };
+
+  const fetchMediaAssetPayload = async (assetId: string) => {
+    const asset = (await convex.query(convexRefs.mediaGetAssetDownloadUrl, {
+      assetId,
+    })) as null | { url?: string; mimeType?: string };
+    if (!asset?.url) {
+      throw new Error(`Media asset unavailable: ${assetId}`);
+    }
+    const buffer = await fetchMediaAssetBuffer(assetId, asset.url);
+    return {
+      buffer,
+      mimeType: (asset.mimeType || "").trim().toLowerCase() || undefined,
+    };
   };
 
   const buildQuotedMessageOptions = (item: OutboxClaimedItem): { quoted: WAMessage } | undefined => {
@@ -7459,16 +7668,27 @@ function resolveTextEmojiAllowlist() {
                   if (!hydrated.mediaAssetId) {
                     throw new Error("Status meme outbox item missing media asset id.");
                   }
-                  const memeBuffer = await fetchMediaAssetBuffer(hydrated.mediaAssetId);
+                  const memeMedia = await fetchMediaAssetPayload(hydrated.mediaAssetId);
                   rememberAutomatedThreadSend(destinationJid);
-                  sent = await sock.sendMessage(
-                    destinationJid,
-                    {
-                      image: memeBuffer,
-                      caption: effectiveMediaCaption || effectiveMessageText,
-                    },
-                    statusSendOptions,
-                  );
+                  if (isVideoMimeType(memeMedia.mimeType)) {
+                    sent = await sock.sendMessage(
+                      destinationJid,
+                      {
+                        video: memeMedia.buffer,
+                        caption: effectiveMediaCaption || effectiveMessageText,
+                      },
+                      statusSendOptions,
+                    );
+                  } else {
+                    sent = await sock.sendMessage(
+                      destinationJid,
+                      {
+                        image: memeMedia.buffer,
+                        caption: effectiveMediaCaption || effectiveMessageText,
+                      },
+                      statusSendOptions,
+                    );
+                  }
                 } else {
                   rememberAutomatedThreadSend(destinationJid);
                   sent = await sock.sendMessage(destinationJid, { text: effectiveMessageText }, statusSendOptions);
@@ -7513,12 +7733,27 @@ function resolveTextEmojiAllowlist() {
                   await sock.sendPresenceUpdate("paused", item.jid);
                   return;
                 }
-                const memeBuffer = await fetchMediaAssetBuffer(hydrated.mediaAssetId);
+                const memeMedia = await fetchMediaAssetPayload(hydrated.mediaAssetId);
                 rememberAutomatedThreadSend(item.jid);
-                sent = await sock.sendMessage(item.jid, {
-                  image: memeBuffer,
-                  caption: effectiveMediaCaption || effectiveMessageText,
-                }, quotedMessageOptions);
+                if (isVideoMimeType(memeMedia.mimeType)) {
+                  sent = await sock.sendMessage(
+                    item.jid,
+                    {
+                      video: memeMedia.buffer,
+                      caption: effectiveMediaCaption || effectiveMessageText,
+                    },
+                    quotedMessageOptions,
+                  );
+                } else {
+                  sent = await sock.sendMessage(
+                    item.jid,
+                    {
+                      image: memeMedia.buffer,
+                      caption: effectiveMediaCaption || effectiveMessageText,
+                    },
+                    quotedMessageOptions,
+                  );
+                }
                 await sock.sendPresenceUpdate("paused", item.jid);
               } else {
                 await maybeSubscribePresence(item.jid, runtimeSettings);

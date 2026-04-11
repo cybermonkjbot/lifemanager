@@ -42,6 +42,39 @@ function buildContextSnippet(args: {
   return fragments.join("\n").slice(0, 380);
 }
 
+function resolveGenerationFailureStatus(errorMessage: string) {
+  if (!errorMessage) {
+    return 502;
+  }
+  if (/endpoint\/key missing/i.test(errorMessage)) {
+    return 503;
+  }
+  if (/timeout|timed out|network|econnreset|socket hang up/i.test(errorMessage)) {
+    return 503;
+  }
+  const statusMatch = errorMessage.match(/\((\d{3})\)/);
+  const upstreamStatus = statusMatch ? Number(statusMatch[1]) : NaN;
+  if (!Number.isFinite(upstreamStatus)) {
+    return 502;
+  }
+  if (upstreamStatus === 400) {
+    return 400;
+  }
+  if (upstreamStatus === 401 || upstreamStatus === 403) {
+    return 502;
+  }
+  if (upstreamStatus === 404) {
+    return 502;
+  }
+  if (upstreamStatus === 408 || upstreamStatus === 429) {
+    return 503;
+  }
+  if (upstreamStatus >= 500) {
+    return 503;
+  }
+  return 502;
+}
+
 export async function POST(request: Request) {
   let payload: {
     prompt?: unknown;
@@ -108,18 +141,16 @@ export async function POST(request: Request) {
     });
 
     if (!generation.imageBytes || generation.error) {
+      const errorMessage = generation.error || "Meme generation failed. No image payload was returned.";
       await convex
         .mutation(convexRefs.systemRecordEvent, {
           source: "dashboard",
           eventType: "media.meme.manual.error",
-          detail: `Manual meme generation failed: ${compactText(generation.error || "empty image payload", 220)}`,
+          detail: `Manual meme generation failed: ${compactText(errorMessage, 220)}`,
           ...(threadId ? { threadId } : {}),
         })
         .catch(() => undefined);
-      return NextResponse.json(
-        { error: generation.error || "Meme generation failed. No image payload was returned." },
-        { status: 502 },
-      );
+      return NextResponse.json({ error: errorMessage }, { status: resolveGenerationFailureStatus(errorMessage) });
     }
 
     const contentHash = createHash("sha256").update(generation.imageBytes).digest("hex");

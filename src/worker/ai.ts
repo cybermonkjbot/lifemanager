@@ -6310,6 +6310,21 @@ function buildAzureImageGenerationEndpoint(endpoint: string) {
     if (/\/images\/generations\/?$/i.test(parsed.pathname)) {
       return parsed.toString();
     }
+    if (parsed.pathname === "/" || parsed.pathname === "") {
+      parsed.pathname = "/openai/v1/images/generations";
+      parsed.search = "";
+      return parsed.toString();
+    }
+    if (/\/api\/projects\/[^/]+\/?$/i.test(parsed.pathname)) {
+      parsed.pathname = `${parsed.pathname.replace(/\/+$/, "")}/openai/v1/images/generations`;
+      parsed.search = "";
+      return parsed.toString();
+    }
+    if (/\/api\/projects\/[^/]+\/openai\/v1\/?$/i.test(parsed.pathname)) {
+      parsed.pathname = `${parsed.pathname.replace(/\/+$/, "")}/images/generations`;
+      parsed.search = "";
+      return parsed.toString();
+    }
     if (/\/openai\/deployments\/[^/]+\/chat\/completions\/?$/i.test(parsed.pathname)) {
       parsed.pathname = "/openai/v1/images/generations";
       parsed.search = "";
@@ -6338,11 +6353,68 @@ function buildAzureImageGenerationEndpoint(endpoint: string) {
   }
 }
 
-function buildMemeImagePrompt(args: {
+function buildAzureVideoGenerationEndpoint(endpoint: string) {
+  if (!endpoint) {
+    return "";
+  }
+  try {
+    const parsed = new URL(endpoint);
+    if (/\/videos\/?$/i.test(parsed.pathname)) {
+      return parsed.toString();
+    }
+    if (parsed.pathname === "/" || parsed.pathname === "") {
+      parsed.pathname = "/openai/v1/videos";
+      parsed.search = "";
+      return parsed.toString();
+    }
+    if (/\/api\/projects\/[^/]+\/?$/i.test(parsed.pathname)) {
+      parsed.pathname = `${parsed.pathname.replace(/\/+$/, "")}/openai/v1/videos`;
+      parsed.search = "";
+      return parsed.toString();
+    }
+    if (/\/api\/projects\/[^/]+\/openai\/v1\/?$/i.test(parsed.pathname)) {
+      parsed.pathname = `${parsed.pathname.replace(/\/+$/, "")}/videos`;
+      parsed.search = "";
+      return parsed.toString();
+    }
+    if (/\/openai\/deployments\/[^/]+\/chat\/completions\/?$/i.test(parsed.pathname)) {
+      parsed.pathname = "/openai/v1/videos";
+      parsed.search = "";
+      return parsed.toString();
+    }
+    if (/\/openai\/deployments\/[^/]+\/responses\/?$/i.test(parsed.pathname)) {
+      parsed.pathname = "/openai/v1/videos";
+      parsed.search = "";
+      return parsed.toString();
+    }
+    if (/\/videos\/generations\/?$/i.test(parsed.pathname)) {
+      parsed.pathname = parsed.pathname.replace(/\/videos\/generations\/?$/i, "/videos");
+      return parsed.toString();
+    }
+    if (/\/responses\/?$/i.test(parsed.pathname)) {
+      parsed.pathname = parsed.pathname.replace(/\/responses\/?$/i, "/videos");
+      return parsed.toString();
+    }
+    if (/\/chat\/completions\/?$/i.test(parsed.pathname)) {
+      parsed.pathname = parsed.pathname.replace(/\/chat\/completions\/?$/i, "/videos");
+      return parsed.toString();
+    }
+    if (/\/openai\/v1\/?$/i.test(parsed.pathname)) {
+      parsed.pathname = `${parsed.pathname.replace(/\/+$/, "")}/videos`;
+      return parsed.toString();
+    }
+    return endpoint;
+  } catch {
+    return endpoint;
+  }
+}
+
+function buildMemePrompt(args: {
   inboundText: string;
   recentHistoryLines: string[];
   styleHints?: string[];
   threadTitle?: string;
+  format: "image" | "video";
 }) {
   const history = args.recentHistoryLines
     .slice(-8)
@@ -6355,6 +6427,22 @@ function buildMemeImagePrompt(args: {
     .slice(0, 6)
     .join(" | ");
   const threadLabel = (args.threadTitle || "this chat").trim();
+
+  if (args.format === "video") {
+    return [
+      `Create a witty reaction meme video for ${threadLabel}.`,
+      "Style: friendly, tasteful, not offensive, and modern social-chat meme tone.",
+      "No watermarks, no logos, no political content, no explicit content.",
+      "Keep it short (about 3-6 seconds), visual-first, easy to understand without audio.",
+      "Use brief on-screen text only when necessary; keep text highly readable.",
+      "Reference the latest message and chat vibe below.",
+      `Latest inbound: ${args.inboundText}`,
+      history ? `Recent chat context:\n${history}` : "",
+      hints ? `Style hints: ${hints}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+  }
 
   return [
     `Create a witty reaction meme image for ${threadLabel}.`,
@@ -6395,47 +6483,170 @@ function getAzureImageConfig(runtime?: RuntimeAiTuning) {
   };
 }
 
-async function extractImageBytesFromGenerationPayload(payload: unknown) {
+function getAzureVideoConfig(runtime?: RuntimeAiTuning) {
+  const endpoint = pickConfigValue(
+    process.env.AZURE_AI_VIDEO_ENDPOINT,
+    process.env.AZURE_OPENAI_VIDEO_ENDPOINT,
+  );
+  const apiKey = pickConfigValue(
+    process.env.AZURE_AI_VIDEO_API_KEY,
+    process.env.AZURE_OPENAI_VIDEO_API_KEY,
+    process.env.OPENAI_API_KEY,
+  );
+  const runtimeVideoModel = runtime?.model && /(video|sora|veo)/i.test(runtime.model) ? runtime.model : "";
+  const model = pickConfigValue(
+    process.env.AZURE_AI_VIDEO_MODEL,
+    process.env.AZURE_OPENAI_VIDEO_MODEL,
+    runtimeVideoModel,
+  );
+  return {
+    endpoint: buildAzureVideoGenerationEndpoint(endpoint),
+    apiKey,
+    model,
+  };
+}
+
+async function extractMediaBytesFromGenerationPayload(args: {
+  payload: unknown;
+  fallbackMimeType: string;
+}) {
+  const payload = args.payload;
   if (!payload || typeof payload !== "object") {
     return null;
   }
-  const data = (payload as { data?: unknown }).data;
-  if (!Array.isArray(data) || data.length === 0) {
-    return null;
-  }
-  const first = data[0];
-  if (!first || typeof first !== "object") {
-    return null;
-  }
 
-  const b64 =
-    ((first as { b64_json?: unknown }).b64_json as string | undefined) ||
-    ((first as { b64?: unknown }).b64 as string | undefined);
-  if (typeof b64 === "string" && b64.trim()) {
-    try {
+  const tryExtractFromRecord = (record: Record<string, unknown>) => {
+    const recordMimeType =
+      (typeof record.mimeType === "string" && record.mimeType.trim()) ||
+      (typeof record.mimetype === "string" && record.mimetype.trim()) ||
+      (typeof record.contentType === "string" && record.contentType.trim()) ||
+      ((record.image as Record<string, unknown> | undefined)?.mimeType as string | undefined) ||
+      ((record.video as Record<string, unknown> | undefined)?.mimeType as string | undefined);
+    const directCandidates = [
+      record.b64_json,
+      record.b64,
+      record.base64,
+      record.image_base64,
+      record.imageBase64,
+      record.imageData,
+      (record.image as Record<string, unknown> | undefined)?.b64_json,
+      (record.image as Record<string, unknown> | undefined)?.b64,
+      (record.image as Record<string, unknown> | undefined)?.base64,
+    ];
+    for (const candidate of directCandidates) {
+      if (typeof candidate === "string" && candidate.trim()) {
+        return {
+          type: "b64" as const,
+          value: candidate.trim(),
+          mimeType: recordMimeType || args.fallbackMimeType,
+        };
+      }
+    }
+
+    const urlCandidates = [
+      record.url,
+      record.image_url,
+      record.imageUrl,
+      record.video_url,
+      record.videoUrl,
+      record.output_url,
+      record.outputUrl,
+      (record.image as Record<string, unknown> | undefined)?.url,
+      (record.image as Record<string, unknown> | undefined)?.image_url,
+      (record.image as Record<string, unknown> | undefined)?.imageUrl,
+      (record.video as Record<string, unknown> | undefined)?.url,
+      (record.video as Record<string, unknown> | undefined)?.video_url,
+      (record.video as Record<string, unknown> | undefined)?.videoUrl,
+    ];
+    for (const candidate of urlCandidates) {
+      if (typeof candidate === "string" && candidate.trim()) {
+        return {
+          type: "url" as const,
+          value: candidate.trim(),
+        };
+      }
+    }
+
+    const dataUrlCandidates = [record.data, record.image];
+    for (const candidate of dataUrlCandidates) {
+      if (typeof candidate !== "string") {
+        continue;
+      }
+      const match = candidate.match(/^data:((?:image|video)\/[a-z0-9.+-]+);base64,(.+)$/i);
+      if (!match) {
+        continue;
+      }
       return {
-        imageBytes: Buffer.from(b64, "base64"),
-        mimeType: "image/png",
+        type: "b64" as const,
+        value: match[2] || "",
+        mimeType: (match[1] || "image/png").toLowerCase(),
       };
-    } catch {
-      return null;
+    }
+
+    return null;
+  };
+
+  const sourceRecords: Record<string, unknown>[] = [];
+  if ((payload as { data?: unknown }).data && Array.isArray((payload as { data?: unknown }).data)) {
+    const data = (payload as { data?: unknown }).data as unknown[];
+    for (const entry of data) {
+      if (entry && typeof entry === "object") {
+        sourceRecords.push(entry as Record<string, unknown>);
+      }
     }
   }
+  if ((payload as { output?: unknown }).output && Array.isArray((payload as { output?: unknown }).output)) {
+    const output = (payload as { output?: unknown }).output as unknown[];
+    for (const entry of output) {
+      if (entry && typeof entry === "object") {
+        sourceRecords.push(entry as Record<string, unknown>);
+      }
+    }
+  }
+  sourceRecords.push(payload as Record<string, unknown>);
 
-  const imageUrl = ((first as { url?: unknown }).url as string | undefined) || "";
-  if (imageUrl) {
-    const response = await fetch(imageUrl);
+  for (const record of sourceRecords) {
+    const extracted = tryExtractFromRecord(record);
+    if (!extracted) {
+      continue;
+    }
+    if (extracted.type === "b64") {
+      try {
+        return {
+          imageBytes: Buffer.from(extracted.value, "base64"),
+          mimeType: extracted.mimeType || args.fallbackMimeType,
+        };
+      } catch {
+        continue;
+      }
+    }
+
+    const response = await fetch(extracted.value);
     if (!response.ok) {
-      return null;
+      continue;
     }
     const mimeType = response.headers.get("content-type") || "image/png";
     return {
       imageBytes: Buffer.from(await response.arrayBuffer()),
-      mimeType: mimeType.split(";")[0]?.trim() || "image/png",
+      mimeType: mimeType.split(";")[0]?.trim() || args.fallbackMimeType,
     };
   }
 
   return null;
+}
+
+function buildAzureVideoJobEndpoint(baseEndpoint: string, videoId: string) {
+  const parsed = new URL(baseEndpoint);
+  parsed.pathname = `${parsed.pathname.replace(/\/+$/, "")}/${videoId.replace(/^\/+/, "")}`;
+  parsed.search = "";
+  return parsed.toString();
+}
+
+function buildAzureVideoJobContentEndpoint(baseEndpoint: string, videoId: string) {
+  const parsed = new URL(baseEndpoint);
+  parsed.pathname = `${parsed.pathname.replace(/\/+$/, "")}/${videoId.replace(/^\/+/, "")}/content`;
+  parsed.search = "";
+  return parsed.toString();
 }
 
 export async function generateMemeImageWithAzure(args: {
@@ -6444,13 +6655,18 @@ export async function generateMemeImageWithAzure(args: {
   styleHints?: string[];
   threadTitle?: string;
   runtime?: RuntimeAiTuning;
+  preferVideo?: boolean;
 }): Promise<MemeImageGenerationResult> {
-  const cfg = getAzureImageConfig(args.runtime);
-  const prompt = buildMemeImagePrompt({
+  const videoCfg = args.preferVideo ? getAzureVideoConfig(args.runtime) : null;
+  const canUseVideoConfig = Boolean(videoCfg?.endpoint && videoCfg?.apiKey && videoCfg?.model);
+  const selectedFormat: "image" | "video" = canUseVideoConfig ? "video" : "image";
+  const cfg = selectedFormat === "video" ? (videoCfg as { endpoint: string; apiKey: string; model: string }) : getAzureImageConfig(args.runtime);
+  const prompt = buildMemePrompt({
     inboundText: args.inboundText,
     recentHistoryLines: args.recentHistoryLines,
     styleHints: args.styleHints,
     threadTitle: args.threadTitle,
+    format: selectedFormat,
   });
   const promptHash = createHash("sha256").update(prompt).digest("hex");
   const start = Date.now();
@@ -6463,39 +6679,314 @@ export async function generateMemeImageWithAzure(args: {
       provider: "azure",
       model: cfg.model,
       latencyMs: 0,
-      error: "Azure image generation endpoint/key missing.",
+      error:
+        selectedFormat === "video"
+          ? "Azure video generation endpoint/key missing."
+          : "Azure image generation endpoint/key missing.",
     };
   }
 
   try {
-    const response = await fetch(cfg.endpoint, {
-      method: "POST",
-      headers: {
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+    const parseRetryAfterMs = (headerValue: string | null) => {
+      if (!headerValue) {
+        return 0;
+      }
+      const seconds = Number(headerValue);
+      if (Number.isFinite(seconds) && seconds > 0) {
+        return Math.round(Math.max(250, Math.min(seconds * 1000, 15_000)));
+      }
+      const retryAt = Date.parse(headerValue);
+      if (Number.isFinite(retryAt)) {
+        return Math.round(Math.max(250, Math.min(retryAt - Date.now(), 15_000)));
+      }
+      return 0;
+    };
+
+    const payloadCandidates: Array<Record<string, unknown>> =
+      selectedFormat === "video"
+        ? [
+            {
+              model: cfg.model,
+              prompt,
+              duration_seconds: 5,
+              resolution: "720x1280",
+            },
+            {
+              model: cfg.model,
+              prompt,
+              duration_seconds: 5,
+            },
+            {
+              model: cfg.model,
+              prompt,
+            },
+          ]
+        : [
+            {
+              model: cfg.model,
+              prompt,
+              size: "1024x1024",
+              quality: "medium",
+            },
+            {
+              model: cfg.model,
+              prompt,
+              size: "1024x1024",
+            },
+            {
+              model: cfg.model,
+              prompt,
+            },
+          ];
+    const headerCandidates: Array<Record<string, string>> = [
+      {
         "Content-Type": "application/json",
         "api-key": cfg.apiKey,
         Authorization: `Bearer ${cfg.apiKey}`,
       },
-      body: JSON.stringify({
-        model: cfg.model,
-        prompt,
-        size: "1024x1024",
-        quality: "medium",
-        response_format: "b64_json",
-      }),
-    });
-    if (!response.ok) {
-      const body = await response.text();
-      throw new Error(`Azure meme generation failed (${response.status}): ${body.slice(0, 280)}`);
+      {
+        "Content-Type": "application/json",
+        "api-key": cfg.apiKey,
+      },
+      {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${cfg.apiKey}`,
+      },
+    ];
+
+    if (selectedFormat === "video") {
+      const videoCreatePayloadCandidates: Array<Record<string, unknown>> = [
+        {
+          model: cfg.model,
+          prompt,
+          seconds: "4",
+          size: "720x1280",
+        },
+        {
+          model: cfg.model,
+          prompt,
+          seconds: "4",
+        },
+        {
+          model: cfg.model,
+          prompt,
+        },
+      ];
+      const maxVideoWaitMs = 120_000;
+      const pollIntervalMs = 4_000;
+      const videoDeadline = Date.now() + maxVideoWaitMs;
+      let finalVideoError = "Azure meme video generation failed.";
+      let lastStatus: number | null = null;
+
+      headerLoop: for (const headers of headerCandidates) {
+        let authFailureForHeader = false;
+        for (const requestBody of videoCreatePayloadCandidates) {
+          let rateLimitRetryRemaining = 1;
+          while (true) {
+            const createResponse = await fetch(cfg.endpoint, {
+              method: "POST",
+              headers,
+              body: JSON.stringify(requestBody),
+            });
+            if (createResponse.ok) {
+              const createPayload = await createResponse.json();
+              const immediate = await extractMediaBytesFromGenerationPayload({
+                payload: createPayload,
+                fallbackMimeType: "video/mp4",
+              });
+              if (immediate?.imageBytes.length) {
+                return {
+                  imageBytes: immediate.imageBytes,
+                  mimeType: immediate.mimeType || "video/mp4",
+                  prompt,
+                  promptHash,
+                  provider: "azure",
+                  model: cfg.model,
+                  latencyMs: Date.now() - start,
+                };
+              }
+
+              const videoId = typeof (createPayload as { id?: unknown }).id === "string" ? String((createPayload as { id?: unknown }).id).trim() : "";
+              if (!videoId) {
+                finalVideoError = "Azure video generation did not return a job id.";
+                break;
+              }
+
+              let currentStatus = String((createPayload as { status?: unknown }).status || "").toLowerCase();
+              let latestPayload = createPayload as Record<string, unknown>;
+              while ((currentStatus === "queued" || currentStatus === "in_progress" || !currentStatus) && Date.now() < videoDeadline) {
+                await sleep(pollIntervalMs);
+                const statusResponse = await fetch(buildAzureVideoJobEndpoint(cfg.endpoint, videoId), {
+                  headers,
+                });
+                if (!statusResponse.ok) {
+                  const body = await statusResponse.text();
+                  finalVideoError = `Azure video status check failed (${statusResponse.status}): ${body.slice(0, 260)}`;
+                  break;
+                }
+                latestPayload = (await statusResponse.json()) as Record<string, unknown>;
+                currentStatus = String((latestPayload.status as string | undefined) || "").toLowerCase();
+                if (currentStatus === "completed") {
+                  break;
+                }
+                if (currentStatus === "failed" || currentStatus === "cancelled") {
+                  const errorRecord = latestPayload.error as Record<string, unknown> | undefined;
+                  const errorMessage =
+                    (typeof errorRecord?.message === "string" && errorRecord.message) ||
+                    (typeof errorRecord?.code === "string" && errorRecord.code) ||
+                    "Video generation failed.";
+                  finalVideoError = `Azure video generation ${currentStatus}: ${errorMessage}`;
+                  break;
+                }
+              }
+
+              if (currentStatus !== "completed") {
+                if (!finalVideoError || /did not return a job id/i.test(finalVideoError)) {
+                  finalVideoError = "Azure video generation timed out before completion.";
+                }
+                break;
+              }
+
+              const contentResponse = await fetch(buildAzureVideoJobContentEndpoint(cfg.endpoint, videoId), {
+                headers: {
+                  ...headers,
+                  Accept: "video/mp4,application/octet-stream,application/json",
+                },
+              });
+              if (!contentResponse.ok) {
+                const body = await contentResponse.text();
+                finalVideoError = `Azure video content download failed (${contentResponse.status}): ${body.slice(0, 260)}`;
+                break;
+              }
+              const mimeType = contentResponse.headers.get("content-type") || "video/mp4";
+              const videoBytes = Buffer.from(await contentResponse.arrayBuffer());
+              if (!videoBytes.length) {
+                finalVideoError = "Azure video content download returned empty payload.";
+                break;
+              }
+              return {
+                imageBytes: videoBytes,
+                mimeType: mimeType.split(";")[0]?.trim() || "video/mp4",
+                prompt,
+                promptHash,
+                provider: "azure",
+                model: cfg.model,
+                latencyMs: Date.now() - start,
+              };
+            }
+
+            const body = await createResponse.text();
+            lastStatus = createResponse.status;
+            finalVideoError = `Azure video generation failed (${createResponse.status}): ${body.slice(0, 280)}`;
+            if (createResponse.status === 429 && rateLimitRetryRemaining > 0) {
+              rateLimitRetryRemaining -= 1;
+              const waitMs = parseRetryAfterMs(createResponse.headers.get("retry-after")) || 1_000;
+              await sleep(waitMs);
+              continue;
+            }
+
+            const shouldRetryWithSlimmerPayload =
+              createResponse.status === 400 &&
+              /\bunknown parameter\b/i.test(body) &&
+              /\b(quality|size|response_format|duration|duration_seconds|seconds|resolution)\b/i.test(body);
+            if (shouldRetryWithSlimmerPayload) {
+              break;
+            }
+
+            const authError = createResponse.status === 401 || createResponse.status === 403;
+            if (authError) {
+              authFailureForHeader = true;
+              break;
+            }
+
+            break headerLoop;
+          }
+
+          if (authFailureForHeader) {
+            break;
+          }
+        }
+
+        if (lastStatus !== 401 && lastStatus !== 403) {
+          break;
+        }
+      }
+
+      throw new Error(finalVideoError || "Azure meme video generation failed.");
     }
-    const payload = await response.json();
-    const extracted = await extractImageBytesFromGenerationPayload(payload);
-    if (!extracted || extracted.imageBytes.length === 0) {
-      throw new Error("Azure meme generation returned empty image payload.");
+
+    let finalError = `Azure meme ${selectedFormat} generation failed.`;
+    let extractedImage: { imageBytes: Buffer; mimeType: string } | null = null;
+    let lastStatus: number | null = null;
+    headerLoop: for (const headers of headerCandidates) {
+      let authFailureForHeader = false;
+      for (const requestBody of payloadCandidates) {
+        let rateLimitRetryRemaining = 1;
+        while (true) {
+          const response = await fetch(cfg.endpoint, {
+            method: "POST",
+            headers,
+            body: JSON.stringify(requestBody),
+          });
+
+          if (response.ok) {
+            const payload = await response.json();
+            extractedImage = await extractMediaBytesFromGenerationPayload({
+              payload,
+              fallbackMimeType: "image/png",
+            });
+            if (extractedImage?.imageBytes.length) {
+              break headerLoop;
+            }
+            finalError = `Azure meme generation returned empty ${selectedFormat} payload.`;
+            break;
+          }
+
+          const body = await response.text();
+          lastStatus = response.status;
+          finalError = `Azure meme generation failed (${response.status}): ${body.slice(0, 280)}`;
+
+          if (response.status === 429 && rateLimitRetryRemaining > 0) {
+            rateLimitRetryRemaining -= 1;
+            const waitMs = parseRetryAfterMs(response.headers.get("retry-after")) || 900;
+            await sleep(waitMs);
+            continue;
+          }
+
+          const shouldRetryWithSlimmerPayload =
+            response.status === 400 &&
+            /\bunknown parameter\b/i.test(body) &&
+            /\b(quality|size|response_format|duration|duration_seconds|resolution)\b/i.test(body);
+          if (shouldRetryWithSlimmerPayload) {
+            break;
+          }
+
+          const authError = response.status === 401 || response.status === 403;
+          if (authError) {
+            authFailureForHeader = true;
+            break;
+          }
+
+          break headerLoop;
+        }
+        if (authFailureForHeader) {
+          break;
+        }
+      }
+
+      if (lastStatus !== 401 && lastStatus !== 403) {
+        break;
+      }
+    }
+
+    if (!extractedImage) {
+      throw new Error(finalError);
     }
 
     return {
-      imageBytes: extracted.imageBytes,
-      mimeType: extracted.mimeType,
+      imageBytes: extractedImage.imageBytes,
+      mimeType: extractedImage.mimeType,
       prompt,
       promptHash,
       provider: "azure",
@@ -6505,8 +6996,10 @@ export async function generateMemeImageWithAzure(args: {
   } catch (error) {
     const baseError = toErrorMessage(error);
     const guidance =
-      /\b404\b/.test(baseError) && !process.env.AZURE_AI_IMAGE_ENDPOINT
-        ? " Set AZURE_AI_IMAGE_ENDPOINT to your Azure image generation endpoint and AZURE_AI_IMAGE_MODEL to an image model such as gpt-image-1."
+      /\b404\b/.test(baseError) && selectedFormat === "video" && !process.env.AZURE_AI_VIDEO_ENDPOINT
+        ? " Set AZURE_AI_VIDEO_ENDPOINT to your Azure video generation endpoint and AZURE_AI_VIDEO_MODEL to a video-capable model."
+        : /\b404\b/.test(baseError) && !process.env.AZURE_AI_IMAGE_ENDPOINT
+          ? " Set AZURE_AI_IMAGE_ENDPOINT to your Azure image generation endpoint and AZURE_AI_IMAGE_MODEL to an image model such as gpt-image-1."
         : "";
     return {
       mimeType: "image/png",

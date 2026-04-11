@@ -13,6 +13,7 @@ import {
   hasBossAddressCue,
   inferFriendshipGenerationCohort,
   inferProfessionalLinguaProfile,
+  generateMemeImageWithAzure,
   normalizeOutboundText,
   postProcessReplyText,
   routeAckResponseChannel,
@@ -25,6 +26,18 @@ const ENV_KEYS = [
   "AZURE_OPENAI_ENDPOINT",
   "AZURE_AI_API_KEY",
   "AZURE_OPENAI_API_KEY",
+  "AZURE_AI_MODEL",
+  "AZURE_OPENAI_MODEL",
+  "AZURE_AI_IMAGE_ENDPOINT",
+  "AZURE_AI_IMAGE_API_KEY",
+  "AZURE_AI_IMAGE_MODEL",
+  "AZURE_AI_VIDEO_ENDPOINT",
+  "AZURE_AI_VIDEO_API_KEY",
+  "AZURE_AI_VIDEO_MODEL",
+  "AZURE_OPENAI_VIDEO_ENDPOINT",
+  "AZURE_OPENAI_VIDEO_API_KEY",
+  "AZURE_OPENAI_VIDEO_MODEL",
+  "AZURE_OPENAI_IMAGE_MODEL",
   "OPENAI_API_KEY",
   "CODEX_CLI_PATH",
 ] as const;
@@ -920,6 +933,155 @@ test("describeInboundImageWithFallback returns heuristic fallback when Azure con
     assert.match(result.description, /wild status/i);
     assert.match(result.error || "", /endpoint\/key missing/i);
   } finally {
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateMemeImageWithAzure retries with slimmer payload on unknown parameter errors", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  const seenBodies: Array<Record<string, unknown>> = [];
+
+  try {
+    process.env.AZURE_AI_IMAGE_ENDPOINT = "https://example.services.ai.azure.com/openai/v1/images/generations";
+    process.env.AZURE_AI_IMAGE_API_KEY = "test-key";
+    process.env.AZURE_AI_IMAGE_MODEL = "gpt-image-1.5";
+
+    globalThis.fetch = (async (_input, init) => {
+      const body = JSON.parse(String(init?.body || "{}")) as Record<string, unknown>;
+      seenBodies.push(body);
+      if (seenBodies.length === 1) {
+        return new Response(
+          JSON.stringify({
+            error: {
+              message: "Unknown parameter: 'quality'.",
+              param: "quality",
+            },
+          }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          data: [
+            {
+              b64_json: Buffer.from("meme-ok").toString("base64"),
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    const result = await generateMemeImageWithAzure({
+      inboundText: "Make a meme about late replies",
+      recentHistoryLines: ["Them: you still dey there?", "Me: yes o"],
+      threadTitle: "Sample chat",
+    });
+
+    assert.equal(result.error, undefined);
+    assert.ok(result.imageBytes);
+    assert.equal(result.imageBytes?.toString("utf8"), "meme-ok");
+    assert.equal(seenBodies.length, 2);
+    assert.equal(typeof seenBodies[0]?.quality, "string");
+    assert.equal(seenBodies[1]?.quality, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateMemeImageWithAzure maps bare Foundry target URI and defaults to image model", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  const calledUrls: string[] = [];
+
+  try {
+    process.env.AZURE_AI_IMAGE_ENDPOINT = "https://cribnoshprod-resource.services.ai.azure.com";
+    process.env.AZURE_AI_IMAGE_API_KEY = "test-key";
+    process.env.AZURE_AI_MODEL = "gpt-5.4";
+    delete process.env.AZURE_AI_IMAGE_MODEL;
+
+    globalThis.fetch = (async (input, init) => {
+      calledUrls.push(String(input));
+      const body = JSON.parse(String(init?.body || "{}")) as Record<string, unknown>;
+      assert.equal(body.model, "gpt-image-1");
+      return new Response(
+        JSON.stringify({
+          data: [
+            {
+              b64_json: Buffer.from("ok").toString("base64"),
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    const result = await generateMemeImageWithAzure({
+      inboundText: "Make a witty meme",
+      recentHistoryLines: [],
+    });
+
+    assert.equal(result.error, undefined);
+    assert.equal(result.model, "gpt-image-1");
+    assert.equal(calledUrls.length > 0, true);
+    assert.match(calledUrls[0] || "", /\/openai\/v1\/images\/generations$/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateMemeImageWithAzure can generate video meme payloads when preferVideo is enabled", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  const calledUrls: string[] = [];
+
+  try {
+    process.env.AZURE_AI_VIDEO_ENDPOINT = "https://example.services.ai.azure.com";
+    process.env.AZURE_AI_VIDEO_API_KEY = "video-key";
+    process.env.AZURE_AI_VIDEO_MODEL = "gpt-video-1";
+
+    globalThis.fetch = (async (input, init) => {
+      calledUrls.push(String(input));
+      if (calledUrls.length === 1) {
+        const body = JSON.parse(String(init?.body || "{}")) as Record<string, unknown>;
+        assert.equal(body.model, "gpt-video-1");
+        assert.equal(body.seconds, "4");
+        return new Response(
+          JSON.stringify({ id: "video_test_123", status: "queued" }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (calledUrls.length === 2) {
+        return new Response(
+          JSON.stringify({ id: "video_test_123", status: "completed" }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(Buffer.from("video-ok"), {
+        status: 200,
+        headers: { "content-type": "video/mp4" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateMemeImageWithAzure({
+      inboundText: "make a meme clip for this gist",
+      recentHistoryLines: ["Them: this one needs motion", "Me: facts"],
+      preferVideo: true,
+    });
+
+    assert.equal(result.error, undefined);
+    assert.equal(result.model, "gpt-video-1");
+    assert.equal(result.mimeType, "video/mp4");
+    assert.equal(result.imageBytes?.toString("utf8"), "video-ok");
+    assert.equal(calledUrls.length, 3);
+    assert.match(calledUrls[0] || "", /\/openai\/v1\/videos$/i);
+    assert.match(calledUrls[1] || "", /\/openai\/v1\/videos\/video_test_123$/i);
+    assert.match(calledUrls[2] || "", /\/openai\/v1\/videos\/video_test_123\/content$/i);
+  } finally {
+    globalThis.fetch = originalFetch;
     restoreAiEnv(snapshot);
   }
 });
