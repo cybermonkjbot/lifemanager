@@ -114,6 +114,52 @@ export function shouldEnterGhostMode(args: {
   return roll < GHOST_TRIGGER_PROBABILITY;
 }
 
+export function shouldResetRomanceMorningNoReplyState(args: {
+  state: Pick<Doc<"romanceMorningState">, "lastSentAt" | "lastInboundAfterSendAt" | "noReplyStreak"> | null;
+  inboundMessageAt: number;
+}) {
+  if (!args.state?.lastSentAt) {
+    return false;
+  }
+  if (args.inboundMessageAt <= args.state.lastSentAt) {
+    return false;
+  }
+  if ((args.state.lastInboundAfterSendAt || 0) >= args.inboundMessageAt && args.state.noReplyStreak === 0) {
+    return false;
+  }
+  return true;
+}
+
+async function resetRomanceMorningNoReplyState(args: {
+  ctx: MutationCtx;
+  threadId: Id<"threads">;
+  inboundMessageAt: number;
+  now: number;
+}) {
+  const state = await args.ctx.db
+    .query("romanceMorningState")
+    .withIndex("by_threadId", (q) => q.eq("threadId", args.threadId))
+    .first();
+  if (!state) {
+    return false;
+  }
+  if (
+    !shouldResetRomanceMorningNoReplyState({
+      state,
+      inboundMessageAt: args.inboundMessageAt,
+    })
+  ) {
+    return false;
+  }
+
+  await args.ctx.db.patch(state._id, {
+    lastInboundAfterSendAt: Math.max(state.lastInboundAfterSendAt || 0, args.inboundMessageAt),
+    noReplyStreak: 0,
+    updatedAt: args.now,
+  });
+  return true;
+}
+
 async function updateAutoAliases(args: {
   ctx: MutationCtx;
   threadId: Id<"threads">;
@@ -422,6 +468,15 @@ export const ingest = mutation({
       createdAt: now,
     });
 
+    if (!isStatusMessage) {
+      await resetRomanceMorningNoReplyState({
+        ctx,
+        threadId: thread._id,
+        inboundMessageAt: messageAt,
+        now,
+      });
+    }
+
     if (messageType === "reaction" && reactionTargetMessageId) {
       const actorJid = args.senderJid;
       const existingReaction = await ctx.db
@@ -493,7 +548,7 @@ export const ingest = mutation({
     });
 
     let promiseDetected = false;
-    let todoDetected = false;
+    const todoDetected = false;
 
     if (!isHistoryIngest && !stale && !isStatusMessage && messageType === "text") {
       const commitment = detectFutureCommitment({
@@ -734,6 +789,15 @@ export const ingestHistorical = mutation({
       messageAt,
       createdAt: now,
     });
+
+    if (args.direction === "inbound" && !isStatusMessage) {
+      await resetRomanceMorningNoReplyState({
+        ctx,
+        threadId: thread._id,
+        inboundMessageAt: messageAt,
+        now,
+      });
+    }
 
     await ctx.db.insert("systemEvents", {
       source: "worker",

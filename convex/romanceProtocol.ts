@@ -5,15 +5,51 @@ import { getConfig } from "./lib/config";
 import { classifyThreadKind } from "./lib/threadEligibility";
 import { GOOD_MORNING_OUTREACH_REASON_PREFIX, isConversationStarterReason } from "./lib/outreachModes";
 import { estimateHumanTiming } from "./lib/heuristics";
-import { buildRomancePromptFingerprint, isWithinHourWindow, selectRomanceMorningMode, stableHash } from "../shared/romance-morning";
+import {
+  buildRomancePromptFingerprint,
+  isIgnoredMorningPauseActive,
+  isSuccessfulLeadPlanCooldownActive,
+  ROMANCE_BASE_VARIANT_COUNT,
+  ROMANCE_BOUNDARY_REOPEN_VARIANT_COUNT,
+  shouldSendIgnoredMorningBoundaryReopen,
+  isWithinHourWindow,
+  selectAdaptiveRomanceMorningMode,
+  stableHash,
+} from "../shared/romance-morning";
 
 const AI_OUTREACH_PLACEHOLDER = "__SLM_AI_OUTREACH__";
 const MAX_SIGNAL_ROWS = 360;
 const MAX_RECENT_DRAFTS = 60;
 const MAX_RECENT_MESSAGES = 140;
 const MAX_TARGET_THREADS = 180;
+const HOLDOUT_RATIO_DEFAULT = 0.1;
 
 type RomanceMorningMode = "lead" | "warm";
+const BOUNDARY_REOPEN_HINT_VARIATIONS = [
+  "Good morning {{name}}, I did not enjoy being ghosted, but I am choosing peace and still checking on you.",
+  "Good morning {{name}}, I did not like how we went silent, but I am taking the higher road and checking on you.",
+  "Good morning {{name}}, being ignored did not feel good, but I am choosing calm and still checking on you.",
+  "Good morning {{name}}, I did not enjoy the silence, but I still want to check on you with respect.",
+  "Good morning {{name}}, I did not like being left on read, but I am choosing maturity and checking on you.",
+  "Good morning {{name}}, I did not enjoy being shut out, but I am keeping it calm and still checking on you.",
+  "Good morning {{name}}, the silence was not pleasant for me, but I would rather choose peace and check on you.",
+  "Good morning {{name}}, I did not like being ignored after reaching out, but I am still checking on you respectfully.",
+  "Good morning {{name}}, I did not enjoy how distant things felt, but I am choosing grace and checking on you.",
+  "Good morning {{name}}, I did not like the quiet between us, but I am still checking in with good intentions.",
+  "Good morning {{name}}, I did not enjoy being ghosted like that, but I am choosing calm and care while checking on you.",
+  "Good morning {{name}}, I did not like how we lost touch this way, but I am taking the bigger-person route and checking on you.",
+  "Good morning {{name}}, I did not enjoy that silence at all, but I am not here to fight, just to check on you.",
+  "Good morning {{name}}, I did not like being ignored, honestly, but I am still checking in from a calm place.",
+  "Good morning {{name}}, I did not enjoy how things went quiet, but I am choosing respect and still checking on you.",
+  "Good morning {{name}}, I did not like the way communication dropped, but I am keeping it mature and checking on you.",
+  "Good morning {{name}}, I did not enjoy being ghosted, but I am not escalating it and still checking on you today.",
+  "Good morning {{name}}, I did not like being left hanging, but I am choosing peace and checking in anyway.",
+  "Good morning {{name}}, I did not enjoy that silent treatment, but I am still reaching out with calm energy.",
+  "Good morning {{name}}, I did not like being ignored after my earlier message, but I am still choosing the bigger person approach.",
+  "Good morning {{name}}, I did not enjoy how we went cold, but I am checking on you without drama.",
+  "Good morning {{name}}, I did not like that silence, but I am keeping it respectful and still checking on you.",
+  "Good morning {{name}}, I did not enjoy being ignored, yet I am choosing composure and still checking on you.",
+] as const;
 
 function resolveLocalDayStart(now: number) {
   const date = new Date(now);
@@ -82,6 +118,19 @@ export function hasPendingOrClaimedOutbox(
   return outboxItems.some((item) => item.status === "pending" || item.status === "claimed");
 }
 
+export function isMorningHoldoutThread(args: {
+  threadId: string;
+  dayBucket: string;
+  holdoutRatio?: number;
+}) {
+  const holdoutRatio = Math.max(0, Math.min(args.holdoutRatio ?? HOLDOUT_RATIO_DEFAULT, 1));
+  if (holdoutRatio <= 0) {
+    return false;
+  }
+  const sample = (stableHash(`${args.threadId}|${args.dayBucket}|holdout`) % 1000) / 1000;
+  return sample < holdoutRatio;
+}
+
 export function hasConversationStarterCollision(
   drafts: Array<Pick<Doc<"replyDrafts">, "reason" | "createdAt">>,
   now: number,
@@ -138,7 +187,7 @@ async function syncNoReplyState(
     (message) => message.direction === "inbound" && !message.isStatus && message.messageAt > (state.lastSentAt || 0),
   );
   const inboundAt = inboundAfterLastSend?.messageAt;
-  const nextNoReplyStreak = inboundAt ? 0 : state.noReplyStreak;
+  const nextNoReplyStreak = inboundAt ? 0 : Math.max(1, state.noReplyStreak);
   if (
     state.lastInboundAfterSendAt === inboundAt &&
     state.noReplyStreak === nextNoReplyStreak
@@ -160,11 +209,68 @@ async function syncNoReplyState(
   };
 }
 
+async function suppressConversationStarterOutboxForThread(args: {
+  ctx: MutationCtx;
+  threadId: Id<"threads">;
+  now: number;
+  reason: string;
+}) {
+  const rows = [
+    ...(await args.ctx.db
+      .query("outbox")
+      .withIndex("by_thread_and_status", (q) => q.eq("threadId", args.threadId).eq("status", "pending"))
+      .take(80)),
+    ...(await args.ctx.db
+      .query("outbox")
+      .withIndex("by_thread_and_status", (q) => q.eq("threadId", args.threadId).eq("status", "claimed"))
+      .take(80)),
+  ];
+
+  let suppressed = 0;
+  for (const row of rows) {
+    const draft = await args.ctx.db.get(row.draftId);
+    if (!draft) {
+      continue;
+    }
+    await args.ctx.db.patch(row._id, {
+      status: "failed",
+      workerId: undefined,
+      leaseExpiresAt: undefined,
+      error: args.reason,
+      updatedAt: args.now,
+    });
+    if (draft.status !== "sent" && draft.status !== "rejected") {
+      await args.ctx.db.patch(draft._id, {
+        status: "rejected",
+        updatedAt: args.now,
+      });
+    }
+    await args.ctx.db.insert("systemEvents", {
+      source: "convex",
+      eventType: "romance_morning.suppressed_outbox",
+      threadId: args.threadId,
+      outboxId: row._id,
+      detail: args.reason.slice(0, 220),
+      createdAt: args.now,
+    });
+    suppressed += 1;
+  }
+  return suppressed;
+}
+
 function resolveGoodMorningHint(args: {
   mode: RomanceMorningMode;
   firstName: string;
   variant: number;
+  boundaryReopen: boolean;
 }) {
+  if (args.boundaryReopen) {
+    const index =
+      ((Math.round(args.variant) % ROMANCE_BOUNDARY_REOPEN_VARIANT_COUNT) + ROMANCE_BOUNDARY_REOPEN_VARIANT_COUNT) %
+      ROMANCE_BOUNDARY_REOPEN_VARIANT_COUNT;
+    const template = BOUNDARY_REOPEN_HINT_VARIATIONS[index];
+    return template.replace(/\{\{name\}\}/g, args.firstName);
+  }
   if (args.mode === "lead") {
     if (args.variant === 0) {
       return `Good morning ${args.firstName}, let us lock one sweet plan for today.`;
@@ -264,6 +370,7 @@ export const run = internalMutation({
 
     const cooldownMs = Math.max(60 * 60 * 1000, config.romanticMorningCollisionCooldownHours * 60 * 60 * 1000);
     const dayStart = resolveLocalDayStart(now);
+    const dayBucket = `${new Date(dayStart).toISOString().slice(0, 10)}`;
     const romanticPartnerJids = [...new Set(config.romanticPartnerJids.map((jid) => jid.trim().toLowerCase()).filter(Boolean))];
 
     const listThreadIds: string[] = [];
@@ -322,6 +429,10 @@ export const run = internalMutation({
       skippedMorningAlreadyQueued: 0,
       skippedConversationStarterCollision: 0,
       skippedPushinessCooldown: 0,
+      skippedHoldout: 0,
+      forcedWarmPlanCooldown: 0,
+      skippedIgnoredPause: 0,
+      suppressedOutboxIgnoredPause: 0,
     };
 
     for (const threadIdRaw of candidateThreadIds) {
@@ -373,12 +484,53 @@ export const run = internalMutation({
       let romanceState = await getRomanceState(ctx, threadId);
       romanceState = await syncNoReplyState(ctx, threadId, romanceState, now);
       const noReplyStreak = romanceState?.noReplyStreak || 0;
+      const ignoredPauseActive = isIgnoredMorningPauseActive({
+        now,
+        noReplyStreak,
+        lastSentAt: romanceState?.lastSentAt,
+        lastInboundAfterSendAt: romanceState?.lastInboundAfterSendAt,
+      });
+      if (ignoredPauseActive) {
+        summary.skippedIgnoredPause += 1;
+        const suppressed = await suppressConversationStarterOutboxForThread({
+          ctx,
+          threadId,
+          now,
+          reason: "Suppressed: no reply to previous good morning; pausing outreach for 3 days.",
+        });
+        summary.suppressedOutboxIgnoredPause += suppressed;
+        await ctx.db.insert("systemEvents", {
+          source: "convex",
+          eventType: "romance_morning.paused_ignored",
+          threadId,
+          detail: `pauseDays=3; noReplyStreak=${noReplyStreak}; suppressed=${suppressed}`,
+          createdAt: now,
+        });
+        continue;
+      }
       if (
         noReplyStreak >= 2 &&
         romanceState?.lastSentAt &&
         now - romanceState.lastSentAt < Math.max(cooldownMs, 24 * 60 * 60 * 1000)
       ) {
         summary.skippedPushinessCooldown += 1;
+        continue;
+      }
+
+      if (
+        isMorningHoldoutThread({
+          threadId,
+          dayBucket,
+        })
+      ) {
+        summary.skippedHoldout += 1;
+        await ctx.db.insert("systemEvents", {
+          source: "convex",
+          eventType: "romance_morning.holdout",
+          threadId,
+          detail: `control=ab_holdout_10pct; day=${dayBucket}`,
+          createdAt: now,
+        });
         continue;
       }
 
@@ -392,14 +544,34 @@ export const run = internalMutation({
         continue;
       }
 
-      const dayBucket = `${new Date(dayStart).toISOString().slice(0, 10)}`;
-      const mode = selectRomanceMorningMode({
+      const planCooldownActive = isSuccessfulLeadPlanCooldownActive({
+        threadId,
+        now,
+        lastMode: romanceState?.lastMode,
+        lastSentAt: romanceState?.lastSentAt,
+        lastInboundAfterSendAt: romanceState?.lastInboundAfterSendAt,
+      });
+      const boundaryReopen = shouldSendIgnoredMorningBoundaryReopen({
+        now,
+        noReplyStreak,
+        lastSentAt: romanceState?.lastSentAt,
+        lastInboundAfterSendAt: romanceState?.lastInboundAfterSendAt,
+      });
+      const mode = selectAdaptiveRomanceMorningMode({
+        threadId,
         seed: `${threadId}|${dayBucket}|${summary.considered}`,
         leadRatio: config.romanticMorningLeadRatio,
+        now,
         lastMode: romanceState?.lastMode,
         noReplyStreak,
+        lastSentAt: romanceState?.lastSentAt,
+        lastInboundAfterSendAt: romanceState?.lastInboundAfterSendAt,
       });
-      let variant = stableHash(`${threadId}|${dayBucket}|${mode}`) % 3;
+      if ((planCooldownActive || boundaryReopen) && mode === "warm") {
+        summary.forcedWarmPlanCooldown += 1;
+      }
+      const variantCount = boundaryReopen ? ROMANCE_BOUNDARY_REOPEN_VARIANT_COUNT : ROMANCE_BASE_VARIANT_COUNT;
+      let variant = stableHash(`${threadId}|${dayBucket}|${mode}`) % variantCount;
       let promptFingerprint = buildRomancePromptFingerprint({
         threadId,
         mode,
@@ -410,7 +582,7 @@ export const run = internalMutation({
         romanceState?.lastPromptFingerprint &&
         romanceState.lastPromptFingerprint === promptFingerprint
       ) {
-        variant = (variant + 1) % 3;
+        variant = (variant + 1) % variantCount;
         promptFingerprint = buildRomancePromptFingerprint({
           threadId,
           mode,
@@ -424,6 +596,7 @@ export const run = internalMutation({
         mode,
         firstName,
         variant,
+        boundaryReopen,
       });
       const timing = estimateHumanTiming(hintText);
       const messageProvider = thread.provider || "whatsapp";
@@ -483,7 +656,7 @@ export const run = internalMutation({
         eventType: "romance_morning.queued",
         threadId,
         outboxId,
-        detail: `mode=${mode}; variant=${variant}; noReplyStreak=${noReplyStreak}; hint=${hintText.slice(0, 140)}`,
+        detail: `mode=${mode}; variant=${variant}; noReplyStreak=${noReplyStreak}; planCooldown=${planCooldownActive ? "active" : "inactive"}; boundaryReopen=${boundaryReopen ? "yes" : "no"}; hint=${hintText.slice(0, 140)}`,
         createdAt: now,
       });
       summary.queued += 1;
@@ -492,7 +665,7 @@ export const run = internalMutation({
     await ctx.db.insert("systemEvents", {
       source: "convex",
       eventType: "romance_morning.batch",
-      detail: `queued=${summary.queued}; considered=${summary.considered}; pending=${summary.skippedPendingOutbox}; queued_today=${summary.skippedMorningAlreadyQueued}; collision=${summary.skippedConversationStarterCollision}; pushiness=${summary.skippedPushinessCooldown}; invalid=${summary.skippedThreadState}`,
+      detail: `queued=${summary.queued}; considered=${summary.considered}; pending=${summary.skippedPendingOutbox}; queued_today=${summary.skippedMorningAlreadyQueued}; collision=${summary.skippedConversationStarterCollision}; pushiness=${summary.skippedPushinessCooldown}; holdout=${summary.skippedHoldout}; ignoredPause=${summary.skippedIgnoredPause}; suppressedIgnoredPause=${summary.suppressedOutboxIgnoredPause}; forcedWarmPlanCooldown=${summary.forcedWarmPlanCooldown}; invalid=${summary.skippedThreadState}`,
       createdAt: now,
     });
 

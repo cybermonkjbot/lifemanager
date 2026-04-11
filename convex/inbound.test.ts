@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { extractAliasesFromText, hasGoodActiveChattingWindow, shouldEnterGhostMode } from "./inbound";
+import {
+  extractAliasesFromText,
+  hasGoodActiveChattingWindow,
+  shouldEnterGhostMode,
+  shouldResetRomanceMorningNoReplyState,
+} from "./inbound";
 import { classifyThreadKind, resolveThreadEligibility } from "./lib/threadEligibility";
 
 test("extractAliasesFromText finds nickname patterns", () => {
@@ -153,6 +158,40 @@ test("shouldEnterGhostMode uses probability once active chatting threshold is me
     shouldEnterGhostMode({
       messages,
       randomValue: 0.21,
+    }),
+    false,
+  );
+});
+
+test("shouldResetRomanceMorningNoReplyState only resets on inbound after last send", () => {
+  assert.equal(
+    shouldResetRomanceMorningNoReplyState({
+      state: {
+        lastSentAt: 10_000,
+        lastInboundAfterSendAt: undefined,
+        noReplyStreak: 2,
+      },
+      inboundMessageAt: 12_000,
+    }),
+    true,
+  );
+
+  assert.equal(
+    shouldResetRomanceMorningNoReplyState({
+      state: {
+        lastSentAt: 10_000,
+        lastInboundAfterSendAt: 12_000,
+        noReplyStreak: 0,
+      },
+      inboundMessageAt: 11_000,
+    }),
+    false,
+  );
+
+  assert.equal(
+    shouldResetRomanceMorningNoReplyState({
+      state: null,
+      inboundMessageAt: 12_000,
     }),
     false,
   );

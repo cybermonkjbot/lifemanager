@@ -20,6 +20,7 @@ import {
   eligibilityReasonLabel,
   resolveThreadEligibility,
 } from "./lib/threadEligibility";
+import { isIgnoredMorningPauseActive } from "../shared/romance-morning";
 
 const UNANSWERED_OUTBOUND_RECHECK_MS = 5 * 60 * 1000;
 const CALL_REPLY_BARRIER_RECHECK_MS = 5 * 60 * 1000;
@@ -275,6 +276,44 @@ export const claimDue = mutation({
       }
       const sourceMessage = await ctx.db.get(draft.sourceMessageId);
       const threadKind = thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup });
+      if (threadKind === "direct") {
+        const romanceState = await ctx.db
+          .query("romanceMorningState")
+          .withIndex("by_threadId", (q) => q.eq("threadId", thread._id))
+          .first();
+        if (
+          isIgnoredMorningPauseActive({
+            now,
+            noReplyStreak: romanceState?.noReplyStreak,
+            lastSentAt: romanceState?.lastSentAt,
+            lastInboundAfterSendAt: romanceState?.lastInboundAfterSendAt,
+          })
+        ) {
+          const reason = "Suppressed: ignored previous good morning; pausing automated sends for 3 days.";
+          await ctx.db.patch(item._id, {
+            status: "failed",
+            workerId: undefined,
+            leaseExpiresAt: undefined,
+            error: reason,
+            updatedAt: now,
+          });
+          if (draft.status !== "sent" && draft.status !== "rejected") {
+            await ctx.db.patch(draft._id, {
+              status: "rejected",
+              updatedAt: now,
+            });
+          }
+          await ctx.db.insert("systemEvents", {
+            source: "worker",
+            eventType: "outbox.suppressed.ignored_pause",
+            threadId: item.threadId,
+            outboxId: item._id,
+            detail: reason,
+            createdAt: now,
+          });
+          continue;
+        }
+      }
       const callReplyBarrierAt = (thread.callReplyBarrierAt || 0) > 0 ? thread.callReplyBarrierAt : undefined;
       if (threadKind === "direct" && callReplyBarrierAt) {
         await ctx.db.patch(item._id, {

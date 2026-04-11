@@ -21,7 +21,13 @@ import {
   resolveLongSilenceReopenWeeks,
 } from "../../convex/lib/outboundGuard";
 import { hasPidginCasualSignal, hasPidginSignal } from "../../shared/pidgin-lexicon";
-import { buildRomancePromptFingerprint, selectRomanceMorningMode } from "../../shared/romance-morning";
+import {
+  buildRomancePromptFingerprint,
+  ROMANCE_BASE_VARIANT_COUNT,
+  ROMANCE_BOUNDARY_REOPEN_VARIANT_COUNT,
+  selectAdaptiveRomanceMorningMode,
+  shouldSendIgnoredMorningBoundaryReopen,
+} from "../../shared/romance-morning";
 import { convexRefs } from "../lib/convex-refs";
 import { acquireWorkerLock, releaseWorkerLockSync } from "../lib/runtime/worker-lock";
 import {
@@ -76,7 +82,7 @@ import {
   pickLaughReactionEmoji,
   shouldUseLaughReactionOnly,
 } from "./status-policy";
-import { buildOutreachFallbackText, buildOutreachPromptSeed } from "./outreach-hydration";
+import { buildOutreachFallbackText, buildOutreachPromptSeed, enforceGoodMorningStyleLint } from "./outreach-hydration";
 import {
   buildPdfAwareInboundText,
   buildPdfReplyPolicyInstruction,
@@ -7009,16 +7015,33 @@ function resolveTextEmojiAllowlist() {
         })) as RomanceMorningStateSnapshot)
       : null;
     const dayBucket = new Date().toISOString().slice(0, 10);
+    const ignoredBoundaryReopen =
+      outreachMode === "good_morning"
+        ? shouldSendIgnoredMorningBoundaryReopen({
+            now: Date.now(),
+            noReplyStreak: romanceMorningState?.noReplyStreak,
+            lastSentAt: romanceMorningState?.lastSentAt,
+            lastInboundAfterSendAt: romanceMorningState?.lastInboundAfterSendAt,
+          })
+        : false;
     const romanceMorningMode = outreachMode === "good_morning"
-      ? selectRomanceMorningMode({
+      ? selectAdaptiveRomanceMorningMode({
+          threadId: item.threadId,
           seed: `${item.threadId}|${item.outboxId}|${dayBucket}`,
           leadRatio: runtimeSettings?.romanticMorningLeadRatio ?? 0.7,
+          now: Date.now(),
           lastMode: romanceMorningState?.lastMode,
           noReplyStreak: romanceMorningState?.noReplyStreak || 0,
+          lastSentAt: romanceMorningState?.lastSentAt,
+          lastInboundAfterSendAt: romanceMorningState?.lastInboundAfterSendAt,
         })
       : undefined;
+    const romancePromptVariantCount =
+      outreachMode === "good_morning" && ignoredBoundaryReopen
+        ? ROMANCE_BOUNDARY_REOPEN_VARIANT_COUNT
+        : ROMANCE_BASE_VARIANT_COUNT;
     let romancePromptVariant = outreachMode === "good_morning" && romanceMorningMode
-      ? stableHash(`${item.threadId}|${dayBucket}|${romanceMorningMode}`) % 3
+      ? stableHash(`${item.threadId}|${dayBucket}|${romanceMorningMode}`) % romancePromptVariantCount
       : 0;
     let romancePromptFingerprint = outreachMode === "good_morning" && romanceMorningMode
       ? buildRomancePromptFingerprint({
@@ -7034,7 +7057,7 @@ function resolveTextEmojiAllowlist() {
       romancePromptFingerprint &&
       romanceMorningState?.lastPromptFingerprint === romancePromptFingerprint
     ) {
-      romancePromptVariant = (romancePromptVariant + 1) % 3;
+      romancePromptVariant = (romancePromptVariant + 1) % romancePromptVariantCount;
       romancePromptFingerprint = buildRomancePromptFingerprint({
         threadId: item.threadId,
         mode: romanceMorningMode,
@@ -7087,6 +7110,7 @@ function resolveTextEmojiAllowlist() {
       outreachMode,
       romanceMorningMode,
       romancePromptVariant,
+      ignoredBoundaryReopen,
       ghostReopenInstruction,
       memorySummary,
       contactName,
@@ -7119,6 +7143,7 @@ function resolveTextEmojiAllowlist() {
             ...baseOutreachStyleHints,
             "romance_morning_protocol",
             `romance_morning_mode:${romanceMorningMode || "warm"}`,
+            ...(ignoredBoundaryReopen ? ["romance_morning_boundary_reopen"] : []),
           ]
         : baseOutreachStyleHints;
 
@@ -7260,11 +7285,35 @@ function resolveTextEmojiAllowlist() {
     const fallbackText = buildOutreachFallbackText({
       outreachMode,
       romanceMorningMode,
+      romancePromptVariant,
+      ignoredBoundaryReopen,
       longSilenceGhostReopen,
       ghostReopenTone,
       ghostSeverity,
     });
-    const rawSafeText = normalizeOutboundText(ai.guardrailBlocked ? fallbackText : ai.text);
+    const normalizedCandidateText = normalizeOutboundText(ai.guardrailBlocked ? fallbackText : ai.text);
+    const lintedGoodMorningText =
+      outreachMode === "good_morning"
+        ? enforceGoodMorningStyleLint({
+            text: normalizedCandidateText,
+            fallbackText,
+          })
+        : {
+            text: normalizedCandidateText,
+            violations: [] as string[],
+          };
+    const rawSafeText = lintedGoodMorningText.text;
+    if (outreachMode === "good_morning" && lintedGoodMorningText.violations.length > 0) {
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "ai",
+          eventType: "outreach.ai.good_morning_style_lint",
+          threadId: item.threadId,
+          toolRunId,
+          detail: `violations=${lintedGoodMorningText.violations.join(",")}; rewritten=true`,
+        })
+        .catch(() => undefined);
+    }
     const emojiAdjusted = applyEmojiCooldownPolicy({
       text: rawSafeText,
       nowMs: Date.now(),

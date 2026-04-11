@@ -5,10 +5,20 @@ import {
   hasConversationStarterCollision,
   hasPendingOrClaimedOutbox,
   hasReachedMorningDraftLimit,
+  isMorningHoldoutThread,
   mergeUniqueThreadIds,
 } from "./romanceProtocol";
 import { GOOD_MORNING_OUTREACH_REASON_PREFIX, PROACTIVE_OUTREACH_REASON_PREFIX } from "./lib/outreachModes";
-import { isWithinHourWindow, selectRomanceMorningMode } from "../shared/romance-morning";
+import {
+  isIgnoredMorningPauseActive,
+  isSuccessfulLeadPlanCooldownActive,
+  isWithinHourWindow,
+  resolvePlanSuggestionCooldownMs,
+  resolveIgnoredMorningPauseMs,
+  shouldSendIgnoredMorningBoundaryReopen,
+  selectAdaptiveRomanceMorningMode,
+  selectRomanceMorningMode,
+} from "../shared/romance-morning";
 
 test("mergeUniqueThreadIds returns union with de-dupe and trim", () => {
   const merged = mergeUniqueThreadIds([
@@ -88,4 +98,103 @@ test("skip helpers cover queued-today limit, pending outbox, and collision coold
 
   const collision = hasConversationStarterCollision(drafts, now, 3 * 60 * 60 * 1000);
   assert.equal(collision, true);
+});
+
+test("isMorningHoldoutThread is deterministic and near 10 percent", () => {
+  const sampleA = isMorningHoldoutThread({
+    threadId: "thread-17",
+    dayBucket: "2026-04-11",
+  });
+  const sampleB = isMorningHoldoutThread({
+    threadId: "thread-17",
+    dayBucket: "2026-04-11",
+  });
+  assert.equal(sampleA, sampleB);
+
+  let holdoutCount = 0;
+  for (let index = 0; index < 1000; index += 1) {
+    if (
+      isMorningHoldoutThread({
+        threadId: `thread-${index}`,
+        dayBucket: "2026-04-11",
+      })
+    ) {
+      holdoutCount += 1;
+    }
+  }
+  assert.ok(holdoutCount > 60 && holdoutCount < 140);
+});
+
+test("successful lead-plan completion enforces 1-2 day warm cooldown", () => {
+  const threadId = "thread-cooldown";
+  const now = Date.now();
+  const cooldownMs = resolvePlanSuggestionCooldownMs({ threadId });
+
+  const withinCooldown = isSuccessfulLeadPlanCooldownActive({
+    threadId,
+    now,
+    lastMode: "lead",
+    lastSentAt: now - Math.min(cooldownMs - 1, 12 * 60 * 60 * 1000),
+    lastInboundAfterSendAt: now - Math.min(cooldownMs - 1, 6 * 60 * 60 * 1000),
+  });
+  assert.equal(withinCooldown, true);
+
+  const outsideCooldown = isSuccessfulLeadPlanCooldownActive({
+    threadId,
+    now,
+    lastMode: "lead",
+    lastSentAt: now - cooldownMs - 1,
+    lastInboundAfterSendAt: now - cooldownMs + 30_000,
+  });
+  assert.equal(outsideCooldown, false);
+});
+
+test("selectAdaptiveRomanceMorningMode downgrades lead to warm during cooldown", () => {
+  const now = Date.now();
+  const mode = selectAdaptiveRomanceMorningMode({
+    threadId: "thread-force-warm",
+    seed: "thread-force-warm|seed",
+    leadRatio: 1,
+    now,
+    lastMode: "lead",
+    noReplyStreak: 0,
+    lastSentAt: now - 2 * 60 * 60 * 1000,
+    lastInboundAfterSendAt: now - 60 * 60 * 1000,
+  });
+  assert.equal(mode, "warm");
+});
+
+test("ignored-morning pause is active for 3 days without inbound reply", () => {
+  const now = Date.now();
+  const pauseMs = resolveIgnoredMorningPauseMs(3);
+
+  assert.equal(
+    isIgnoredMorningPauseActive({
+      now,
+      noReplyStreak: 1,
+      lastSentAt: now - 2 * 24 * 60 * 60 * 1000,
+      lastInboundAfterSendAt: undefined,
+    }),
+    true,
+  );
+
+  assert.equal(
+    isIgnoredMorningPauseActive({
+      now,
+      noReplyStreak: 1,
+      lastSentAt: now - 2 * 24 * 60 * 60 * 1000,
+      lastInboundAfterSendAt: now - 24 * 60 * 60 * 1000,
+    }),
+    false,
+  );
+
+  assert.equal(
+    shouldSendIgnoredMorningBoundaryReopen({
+      now,
+      noReplyStreak: 1,
+      lastSentAt: now - pauseMs - 10_000,
+      lastInboundAfterSendAt: undefined,
+    }),
+    true,
+  );
 });
