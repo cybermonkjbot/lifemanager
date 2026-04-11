@@ -578,6 +578,48 @@ export const reject = mutation({
   },
 });
 
+export const clearAllPending = mutation({
+  args: {
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    const batchSize = Math.min(Math.max(5, Math.round(args.limit ?? 80)), 200);
+    const drafts = await ctx.db
+      .query("replyDrafts")
+      .withIndex("by_status", (q) => q.eq("status", "pending"))
+      .order("desc")
+      .take(batchSize);
+
+    const affectedThreadIds = new Set<(typeof drafts)[number]["threadId"]>();
+    for (const draft of drafts) {
+      await ctx.db.patch(draft._id, {
+        status: "rejected",
+        updatedAt: now,
+      });
+      affectedThreadIds.add(draft.threadId);
+    }
+
+    for (const threadId of affectedThreadIds) {
+      await ctx.scheduler.runAfter(0, internal.backlog.refreshThread, { threadId });
+    }
+
+    if (drafts.length > 0) {
+      await ctx.db.insert("systemEvents", {
+        source: "dashboard",
+        eventType: "draft.pending.cleared",
+        detail: `Cleared ${drafts.length} pending draft(s).`,
+        createdAt: now,
+      });
+    }
+
+    return {
+      cleared: drafts.length,
+      hasMore: drafts.length === batchSize,
+    };
+  },
+});
+
 export const snooze = mutation({
   args: {
     draftId: v.id("replyDrafts"),

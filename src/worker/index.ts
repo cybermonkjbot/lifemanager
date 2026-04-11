@@ -5808,6 +5808,27 @@ function resolveTextEmojiAllowlist() {
         : null;
 
       if (ai && shouldGenerateAiText && !ai.guardrailBlocked) {
+        type ReplyStyleGuardrailResult = {
+          passed?: boolean;
+          score?: number;
+          threshold?: number;
+          rewriteHints?: string[];
+        };
+        const recordStyleGuardrailEvent = async (result: ReplyStyleGuardrailResult, phase: "initial" | "rewrite") => {
+          await convex
+            .mutation(convexRefs.systemRecordEvent, {
+              source: "ai",
+              eventType: result.passed ? "ai.style_guardrail.passed" : "ai.style_guardrail.failed",
+              threadId: ingest.threadId,
+              toolRunId,
+              detail: compactLogText(
+                `phase=${phase} score=${Number(result.score || 0).toFixed(2)} threshold=${Number(result.threshold || 0).toFixed(2)} hints=${(result.rewriteHints || []).join(" | ")}`,
+                280,
+              ),
+            })
+            .catch(() => undefined);
+        };
+
         const styleGuardrail = (await convex
           .query(convexRefs.chatReplyStyleGuardrailCheck, {
             threadId: ingest.threadId,
@@ -5825,18 +5846,7 @@ function resolveTextEmojiAllowlist() {
           | null;
 
         if (styleGuardrail) {
-          await convex
-            .mutation(convexRefs.systemRecordEvent, {
-              source: "ai",
-              eventType: styleGuardrail.passed ? "ai.style_guardrail.passed" : "ai.style_guardrail.failed",
-              threadId: ingest.threadId,
-              toolRunId,
-              detail: compactLogText(
-                `score=${Number(styleGuardrail.score || 0).toFixed(2)} threshold=${Number(styleGuardrail.threshold || 0).toFixed(2)} hints=${(styleGuardrail.rewriteHints || []).join(" | ")}`,
-                280,
-              ),
-            })
-            .catch(() => undefined);
+          await recordStyleGuardrailEvent(styleGuardrail, "initial");
         }
 
         if (styleGuardrail && !styleGuardrail.passed && Array.isArray(styleGuardrail.rewriteHints) && styleGuardrail.rewriteHints.length > 0) {
@@ -5877,7 +5887,23 @@ function resolveTextEmojiAllowlist() {
           });
 
           if (!rewritten.guardrailBlocked) {
-            ai = rewritten;
+            const rewrittenGuardrail = (await convex
+              .query(convexRefs.chatReplyStyleGuardrailCheck, {
+                threadId: ingest.threadId,
+                candidateReply: rewritten.text,
+                inboundText: inboundTextForAi,
+                strictness: "balanced",
+              })
+              .catch(() => null)) as ReplyStyleGuardrailResult | null;
+            if (rewrittenGuardrail) {
+              await recordStyleGuardrailEvent(rewrittenGuardrail, "rewrite");
+            }
+            const initialScore = Number(styleGuardrail.score || 0);
+            const rewriteScore = Number(rewrittenGuardrail?.score || 0);
+            const rewriteImproved = rewrittenGuardrail ? rewrittenGuardrail.passed || rewriteScore >= initialScore : true;
+            if (rewriteImproved) {
+              ai = rewritten;
+            }
           }
         }
       }

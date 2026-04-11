@@ -1971,6 +1971,44 @@ export const replyStyleGuardrailCheck = query({
     if (phraseAlignment < 0.25 && (profile.commonPhrases || []).length > 0) {
       rewriteHints.push("Use one natural phrase common to this thread without forcing it.");
     }
+    if (!passed && rewriteHints.length === 0) {
+      const weakestChecks = [
+        { key: "contextSpecificity", score: contextSpecificity },
+        { key: "lengthFit", score: lengthFit },
+        { key: "lexicalSimilarity", score: lexicalSimilarity },
+        { key: "phraseAlignment", score: phraseAlignment },
+        { key: "antiGeneric", score: antiGeneric },
+      ]
+        .sort((left, right) => left.score - right.score)
+        .slice(0, 2);
+
+      for (const check of weakestChecks) {
+        if (check.key === "contextSpecificity") {
+          rewriteHints.push("Anchor the reply to one concrete detail from the latest inbound message.");
+          continue;
+        }
+        if (check.key === "lengthFit") {
+          rewriteHints.push("Match this thread's usual reply length more closely.");
+          continue;
+        }
+        if (check.key === "lexicalSimilarity") {
+          rewriteHints.push("Use wording that sounds closer to your recent replies while keeping it original.");
+          continue;
+        }
+        if (check.key === "phraseAlignment" && (profile.commonPhrases || []).length > 0) {
+          rewriteHints.push("Include one naturally fitting phrase commonly used in this thread.");
+          continue;
+        }
+        if (check.key === "antiGeneric") {
+          rewriteHints.push("Avoid generic filler and make the reply more specific.");
+          continue;
+        }
+      }
+
+      if (rewriteHints.length === 0) {
+        rewriteHints.push("Rewrite with a more specific, thread-natural reply to improve style fit.");
+      }
+    }
 
     return {
       tool: "reply_style_guardrail.check",

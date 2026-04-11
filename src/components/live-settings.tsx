@@ -7,7 +7,7 @@ import { formatDateTime } from "@/lib/format";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { useMutation, useQuery } from "convex/react";
-import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 type SettingsState = {
   ignoreGroupsByDefault: boolean;
@@ -156,6 +156,24 @@ type MediaAsset = {
   label: string;
   tags: string[];
   enabled: boolean;
+  fileUrl?: string | null;
+  contextSummary?: string;
+  contextTags?: string[];
+  contextTriggers?: string[];
+  contextAvoid?: string[];
+  contextConfidence?: number;
+  contextUpdatedAt?: number;
+};
+
+type MergeSuggestion = {
+  key: string;
+  kind: "sticker" | "meme";
+  sourceAssetId: string;
+  sourceLabel: string;
+  targetAssetId: string;
+  targetLabel: string;
+  score: number;
+  sharedTokens: string[];
 };
 
 type SetupState = {
@@ -174,6 +192,46 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string }> = [
 ];
 
 const STATUS_BUILDER_MAX_TEXT_POST_RATIO = 0.45;
+const MERGE_TOKEN_STOP_WORDS = new Set([
+  "the",
+  "and",
+  "for",
+  "with",
+  "that",
+  "this",
+  "from",
+  "your",
+  "you",
+  "are",
+  "was",
+  "were",
+  "have",
+  "has",
+  "had",
+  "just",
+  "like",
+  "into",
+  "about",
+  "when",
+  "then",
+  "than",
+  "them",
+  "they",
+  "their",
+  "there",
+  "what",
+  "where",
+  "while",
+  "will",
+  "would",
+  "could",
+  "should",
+  "dont",
+  "does",
+  "did",
+  "its",
+  "it",
+]);
 
 function toState(source: Partial<SettingsState> | undefined): SettingsState {
   return {
@@ -386,6 +444,58 @@ function clamp01(value: number) {
   return Math.max(0, Math.min(value, 1));
 }
 
+function tokenizeMergeText(value: string) {
+  if (!value) {
+    return [];
+  }
+  return value
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 3 && !MERGE_TOKEN_STOP_WORDS.has(token));
+}
+
+function buildMergeTokenSet(asset: MediaAsset) {
+  const tokenSet = new Set<string>();
+  const fields = [
+    asset.label,
+    ...(asset.tags || []),
+    asset.contextSummary || "",
+    ...(asset.contextTags || []),
+    ...(asset.contextTriggers || []),
+  ];
+  for (const field of fields) {
+    for (const token of tokenizeMergeText(field)) {
+      tokenSet.add(token);
+    }
+  }
+  return tokenSet;
+}
+
+function pickMergeDirection(a: MediaAsset, b: MediaAsset) {
+  const scoreAsset = (asset: MediaAsset) => {
+    return (
+      (asset.enabled ? 1 : 0) +
+      (asset.tags?.length || 0) +
+      (asset.contextTags?.length || 0) +
+      (asset.contextTriggers?.length || 0) +
+      (asset.contextSummary ? 2 : 0)
+    );
+  };
+  const scoreA = scoreAsset(a);
+  const scoreB = scoreAsset(b);
+  if (scoreA > scoreB) {
+    return { source: b, target: a };
+  }
+  if (scoreB > scoreA) {
+    return { source: a, target: b };
+  }
+  if (a.label.length >= b.label.length) {
+    return { source: b, target: a };
+  }
+  return { source: a, target: b };
+}
+
 function ProfileEditorForm({ profile, pending, error, onSave }: ProfileEditorFormProps) {
   const [name, setName] = useState(profile.name);
   const [description, setDescription] = useState(profile.description);
@@ -474,6 +584,8 @@ export function LiveSettings() {
   const generateUploadUrl = useMutation(api.media.generateUploadUrl);
   const registerAsset = useMutation(api.media.registerAsset);
   const toggleAsset = useMutation(api.media.toggleAsset);
+  const updateAssetMetadata = useMutation(api.media.updateAssetMetadata);
+  const mergeMediaAssets = useMutation(api.media.mergeAssets);
   const deleteAsset = useMutation(api.media.deleteAsset);
   const settings = useQuery(api.settings.get, {}) as SettingsState | undefined;
   const defaults = useQuery(api.settings.defaults, {}) as SettingsState | undefined;
@@ -482,13 +594,99 @@ export function LiveSettings() {
   const profilesQuery = useQuery(api.personality.listProfiles, {}) as PersonalityProfile[] | undefined;
   const personaPacks = useQuery(api.personality.listPersonaPacks, {}) as PersonaPacksPayload | undefined;
   const mediaAssets = useQuery(api.media.listAssets, {}) as MediaAsset[] | undefined;
-  const curatedMediaAssets = (mediaAssets || []).filter((asset) => asset.kind === "sticker" || asset.kind === "meme");
+  const curatedMediaAssets = useMemo(
+    () => (mediaAssets || []).filter((asset) => asset.kind === "sticker" || asset.kind === "meme"),
+    [mediaAssets],
+  );
+  const suggestedMerges = useMemo(() => {
+    const pairCandidates: Array<{
+      source: MediaAsset;
+      target: MediaAsset;
+      score: number;
+      sharedTokens: string[];
+    }> = [];
+    const byKind = new Map<"sticker" | "meme", MediaAsset[]>();
+    for (const asset of curatedMediaAssets) {
+      const kind = asset.kind === "meme" ? "meme" : "sticker";
+      const list = byKind.get(kind) || [];
+      list.push(asset);
+      byKind.set(kind, list);
+    }
+
+    for (const [, assets] of byKind) {
+      const tokensById = new Map<string, Set<string>>();
+      for (const asset of assets) {
+        tokensById.set(asset._id, buildMergeTokenSet(asset));
+      }
+
+      for (let i = 0; i < assets.length; i += 1) {
+        for (let j = i + 1; j < assets.length; j += 1) {
+          const first = assets[i];
+          const second = assets[j];
+          const firstTokens = tokensById.get(first._id) || new Set<string>();
+          const secondTokens = tokensById.get(second._id) || new Set<string>();
+          if (firstTokens.size === 0 || secondTokens.size === 0) {
+            continue;
+          }
+
+          const sharedTokens = [...firstTokens].filter((token) => secondTokens.has(token));
+          if (sharedTokens.length === 0) {
+            continue;
+          }
+          const unionSize = new Set([...firstTokens, ...secondTokens]).size;
+          const overlapScore = sharedTokens.length / Math.min(firstTokens.size, secondTokens.size);
+          const jaccardScore = sharedTokens.length / unionSize;
+          const finalScore = overlapScore * 0.65 + jaccardScore * 0.35;
+          if (finalScore < 0.52) {
+            continue;
+          }
+
+          const { source, target } = pickMergeDirection(first, second);
+          pairCandidates.push({
+            source,
+            target,
+            score: finalScore,
+            sharedTokens: sharedTokens.slice(0, 4),
+          });
+        }
+      }
+    }
+
+    const bestBySource = new Map<string, (typeof pairCandidates)[number]>();
+    for (const candidate of pairCandidates) {
+      const existing = bestBySource.get(candidate.source._id);
+      if (!existing || candidate.score > existing.score) {
+        bestBySource.set(candidate.source._id, candidate);
+      }
+    }
+
+    const dedupedByPair = new Map<string, MergeSuggestion>();
+    for (const candidate of bestBySource.values()) {
+      const pairKey = [candidate.source._id, candidate.target._id].sort().join(":");
+      const existing = dedupedByPair.get(pairKey);
+      if (existing && existing.score >= candidate.score) {
+        continue;
+      }
+      dedupedByPair.set(pairKey, {
+        key: pairKey,
+        kind: candidate.source.kind === "meme" ? "meme" : "sticker",
+        sourceAssetId: candidate.source._id,
+        sourceLabel: candidate.source.label,
+        targetAssetId: candidate.target._id,
+        targetLabel: candidate.target.label,
+        score: candidate.score,
+        sharedTokens: candidate.sharedTokens,
+      });
+    }
+
+    return [...dedupedByPair.values()].sort((a, b) => b.score - a.score).slice(0, 10);
+  }, [curatedMediaAssets]);
   const mediaAssetsLoading = mediaAssets === undefined;
   const settingsLoading = settings === undefined || defaults === undefined;
   const contactsLoading = contacts === undefined;
   const profilesLoading = profilesQuery === undefined;
   const personaPacksLoading = personaPacks === undefined;
-  const { runAction, getRecord, notices, dismissNotice } = useActionStateRegistry();
+  const { runAction, getRecord, notices, dismissNotice, pushNotice } = useActionStateRegistry();
   const key = "settings:save";
   const profileKey = "personality:profile";
   const mediaKey = "media:library";
@@ -505,6 +703,17 @@ export function LiveSettings() {
   const [assetLabel, setAssetLabel] = useState("");
   const [assetTags, setAssetTags] = useState("");
   const [assetFile, setAssetFile] = useState<File | null>(null);
+  const [editingAssetId, setEditingAssetId] = useState<string | null>(null);
+  const [editAssetLabel, setEditAssetLabel] = useState("");
+  const [editAssetTags, setEditAssetTags] = useState("");
+  const [editContextSummary, setEditContextSummary] = useState("");
+  const [editContextTags, setEditContextTags] = useState("");
+  const [editContextTriggers, setEditContextTriggers] = useState("");
+  const [editContextAvoid, setEditContextAvoid] = useState("");
+  const [editContextConfidence, setEditContextConfidence] = useState("");
+  const [mergeTargetByAssetId, setMergeTargetByAssetId] = useState<Record<string, string>>({});
+  const [autoMergeSuggestionsEnabled, setAutoMergeSuggestionsEnabled] = useState(true);
+  const attemptedAutoMergeSignatureRef = useRef("");
   const [newProfileSlug, setNewProfileSlug] = useState("");
   const [newProfileName, setNewProfileName] = useState("");
   const [newProfileDescription, setNewProfileDescription] = useState("");
@@ -514,6 +723,30 @@ export function LiveSettings() {
   useEffect(() => {
     setDraft(remoteState);
   }, [remoteState]);
+
+  useEffect(() => {
+    setMergeTargetByAssetId((prev) => {
+      const next: Record<string, string> = {};
+      for (const asset of curatedMediaAssets) {
+        const candidates = curatedMediaAssets.filter((item) => item.kind === asset.kind && item._id !== asset._id);
+        if (candidates.length === 0) {
+          continue;
+        }
+        const selected = prev[asset._id];
+        const fallback = candidates[0]?._id || "";
+        const resolved = candidates.some((item) => item._id === selected) ? selected : fallback;
+        if (resolved) {
+          next[asset._id] = resolved;
+        }
+      }
+      const prevKeys = Object.keys(prev);
+      const nextKeys = Object.keys(next);
+      if (prevKeys.length === nextKeys.length && nextKeys.every((key) => prev[key] === next[key])) {
+        return prev;
+      }
+      return next;
+    });
+  }, [curatedMediaAssets]);
 
   const selectedEditorSlug = editorSlug || profiles[0]?.slug || "";
   const selectedEditorProfile = profiles.find((profile) => profile.slug === selectedEditorSlug) || null;
@@ -825,6 +1058,178 @@ export function LiveSettings() {
         successMessage: "Media asset added.",
       },
     );
+  };
+
+  const startAssetEdit = (asset: MediaAsset) => {
+    setEditingAssetId(asset._id);
+    setEditAssetLabel(asset.label);
+    setEditAssetTags((asset.tags || []).join(", "));
+    setEditContextSummary(asset.contextSummary || "");
+    setEditContextTags((asset.contextTags || []).join(", "));
+    setEditContextTriggers((asset.contextTriggers || []).join(", "));
+    setEditContextAvoid((asset.contextAvoid || []).join(", "));
+    setEditContextConfidence(
+      asset.contextConfidence !== undefined && Number.isFinite(asset.contextConfidence) ? String(asset.contextConfidence) : "",
+    );
+  };
+
+  const cancelAssetEdit = () => {
+    setEditingAssetId(null);
+    setEditAssetLabel("");
+    setEditAssetTags("");
+    setEditContextSummary("");
+    setEditContextTags("");
+    setEditContextTriggers("");
+    setEditContextAvoid("");
+    setEditContextConfidence("");
+  };
+
+  const saveAssetEdit = (assetId: string) => {
+    const confidenceInput = editContextConfidence.trim();
+    const parsedConfidence = confidenceInput ? Number(confidenceInput) : null;
+    if (confidenceInput && !Number.isFinite(parsedConfidence)) {
+      return;
+    }
+    const contextTags = parseSimpleList(editContextTags, false);
+    const contextTriggers = parseSimpleList(editContextTriggers, false);
+    const contextAvoid = parseSimpleList(editContextAvoid, false);
+
+    void runAction(
+      mediaKey,
+      async () => {
+        await updateAssetMetadata({
+          assetId: assetId as Id<"mediaAssets">,
+          label: editAssetLabel.trim(),
+          tags: parseSimpleList(editAssetTags, true).slice(0, 20),
+          contextSummary: editContextSummary.trim() ? editContextSummary.trim() : null,
+          contextTags: contextTags.length > 0 ? contextTags : null,
+          contextTriggers: contextTriggers.length > 0 ? contextTriggers : null,
+          contextAvoid: contextAvoid.length > 0 ? contextAvoid : null,
+          contextConfidence: parsedConfidence === null ? null : clamp01(parsedConfidence),
+          contextSource: "heuristic",
+        });
+        cancelAssetEdit();
+      },
+      {
+        pendingLabel: "Saving sticker metadata...",
+        successMessage: "Sticker updated.",
+      },
+    );
+  };
+
+  const getMergeCandidates = (asset: MediaAsset) => {
+    return curatedMediaAssets.filter((item) => item.kind === asset.kind && item._id !== asset._id);
+  };
+
+  const getMergeTarget = (asset: MediaAsset) => {
+    const candidates = getMergeCandidates(asset);
+    if (candidates.length === 0) {
+      return "";
+    }
+    const selected = mergeTargetByAssetId[asset._id];
+    if (selected && candidates.some((item) => item._id === selected)) {
+      return selected;
+    }
+    return candidates[0]?._id || "";
+  };
+
+  const mergeAssetIntoTarget = (asset: MediaAsset, explicitTargetId?: string) => {
+    const targetId = explicitTargetId || getMergeTarget(asset);
+    if (!targetId) {
+      return;
+    }
+    const target = curatedMediaAssets.find((item) => item._id === targetId);
+    if (!target) {
+      return;
+    }
+    if (!window.confirm(`Merge "${asset.label}" into "${target.label}"? This deletes the source asset.`)) {
+      return;
+    }
+
+    void runAction(
+      mediaKey,
+      async () => {
+        await mergeMediaAssets({
+          sourceAssetId: asset._id as Id<"mediaAssets">,
+          targetAssetId: target._id as Id<"mediaAssets">,
+        });
+        if (editingAssetId === asset._id) {
+          cancelAssetEdit();
+        }
+      },
+      {
+        pendingLabel: "Merging assets...",
+        successMessage: "Assets merged.",
+      },
+    );
+  };
+
+  const mergeSuggestedPair = (sourceAssetId: string, targetAssetId: string) => {
+    const source = curatedMediaAssets.find((asset) => asset._id === sourceAssetId);
+    if (!source) {
+      return;
+    }
+    mergeAssetIntoTarget(source, targetAssetId);
+  };
+
+  const mergeAllSuggestedPairs = () => {
+    if (suggestedMerges.length === 0) {
+      return;
+    }
+    if (!window.confirm(`Merge all ${suggestedMerges.length} suggested pair(s)?`)) {
+      return;
+    }
+
+    const queuedSuggestions = [...suggestedMerges];
+    void runAction(
+      mediaKey,
+      async () => {
+        let merged = 0;
+        let skipped = 0;
+        let failed = 0;
+        for (const suggestion of queuedSuggestions) {
+          try {
+            await mergeMediaAssets({
+              sourceAssetId: suggestion.sourceAssetId as Id<"mediaAssets">,
+              targetAssetId: suggestion.targetAssetId as Id<"mediaAssets">,
+            });
+            merged += 1;
+            if (editingAssetId === suggestion.sourceAssetId) {
+              cancelAssetEdit();
+            }
+          } catch (error) {
+            const message = error instanceof Error ? error.message.toLowerCase() : "";
+            if (
+              message.includes("must exist") ||
+              message.includes("not found") ||
+              message.includes("must be different assets")
+            ) {
+              skipped += 1;
+              continue;
+            }
+            failed += 1;
+          }
+        }
+        return { merged, skipped, failed };
+      },
+      {
+        pendingLabel: "Merging all suggestions...",
+        suppressSuccessNotice: true,
+      },
+    ).then((result) => {
+      if (!result.executed || result.error || !result.value) {
+        return;
+      }
+      const summary = result.value;
+      const message = `Merge all complete. Merged ${summary.merged}, skipped ${summary.skipped}, failed ${summary.failed}.`;
+      if (summary.failed > 0) {
+        pushNotice("error", message);
+      } else if (summary.skipped > 0) {
+        pushNotice("info", message);
+      } else {
+        pushNotice("success", message);
+      }
+    });
   };
 
   if (settingsLoading) {
@@ -2597,16 +3002,164 @@ export function LiveSettings() {
             {mediaRecord.pending ? "Uploading..." : "Upload Asset"}
           </button>
           <div className="stack">
+            <div className="topbar-controls">
+              <h3>Suggested Merges</h3>
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={mergeAllSuggestedPairs}
+                disabled={mediaRecord.pending || suggestedMerges.length === 0}
+                aria-disabled={mediaRecord.pending || suggestedMerges.length === 0}
+              >
+                Merge All Suggestions
+              </button>
+            </div>
+            <p className="queue-meta">Suggestions are based on label, tags, and context overlap.</p>
+            {suggestedMerges.map((suggestion) => (
+              <div key={suggestion.key} className="queue-item">
+                <p className="queue-title">
+                  Merge {suggestion.sourceLabel} into {suggestion.targetLabel} ({suggestion.kind})
+                </p>
+                <p className="queue-meta">
+                  Similarity {Math.round(suggestion.score * 100)}%
+                  {suggestion.sharedTokens.length > 0 ? ` · shared: ${suggestion.sharedTokens.join(", ")}` : ""}
+                </p>
+                <div className="queue-actions">
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    onClick={() => mergeSuggestedPair(suggestion.sourceAssetId, suggestion.targetAssetId)}
+                    disabled={mediaRecord.pending}
+                    aria-disabled={mediaRecord.pending}
+                  >
+                    Merge Suggested Pair
+                  </button>
+                </div>
+              </div>
+            ))}
+            {!mediaAssetsLoading && curatedMediaAssets.length > 1 && suggestedMerges.length === 0 ? (
+              <p className="empty-line">No high-confidence merge suggestions yet.</p>
+            ) : null}
+          </div>
+          <div className="media-settings-grid">
             {mediaAssetsLoading ? <LoadingBlock label="Loading media assets…" rows={3} compact /> : null}
             {curatedMediaAssets.map((asset) => (
-              <div key={asset._id} className="queue-item">
+              <article key={asset._id} className="media-settings-card">
+                <div className="media-settings-preview-shell">
+                  {asset.fileUrl ? (
+                    <a href={asset.fileUrl} target="_blank" rel="noreferrer" className="media-settings-preview-link" aria-label={`Open ${asset.label}`}>
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={asset.fileUrl} alt={asset.label || `${asset.kind} preview`} className="media-settings-preview-image" loading="lazy" />
+                    </a>
+                  ) : (
+                    <p className="queue-meta media-settings-preview-empty">Preview unavailable.</p>
+                  )}
+                </div>
                 <p className="queue-title">
                   {asset.label} ({asset.kind})
                 </p>
                 <p className="queue-meta">
                   {asset.enabled ? "Enabled" : "Disabled"} · {asset.tags.join(", ") || "No tags"}
                 </p>
+                {asset.contextSummary ? <p className="queue-meta">Context: {asset.contextSummary}</p> : null}
+                {asset.contextUpdatedAt ? (
+                  <p className="queue-meta">
+                    Context updated {formatDateTime(asset.contextUpdatedAt)}
+                    {asset.contextConfidence !== undefined ? ` · confidence ${Math.round(asset.contextConfidence * 100)}%` : ""}
+                  </p>
+                ) : null}
+
+                {editingAssetId === asset._id ? (
+                  <div className="stack compact">
+                    <label className="setup-input-group">
+                      <span className="queue-meta">Label</span>
+                      <input value={editAssetLabel} onChange={(event) => setEditAssetLabel(event.target.value)} disabled={mediaRecord.pending} />
+                    </label>
+                    <label className="setup-input-group">
+                      <span className="queue-meta">Tags (comma or newline)</span>
+                      <textarea rows={2} value={editAssetTags} onChange={(event) => setEditAssetTags(event.target.value)} disabled={mediaRecord.pending} />
+                    </label>
+                    <label className="setup-input-group">
+                      <span className="queue-meta">Context Summary</span>
+                      <textarea
+                        rows={2}
+                        value={editContextSummary}
+                        onChange={(event) => setEditContextSummary(event.target.value)}
+                        disabled={mediaRecord.pending}
+                      />
+                    </label>
+                    <label className="setup-input-group">
+                      <span className="queue-meta">Context Tags</span>
+                      <textarea
+                        rows={2}
+                        value={editContextTags}
+                        onChange={(event) => setEditContextTags(event.target.value)}
+                        disabled={mediaRecord.pending}
+                      />
+                    </label>
+                    <label className="setup-input-group">
+                      <span className="queue-meta">Good Triggers</span>
+                      <textarea
+                        rows={2}
+                        value={editContextTriggers}
+                        onChange={(event) => setEditContextTriggers(event.target.value)}
+                        disabled={mediaRecord.pending}
+                      />
+                    </label>
+                    <label className="setup-input-group">
+                      <span className="queue-meta">Avoid Triggers</span>
+                      <textarea
+                        rows={2}
+                        value={editContextAvoid}
+                        onChange={(event) => setEditContextAvoid(event.target.value)}
+                        disabled={mediaRecord.pending}
+                      />
+                    </label>
+                    <label className="setup-input-group">
+                      <span className="queue-meta">Context Confidence (0-1)</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={1}
+                        step={0.01}
+                        value={editContextConfidence}
+                        onChange={(event) => setEditContextConfidence(event.target.value)}
+                        disabled={mediaRecord.pending}
+                      />
+                    </label>
+                    <div className="queue-actions">
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        onClick={() => saveAssetEdit(asset._id)}
+                        disabled={mediaRecord.pending}
+                        aria-disabled={mediaRecord.pending}
+                      >
+                        Save
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        onClick={cancelAssetEdit}
+                        disabled={mediaRecord.pending}
+                        aria-disabled={mediaRecord.pending}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+
                 <div className="queue-actions">
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    onClick={() => (editingAssetId === asset._id ? cancelAssetEdit() : startAssetEdit(asset))}
+                    disabled={mediaRecord.pending}
+                    aria-disabled={mediaRecord.pending}
+                  >
+                    {editingAssetId === asset._id ? "Close Edit" : "Edit"}
+                  </button>
                   <button
                     type="button"
                     className="btn btn-ghost"
@@ -2625,31 +3178,77 @@ export function LiveSettings() {
                         },
                       )
                     }
+                    disabled={mediaRecord.pending}
+                    aria-disabled={mediaRecord.pending}
                   >
                     {asset.enabled ? "Disable" : "Enable"}
                   </button>
                   <button
                     type="button"
                     className="btn btn-ghost"
-                    onClick={() =>
+                    onClick={() => {
+                      if (!window.confirm(`Delete "${asset.label}"?`)) {
+                        return;
+                      }
                       void runAction(
                         mediaKey,
                         async () => {
                           await deleteAsset({
                             assetId: asset._id as Id<"mediaAssets">,
                           });
+                          if (editingAssetId === asset._id) {
+                            cancelAssetEdit();
+                          }
                         },
                         {
                           pendingLabel: "Deleting asset...",
                           successMessage: "Asset deleted.",
                         },
-                      )
-                    }
+                      );
+                    }}
+                    disabled={mediaRecord.pending}
+                    aria-disabled={mediaRecord.pending}
                   >
                     Delete
                   </button>
                 </div>
-              </div>
+
+                {getMergeCandidates(asset).length > 0 ? (
+                  <div className="stack compact">
+                    <label className="setup-input-group">
+                      <span className="queue-meta">Merge Into</span>
+                      <select
+                        value={getMergeTarget(asset)}
+                        onChange={(event) =>
+                          setMergeTargetByAssetId((prev) => ({
+                            ...prev,
+                            [asset._id]: event.target.value,
+                          }))
+                        }
+                        disabled={mediaRecord.pending}
+                        aria-disabled={mediaRecord.pending}
+                      >
+                        {getMergeCandidates(asset).map((candidate) => (
+                          <option key={candidate._id} value={candidate._id}>
+                            {candidate.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      onClick={() => mergeAssetIntoTarget(asset)}
+                      disabled={mediaRecord.pending}
+                      aria-disabled={mediaRecord.pending}
+                    >
+                      Merge This Asset
+                    </button>
+                  </div>
+                ) : (
+                  <p className="queue-meta">No merge target available for this {asset.kind}.</p>
+                )}
+              </article>
             ))}
             {!mediaAssetsLoading && curatedMediaAssets.length === 0 ? <p className="empty-line">No media assets yet.</p> : null}
           </div>

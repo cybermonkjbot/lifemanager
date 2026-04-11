@@ -1,6 +1,7 @@
 import { v } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel";
 import { mutation, query } from "./_generated/server";
+import type { MutationCtx } from "./_generated/server";
 
 const mediaKindValidator = v.union(
   v.literal("sticker"),
@@ -76,6 +77,84 @@ function normalizeContextPhrases(values?: string[]) {
   );
   const normalized = [...deduped];
   return normalized.length > 0 ? normalized : undefined;
+}
+
+function normalizeLabel(value: string, fallback: string) {
+  const normalized = value.trim().slice(0, 120);
+  return normalized || fallback;
+}
+
+function mergeContextSummary(primary?: string, secondary?: string) {
+  const left = primary?.trim() || "";
+  const right = secondary?.trim() || "";
+  if (!left && !right) {
+    return undefined;
+  }
+  if (!left) {
+    return right.slice(0, 240);
+  }
+  if (!right) {
+    return left.slice(0, 240);
+  }
+  if (left.toLowerCase() === right.toLowerCase()) {
+    return left.slice(0, 240);
+  }
+  return `${left} | ${right}`.slice(0, 240);
+}
+
+type AssetReferenceRewriteResult = {
+  messagesUpdated: number;
+  draftsUpdated: number;
+  outboxUpdated: number;
+  activeOutboxReferences: number;
+};
+
+async function rewriteAssetReferences(
+  ctx: MutationCtx,
+  args: {
+    fromAssetId: Id<"mediaAssets">;
+    toAssetId?: Id<"mediaAssets">;
+    blockOnActiveOutbox: boolean;
+  },
+): Promise<AssetReferenceRewriteResult> {
+  let messagesUpdated = 0;
+  for await (const message of ctx.db.query("messages").withIndex("by_mediaAssetId", (q) => q.eq("mediaAssetId", args.fromAssetId))) {
+    await ctx.db.patch(message._id, {
+      mediaAssetId: args.toAssetId,
+    });
+    messagesUpdated += 1;
+  }
+
+  let draftsUpdated = 0;
+  for await (const draft of ctx.db.query("replyDrafts").withIndex("by_mediaAssetId", (q) => q.eq("mediaAssetId", args.fromAssetId))) {
+    await ctx.db.patch(draft._id, {
+      mediaAssetId: args.toAssetId,
+      updatedAt: Date.now(),
+    });
+    draftsUpdated += 1;
+  }
+
+  let outboxUpdated = 0;
+  let activeOutboxReferences = 0;
+  for await (const item of ctx.db.query("outbox").withIndex("by_mediaAssetId", (q) => q.eq("mediaAssetId", args.fromAssetId))) {
+    const isActive = item.status === "pending" || item.status === "claimed";
+    if (!args.toAssetId && args.blockOnActiveOutbox && isActive) {
+      activeOutboxReferences += 1;
+      continue;
+    }
+    await ctx.db.patch(item._id, {
+      mediaAssetId: args.toAssetId,
+      updatedAt: Date.now(),
+    });
+    outboxUpdated += 1;
+  }
+
+  return {
+    messagesUpdated,
+    draftsUpdated,
+    outboxUpdated,
+    activeOutboxReferences,
+  };
 }
 
 export const generateUploadUrl = mutation({
@@ -740,9 +819,18 @@ export const toggleAsset = mutation({
   },
 });
 
-export const deleteAsset = mutation({
+export const updateAssetMetadata = mutation({
   args: {
     assetId: v.id("mediaAssets"),
+    label: v.optional(v.string()),
+    tags: v.optional(v.array(v.string())),
+    enabled: v.optional(v.boolean()),
+    contextSummary: v.optional(v.union(v.string(), v.null())),
+    contextTags: v.optional(v.union(v.array(v.string()), v.null())),
+    contextTriggers: v.optional(v.union(v.array(v.string()), v.null())),
+    contextAvoid: v.optional(v.union(v.array(v.string()), v.null())),
+    contextConfidence: v.optional(v.union(v.number(), v.null())),
+    contextSource: v.optional(v.union(v.literal("vision_ai"), v.literal("heuristic"))),
   },
   handler: async (ctx, args) => {
     const asset = await ctx.db.get(args.assetId);
@@ -750,9 +838,178 @@ export const deleteAsset = mutation({
       return null;
     }
 
-    const id = asset._id;
-    await ctx.db.delete(id);
-    await ctx.storage.delete(asset.fileId as Id<"_storage">);
-    return id;
+    const now = Date.now();
+    const patch: {
+      label?: string;
+      tags?: string[];
+      enabled?: boolean;
+      contextSummary?: string;
+      contextTags?: string[];
+      contextTriggers?: string[];
+      contextAvoid?: string[];
+      contextConfidence?: number;
+      contextSource?: "vision_ai" | "heuristic";
+      contextUpdatedAt?: number;
+      updatedAt: number;
+    } = {
+      updatedAt: now,
+    };
+    let contextTouched = false;
+
+    if (args.label !== undefined) {
+      patch.label = normalizeLabel(args.label, asset.kind);
+    }
+    if (args.tags !== undefined) {
+      patch.tags = normalizeTags(args.tags);
+    }
+    if (args.enabled !== undefined) {
+      patch.enabled = args.enabled;
+    }
+    if (args.contextSummary !== undefined) {
+      patch.contextSummary = args.contextSummary?.trim().slice(0, 240) || undefined;
+      contextTouched = true;
+    }
+    if (args.contextTags !== undefined) {
+      patch.contextTags = args.contextTags === null ? undefined : normalizeContextPhrases(args.contextTags);
+      contextTouched = true;
+    }
+    if (args.contextTriggers !== undefined) {
+      patch.contextTriggers = args.contextTriggers === null ? undefined : normalizeContextPhrases(args.contextTriggers);
+      contextTouched = true;
+    }
+    if (args.contextAvoid !== undefined) {
+      patch.contextAvoid = args.contextAvoid === null ? undefined : normalizeContextPhrases(args.contextAvoid);
+      contextTouched = true;
+    }
+    if (args.contextConfidence !== undefined) {
+      patch.contextConfidence =
+        args.contextConfidence === null ? undefined : Math.max(0, Math.min(1, args.contextConfidence));
+      contextTouched = true;
+    }
+
+    if (contextTouched) {
+      patch.contextUpdatedAt = now;
+      patch.contextSource = args.contextSource || asset.contextSource || "heuristic";
+    } else if (args.contextSource) {
+      patch.contextSource = args.contextSource;
+    }
+
+    await ctx.db.patch(asset._id, patch);
+    return asset._id;
+  },
+});
+
+export const mergeAssets = mutation({
+  args: {
+    sourceAssetId: v.id("mediaAssets"),
+    targetAssetId: v.id("mediaAssets"),
+  },
+  handler: async (ctx, args) => {
+    if (args.sourceAssetId === args.targetAssetId) {
+      throw new Error("Source and target must be different assets.");
+    }
+
+    const [source, target] = await Promise.all([ctx.db.get(args.sourceAssetId), ctx.db.get(args.targetAssetId)]);
+    if (!source || !target) {
+      throw new Error("Both source and target assets must exist.");
+    }
+    if (source.kind !== target.kind) {
+      throw new Error("You can only merge assets of the same kind.");
+    }
+
+    const referenceRewrite = await rewriteAssetReferences(ctx, {
+      fromAssetId: source._id,
+      toAssetId: target._id,
+      blockOnActiveOutbox: false,
+    });
+
+    const now = Date.now();
+    const mergedTags = normalizeTags([...(target.tags || []), ...(source.tags || [])]);
+    const mergedSummary = mergeContextSummary(target.contextSummary, source.contextSummary);
+    const mergedContextTags = normalizeContextPhrases([...(target.contextTags || []), ...(source.contextTags || [])]);
+    const mergedContextTriggers = normalizeContextPhrases([...(target.contextTriggers || []), ...(source.contextTriggers || [])]);
+    const mergedContextAvoid = normalizeContextPhrases([...(target.contextAvoid || []), ...(source.contextAvoid || [])]);
+    const mergedContextConfidence =
+      target.contextConfidence !== undefined || source.contextConfidence !== undefined
+        ? Math.max(target.contextConfidence || 0, source.contextConfidence || 0)
+        : undefined;
+
+    await ctx.db.patch(target._id, {
+      label: normalizeLabel(target.label, source.label || target.kind),
+      tags: mergedTags,
+      enabled: target.enabled || source.enabled,
+      generationContextSnippet: target.generationContextSnippet || source.generationContextSnippet,
+      contextSummary: mergedSummary,
+      contextTags: mergedContextTags,
+      contextTriggers: mergedContextTriggers,
+      contextAvoid: mergedContextAvoid,
+      contextConfidence: mergedContextConfidence,
+      contextSource: target.contextSource || source.contextSource,
+      contextUpdatedAt:
+        mergedSummary || mergedContextTags || mergedContextTriggers || mergedContextAvoid || mergedContextConfidence !== undefined
+          ? now
+          : target.contextUpdatedAt,
+      updatedAt: now,
+    });
+
+    await ctx.db.delete(source._id);
+    if (source.fileId !== target.fileId) {
+      await ctx.storage.delete(source.fileId as Id<"_storage">);
+    }
+
+    return {
+      sourceAssetId: source._id,
+      targetAssetId: target._id,
+      kind: target.kind,
+      movedReferences: referenceRewrite,
+    };
+  },
+});
+
+export const deleteAsset = mutation({
+  args: {
+    assetId: v.id("mediaAssets"),
+    replacementAssetId: v.optional(v.id("mediaAssets")),
+  },
+  handler: async (ctx, args) => {
+    const asset = await ctx.db.get(args.assetId);
+    if (!asset) {
+      return null;
+    }
+
+    let replacement: Doc<"mediaAssets"> | null = null;
+    if (args.replacementAssetId) {
+      replacement = await ctx.db.get(args.replacementAssetId);
+      if (!replacement) {
+        throw new Error("Replacement asset not found.");
+      }
+      if (replacement._id === asset._id) {
+        throw new Error("Replacement asset must be different from the asset being deleted.");
+      }
+      if (replacement.kind !== asset.kind) {
+        throw new Error("Replacement asset must match the asset kind.");
+      }
+    }
+
+    const referenceRewrite = await rewriteAssetReferences(ctx, {
+      fromAssetId: asset._id,
+      toAssetId: replacement?._id,
+      blockOnActiveOutbox: !replacement,
+    });
+    if (!replacement && referenceRewrite.activeOutboxReferences > 0) {
+      throw new Error(
+        `Cannot delete this asset because ${referenceRewrite.activeOutboxReferences} pending outbox item(s) still depend on it. Merge first or provide a replacement.`,
+      );
+    }
+
+    await ctx.db.delete(asset._id);
+    if (!replacement || replacement.fileId !== asset.fileId) {
+      await ctx.storage.delete(asset.fileId as Id<"_storage">);
+    }
+    return {
+      deletedAssetId: asset._id,
+      replacementAssetId: replacement?._id,
+      rewrittenReferences: referenceRewrite,
+    };
   },
 });

@@ -218,7 +218,7 @@ type MessageToolSummary = {
 
 type PlannerSummary = {
   intentLabel: string;
-  replyMode: "answer" | "confirm" | "clarify" | "close";
+  replyMode: "answer" | "confirm" | "clarify" | "close" | "lead";
   explicitAskCount: number;
   ambiguityCount: number;
   confidence: number;
@@ -241,7 +241,11 @@ function parsePlannerSummary(value: unknown): PlannerSummary | null {
   const intentLabel = typeof record.intentLabel === "string" ? record.intentLabel : "";
   const replyModeRaw = typeof record.replyMode === "string" ? record.replyMode : "";
   const replyMode =
-    replyModeRaw === "answer" || replyModeRaw === "confirm" || replyModeRaw === "clarify" || replyModeRaw === "close"
+    replyModeRaw === "answer" ||
+    replyModeRaw === "confirm" ||
+    replyModeRaw === "clarify" ||
+    replyModeRaw === "close" ||
+    replyModeRaw === "lead"
       ? replyModeRaw
       : null;
   const explicitAskCount = Number(record.explicitAskCount);
@@ -265,6 +269,7 @@ function plannerModeLabel(mode: PlannerSummary["replyMode"]) {
   if (mode === "answer") return "Answer";
   if (mode === "confirm") return "Confirm";
   if (mode === "clarify") return "Clarify";
+  if (mode === "lead") return "Lead";
   return "Close";
 }
 

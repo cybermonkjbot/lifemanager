@@ -214,3 +214,59 @@ export const resolveGuardrail = mutation({
     return row._id;
   },
 });
+
+export const clearAllGuardrails = mutation({
+  args: {
+    limit: v.optional(v.number()),
+    closeDraft: v.optional(v.boolean()),
+    resolutionNote: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    const batchSize = Math.min(Math.max(5, Math.round(args.limit ?? 80)), 200);
+    const closeDraft = args.closeDraft !== false;
+    const resolutionNote = args.resolutionNote?.trim() || "Bulk resolved from queue.";
+
+    const rows = await ctx.db
+      .query("guardrailEvents")
+      .withIndex("by_resolvedAt_and_createdAt", (q) => q.eq("resolvedAt", undefined))
+      .order("desc")
+      .take(batchSize);
+
+    let closedDrafts = 0;
+    for (const row of rows) {
+      await ctx.db.patch(row._id, {
+        resolvedAt: now,
+        resolvedBy: "dashboard",
+        resolutionNote,
+      });
+
+      if (closeDraft && row.draftId) {
+        const draft = await ctx.db.get(row.draftId);
+        if (draft && draft.status === "pending") {
+          await ctx.db.patch(draft._id, {
+            status: "rejected",
+            updatedAt: now,
+            reason: draft.reason || "Closed during bulk guardrail clear.",
+          });
+          closedDrafts += 1;
+        }
+      }
+    }
+
+    if (rows.length > 0) {
+      await ctx.db.insert("systemEvents", {
+        source: "dashboard",
+        eventType: "guardrail.cleared",
+        detail: `Bulk resolved ${rows.length} guardrail event(s); closed ${closedDrafts} draft(s).`,
+        createdAt: now,
+      });
+    }
+
+    return {
+      cleared: rows.length,
+      closedDrafts,
+      hasMore: rows.length === batchSize,
+    };
+  },
+});

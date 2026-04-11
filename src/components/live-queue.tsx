@@ -72,15 +72,20 @@ function QueueContent() {
   const approveDraft = useMutation(api.draft.approve);
   const snoozeDraft = useMutation(api.draft.snooze);
   const rejectDraft = useMutation(api.draft.reject);
+  const clearAllPendingDrafts = useMutation(api.draft.clearAllPending);
   const updateDraftContent = useMutation(api.draft.updateDraftContent);
   const confirmFollowup = useMutation(api.followups.confirm);
   const snoozeFollowup = useMutation(api.followups.snooze);
   const rescheduleFollowup = useMutation(api.followups.reschedule);
   const cancelFollowup = useMutation(api.followups.cancel);
+  const clearAllFollowups = useMutation(api.followups.clearAll);
   const createTodoFromCandidate = useMutation(api.todos.fromCandidate);
+  const clearAllTodos = useMutation(api.todos.clearAll);
   const resolveGuardrail = useMutation(api.queue.resolveGuardrail);
+  const clearAllGuardrails = useMutation(api.queue.clearAllGuardrails);
+  const clearAllBacklog = useMutation(api.backlog.clearAll);
 
-  const { runAction, getRecord, isPending, notices, dismissNotice } = useActionStateRegistry();
+  const { runAction, getRecord, isPending, notices, dismissNotice, pushNotice } = useActionStateRegistry();
   const [tab, setTab] = useState<QueueTab>("needsReply");
   const [providerFilter, setProviderFilter] = useState<ProviderFilterValue>("all");
   const [reviewState, setReviewState] = useState<QueueReviewState>(null);
@@ -293,6 +298,115 @@ function QueueContent() {
     );
   };
 
+  const onClearNeedsReply = () => {
+    const confirmed = window.confirm("Clear all items in Needs Reply? This will reject all pending drafts.");
+    if (!confirmed) {
+      return;
+    }
+    void runAction(
+      "queue:clear:needsReply",
+      async () => {
+        let cleared = 0;
+        for (let pass = 0; pass < 20; pass += 1) {
+          const result = await clearAllPendingDrafts({ limit: 80 });
+          cleared += result.cleared;
+          if (!result.hasMore) {
+            break;
+          }
+        }
+        await clearAllBacklog({});
+        pushNotice("info", `Cleared ${cleared} pending draft(s).`);
+      },
+      {
+        pendingLabel: "Clearing needs reply...",
+        successMessage: "Needs Reply cleared.",
+      },
+    );
+  };
+
+  const onClearFollowups = () => {
+    const confirmed = window.confirm("Clear all follow-ups? This dismisses all open follow-up items.");
+    if (!confirmed) {
+      return;
+    }
+    void runAction(
+      "queue:clear:followups",
+      async () => {
+        let cleared = 0;
+        for (let pass = 0; pass < 20; pass += 1) {
+          const result = await clearAllFollowups({ limit: 60 });
+          cleared += result.cleared;
+          if (!result.hasMore) {
+            break;
+          }
+        }
+        pushNotice("info", `Cleared ${cleared} follow-up item(s).`);
+      },
+      {
+        pendingLabel: "Clearing follow-ups...",
+        successMessage: "Follow-ups cleared.",
+      },
+    );
+  };
+
+  const onClearTodos = () => {
+    const confirmed = window.confirm("Clear all TODOs and TODO candidates?");
+    if (!confirmed) {
+      return;
+    }
+    void runAction(
+      "queue:clear:todos",
+      async () => {
+        let clearedTodos = 0;
+        let clearedCandidates = 0;
+        for (let pass = 0; pass < 20; pass += 1) {
+          const result = await clearAllTodos({ limit: 80 });
+          clearedTodos += result.clearedTodos;
+          clearedCandidates += result.clearedCandidates;
+          if (!result.hasMore) {
+            break;
+          }
+        }
+        pushNotice("info", `Cleared ${clearedTodos} todo(s) and ${clearedCandidates} candidate(s).`);
+      },
+      {
+        pendingLabel: "Clearing TODOs...",
+        successMessage: "TODOs cleared.",
+      },
+    );
+  };
+
+  const onClearGuardrails = () => {
+    const confirmed = window.confirm("Clear all guardrails? This resolves all active guardrail flags.");
+    if (!confirmed) {
+      return;
+    }
+    void runAction(
+      "queue:clear:guardrails",
+      async () => {
+        let cleared = 0;
+        let closedDrafts = 0;
+        for (let pass = 0; pass < 20; pass += 1) {
+          const result = await clearAllGuardrails({
+            limit: 80,
+            closeDraft: true,
+            resolutionNote: "Bulk cleared from queue.",
+          });
+          cleared += result.cleared;
+          closedDrafts += result.closedDrafts;
+          if (!result.hasMore) {
+            break;
+          }
+        }
+        pushNotice("info", `Cleared ${cleared} guardrail flag(s); closed ${closedDrafts} draft(s).`);
+      },
+      {
+        pendingLabel: "Clearing guardrails...",
+        successMessage: "Guardrails cleared.",
+      },
+    );
+  };
+
   const renderNeedsReply = () => (
     <div className="stack">
       {queueLoading ? <LoadingBlock label="Loading reply queue…" rows={3} compact /> : null}
@@ -475,6 +589,57 @@ function QueueContent() {
               aria-disabled={needsReply.length === 0 || getRecord("queue:bulk:snooze").pending}
             >
               Snooze All 30m
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost queue-clear-all"
+              onClick={onClearNeedsReply}
+              disabled={getRecord("queue:clear:needsReply").pending}
+              aria-disabled={getRecord("queue:clear:needsReply").pending}
+            >
+              {getRecord("queue:clear:needsReply").pending ? "Clearing..." : "Clear All Needs Reply"}
+            </button>
+          </div>
+        ) : null}
+
+        {tab === "followups" ? (
+          <div className="queue-actions">
+            <button
+              type="button"
+              className="btn btn-ghost queue-clear-all"
+              onClick={onClearFollowups}
+              disabled={getRecord("queue:clear:followups").pending}
+              aria-disabled={getRecord("queue:clear:followups").pending}
+            >
+              {getRecord("queue:clear:followups").pending ? "Clearing..." : "Clear All Follow-ups"}
+            </button>
+          </div>
+        ) : null}
+
+        {tab === "todos" ? (
+          <div className="queue-actions">
+            <button
+              type="button"
+              className="btn btn-ghost queue-clear-all"
+              onClick={onClearTodos}
+              disabled={getRecord("queue:clear:todos").pending}
+              aria-disabled={getRecord("queue:clear:todos").pending}
+            >
+              {getRecord("queue:clear:todos").pending ? "Clearing..." : "Clear All TODOs"}
+            </button>
+          </div>
+        ) : null}
+
+        {tab === "guardrails" ? (
+          <div className="queue-actions">
+            <button
+              type="button"
+              className="btn btn-ghost queue-clear-all"
+              onClick={onClearGuardrails}
+              disabled={getRecord("queue:clear:guardrails").pending}
+              aria-disabled={getRecord("queue:clear:guardrails").pending}
+            >
+              {getRecord("queue:clear:guardrails").pending ? "Clearing..." : "Clear All Guardrails"}
             </button>
           </div>
         ) : null}

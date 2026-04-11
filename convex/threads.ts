@@ -898,6 +898,7 @@ export const getToolEvents = query({
         run.errorCode ? `errorCode=${run.errorCode}` : "",
         run.errorMessage ? `error=${run.errorMessage}` : "",
       ].filter(Boolean);
+      const parsedOutput = safeJsonParse(run.outputSummary);
       return {
         _id: run._id,
         createdAt: run.createdAt,
@@ -911,20 +912,22 @@ export const getToolEvents = query({
         inputText: run.inputSize !== undefined ? `inputSize=${run.inputSize}` : undefined,
         outputText: run.outputSummary || undefined,
         parsedInput: null,
-        parsedOutput: null,
+        parsedOutput,
         status: run.status,
         errorCode: run.errorCode,
         detail: compactDetail(detailParts.join(" | "), 900),
       };
     });
 
-    const preferStructuredToolRuns = structuredToolItems.length > 0;
+    const structuredToolKey = (toolRunId: string | undefined, toolName: string) => `${toolRunId || ""}:${toolName}`;
+    const structuredToolKeys = new Set(toolRuns.map((run) => structuredToolKey(run.toolRunId, run.toolName)));
     const filtered = events.filter((event) => {
-      if (
-        preferStructuredToolRuns &&
-        (event.eventType.startsWith("ai.context.tool.") || event.eventType.startsWith("outreach.ai.context.tool."))
-      ) {
-        return false;
+      if (event.eventType.startsWith("ai.context.tool.") || event.eventType.startsWith("outreach.ai.context.tool.")) {
+        const toolName = event.eventType.split(".tool.")[1] || "unknown";
+        const duplicateStructuredEvent = structuredToolKeys.has(structuredToolKey(event.toolRunId, toolName));
+        if (duplicateStructuredEvent) {
+          return false;
+        }
       }
       return (
         event.eventType.startsWith("ai.context.tool.") ||

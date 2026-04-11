@@ -234,8 +234,8 @@ const SERVICES: ServiceNode[] = [
     description: "Promotes due reminders into actionable outreach tasks for the operator.",
     x: 85,
     y: 63,
-    sources: ["convex"],
-    keywords: ["followup", "follow-up", "promote", "snooze", "overdue"],
+    sources: ["convex", "worker", "dashboard"],
+    keywords: ["followup.", "follow-up", "promote", "snooze", "reschedule", "overdue", "dismissed", "confirmed"],
     sourceFallback: false,
   },
   {

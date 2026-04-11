@@ -9,7 +9,7 @@ import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { useMutation, useQuery } from "convex/react";
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 
 type BacklogTab = "all" | "critical" | "answer" | "restart" | "snoozed";
 type SortMode = "importance" | "oldest" | "newest" | "relationship" | "activity";
@@ -144,6 +144,7 @@ function tabFromCounts(items: BacklogItem[]) {
 
 function BacklogContent() {
   const refreshRecent = useMutation(api.backlog.refreshRecent);
+  const clearAll = useMutation(api.backlog.clearAll);
   const createDraft = useMutation(api.backlog.createDraft);
   const setImportance = useMutation(api.backlog.setImportanceOverride);
   const setRelationship = useMutation(api.backlog.setRelationshipOverride);
@@ -151,7 +152,7 @@ function BacklogContent() {
   const unsnooze = useMutation(api.backlog.unsnooze);
   const ignoreThread = useMutation(api.backlog.ignoreThread);
 
-  const { runAction, getRecord, notices, dismissNotice } = useActionStateRegistry();
+  const { runAction, getRecord, notices, dismissNotice, pushNotice } = useActionStateRegistry();
 
   const [tab, setTab] = useState<BacklogTab>("all");
   const [providerFilter, setProviderFilter] = useState<ProviderFilterValue>("all");
@@ -221,7 +222,14 @@ function BacklogContent() {
 
     return items.filter((item) => !item.isSnoozed);
   }, [items, tab]);
-  const allVisibleSelected = visibleItems.length > 0 && visibleItems.every((item) => selectedThreadIds.includes(item.threadId));
+  const visibleThreadIds = useMemo(() => new Set(visibleItems.map((item) => item.threadId)), [visibleItems]);
+  const selectedVisibleThreadIds = useMemo(
+    () => selectedThreadIds.filter((threadId) => visibleThreadIds.has(threadId)),
+    [selectedThreadIds, visibleThreadIds],
+  );
+  const allVisibleSelected =
+    visibleItems.length > 0 && visibleItems.every((item) => selectedVisibleThreadIds.includes(item.threadId));
+  const selectedCount = selectedVisibleThreadIds.length;
 
   const onRefresh = () => {
     void runAction(
@@ -232,6 +240,30 @@ function BacklogContent() {
       {
         pendingLabel: "Refreshing...",
         successMessage: "Backlog refreshed.",
+      },
+    );
+  };
+
+  const onClearAll = () => {
+    const confirmed = window.confirm(
+      "Clear the entire backlog now? This resets backlog history so old unresolved messages will not reappear.",
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    void runAction(
+      "backlog:clear-all",
+      async () => {
+        const result = await clearAll({});
+        setSelectedThreadIds([]);
+        if (result.continuing) {
+          pushNotice("info", "Large backlog clear is continuing in the background.");
+        }
+      },
+      {
+        pendingLabel: "Clearing backlog...",
+        successMessage: "Backlog cleared.",
       },
     );
   };
@@ -274,7 +306,7 @@ function BacklogContent() {
   };
 
   const bulkSnooze = () => {
-    const targets = [...selectedThreadIds];
+    const targets = [...selectedVisibleThreadIds];
     if (targets.length === 0) {
       return;
     }
@@ -297,7 +329,7 @@ function BacklogContent() {
   };
 
   const bulkIgnore = (enabled: boolean) => {
-    const targets = [...selectedThreadIds];
+    const targets = [...selectedVisibleThreadIds];
     if (targets.length === 0) {
       return;
     }
@@ -313,7 +345,9 @@ function BacklogContent() {
       },
       {
         pendingLabel: enabled ? "Ignoring selected threads..." : "Restoring selected threads...",
-        successMessage: enabled ? `Ignored ${targets.length} thread${targets.length === 1 ? "" : "s"}.` : `Restored ${targets.length} thread${targets.length === 1 ? "" : "s"}.`,
+        successMessage: enabled
+          ? `Ignored ${targets.length} thread${targets.length === 1 ? "" : "s"}.`
+          : `Restored ${targets.length} thread${targets.length === 1 ? "" : "s"}.`,
       },
     );
   };
@@ -393,293 +427,346 @@ function BacklogContent() {
   };
 
   return (
-    <section className="panel-card">
+    <section className="panel-card backlog-workspace">
       <ActionNotices notices={notices} onDismiss={dismissNotice} />
-      <div className="backlog-intro">
-        <p className="backlog-intro-title">Draft types</p>
-        <p className="queue-meta">
-          <strong>Reply Draft</strong> answers the latest unresolved message. <strong>Reconnect Draft</strong>{" "}
-          starts with a warm check-in for stale threads. Both are queued for review before sending.
-        </p>
-      </div>
-      <div className="backlog-toolbar">
-        <ProviderFilter
-          value={providerFilter}
-          onChange={setProviderFilter}
-          label="Backlog provider filter"
-        />
-        <div className="backlog-tabs">
-          <button type="button" className={`btn ${tab === "all" ? "btn-primary" : "btn-ghost"}`} onClick={() => setTab("all")}>
-            Active ({counts.all - counts.snoozed})
-          </button>
-          <button type="button" className={`btn ${tab === "critical" ? "btn-primary" : "btn-ghost"}`} onClick={() => setTab("critical")}>
-            Critical ({counts.critical})
-          </button>
-          <button type="button" className={`btn ${tab === "answer" ? "btn-primary" : "btn-ghost"}`} onClick={() => setTab("answer")}>
-            Reply ({counts.answer})
-          </button>
-          <button type="button" className={`btn ${tab === "restart" ? "btn-primary" : "btn-ghost"}`} onClick={() => setTab("restart")}>
-            Reconnect ({counts.restart})
-          </button>
-          <button type="button" className={`btn ${tab === "snoozed" ? "btn-primary" : "btn-ghost"}`} onClick={() => setTab("snoozed")}>
-            Snoozed ({counts.snoozed})
-          </button>
+
+      <header className="backlog-command-header">
+        <div className="backlog-command-copy">
+          <p className="backlog-kicker">Unread backlog</p>
+          <h2 className="backlog-command-title">Triage stale threads before they cool off.</h2>
+          <p className="queue-meta backlog-command-subtitle">
+            Reply Draft answers the latest unresolved message. Reconnect Draft starts with a warm check-in for stale threads.
+            Both are queued for review before sending.
+          </p>
         </div>
-
-        <div className="backlog-filters">
-          <label className="setup-input-group inline">
-            <span className="queue-meta">Search</span>
-            <input
-              type="text"
-              value={search}
-              placeholder="Search contact, JID, or latest message..."
-              onChange={(event) => {
-                setSearch(event.target.value);
-                setLimit(120);
-              }}
-            />
-          </label>
-
-          <label className="setup-input-group inline">
-            <span className="queue-meta">Relationship</span>
-            <select value={relationshipFilter} onChange={(event) => setRelationshipFilter(event.target.value as "all" | RelationshipValue)}>
-              <option value="all">All</option>
-              {RELATIONSHIP_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <label className="setup-input-group inline">
-            <span className="queue-meta">Sort</span>
-            <select value={sort} onChange={(event) => setSort(event.target.value as SortMode)}>
-              <option value="importance">Importance</option>
-              <option value="oldest">Oldest pending</option>
-              <option value="newest">Newest pending</option>
-              <option value="relationship">Relationship</option>
-              <option value="activity">Recent activity</option>
-            </select>
-          </label>
-
-          <button
-            type="button"
-            className="btn btn-ghost"
-            onClick={onRefresh}
-            disabled={getRecord("backlog:refresh").pending}
-            aria-disabled={getRecord("backlog:refresh").pending}
-          >
-            {getRecord("backlog:refresh").pending ? "Refreshing..." : "Refresh"}
-          </button>
-
-          <button type="button" className="btn btn-ghost" onClick={() => setLimit((prev) => Math.min(prev + 120, 480))}>
-            Load More
-          </button>
+        <div className="backlog-command-metrics" aria-label="Backlog summary">
+          <p className="backlog-metric-value">{counts.all - counts.snoozed}</p>
+          <p className="backlog-metric-label">Active threads</p>
+          <p className="backlog-metric-divider" aria-hidden="true" />
+          <p className="backlog-metric-value">{counts.critical}</p>
+          <p className="backlog-metric-label">Critical now</p>
+          <p className="backlog-metric-divider" aria-hidden="true" />
+          <p className="backlog-metric-value">{counts.restart}</p>
+          <p className="backlog-metric-label">Need reconnect</p>
         </div>
-      </div>
+      </header>
 
-      <div className="queue-actions">
-        <label className="queue-meta">
-          <input
-            type="checkbox"
-            checked={allVisibleSelected}
-            onChange={(event) =>
-              setSelectedThreadIds(event.target.checked ? visibleItems.map((item) => item.threadId) : [])
-            }
-          />{" "}
-          Select visible threads
-        </label>
-        <label className="setup-input-group inline">
-          <span className="queue-meta">Snooze for (minutes)</span>
-          <input type="number" min={5} step={5} value={snoozeMinutes} onChange={(event) => setSnoozeMinutes(Number(event.target.value) || 5)} />
-        </label>
-        <label className="setup-input-group inline">
-          <span className="queue-meta">Snooze note</span>
-          <input type="text" value={snoozeReason} onChange={(event) => setSnoozeReason(event.target.value)} placeholder="Optional context" />
-        </label>
-        <button type="button" className="btn btn-ghost" onClick={bulkSnooze} disabled={selectedThreadIds.length === 0}>
-          Snooze Selection
-        </button>
-        <button type="button" className="btn btn-ghost" onClick={() => bulkIgnore(true)} disabled={selectedThreadIds.length === 0}>
-          Ignore Selection
-        </button>
-        <button type="button" className="btn btn-ghost" onClick={() => bulkIgnore(false)} disabled={selectedThreadIds.length === 0}>
-          Unignore Selection
-        </button>
-      </div>
-
-      <div className="stack">
-        {loading ? <LoadingBlock label="Loading unread backlog…" rows={4} /> : null}
-
-        {visibleItems.map((item) => {
-          const answerKey = `backlog:draft:answer:${item.threadId}`;
-          const restartKey = `backlog:draft:restart:${item.threadId}`;
-          const snoozeKey = `backlog:snooze:${item.threadId}`;
-          const unsnoozeKey = `backlog:unsnooze:${item.threadId}`;
-          const ignoreKey = `backlog:ignore:${item.threadId}`;
-          const importanceKey = `backlog:importance:${item.threadId}`;
-          const relationshipKey = `backlog:relationship:${item.threadId}`;
-          const draftError = getRecord(answerKey).error || getRecord(restartKey).error;
-
-          const isPending =
-            getRecord(answerKey).pending ||
-            getRecord(restartKey).pending ||
-            getRecord(snoozeKey).pending ||
-            getRecord(unsnoozeKey).pending ||
-            getRecord(ignoreKey).pending ||
-            getRecord(importanceKey).pending ||
-            getRecord(relationshipKey).pending;
-
-          const recommendedMode = item.recommendation === "restart" ? "restart" : "answer";
-          const recommendedLabel = draftModeLabel(recommendedMode);
-          const alreadyQueued = item.recommendation === "already_queued";
-
-          return (
-            <div
-              key={item.stateId}
-              className={`queue-item backlog-item ${
-                recommendedMode === "restart" ? "backlog-item-reconnect" : "backlog-item-reply"
-              } ${alreadyQueued ? "backlog-item-queued" : ""}`}
-              aria-busy={isPending}
-            >
-              <label className="queue-meta">
-                <input
-                  type="checkbox"
-                  checked={selectedThreadIds.includes(item.threadId)}
-                  onChange={(event) => toggleSelected(item.threadId, event.target.checked)}
-                  disabled={isPending}
-                />{" "}
-                Select
-              </label>
-              <div className="backlog-row-head">
-                <p className="queue-title">{item.title || item.jid}</p>
-                <div className="backlog-badges">
-                  <span className={`backlog-badge importance-${item.importance}`}>{item.importance}</span>
-                  <span className="backlog-badge">{item.relationship}</span>
-                  <span className="backlog-badge">{recommendationLabel(item.recommendation)}</span>
-                </div>
-              </div>
-
-              <p className="queue-body">{trim(item.latestUnresolvedText || "(No text body)", 220)}</p>
-              <p className="queue-meta">
-                Pending: {formatPendingAge(item.pendingAgeMs)} · Unresolved: {item.unresolvedCount} · Last inbound: {formatDateTime(item.latestUnresolvedAt)} · Score: {item.score}
-              </p>
-              <p className="queue-meta backlog-recommendation-line">
-                {alreadyQueued
-                  ? "A draft is already queued for this thread. Review it in Queue before adding another."
-                  : `Recommended: ${recommendedLabel}. ${recommendationHint(item)}`}
-              </p>
-
-              {item.isSnoozed ? (
-                <p className="queue-meta">
-                  Snoozed until {formatDateTime(item.snoozedUntil)}{item.snoozeReason ? ` · ${item.snoozeReason}` : ""}
-                </p>
-              ) : null}
-
-              <div className="queue-actions backlog-actions">
-                <div className="backlog-primary-actions">
-                  <button
-                    type="button"
-                    className={`btn ${recommendedMode === "answer" ? "btn-primary" : "btn-ghost"}`}
-                    onClick={() => onCreateDraft(item.threadId, "answer")}
-                    disabled={isPending || alreadyQueued}
-                    aria-disabled={isPending || alreadyQueued}
-                    title="Reply directly to the latest unresolved message."
-                  >
-                    Reply Draft
-                  </button>
-                  <button
-                    type="button"
-                    className={`btn ${recommendedMode === "restart" ? "btn-primary" : "btn-ghost"}`}
-                    onClick={() => onCreateDraft(item.threadId, "restart")}
-                    disabled={isPending || alreadyQueued}
-                    aria-disabled={isPending || alreadyQueued}
-                    title="Start with a warm reconnection opener for stale threads."
-                  >
-                    Reconnect Draft
-                  </button>
-                </div>
-                <p className="queue-meta backlog-draft-help">
-                  Reply Draft responds directly. Reconnect Draft reopens the conversation gently.
-                </p>
-                <div className="backlog-secondary-actions">
-                  {item.isSnoozed ? (
-                    <button type="button" className="btn btn-ghost" onClick={() => onUnsnooze(item.threadId)} disabled={isPending} aria-disabled={isPending}>
-                      Unsnooze
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      className="btn btn-ghost"
-                      onClick={() => onSnooze(item.threadId, Math.max(5, Math.round(snoozeMinutes)))}
-                      disabled={isPending}
-                      aria-disabled={isPending}
-                    >
-                      Snooze
-                    </button>
-                  )}
-
-                  <button
-                    type="button"
-                    className="btn btn-ghost"
-                    onClick={() => onIgnoreToggle(item.threadId, !item.isIgnored)}
-                    disabled={isPending}
-                    aria-disabled={isPending}
-                  >
-                    {item.isIgnored ? "Unignore" : "Ignore"}
-                  </button>
-
-                  <Link href={`/conversations?threadId=${item.threadId}`} className="btn btn-ghost">
-                    Open Thread
-                  </Link>
-                </div>
-                {draftError ? (
-                  <p className="queue-meta action-inline-error" role="alert">
-                    {draftError}
-                  </p>
-                ) : null}
-              </div>
-
-              <div className="backlog-overrides">
-                <label className="setup-input-group inline">
-                  <span className="queue-meta">Importance</span>
-                  <select
-                    value={item.importanceOverride || "__auto"}
-                    onChange={(event) => onImportanceChange(item.threadId, event.target.value)}
-                    disabled={isPending}
-                    aria-disabled={isPending}
-                  >
-                    <option value="__auto">Auto</option>
-                    <option value="critical">Critical</option>
-                    <option value="high">High</option>
-                    <option value="medium">Medium</option>
-                    <option value="low">Low</option>
-                  </select>
-                </label>
-
-                <label className="setup-input-group inline">
-                  <span className="queue-meta">Relationship</span>
-                  <select
-                    value={item.relationshipOverride || "__auto"}
-                    onChange={(event) => onRelationshipChange(item.threadId, event.target.value)}
-                    disabled={isPending}
-                    aria-disabled={isPending}
-                  >
-                    <option value="__auto">Auto</option>
-                    {RELATIONSHIP_OPTIONS.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+      <div className="backlog-operating-grid">
+        <aside className="backlog-side-rail">
+          <div className="backlog-control-deck">
+            <div className="backlog-control-topline">
+              <ProviderFilter value={providerFilter} onChange={setProviderFilter} label="Backlog provider filter" />
+              <div className="backlog-tabs" role="tablist" aria-label="Backlog scope tabs">
+                <button type="button" className={`btn ${tab === "all" ? "btn-primary" : "btn-ghost"}`} onClick={() => setTab("all")}>
+                  Active ({counts.all - counts.snoozed})
+                </button>
+                <button type="button" className={`btn ${tab === "critical" ? "btn-primary" : "btn-ghost"}`} onClick={() => setTab("critical")}>
+                  Critical ({counts.critical})
+                </button>
+                <button type="button" className={`btn ${tab === "answer" ? "btn-primary" : "btn-ghost"}`} onClick={() => setTab("answer")}>
+                  Reply ({counts.answer})
+                </button>
+                <button type="button" className={`btn ${tab === "restart" ? "btn-primary" : "btn-ghost"}`} onClick={() => setTab("restart")}>
+                  Reconnect ({counts.restart})
+                </button>
+                <button type="button" className={`btn ${tab === "snoozed" ? "btn-primary" : "btn-ghost"}`} onClick={() => setTab("snoozed")}>
+                  Snoozed ({counts.snoozed})
+                </button>
               </div>
             </div>
-          );
-        })}
 
-        {!loading && visibleItems.length === 0 ? <p className="empty-line">{emptyStateMessage(tab)}</p> : null}
+            <div className="backlog-filters">
+              <label className="setup-input-group inline">
+                <span className="queue-meta">Search</span>
+                <input
+                  type="text"
+                  value={search}
+                  placeholder="Search contact, JID, or latest message..."
+                  onChange={(event) => {
+                    setSearch(event.target.value);
+                    setLimit(120);
+                  }}
+                />
+              </label>
+
+              <label className="setup-input-group inline">
+                <span className="queue-meta">Relationship</span>
+                <select value={relationshipFilter} onChange={(event) => setRelationshipFilter(event.target.value as "all" | RelationshipValue)}>
+                  <option value="all">All</option>
+                  {RELATIONSHIP_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="setup-input-group inline">
+                <span className="queue-meta">Sort</span>
+                <select value={sort} onChange={(event) => setSort(event.target.value as SortMode)}>
+                  <option value="importance">Importance</option>
+                  <option value="oldest">Oldest pending</option>
+                  <option value="newest">Newest pending</option>
+                  <option value="relationship">Relationship</option>
+                  <option value="activity">Recent activity</option>
+                </select>
+              </label>
+
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={onRefresh}
+                disabled={getRecord("backlog:refresh").pending}
+                aria-disabled={getRecord("backlog:refresh").pending}
+              >
+                {getRecord("backlog:refresh").pending ? "Refreshing..." : "Refresh"}
+              </button>
+
+              <button type="button" className="btn btn-ghost" onClick={() => setLimit((prev) => Math.min(prev + 120, 480))}>
+                Load More
+              </button>
+            </div>
+          </div>
+
+          <div className="queue-actions backlog-bulk-actions">
+            <label className="queue-meta backlog-select-toggle">
+              <input
+                type="checkbox"
+                checked={allVisibleSelected}
+                onChange={(event) =>
+                  setSelectedThreadIds(event.target.checked ? visibleItems.map((item) => item.threadId) : [])
+                }
+              />{" "}
+              Select visible threads
+            </label>
+
+            <p className="queue-meta backlog-selection-count">{selectedCount} selected</p>
+
+            <label className="setup-input-group inline">
+              <span className="queue-meta">Snooze for (minutes)</span>
+              <input
+                type="number"
+                min={5}
+                step={5}
+                value={snoozeMinutes}
+                onChange={(event) => setSnoozeMinutes(Number(event.target.value) || 5)}
+              />
+            </label>
+
+            <label className="setup-input-group inline">
+              <span className="queue-meta">Snooze note</span>
+              <input type="text" value={snoozeReason} onChange={(event) => setSnoozeReason(event.target.value)} placeholder="Optional context" />
+            </label>
+
+            <button type="button" className="btn btn-ghost" onClick={bulkSnooze} disabled={selectedCount === 0}>
+              Snooze Selection
+            </button>
+            <button type="button" className="btn btn-ghost" onClick={() => bulkIgnore(true)} disabled={selectedCount === 0}>
+              Ignore Selection
+            </button>
+            <button type="button" className="btn btn-ghost" onClick={() => bulkIgnore(false)} disabled={selectedCount === 0}>
+              Unignore Selection
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost backlog-clear-all"
+              onClick={onClearAll}
+              disabled={getRecord("backlog:clear-all").pending}
+              aria-disabled={getRecord("backlog:clear-all").pending}
+            >
+              {getRecord("backlog:clear-all").pending ? "Clearing..." : "Clear Entire Backlog"}
+            </button>
+          </div>
+        </aside>
+
+        <section className="backlog-main-rail">
+          <div className="backlog-main-head">
+            <p className="queue-meta">
+              Showing {visibleItems.length} thread{visibleItems.length === 1 ? "" : "s"}
+            </p>
+            <p className="queue-meta">Tab: {tab === "all" ? "active" : tab}</p>
+          </div>
+
+          <div className="stack backlog-stream">
+            {loading ? <LoadingBlock label="Loading unread backlog..." rows={4} /> : null}
+
+            {visibleItems.map((item, index) => {
+              const answerKey = `backlog:draft:answer:${item.threadId}`;
+              const restartKey = `backlog:draft:restart:${item.threadId}`;
+              const snoozeKey = `backlog:snooze:${item.threadId}`;
+              const unsnoozeKey = `backlog:unsnooze:${item.threadId}`;
+              const ignoreKey = `backlog:ignore:${item.threadId}`;
+              const importanceKey = `backlog:importance:${item.threadId}`;
+              const relationshipKey = `backlog:relationship:${item.threadId}`;
+              const draftError = getRecord(answerKey).error || getRecord(restartKey).error;
+
+              const isPending =
+                getRecord(answerKey).pending ||
+                getRecord(restartKey).pending ||
+                getRecord(snoozeKey).pending ||
+                getRecord(unsnoozeKey).pending ||
+                getRecord(ignoreKey).pending ||
+                getRecord(importanceKey).pending ||
+                getRecord(relationshipKey).pending;
+
+              const recommendedMode = item.recommendation === "restart" ? "restart" : "answer";
+              const recommendedLabel = draftModeLabel(recommendedMode);
+              const alreadyQueued = item.recommendation === "already_queued";
+
+              return (
+                <article
+                  key={item.stateId}
+                  className={`queue-item backlog-item ${
+                    recommendedMode === "restart" ? "backlog-item-reconnect" : "backlog-item-reply"
+                  } ${alreadyQueued ? "backlog-item-queued" : ""}`}
+                  aria-busy={isPending}
+                  style={{ "--item-index": index } as CSSProperties}
+                >
+                  <div className="backlog-row-head">
+                    <div className="backlog-thread-main">
+                      <label className="queue-meta backlog-select-toggle">
+                        <input
+                          type="checkbox"
+                          checked={selectedThreadIds.includes(item.threadId)}
+                          onChange={(event) => toggleSelected(item.threadId, event.target.checked)}
+                          disabled={isPending}
+                        />{" "}
+                        Select
+                      </label>
+                      <p className="queue-title">{item.title || item.jid}</p>
+                      <div className="backlog-badges">
+                        <span className={`backlog-badge importance-${item.importance}`}>{item.importance}</span>
+                        <span className="backlog-badge">{item.relationship}</span>
+                        <span className="backlog-badge">{recommendationLabel(item.recommendation)}</span>
+                      </div>
+                    </div>
+                    <div className="backlog-row-signal">
+                      <p className="backlog-age-value">{formatPendingAge(item.pendingAgeMs)}</p>
+                      <p className="backlog-age-label">pending</p>
+                    </div>
+                  </div>
+
+                  <p className="queue-body">{trim(item.latestUnresolvedText || "(No text body)", 220)}</p>
+                  <p className="queue-meta">
+                    Unresolved: {item.unresolvedCount} · Last inbound: {formatDateTime(item.latestUnresolvedAt)} · Score: {item.score}
+                  </p>
+                  <p className="queue-meta backlog-recommendation-line">
+                    {alreadyQueued
+                      ? "A draft is already queued for this thread. Review it in Queue before adding another."
+                      : `Recommended: ${recommendedLabel}. ${recommendationHint(item)}`}
+                  </p>
+
+                  {item.isSnoozed ? (
+                    <p className="queue-meta">
+                      Snoozed until {formatDateTime(item.snoozedUntil)}{item.snoozeReason ? ` · ${item.snoozeReason}` : ""}
+                    </p>
+                  ) : null}
+
+                  <div className="queue-actions backlog-actions">
+                    <div className="backlog-primary-actions">
+                      <button
+                        type="button"
+                        className={`btn ${recommendedMode === "answer" ? "btn-primary" : "btn-ghost"}`}
+                        onClick={() => onCreateDraft(item.threadId, "answer")}
+                        disabled={isPending || alreadyQueued}
+                        aria-disabled={isPending || alreadyQueued}
+                        title="Reply directly to the latest unresolved message."
+                      >
+                        Reply Draft
+                      </button>
+                      <button
+                        type="button"
+                        className={`btn ${recommendedMode === "restart" ? "btn-primary" : "btn-ghost"}`}
+                        onClick={() => onCreateDraft(item.threadId, "restart")}
+                        disabled={isPending || alreadyQueued}
+                        aria-disabled={isPending || alreadyQueued}
+                        title="Start with a warm reconnection opener for stale threads."
+                      >
+                        Reconnect Draft
+                      </button>
+                    </div>
+                    <p className="queue-meta backlog-draft-help">
+                      Reply Draft responds directly. Reconnect Draft reopens the conversation gently.
+                    </p>
+                    <div className="backlog-secondary-actions">
+                      {item.isSnoozed ? (
+                        <button type="button" className="btn btn-ghost" onClick={() => onUnsnooze(item.threadId)} disabled={isPending} aria-disabled={isPending}>
+                          Unsnooze
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          className="btn btn-ghost"
+                          onClick={() => onSnooze(item.threadId, Math.max(5, Math.round(snoozeMinutes)))}
+                          disabled={isPending}
+                          aria-disabled={isPending}
+                        >
+                          Snooze
+                        </button>
+                      )}
+
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        onClick={() => onIgnoreToggle(item.threadId, !item.isIgnored)}
+                        disabled={isPending}
+                        aria-disabled={isPending}
+                      >
+                        {item.isIgnored ? "Unignore" : "Ignore"}
+                      </button>
+
+                      <Link href={`/conversations?threadId=${item.threadId}`} className="btn btn-ghost">
+                        Open Thread
+                      </Link>
+                    </div>
+                    {draftError ? (
+                      <p className="queue-meta action-inline-error" role="alert">
+                        {draftError}
+                      </p>
+                    ) : null}
+                  </div>
+
+                  <div className="backlog-overrides">
+                    <label className="setup-input-group inline">
+                      <span className="queue-meta">Importance</span>
+                      <select
+                        value={item.importanceOverride || "__auto"}
+                        onChange={(event) => onImportanceChange(item.threadId, event.target.value)}
+                        disabled={isPending}
+                        aria-disabled={isPending}
+                      >
+                        <option value="__auto">Auto</option>
+                        <option value="critical">Critical</option>
+                        <option value="high">High</option>
+                        <option value="medium">Medium</option>
+                        <option value="low">Low</option>
+                      </select>
+                    </label>
+
+                    <label className="setup-input-group inline">
+                      <span className="queue-meta">Relationship</span>
+                      <select
+                        value={item.relationshipOverride || "__auto"}
+                        onChange={(event) => onRelationshipChange(item.threadId, event.target.value)}
+                        disabled={isPending}
+                        aria-disabled={isPending}
+                      >
+                        <option value="__auto">Auto</option>
+                        {RELATIONSHIP_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                </article>
+              );
+            })}
+
+            {!loading && visibleItems.length === 0 ? <p className="empty-line">{emptyStateMessage(tab)}</p> : null}
+          </div>
+        </section>
       </div>
     </section>
   );

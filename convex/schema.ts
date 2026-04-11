@@ -153,7 +153,8 @@ export default defineSchema({
     .index("by_thread", ["threadId"])
     .index("by_status", ["status"])
     .index("by_messageProvider_and_status", ["messageProvider", "status"])
-    .index("by_sourceMessage", ["sourceMessageId"]),
+    .index("by_sourceMessage", ["sourceMessageId"])
+    .index("by_mediaAssetId", ["mediaAssetId"]),
 
   outbox: defineTable({
     messageProvider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
@@ -198,7 +199,8 @@ export default defineSchema({
     .index("by_messageProvider_and_status_leaseExpiresAt", ["messageProvider", "status", "leaseExpiresAt"])
     .index("by_thread_and_status", ["threadId", "status"])
     .index("by_worker", ["workerId"])
-    .index("by_draft", ["draftId"]),
+    .index("by_draft", ["draftId"])
+    .index("by_mediaAssetId", ["mediaAssetId"]),
 
   followUps: defineTable({
     threadId: v.id("threads"),

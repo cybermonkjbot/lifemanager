@@ -5,6 +5,7 @@ import { internal } from "./_generated/api";
 import { internalMutation, mutation, query } from "./_generated/server";
 import { detectPromiseOrPlan, detectTodoCandidate, estimateHumanTiming, evaluateGuardrail, looksLikeQuestion } from "./lib/heuristics";
 import { classifyThreadKind } from "./lib/threadEligibility";
+import { setConfigValue } from "./lib/config";
 
 type RelationshipKind = "girlfriend" | "relationship" | "friendship" | "casual" | "family" | "business";
 type ImportanceKind = "critical" | "high" | "medium" | "low";
@@ -72,6 +73,9 @@ const IMPORTANCE_WEIGHT: Record<ImportanceKind, number> = {
   medium: 2,
   low: 1,
 };
+
+const BACKLOG_CLEARED_BEFORE_CONFIG_KEY = "backlogClearedBefore";
+const BACKLOG_CLEAR_BATCH_SIZE = 300;
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
@@ -232,6 +236,7 @@ async function computeLiveSignals(
   ctx: QueryCtx | MutationCtx,
   thread: ThreadLike,
   existing?: Doc<"backlogThreadState"> | null,
+  clearedBefore?: number,
 ): Promise<LiveSignals> {
   const allMessages = await ctx.db
     .query("messages")
@@ -261,6 +266,9 @@ async function computeLiveSignals(
   const lastOutboundAt = latestOutbound?.messageAt;
   const unresolved = messages.filter((message) => {
     if (message.direction !== "inbound") {
+      return false;
+    }
+    if (clearedBefore && message.messageAt <= clearedBefore) {
       return false;
     }
     if (!lastOutboundAt) {
@@ -450,13 +458,41 @@ async function refreshThreadSnapshot(ctx: MutationCtx, threadId: Id<"threads">) 
     .withIndex("by_threadId", (q) => q.eq("threadId", thread._id))
     .first();
 
-  const signals = await computeLiveSignals(ctx, thread, existing);
+  const clearedBefore = await getBacklogClearedBefore(ctx);
+  const signals = await computeLiveSignals(ctx, thread, existing, clearedBefore);
 
   return await upsertThreadState(ctx, {
     thread,
     existing,
     signals,
   });
+}
+
+async function getBacklogClearedBefore(ctx: QueryCtx | MutationCtx) {
+  const config = await ctx.db
+    .query("appConfig")
+    .withIndex("by_key", (q) => q.eq("key", BACKLOG_CLEARED_BEFORE_CONFIG_KEY))
+    .first();
+  if (!config) {
+    return undefined;
+  }
+  const parsed = Number(config.value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return undefined;
+  }
+  return Math.round(parsed);
+}
+
+async function deleteBacklogStateBatch(ctx: MutationCtx) {
+  const batch = await ctx.db
+    .query("backlogThreadState")
+    .withIndex("by_updatedAt")
+    .order("desc")
+    .take(BACKLOG_CLEAR_BATCH_SIZE);
+  for (const row of batch) {
+    await ctx.db.delete(row._id);
+  }
+  return batch.length;
 }
 
 function recommendationMatches(value: RecommendationKind, filter: "all" | RecommendationKind) {
@@ -1051,6 +1087,49 @@ export const createDraft = mutation({
     });
 
     return draftId;
+  },
+});
+
+export const clearAll = mutation({
+  args: {},
+  handler: async (ctx) => {
+    const now = Date.now();
+    await setConfigValue(ctx, BACKLOG_CLEARED_BEFORE_CONFIG_KEY, String(now));
+
+    const deleted = await deleteBacklogStateBatch(ctx);
+    const continuing = deleted === BACKLOG_CLEAR_BATCH_SIZE;
+
+    if (continuing) {
+      await ctx.scheduler.runAfter(0, internal.backlog.clearAllInternal, {});
+    }
+
+    await ctx.db.insert("systemEvents", {
+      source: "dashboard",
+      eventType: "backlog.cleared",
+      detail: `Backlog cleared at ${new Date(now).toISOString()}`,
+      createdAt: now,
+    });
+
+    return {
+      deleted,
+      continuing,
+      clearedBefore: now,
+    };
+  },
+});
+
+export const clearAllInternal = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const deleted = await deleteBacklogStateBatch(ctx);
+    if (deleted === BACKLOG_CLEAR_BATCH_SIZE) {
+      await ctx.scheduler.runAfter(0, internal.backlog.clearAllInternal, {});
+    }
+
+    return {
+      deleted,
+      continuing: deleted === BACKLOG_CLEAR_BATCH_SIZE,
+    };
   },
 });
 
