@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { extractKeywords, isWithinHourWindow, relationshipLabel, stableHash } from "./statusBuilder";
+import { compactSafeText, extractKeywords, isWithinHourWindow, relationshipLabel, stableHash } from "./statusBuilder";
 
 test("stableHash is deterministic", () => {
   const seed = "trend|social|42|123";
@@ -26,4 +26,13 @@ test("extractKeywords keeps meaningful tokens and removes common stopwords", () 
   assert.deepEqual(keywords.includes("business"), true);
   assert.deepEqual(keywords.includes("the"), false);
   assert.deepEqual(keywords.includes("and"), false);
+});
+
+test("compactSafeText truncates by Unicode code points and keeps emoji intact", () => {
+  assert.equal(compactSafeText("A🙂B", 2), "A🙂");
+});
+
+test("compactSafeText removes lone surrogates and control characters", () => {
+  const withInvalids = `ok${String.fromCharCode(0xd83d)}${String.fromCharCode(0x001b)}done`;
+  assert.equal(compactSafeText(withInvalids, 20), "okdone");
 });

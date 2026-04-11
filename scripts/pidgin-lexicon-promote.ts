@@ -88,15 +88,15 @@ async function readJson<T>(path: string) {
 async function loadExistingGenerated(outPath: string) {
   try {
     const moduleUrl = `${pathToFileURL(outPath).href}?ts=${Date.now()}`;
-    const module = (await import(moduleUrl)) as {
+    const generatedModule = (await import(moduleUrl)) as {
       GENERATED_PIDGIN_STRONG_TOKENS?: string[];
       GENERATED_PIDGIN_EXTENDED_TOKENS?: string[];
       GENERATED_PIDGIN_WEAK_TOKENS?: string[];
     };
     return {
-      strong: (module.GENERATED_PIDGIN_STRONG_TOKENS || []).map(normalizeTerm).filter(Boolean),
-      extended: (module.GENERATED_PIDGIN_EXTENDED_TOKENS || []).map(normalizeTerm).filter(Boolean),
-      weak: (module.GENERATED_PIDGIN_WEAK_TOKENS || []).map(normalizeTerm).filter(Boolean),
+      strong: (generatedModule.GENERATED_PIDGIN_STRONG_TOKENS || []).map(normalizeTerm).filter(Boolean),
+      extended: (generatedModule.GENERATED_PIDGIN_EXTENDED_TOKENS || []).map(normalizeTerm).filter(Boolean),
+      weak: (generatedModule.GENERATED_PIDGIN_WEAK_TOKENS || []).map(normalizeTerm).filter(Boolean),
     };
   } catch {
     return {

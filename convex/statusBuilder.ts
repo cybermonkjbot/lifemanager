@@ -55,6 +55,32 @@ function normalizeSpace(value: string) {
   return value.replace(/\s+/g, " ").trim();
 }
 
+export function compactSafeText(value: string, maxChars: number) {
+  if (maxChars <= 0) {
+    return "";
+  }
+  const normalized = normalizeSpace(value);
+  if (!normalized) {
+    return "";
+  }
+  const compacted: string[] = [];
+  for (const char of normalized) {
+    if (compacted.length >= maxChars) {
+      break;
+    }
+    const codePoint = char.codePointAt(0);
+    if (codePoint === undefined) {
+      continue;
+    }
+    // Drop lone surrogates and control characters that can poison JSON/event logs.
+    if ((codePoint >= 0xd800 && codePoint <= 0xdfff) || (codePoint < 0x20 && codePoint !== 0x09 && codePoint !== 0x0a && codePoint !== 0x0d)) {
+      continue;
+    }
+    compacted.push(char);
+  }
+  return compacted.join("");
+}
+
 export function stableHash(value: string) {
   let hash = 0;
   for (let index = 0; index < value.length; index += 1) {
@@ -297,7 +323,7 @@ export const run = internalMutation({
         if (!text) {
           continue;
         }
-        sampleLines.push(text.slice(0, 180));
+        sampleLines.push(compactSafeText(text, 180));
         for (const keyword of extractKeywords(text)) {
           keywordCounts.set(keyword, (keywordCounts.get(keyword) || 0) + 1);
         }
@@ -311,7 +337,7 @@ export const run = internalMutation({
 
     const dominantRelationship = [...relationshipCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || "mixed";
     const trendTheme = topKeywords.length > 0 ? topKeywords.slice(0, 3).join(", ") : "daily life, motivation, and fun";
-    const trendSnippet = sampleLines.slice(0, 5).join(" | ");
+    const trendSnippet = compactSafeText(sampleLines.slice(0, 5).join(" | "), 120);
 
     const cadenceBucket = Math.floor(now / cadenceMs);
     const seed = `${trendTheme}|${dominantRelationship}|${audienceJids.length}|${cadenceBucket}`;
@@ -376,7 +402,7 @@ export const run = internalMutation({
       eventType: "status_builder.queued",
       threadId: statusThreadId,
       outboxId,
-      detail: `Queued ${statusFormat} status for default status privacy audience. review=${requiresReview ? "sampled" : "auto"}. trend=${trendTheme}. demographic=${dominantRelationship}. context=${trendSnippet.slice(0, 120)}`,
+      detail: `Queued ${statusFormat} status for default status privacy audience. review=${requiresReview ? "sampled" : "auto"}. trend=${trendTheme}. demographic=${dominantRelationship}. context=${trendSnippet}`,
       createdAt: now,
     });
 
