@@ -650,13 +650,19 @@ a {
   padding: 0 13px;
 }
 
-.home-prompt-input {
+input.home-prompt-input[type="text"] {
   width: 100%;
   border: 1px solid rgba(7, 16, 44, 0.2);
   border-radius: 999px;
   background: #ffffff;
   color: #0b1225;
+  caret-color: #0b1225;
   padding: 9px 12px;
+}
+
+input.home-prompt-input[type="text"]::placeholder {
+  color: #4b566f;
+  opacity: 1;
 }
 
 .home-command-feedback {
@@ -1343,7 +1349,7 @@ textarea {
   width: 100%;
 }
 
-input[type="text"],
+input[type="text"]:not(.home-prompt-input),
 input[type="password"],
 input[type="number"] {
   border: 1px solid var(--line);

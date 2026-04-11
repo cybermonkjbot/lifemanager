@@ -108,6 +108,7 @@ Notes:
 - Shortcuts are supported for worker control: `pause`, `resume`, `restart`, `status` (and `/slm pause`, etc.).
 - Send `help` anytime to get the full command list in chat.
 - Optional hard gate: set `SLM_SELF_CONTROL_MESSAGE_PREFIX` (for example `slm`) to require prefixed commands like `slm help`.
+- Plain self-chat requests are also auto-routed by a model router (OpenClaw vs Codex improve), so explicit prefixes are no longer required.
 - `pause worker` pauses automation while keeping the listener alive, so `resume worker` still works.
 - App controls use `.slm/app.pid` and start with `SLM_APP_START_CMD` (default `bun run dev:next`).
 
@@ -146,6 +147,9 @@ Environment variables:
 - `SLM_OPENCLAW_CLI_PATH` (optional, default `openclaw`)
 - `SLM_OPENCLAW_AGENT_ID` (optional, default `main`)
 - `SLM_OPENCLAW_AGENT_TIMEOUT_MS` (optional, default `21600000` = 6h)
+- `SLM_SELF_CONTROL_SMART_ROUTING_ENABLED` (optional, default `true`)
+- `SLM_SELF_CONTROL_ROUTER_MODEL` (optional, default `gpt-5.2`)
+- `SLM_SELF_CONTROL_ROUTER_TIMEOUT_MS` (optional, default `45000`)
 
 Long-running behavior:
 - `openclaw <instruction>` and `@openclaw <instruction>` are queued and run in background.

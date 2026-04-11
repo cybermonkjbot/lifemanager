@@ -10,6 +10,7 @@ import makeWASocket, {
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFile, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { basename, extname, join, resolve } from "node:path";
 import pino from "pino";
 import { ConvexHttpClient } from "convex/browser";
@@ -103,6 +104,12 @@ import { isStrictSelfControlScope } from "./self-control-scope";
 import { parseSelfControlCommandText } from "./self-control-command-text";
 import { parseOpenClawCommand, type OpenClawCommand } from "./openclaw-command";
 import { extractOpenClawReplyFiles, type OpenClawReplyFile } from "./openclaw-output-files";
+import {
+  buildSelfControlSmartRouterPrompt,
+  fallbackSelfControlSmartRoute,
+  parseSelfControlSmartRouteOutput,
+  type SelfControlSmartRoute,
+} from "./self-control-smart-router";
 
 const logger = pino({
   name: "slm-worker",
@@ -3644,6 +3651,19 @@ function resolveTextEmojiAllowlist() {
   const SELF_IMPROVE_LATEST_META_PATH = join(SELF_IMPROVE_ROOT, "latest-meta.json");
   const SELF_IMPROVE_LATEST_REPORT_PATH = join(SELF_IMPROVE_ROOT, "latest.md");
   const SELF_CONTROL_MESSAGE_PREFIX = (process.env.SLM_SELF_CONTROL_MESSAGE_PREFIX || "").trim();
+  const CODEX_CLI_PATH = (process.env.CODEX_CLI_PATH || "codex").trim() || "codex";
+  const SELF_CONTROL_SMART_ROUTING_ENABLED = !["0", "false", "off", "no"].includes(
+    (process.env.SLM_SELF_CONTROL_SMART_ROUTING_ENABLED || "1").trim().toLowerCase(),
+  );
+  const SELF_CONTROL_SMART_ROUTER_MODEL =
+    (process.env.SLM_SELF_CONTROL_ROUTER_MODEL || process.env.CODEX_FALLBACK_MODEL || "gpt-5.2").trim() || "gpt-5.2";
+  const SELF_CONTROL_SMART_ROUTER_TIMEOUT_MS = (() => {
+    const raw = Number(process.env.SLM_SELF_CONTROL_ROUTER_TIMEOUT_MS || 45_000);
+    if (!Number.isFinite(raw)) {
+      return 45_000;
+    }
+    return Math.max(5_000, Math.min(Math.round(raw), 180_000));
+  })();
   const OPENCLAW_CLI_PATH = (process.env.SLM_OPENCLAW_CLI_PATH || "openclaw").trim() || "openclaw";
   const OPENCLAW_AGENT_ID = (process.env.SLM_OPENCLAW_AGENT_ID || "main").trim() || "main";
   const OPENCLAW_AGENT_TIMEOUT_MS = (() => {
@@ -4090,6 +4110,7 @@ function resolveTextEmojiAllowlist() {
       "- @openclaw <instruction>",
       "- openclaw status",
       "- openclaw help",
+      "- plain self-chat requests are auto-routed to openclaw or codex improve",
       "",
       "Help:",
       "- help",
@@ -4420,6 +4441,110 @@ function resolveTextEmojiAllowlist() {
     });
   };
 
+  const runSelfControlSmartRouterWithCodex = async (
+    commandText: string,
+  ): Promise<{ route: SelfControlSmartRoute; source: "model" | "fallback"; detail?: string }> => {
+    const fallbackRoute = fallbackSelfControlSmartRoute(commandText);
+    if (!SELF_CONTROL_SMART_ROUTING_ENABLED) {
+      return {
+        route: fallbackRoute,
+        source: "fallback",
+        detail: "smart routing disabled",
+      };
+    }
+
+    const prompt = buildSelfControlSmartRouterPrompt(commandText);
+    const outFile = join(
+      tmpdir(),
+      `slm-self-control-router-${Date.now()}-${Math.random().toString(16).slice(2)}.txt`,
+    );
+
+    const cli = await new Promise<{
+      stderr: string;
+      exitCode: number | null;
+      signal: NodeJS.Signals | null;
+      timedOut: boolean;
+      spawnError: string;
+    }>((resolve) => {
+      let stderr = "";
+      let timedOut = false;
+      let spawnError = "";
+
+      const child = spawn(
+        CODEX_CLI_PATH,
+        ["exec", "--model", SELF_CONTROL_SMART_ROUTER_MODEL, "--output-last-message", outFile, prompt],
+        {
+          cwd: process.cwd(),
+          env: process.env,
+          stdio: ["ignore", "ignore", "pipe"],
+        },
+      );
+
+      if (child.stderr) {
+        child.stderr.setEncoding("utf8");
+        child.stderr.on("data", (chunk: string) => {
+          stderr = appendWithLimit(stderr, chunk);
+        });
+      }
+
+      const timer = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGTERM");
+        setTimeout(() => {
+          child.kill("SIGKILL");
+        }, 1_500).unref();
+      }, SELF_CONTROL_SMART_ROUTER_TIMEOUT_MS);
+
+      child.once("error", (error) => {
+        spawnError = error instanceof Error ? error.message : String(error);
+      });
+
+      child.once("close", (exitCode, signal) => {
+        clearTimeout(timer);
+        resolve({
+          stderr: stderr.trim(),
+          exitCode,
+          signal,
+          timedOut,
+          spawnError: spawnError.trim(),
+        });
+      });
+    });
+
+    let rawOutput = "";
+    try {
+      rawOutput = (await readFile(outFile, "utf8")).trim();
+    } catch {
+      rawOutput = "";
+    } finally {
+      await rm(outFile, { force: true }).catch(() => undefined);
+    }
+
+    const modelRoute = parseSelfControlSmartRouteOutput(rawOutput, commandText);
+    const modelUsable = !cli.timedOut && !cli.spawnError && cli.exitCode === 0 && modelRoute;
+
+    if (modelUsable) {
+      return {
+        route: modelRoute,
+        source: "model",
+      };
+    }
+
+    const failureDetail = compactLogText(
+      [cli.timedOut ? "timeout" : "", cli.spawnError, cli.stderr, rawOutput]
+        .map((part) => (part || "").trim())
+        .filter(Boolean)
+        .join(" | "),
+      220,
+    );
+
+    return {
+      route: fallbackRoute,
+      source: "fallback",
+      detail: failureDetail || "model route unavailable",
+    };
+  };
+
   const buildOpenClawHelpText = () => {
     return formatAssistantReply(
       "openclaw",
@@ -4683,6 +4808,144 @@ function resolveTextEmojiAllowlist() {
         source: "worker",
         eventType: outcome.hasError ? "openclaw.command.failed" : "openclaw.command.executed",
         detail: compactLogText(outcome.responseText, 280),
+      })
+      .catch(() => undefined);
+
+    return true;
+  };
+
+  const maybeHandleSmartSelfControlCommand = async (message: {
+    key: SelfControlMessageKey;
+    message?: unknown;
+  }) => {
+    const parsed = parseInboundMessage(message.message as Parameters<typeof parseInboundMessage>[0]);
+    if (parsed.kind !== "text") {
+      return false;
+    }
+
+    const selfControl = resolveSelfControlThread(message.key);
+    if (!selfControl) {
+      return false;
+    }
+
+    const commandText = parseSelfControlCommandText({
+      rawText: parsed.text,
+      prefix: SELF_CONTROL_MESSAGE_PREFIX,
+    });
+    if (!commandText) {
+      return false;
+    }
+
+    if (isSelfControlHelpCommand(commandText)) {
+      return false;
+    }
+    if (parseSelfImproveCommand(commandText)) {
+      return false;
+    }
+    if (parseOpenClawCommand(commandText)) {
+      return false;
+    }
+    if (parseRuntimeCommand(commandText)) {
+      return false;
+    }
+
+    const routeDecision = await runSelfControlSmartRouterWithCodex(commandText);
+    const route = routeDecision.route;
+    await convex
+      .mutation(convexRefs.systemRecordEvent, {
+        source: "worker",
+        eventType: "self_control.smart_router.routed",
+        detail: compactLogText(
+          `${routeDecision.source}: ${commandText} -> ${route.tool}${"action" in route ? `:${route.action}` : ""}${
+            routeDecision.detail ? ` (${routeDecision.detail})` : ""
+          }`,
+          280,
+        ),
+      })
+      .catch(() => undefined);
+
+    if (route.tool === "none") {
+      return false;
+    }
+
+    if (route.tool === "codex_improve") {
+      let responseText = "";
+      let hasError = false;
+      try {
+        if (route.action === "status") {
+          responseText = await buildSelfImproveStatusText();
+        } else if (route.action === "latest") {
+          responseText = await buildSelfImproveLatestText();
+        } else {
+          const started = await launchSelfImproveRun({
+            command: {
+              action: "run",
+              prompt: (route.input || commandText).trim(),
+              raw: commandText,
+            },
+            selfControl,
+          });
+          responseText = started.responseText;
+          hasError = started.hasError;
+        }
+      } catch (error) {
+        const err = error instanceof Error ? error.message : String(error);
+        responseText = formatAssistantReply("codex", `I hit an issue (${compactLogText(err, 240)}).`);
+        hasError = true;
+      }
+
+      await sendSelfControlText({ selfControl, text: responseText });
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: hasError ? "self_improve.command.failed" : "self_improve.command.executed",
+          detail: compactLogText(`[smart_router:${routeDecision.source}] ${responseText}`, 280),
+        })
+        .catch(() => undefined);
+      return true;
+    }
+
+    if (route.action === "help" || route.action === "status") {
+      const outcome = await runOpenClawCommand({
+        command: {
+          action: route.action,
+          raw: commandText,
+        },
+      });
+      await sendSelfControlText({ selfControl, text: outcome.responseText });
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: outcome.hasError ? "openclaw.command.failed" : "openclaw.command.executed",
+          detail: compactLogText(`[smart_router:${routeDecision.source}] ${outcome.responseText}`, 280),
+        })
+        .catch(() => undefined);
+      return true;
+    }
+
+    const forwardInput = (route.input || commandText).trim();
+    if (!forwardInput) {
+      await sendSelfControlText({ selfControl, text: formatAssistantReply("openclaw", "tell me what to do.") });
+      return true;
+    }
+
+    const localRunId = launchOpenClawForwardCommand({
+      command: {
+        action: "forward",
+        input: forwardInput,
+        raw: commandText,
+      },
+      selfControl,
+    });
+    await sendSelfControlText({
+      selfControl,
+      text: formatAssistantReply("openclaw", "on it. I will reply here when it is done."),
+    });
+    await convex
+      .mutation(convexRefs.systemRecordEvent, {
+        source: "worker",
+        eventType: "openclaw.command.queued",
+        detail: compactLogText(`[smart_router:${routeDecision.source}] ${localRunId}: ${commandText}`, 280),
       })
       .catch(() => undefined);
 
@@ -6656,6 +6919,10 @@ function resolveTextEmojiAllowlist() {
           }
           const runtimeCommandHandled = await maybeHandleRuntimeControlCommand(message);
           if (runtimeCommandHandled) {
+            continue;
+          }
+          const smartSelfControlHandled = await maybeHandleSmartSelfControlCommand(message);
+          if (smartSelfControlHandled) {
             continue;
           }
           if (message.key.fromMe) {
