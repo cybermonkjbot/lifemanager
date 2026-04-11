@@ -2148,6 +2148,164 @@ test("generateReplyWithFallback injects professional lingua instructions for pro
   }
 });
 
+test("generateReplyWithFallback injects capital-markets persona instructions for NGX guidance asks", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  const requestBodies: string[] = [];
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      requestBodies.push(typeof init?.body === "string" ? init.body : "");
+      return new Response(JSON.stringify({ output_text: "Accumulate in tranches and manage downside with position sizing." }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "Please give stock guidance on NGX, FGN bonds and Sukuk. I use Afrinvest and Stanbic investor portal.",
+      historyLines: ["Them: Please give stock guidance on NGX, FGN bonds and Sukuk. I use Afrinvest and Stanbic investor portal."],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "log_only",
+      },
+    });
+
+    assert.equal(result.provider, "azure");
+    assert.ok(requestBodies.some((body) => /Capital-markets guidance mode is ON/i.test(body)));
+    assert.ok(requestBodies.some((body) => /NGX equities, FGN Government Bonds, and FGN Sukuk/i.test(body)));
+    assert.ok(requestBodies.some((body) => /Forex lens: treat FX as a higher-risk, lower-opportunity short-term lane/i.test(body)));
+    assert.ok(requestBodies.some((body) => /Transparency rule: represent forex experience as beginner-level/i.test(body)));
+    assert.ok(requestBodies.some((body) => /Afrinvest and Stanbic IBTC Investor Portal workflows/i.test(body)));
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback injects capital-markets persona instructions for forex-only guidance asks", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  const requestBodies: string[] = [];
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      requestBodies.push(typeof init?.body === "string" ? init.body : "");
+      return new Response(JSON.stringify({ output_text: "Keep risk tight and avoid oversized leverage." }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "Need forex guidance on USDNGN pairs from my broker. I avoid gold.",
+      historyLines: ["Them: Need forex guidance on USDNGN pairs from my broker. I avoid gold."],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "log_only",
+      },
+    });
+
+    assert.equal(result.provider, "azure");
+    assert.ok(requestBodies.some((body) => /Capital-markets guidance mode is ON/i.test(body)));
+    assert.ok(requestBodies.some((body) => /Forex preference: where broker access allows/i.test(body)));
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback injects capital-markets persona instructions for local angel investing asks", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  const requestBodies: string[] = [];
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      requestBodies.push(typeof init?.body === "string" ? init.body : "");
+      return new Response(JSON.stringify({ output_text: "Use clear terms, small tickets, and downside caps." }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText:
+        "Need guidance on angel investing in small businesses around me using profit sharing or payback with interest.",
+      historyLines: [
+        "Them: Need guidance on angel investing in small businesses around me using profit sharing or payback with interest.",
+      ],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "log_only",
+      },
+    });
+
+    assert.equal(result.provider, "azure");
+    assert.ok(requestBodies.some((body) => /Capital-markets guidance mode is ON/i.test(body)));
+    assert.ok(requestBodies.some((body) => /Angel lens: include local small-business deal flow where relevant/i.test(body)));
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback injects startup operator-investor persona instructions", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  const requestBodies: string[] = [];
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      requestBodies.push(typeof init?.body === "string" ? init.body : "");
+      return new Response(JSON.stringify({ output_text: "Structure the deal to protect runway and align milestones." }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText:
+        "Need guidance on investing in startups where I contribute as CTO, take equity comp, and use milestone-based service contracts.",
+      historyLines: [
+        "Them: Need guidance on investing in startups where I contribute as CTO, take equity comp, and use milestone-based service contracts.",
+      ],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "log_only",
+      },
+    });
+
+    assert.equal(result.provider, "azure");
+    assert.ok(requestBodies.some((body) => /Capital-markets guidance mode is ON/i.test(body)));
+    assert.ok(requestBodies.some((body) => /Startup operator-investor lens: explain that you also invest with execution skill/i.test(body)));
+    assert.ok(requestBodies.some((body) => /Service structure lens: mention your company can support startups/i.test(body)));
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
 test("generateReplyWithFallback injects micro-reply cadence guidance", async () => {
   const snapshot = clearAiEnv();
   const originalFetch = globalThis.fetch;

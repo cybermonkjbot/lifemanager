@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import pino from "pino";
 import {
   acquireWorkerSupervisorLock,
@@ -18,6 +20,8 @@ const WORKER_ENTRY_BY_PROVIDER: Record<WorkerProvider, string> = {
 
 const CHILD_STOP_TIMEOUT_MS = 4500;
 const QUICK_CRASH_RESET_MS = 120_000;
+const APP_PID_POLL_MS = 1200;
+const APP_PID_PATH = join(".slm", "app.pid");
 
 function parseProvider(argvValue: string | undefined): WorkerProvider {
   if (!argvValue || argvValue.trim() === "") {
@@ -33,6 +37,19 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function readAppPid() {
+  try {
+    const raw = await readFile(APP_PID_PATH, "utf8");
+    const parsed = Number.parseInt(raw.trim(), 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      return undefined;
+    }
+    return parsed;
+  } catch {
+    return undefined;
+  }
+}
+
 async function runSupervisor(provider: WorkerProvider) {
   await acquireWorkerSupervisorLock(provider);
 
@@ -41,6 +58,11 @@ async function runSupervisor(provider: WorkerProvider) {
   let restartTimer: ReturnType<typeof setTimeout> | null = null;
   let restartAttempt = 0;
   let shuttingDown = false;
+  let controlledRestartPending = false;
+  let appPidMonitorTimer: ReturnType<typeof setInterval> | null = null;
+  let appPidCheckInFlight = false;
+  let lastObservedAppPid = await readAppPid();
+  let hasObservedConcreteAppPid = typeof lastObservedAppPid === "number";
 
   const clearRestartTimer = () => {
     if (!restartTimer) {
@@ -48,6 +70,14 @@ async function runSupervisor(provider: WorkerProvider) {
     }
     clearTimeout(restartTimer);
     restartTimer = null;
+  };
+
+  const clearAppPidMonitor = () => {
+    if (!appPidMonitorTimer) {
+      return;
+    }
+    clearInterval(appPidMonitorTimer);
+    appPidMonitorTimer = null;
   };
 
   const computeRestartDelayMs = () => {
@@ -97,6 +127,15 @@ async function runSupervisor(provider: WorkerProvider) {
       const uptimeMs = Date.now() - childStartedAt;
       const exitedPid = child?.pid;
       child = null;
+
+      if (controlledRestartPending) {
+        controlledRestartPending = false;
+        logger.info(
+          { provider, code, signal, pid: exitedPid, uptimeMs },
+          "Worker child exited for controlled restart",
+        );
+        return;
+      }
 
       if (shuttingDown) {
         logger.info({ provider, code, signal, pid: exitedPid }, "Worker child exited during shutdown");
@@ -168,12 +207,73 @@ async function runSupervisor(provider: WorkerProvider) {
     }
   };
 
+  const restartChildForAppChange = async (previousAppPid: number, nextAppPid: number) => {
+    if (shuttingDown || controlledRestartPending) {
+      return;
+    }
+
+    controlledRestartPending = true;
+    clearRestartTimer();
+    logger.info(
+      { provider, previousAppPid, nextAppPid },
+      "Detected app runtime restart; restarting worker child",
+    );
+
+    await stopChild();
+
+    if (shuttingDown) {
+      return;
+    }
+
+    controlledRestartPending = false;
+    restartAttempt = 0;
+    startChild();
+  };
+
+  const startAppPidMonitor = () => {
+    if (appPidMonitorTimer) {
+      return;
+    }
+
+    appPidMonitorTimer = setInterval(() => {
+      if (shuttingDown || appPidCheckInFlight) {
+        return;
+      }
+
+      appPidCheckInFlight = true;
+      void (async () => {
+        try {
+          const currentPid = await readAppPid();
+          if (typeof currentPid === "number") {
+            if (!hasObservedConcreteAppPid) {
+              hasObservedConcreteAppPid = true;
+              lastObservedAppPid = currentPid;
+              return;
+            }
+
+            const previousPid = lastObservedAppPid;
+            if (typeof previousPid === "number" && currentPid !== previousPid) {
+              lastObservedAppPid = currentPid;
+              await restartChildForAppChange(previousPid, currentPid);
+              return;
+            }
+
+            lastObservedAppPid = currentPid;
+          }
+        } finally {
+          appPidCheckInFlight = false;
+        }
+      })();
+    }, APP_PID_POLL_MS);
+  };
+
   const shutdown = async (exitCode: number, reason: string) => {
     if (shuttingDown) {
       return;
     }
     shuttingDown = true;
     clearRestartTimer();
+    clearAppPidMonitor();
     logger.info({ provider, reason }, "Worker supervisor shutting down");
     await stopChild();
     releaseWorkerSupervisorLockSync(provider);
@@ -199,6 +299,7 @@ async function runSupervisor(provider: WorkerProvider) {
     void shutdown(1, "Supervisor unhandled rejection.");
   });
 
+  startAppPidMonitor();
   startChild();
   await new Promise<void>(() => {
     // keep supervisor process alive until explicit shutdown

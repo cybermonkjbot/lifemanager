@@ -37,6 +37,12 @@ export const dashboardNavItems: DashboardNavItem[] = [
     primary: true,
   },
   {
+    href: "/memes",
+    label: "Memes",
+    description: "Review generated memes and create fresh ones on demand.",
+    primary: true,
+  },
+  {
     href: "/backlog",
     label: "Backlog",
     description: "Triage unread threads and restart stale relationships.",

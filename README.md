@@ -45,6 +45,11 @@ cp .env.example .env.local
 
 If you use an Azure AI Foundry `.../responses` URI, set `AZURE_AI_API_STYLE=responses` (or keep `auto` and it will be inferred).
 
+Optional meme-image generation config:
+- `AZURE_AI_IMAGE_ENDPOINT` (dedicated image endpoint; if omitted, derived from `AZURE_AI_ENDPOINT`)
+- `AZURE_AI_IMAGE_API_KEY` (if image endpoint uses a different key)
+- `AZURE_AI_IMAGE_MODEL` (for example `gpt-image-1`; do not use text models like `gpt-5.4` here)
+
 Optional history/context tuning:
 - `SLM_HISTORY_FETCH_ON_DEMAND=true`
 - `SLM_HISTORY_FETCH_MAX_BATCH=50`

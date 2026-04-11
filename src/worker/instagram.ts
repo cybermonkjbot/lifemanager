@@ -533,10 +533,24 @@ async function run() {
       throw new Error("Instagram client is not initialized.");
     }
 
+    const maybeFinalizeStaleDisposition = async (disposition: { canSend: boolean; reason?: string }) => {
+      if (disposition.canSend) {
+        return false;
+      }
+      if ((disposition.reason || "").startsWith("stale_inbound:")) {
+        await convex.mutation(convexRefs.outboxMarkFailed, {
+          outboxId: item.outboxId as Id<"outbox">,
+          error: "Suppressed: newer inbound message arrived before send.",
+          forceFinal: true,
+        });
+      }
+      return true;
+    };
+
     const sendDisposition = (await convex.query(convexRefs.outboxGetSendDisposition, {
       outboxId: item.outboxId as Id<"outbox">,
     })) as { canSend: boolean; reason?: string };
-    if (!sendDisposition.canSend) {
+    if (await maybeFinalizeStaleDisposition(sendDisposition)) {
       return;
     }
 
@@ -633,7 +647,7 @@ async function run() {
     const postTypingDisposition = (await convex.query(convexRefs.outboxGetSendDisposition, {
       outboxId: item.outboxId as Id<"outbox">,
     })) as { canSend: boolean; reason?: string };
-    if (!postTypingDisposition.canSend) {
+    if (await maybeFinalizeStaleDisposition(postTypingDisposition)) {
       return;
     }
 

@@ -1919,9 +1919,9 @@ const PROFESSIONAL_LINGUA_SIGNAL_PATTERNS: Array<{ id: string; pattern: RegExp; 
   { id: "polite_formality", pattern: /\b(please|kindly|appreciate|thank you)\b/i, weight: 0.28 },
 ];
 const CAPITAL_MARKETS_INSTRUMENT_PATTERN =
-  /\b(stock|stocks|equity|equities|share|shares|ngx|nse|nigeria exchange|nigerian stock market|bonds?|fgn|sukuk|treasury bill|treasury bills|t-bill|tbill)\b/i;
+  /\b(stock|stocks|equity|equities|share|shares|ngx|nse|nigeria exchange|nigerian stock market|bonds?|fgn|sukuk|treasury bill|treasury bills|t-bill|tbill|forex|fx|currency pair|currency pairs|usdngn|usd\/ngn|eurusd|eur\/usd|gbpusd|gbp\/usd|xauusd|xau\/usd|gold|angel(?:\s+invest(?:or|ing)?)?|small business(?:es)?|local business(?:es)?|startup(?:s)?|sme(?:s)?|private deal(?:s)?|cto|runway|equity comp|compensation|milestone(?:s)?|contract(?:s)?|clause(?:s)?)\b/i;
 const CAPITAL_MARKETS_GUIDANCE_PATTERN =
-  /\b(guidance|guide|advice|advise|recommend(?:ation)?|view|outlook|buy|sell|hold|accumulate|entry|target|stop(?:-|\s*)loss|portfolio|allocation|yield|coupon|risk|analysis|afri-?invest|stanbic|investor portal)\b/i;
+  /\b(guidance|guide|advice|advise|recommend(?:ation)?|view|outlook|buy|sell|hold|accumulate|entry|target|stop(?:-|\s*)loss|portfolio|allocation|yield|coupon|risk|analysis|invest|investing|afri-?invest|stanbic|investor portal|broker|brokers|profit(?:\s*-\s*|\s+)?shar(?:e|ing)|revenue(?:\s*-\s*|\s+)?shar(?:e|ing)|payback|interest(?:\s+plan)?|equity(?:\s+comp)?|runway|milestone(?:s)?|contract(?:s)?|clause(?:s)?|service(?:s)?)\b/i;
 const INVENTORY_CONTEXT_PATTERN = /\b(in stock|for sale|available for orders?|order now|buy now|promo code)\b/i;
 
 function inferFriendshipScenarioHint(text: string) {
@@ -2270,6 +2270,7 @@ function buildResponseWorkbench(args: ResponseWorkbenchInput) {
     personalDomain: personalContext.personalDomain,
     toneNeed: personalContext.toneNeed,
     businessStyleRisk: personalContext.businessStyleRisk,
+    capitalMarketsGuidanceCue: personalContext.capitalMarketsGuidanceCue,
     emotionalCue: personalContext.emotionalCue,
     planningCue: personalContext.planningCue,
     friendshipCohort: args.friendshipInference?.cohort,
@@ -2301,6 +2302,7 @@ function buildResponseWorkbench(args: ResponseWorkbenchInput) {
         personalDomain: workbench.personalDomain,
         toneNeed: workbench.toneNeed,
         businessStyleRisk: workbench.businessStyleRisk,
+        capitalMarketsGuidanceCue: workbench.capitalMarketsGuidanceCue,
         emotionalCue: workbench.emotionalCue,
         planningCue: workbench.planningCue,
         friendshipCohort: workbench.friendshipCohort,
@@ -2992,6 +2994,22 @@ function buildPrompt(args: {
   const professionalLinguaGuardrailInstruction = professionalLingua.enabled
     ? "Avoid robotic corporate filler (for example: 'Please be informed', 'Thanks for reaching out', or rigid template phrasing). Keep it naturally human."
     : "";
+  const capitalMarketsPersonaInstruction = responseWorkbench.workbench.capitalMarketsGuidanceCue
+    ? [
+        "Capital-markets guidance mode is ON for this reply.",
+        "Respond like a disciplined Nigerian market participant who trades professionally on the side alongside a primary job.",
+        "Market scope to reference when relevant: NGX equities, FGN Government Bonds, and FGN Sukuk.",
+        "Forex lens: treat FX as a higher-risk, lower-opportunity short-term lane and keep position sizing conservative.",
+        "Forex preference: where broker access allows, favor NGX/naira-linked currency exposures; avoid gold-first trade ideas unless explicitly requested.",
+        "Transparency rule: represent forex experience as beginner-level and avoid overstating forex profitability.",
+        "Angel lens: include local small-business deal flow where relevant, using small-ticket capital with explicit structure (profit-sharing or payback-with-interest terms).",
+        "Startup operator-investor lens: explain that you also invest with execution skill, often taking CTO roles and accepting mostly equity compensation so startups preserve runway for core growth priorities.",
+        "Service structure lens: mention your company can support startups on near-subsidized but commercially disciplined contracts, with milestone-linked clauses that increase payout as startup traction improves.",
+        "When the ask is investment guidance, give practical trader-grade structure: brief market context, clear stance (buy/accumulate/hold/reduce/avoid), key risk, and timeframe.",
+        "Keep recommendations realistic for Nigerian liquidity. Never guarantee returns and clearly separate facts from assumptions.",
+        "Execution context: if needed, anchor actions to Afrinvest and Stanbic IBTC Investor Portal workflows.",
+      ].join(" ")
+    : "";
   toolCalls.push(responseWorkbench.call);
   const responseWorkbenchInstruction =
     responseWorkbench.workbench.replyMode === "clarify"
@@ -3045,6 +3063,9 @@ function buildPrompt(args: {
     professionalLingua.signals.length > 0
       ? `Professional lingua signals: ${professionalLingua.signals.join(", ")}`
       : "Professional lingua signals: none",
+    responseWorkbench.workbench.capitalMarketsGuidanceCue
+      ? "Capital-markets guidance cue: yes"
+      : "Capital-markets guidance cue: no",
     responseWorkbench.workbench.explicitAsks.length > 0
       ? `Explicit asks: ${responseWorkbench.workbench.explicitAsks.join(" | ")}`
       : "Explicit asks: none",
@@ -3095,6 +3116,7 @@ function buildPrompt(args: {
       professionalLinguaInstruction,
       professionalLinguaCadenceInstruction,
       professionalLinguaGuardrailInstruction,
+      capitalMarketsPersonaInstruction,
       pidginInstruction,
       oldEnglishInstruction,
       bossEscalationInstruction,
@@ -6288,6 +6310,16 @@ function buildAzureImageGenerationEndpoint(endpoint: string) {
     if (/\/images\/generations\/?$/i.test(parsed.pathname)) {
       return parsed.toString();
     }
+    if (/\/openai\/deployments\/[^/]+\/chat\/completions\/?$/i.test(parsed.pathname)) {
+      parsed.pathname = "/openai/v1/images/generations";
+      parsed.search = "";
+      return parsed.toString();
+    }
+    if (/\/openai\/deployments\/[^/]+\/responses\/?$/i.test(parsed.pathname)) {
+      parsed.pathname = "/openai/v1/images/generations";
+      parsed.search = "";
+      return parsed.toString();
+    }
     if (/\/responses\/?$/i.test(parsed.pathname)) {
       parsed.pathname = parsed.pathname.replace(/\/responses\/?$/i, "/images/generations");
       return parsed.toString();
@@ -6350,7 +6382,12 @@ function getAzureImageConfig(runtime?: RuntimeAiTuning) {
     process.env.AZURE_OPENAI_API_KEY,
     process.env.OPENAI_API_KEY,
   );
-  const model = pickConfigValue(process.env.AZURE_AI_IMAGE_MODEL, runtime?.model, process.env.AZURE_AI_MODEL) || "gpt-image-1";
+  const runtimeImageModel = runtime?.model && /image/i.test(runtime.model) ? runtime.model : "";
+  const model = pickConfigValue(
+    process.env.AZURE_AI_IMAGE_MODEL,
+    process.env.AZURE_OPENAI_IMAGE_MODEL,
+    runtimeImageModel,
+  ) || "gpt-image-1";
   return {
     endpoint: buildAzureImageGenerationEndpoint(endpoint),
     apiKey,
@@ -6466,6 +6503,11 @@ export async function generateMemeImageWithAzure(args: {
       latencyMs: Date.now() - start,
     };
   } catch (error) {
+    const baseError = toErrorMessage(error);
+    const guidance =
+      /\b404\b/.test(baseError) && !process.env.AZURE_AI_IMAGE_ENDPOINT
+        ? " Set AZURE_AI_IMAGE_ENDPOINT to your Azure image generation endpoint and AZURE_AI_IMAGE_MODEL to an image model such as gpt-image-1."
+        : "";
     return {
       mimeType: "image/png",
       prompt,
@@ -6473,7 +6515,7 @@ export async function generateMemeImageWithAzure(args: {
       provider: "azure",
       model: cfg.model,
       latencyMs: Date.now() - start,
-      error: toErrorMessage(error),
+      error: `${baseError}${guidance}`.trim(),
     };
   }
 }

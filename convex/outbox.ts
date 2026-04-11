@@ -2,6 +2,7 @@ import { v } from "convex/values";
 import { makeFunctionReference } from "convex/server";
 import { internal } from "./_generated/api";
 import { internalMutation, mutation, query } from "./_generated/server";
+import type { Doc } from "./_generated/dataModel";
 import { detectFutureCommitment, hasRecentFollowupDuplicate } from "./lib/commitments";
 import { DEFAULT_LEASE_MS, DEFAULT_RETRY_LIMIT } from "./lib/constants";
 import { getConfig } from "./lib/config";
@@ -22,6 +23,8 @@ import {
 const UNANSWERED_OUTBOUND_RECHECK_MS = 5 * 60 * 1000;
 const CALL_REPLY_BARRIER_RECHECK_MS = 5 * 60 * 1000;
 const UNANSWERED_OUTBOUND_SCAN_LIMIT = 25;
+const OUTBOX_STALE_INBOUND_GRACE_MS = 8_000;
+const OUTBOX_STALE_INBOUND_SCAN_LIMIT = 80;
 const refStyleLearnFromOutboundEmoji = makeFunctionReference<"mutation">("style:learnFromOutboundEmoji");
 const refChatRebuildThreadStyleProfile = makeFunctionReference<"mutation">("chatTools:rebuildThreadStyleProfile");
 type MessageProvider = "whatsapp" | "instagram";
@@ -130,6 +133,56 @@ function resolveSendRateLimits(config: Awaited<ReturnType<typeof getConfig>>, me
   };
 }
 
+type FreshnessMessage = Pick<Doc<"messages">, "direction" | "messageAt" | "messageType" | "isStatus" | "text">;
+
+function isFreshnessBlockingInboundMessage(message: FreshnessMessage) {
+  if (message.direction !== "inbound") {
+    return false;
+  }
+  if (message.isStatus) {
+    return false;
+  }
+  return message.messageType !== "reaction";
+}
+
+export function resolveOutboxFreshnessReferenceAt(args: {
+  outboxCreatedAt: number;
+  draftUpdatedAt?: number;
+  sourceMessageDirection?: Doc<"messages">["direction"];
+  sourceMessageAt?: number;
+}) {
+  const outboxCreatedAt = Number.isFinite(args.outboxCreatedAt) ? Math.max(0, args.outboxCreatedAt) : 0;
+  const draftUpdatedAt = Number.isFinite(args.draftUpdatedAt) ? Math.max(0, args.draftUpdatedAt || 0) : 0;
+  const sourceInboundAt =
+    args.sourceMessageDirection === "inbound" && Number.isFinite(args.sourceMessageAt)
+      ? Math.max(0, args.sourceMessageAt || 0)
+      : 0;
+  return Math.max(outboxCreatedAt, draftUpdatedAt, sourceInboundAt);
+}
+
+export function findNewestStaleInboundMessage(args: {
+  recentMessages: FreshnessMessage[];
+  referenceAt: number;
+  graceMs?: number;
+}) {
+  const cutoff = Math.max(0, args.referenceAt) + Math.max(0, args.graceMs ?? OUTBOX_STALE_INBOUND_GRACE_MS);
+  let newest: FreshnessMessage | null = null;
+
+  for (const message of args.recentMessages) {
+    if (!isFreshnessBlockingInboundMessage(message)) {
+      continue;
+    }
+    if ((message.messageAt || 0) <= cutoff) {
+      continue;
+    }
+    if (!newest || (message.messageAt || 0) > (newest.messageAt || 0)) {
+      newest = message;
+    }
+  }
+
+  return newest;
+}
+
 export const claimDue = mutation({
   args: {
     workerId: v.string(),
@@ -214,6 +267,7 @@ export const claimDue = mutation({
       if (!draft || !thread) {
         continue;
       }
+      const sourceMessage = await ctx.db.get(draft.sourceMessageId);
       const threadKind = thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup });
       const callReplyBarrierAt = (thread.callReplyBarrierAt || 0) > 0 ? thread.callReplyBarrierAt : undefined;
       if (threadKind === "direct" && callReplyBarrierAt) {
@@ -234,8 +288,59 @@ export const claimDue = mutation({
         });
         continue;
       }
-      const sourceMessage = await ctx.db.get(draft.sourceMessageId);
       const shouldQuoteSource = sourceMessage?.direction === "inbound";
+      if (threadKind === "direct" && !item.isStatusPost) {
+        const referenceAt = resolveOutboxFreshnessReferenceAt({
+          outboxCreatedAt: item.createdAt,
+          draftUpdatedAt: draft.updatedAt,
+          sourceMessageDirection: sourceMessage?.direction,
+          sourceMessageAt: sourceMessage?.messageAt,
+        });
+        const freshnessCandidates = await ctx.db
+          .query("messages")
+          .withIndex("by_thread_messageAt", (q) => q.eq("threadId", thread._id).gt("messageAt", referenceAt))
+          .order("desc")
+          .take(OUTBOX_STALE_INBOUND_SCAN_LIMIT);
+        const staleInbound = findNewestStaleInboundMessage({
+          recentMessages: freshnessCandidates,
+          referenceAt,
+        });
+        if (staleInbound) {
+          const staleAtIso = new Date(staleInbound.messageAt).toISOString();
+          const reason = `Suppressed: newer inbound at ${staleAtIso} made this automatic reply stale.`;
+          await ctx.db.patch(item._id, {
+            status: "failed",
+            workerId: undefined,
+            leaseExpiresAt: undefined,
+            error: reason,
+            updatedAt: now,
+          });
+          if (draft.status !== "sent" && draft.status !== "rejected") {
+            await ctx.db.patch(draft._id, {
+              status: "rejected",
+              updatedAt: now,
+            });
+          }
+          if (item.followUpId) {
+            const followUp = await ctx.db.get(item.followUpId);
+            if (followUp && followUp.status !== "sent" && followUp.status !== "failed" && followUp.status !== "cancelled") {
+              await ctx.db.patch(followUp._id, {
+                status: "cancelled",
+                updatedAt: now,
+              });
+            }
+          }
+          await ctx.db.insert("systemEvents", {
+            source: "worker",
+            eventType: "outbox.suppressed.stale_inbound",
+            threadId: item.threadId,
+            outboxId: item._id,
+            detail: `${staleAtIso} · ${(staleInbound.text || "[Inbound message]").slice(0, 220)}`,
+            createdAt: now,
+          });
+          continue;
+        }
+      }
       const duplicateCandidateKey = buildOutboundDuplicateKey({
         sendKind: item.sendKind,
         messageText: item.messageText,
@@ -670,12 +775,43 @@ export const getSendDisposition = query({
         reason: "thread_missing",
       };
     }
+    const draft = await ctx.db.get(outbox.draftId);
+    if (!draft) {
+      return {
+        canSend: false,
+        reason: "draft_missing",
+      };
+    }
     const threadKind = thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup, provider: thread.provider });
     if (threadKind === "direct" && (thread.callReplyBarrierAt || 0) > 0) {
       return {
         canSend: false,
         reason: `call_reply_barrier:${thread.callReplyBarrierAt}`,
       };
+    }
+    if (threadKind === "direct" && !outbox.isStatusPost) {
+      const sourceMessage = await ctx.db.get(draft.sourceMessageId);
+      const referenceAt = resolveOutboxFreshnessReferenceAt({
+        outboxCreatedAt: outbox.createdAt,
+        draftUpdatedAt: draft.updatedAt,
+        sourceMessageDirection: sourceMessage?.direction,
+        sourceMessageAt: sourceMessage?.messageAt,
+      });
+      const freshnessCandidates = await ctx.db
+        .query("messages")
+        .withIndex("by_thread_messageAt", (q) => q.eq("threadId", thread._id).gt("messageAt", referenceAt))
+        .order("desc")
+        .take(OUTBOX_STALE_INBOUND_SCAN_LIMIT);
+      const staleInbound = findNewestStaleInboundMessage({
+        recentMessages: freshnessCandidates,
+        referenceAt,
+      });
+      if (staleInbound) {
+        return {
+          canSend: false,
+          reason: `stale_inbound:${staleInbound.messageAt}`,
+        };
+      }
     }
 
     return {

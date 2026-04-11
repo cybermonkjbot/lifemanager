@@ -88,7 +88,7 @@ test("pickCanonicalAssetForDedupe keeps richer enabled asset and is deterministi
     contextAvoid: undefined,
     contextConfidence: undefined,
     generationContextSnippet: undefined,
-  } as never;
+  };
   const richer = {
     _id: "asset_b",
     _creationTime: 2000,
@@ -104,9 +104,9 @@ test("pickCanonicalAssetForDedupe keeps richer enabled asset and is deterministi
     contextAvoid: ["avoid"],
     contextConfidence: 0.8,
     generationContextSnippet: "ctx",
-  } as never;
+  };
 
-  const picked = pickCanonicalAssetForDedupe([older, richer]);
+  const picked = pickCanonicalAssetForDedupe([older, richer] as never);
   assert.equal(picked?._id, "asset_b");
 
   const tieOne = {
@@ -115,15 +115,15 @@ test("pickCanonicalAssetForDedupe keeps richer enabled asset and is deterministi
     _creationTime: 900,
     tags: [],
     label: "Tie",
-  } as never;
+  };
   const tieTwo = {
     ...older,
     _id: "asset_d",
     _creationTime: 900,
     tags: [],
     label: "Tie",
-  } as never;
+  };
 
-  const tiePicked = pickCanonicalAssetForDedupe([tieTwo, tieOne]);
+  const tiePicked = pickCanonicalAssetForDedupe([tieTwo, tieOne] as never);
   assert.equal(tiePicked?._id, "asset_c");
 });

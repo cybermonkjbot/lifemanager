@@ -94,6 +94,7 @@ import {
   normalizeHexHashToken,
   shouldCaptureMediaAfterIngest,
 } from "./sticker-dedupe";
+import { prepareStickerVisionInput } from "./sticker-vision-frame";
 import { parseRuntimeCommand, type RuntimeCommand, type RuntimeCommandTarget } from "./runtime-commands";
 import { parseSelfImproveCommand, type SelfImproveCommand } from "./self-improve-command";
 import { isSelfControlHelpCommand } from "./control-help-command";
@@ -2439,11 +2440,15 @@ function resolveTextEmojiAllowlist() {
       if (stickerBytes.length === 0) {
         throw new Error(`Sticker asset ${assetId} is empty.`);
       }
+      const stickerVisionInput = await prepareStickerVisionInput({
+        stickerBytes,
+        mimeType: asset.mimeType,
+      });
 
       const runtimeSettings = await getRuntimeSettings();
       const visual = await describeInboundImageWithFallback({
-        imageBytes: stickerBytes,
-        mimeType: asset.mimeType,
+        imageBytes: stickerVisionInput.imageBytes,
+        mimeType: stickerVisionInput.mimeType,
         caption: asset.label,
         runtime: {
           temperature: runtimeSettings?.aiTemperature,
@@ -4767,9 +4772,9 @@ function resolveTextEmojiAllowlist() {
 
       const runtimeSettings = await getRuntimeSettings();
       const shouldCaptureGroupMedia = runtimeSettings?.captureGroupMediaEnabled ?? false;
-      if (shouldCaptureMediaAfterIngest({
+      if (mediaKind && shouldCaptureMediaAfterIngest({
         duplicate: ingested.duplicate,
-        hasMediaKind: Boolean(mediaKind),
+        hasMediaKind: true,
         hasMessageId: Boolean(ingested.messageId),
         shouldCaptureGroupMedia,
         isGroupThread: isGroupJid(rawThreadJid || ""),
@@ -5077,9 +5082,9 @@ function resolveTextEmojiAllowlist() {
         return;
       }
 
-      if (shouldCaptureMediaAfterIngest({
+      if (mediaKind && shouldCaptureMediaAfterIngest({
         duplicate: ingest.duplicate,
-        hasMediaKind: Boolean(mediaKind),
+        hasMediaKind: true,
         hasMessageId: Boolean(ingest.messageId),
         shouldCaptureGroupMedia,
         isGroupThread: isGroupJid(rawThreadJid || ""),
@@ -5325,9 +5330,19 @@ function resolveTextEmojiAllowlist() {
                   logger,
                 },
               );
+              const visionInput =
+                effectiveParsed.kind === "sticker"
+                  ? await prepareStickerVisionInput({
+                      stickerBytes: mediaBytes,
+                      mimeType: effectiveParsed.mimeType,
+                    })
+                  : {
+                      imageBytes: mediaBytes,
+                      mimeType: effectiveParsed.mimeType || "image/jpeg",
+                    };
               const visualAnalysis = await describeInboundImageWithFallback({
-                imageBytes: mediaBytes,
-                mimeType: effectiveParsed.mimeType,
+                imageBytes: visionInput.imageBytes,
+                mimeType: visionInput.mimeType,
                 caption: effectiveParsed.caption,
                 runtime: runtimeAiConfig,
               });
@@ -7186,6 +7201,23 @@ function resolveTextEmojiAllowlist() {
     return { quoted };
   };
 
+  const maybeFinalizeStaleDisposition = async (
+    item: OutboxClaimedItem,
+    disposition: { canSend: boolean; reason?: string },
+  ) => {
+    if (disposition.canSend) {
+      return false;
+    }
+    if ((disposition.reason || "").startsWith("stale_inbound:")) {
+      await convex.mutation(convexRefs.outboxMarkFailed, {
+        outboxId: item.outboxId,
+        error: "Suppressed: newer inbound message arrived before send.",
+        forceFinal: true,
+      });
+    }
+    return true;
+  };
+
   const pollOutbox = async () => {
     if (processingOutbox) {
       return;
@@ -7271,7 +7303,7 @@ function resolveTextEmojiAllowlist() {
               const preHydrationDisposition = (await convex.query(convexRefs.outboxGetSendDisposition, {
                 outboxId: item.outboxId,
               })) as { canSend: boolean; reason?: string };
-              if (!preHydrationDisposition.canSend) {
+              if (await maybeFinalizeStaleDisposition(item, preHydrationDisposition)) {
                 return;
               }
 
@@ -7280,7 +7312,7 @@ function resolveTextEmojiAllowlist() {
               const postHydrationDisposition = (await convex.query(convexRefs.outboxGetSendDisposition, {
                 outboxId: item.outboxId,
               })) as { canSend: boolean; reason?: string };
-              if (!postHydrationDisposition.canSend) {
+              if (await maybeFinalizeStaleDisposition(item, postHydrationDisposition)) {
                 return;
               }
 
@@ -7477,7 +7509,7 @@ function resolveTextEmojiAllowlist() {
                 const postTypingDisposition = (await convex.query(convexRefs.outboxGetSendDisposition, {
                   outboxId: item.outboxId,
                 })) as { canSend: boolean; reason?: string };
-                if (!postTypingDisposition.canSend) {
+                if (await maybeFinalizeStaleDisposition(item, postTypingDisposition)) {
                   await sock.sendPresenceUpdate("paused", item.jid);
                   return;
                 }
@@ -7496,7 +7528,7 @@ function resolveTextEmojiAllowlist() {
                 const postTypingDisposition = (await convex.query(convexRefs.outboxGetSendDisposition, {
                   outboxId: item.outboxId,
                 })) as { canSend: boolean; reason?: string };
-                if (!postTypingDisposition.canSend) {
+                if (await maybeFinalizeStaleDisposition(item, postTypingDisposition)) {
                   await sock.sendPresenceUpdate("paused", item.jid);
                   return;
                 }
