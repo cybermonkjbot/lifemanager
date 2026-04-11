@@ -82,7 +82,12 @@ import {
   pickLaughReactionEmoji,
   shouldUseLaughReactionOnly,
 } from "./status-policy";
-import { buildOutreachFallbackText, buildOutreachPromptSeed, enforceGoodMorningStyleLint } from "./outreach-hydration";
+import {
+  buildOutreachFallbackText,
+  buildOutreachPromptSeed,
+  enforceComplimentStyleLint,
+  enforceGoodMorningStyleLint,
+} from "./outreach-hydration";
 import {
   buildPdfAwareInboundText,
   buildPdfReplyPolicyInstruction,
@@ -241,7 +246,7 @@ type OutboxClaimedItem = {
   toolRunId?: string;
   jid: string;
   messageProvider: "whatsapp" | "instagram";
-  outreachMode?: "proactive" | "good_morning";
+  outreachMode?: "proactive" | "good_morning" | "compliment";
   messageText: string;
   typingMs: number;
   provider: "azure" | "codex" | "heuristic";
@@ -7042,7 +7047,9 @@ function resolveTextEmojiAllowlist() {
         : ROMANCE_BASE_VARIANT_COUNT;
     let romancePromptVariant = outreachMode === "good_morning" && romanceMorningMode
       ? stableHash(`${item.threadId}|${dayBucket}|${romanceMorningMode}`) % romancePromptVariantCount
-      : 0;
+      : outreachMode === "compliment"
+        ? stableHash(`${item.threadId}|${dayBucket}|compliment`)
+        : 0;
     let romancePromptFingerprint = outreachMode === "good_morning" && romanceMorningMode
       ? buildRomancePromptFingerprint({
           threadId: item.threadId,
@@ -7145,7 +7152,9 @@ function resolveTextEmojiAllowlist() {
             `romance_morning_mode:${romanceMorningMode || "warm"}`,
             ...(ignoredBoundaryReopen ? ["romance_morning_boundary_reopen"] : []),
           ]
-        : baseOutreachStyleHints;
+        : outreachMode === "compliment"
+          ? [...baseOutreachStyleHints, "romance_random_compliment_protocol", "romance_appreciation_style"]
+          : baseOutreachStyleHints;
 
     const ai = await generateReplyWithFallback({
       inboundText: promptSeed,
@@ -7292,25 +7301,41 @@ function resolveTextEmojiAllowlist() {
       ghostSeverity,
     });
     const normalizedCandidateText = normalizeOutboundText(ai.guardrailBlocked ? fallbackText : ai.text);
-    const lintedGoodMorningText =
+    const lintedOutreachText =
       outreachMode === "good_morning"
         ? enforceGoodMorningStyleLint({
             text: normalizedCandidateText,
             fallbackText,
           })
-        : {
-            text: normalizedCandidateText,
-            violations: [] as string[],
-          };
-    const rawSafeText = lintedGoodMorningText.text;
-    if (outreachMode === "good_morning" && lintedGoodMorningText.violations.length > 0) {
+        : outreachMode === "compliment"
+          ? enforceComplimentStyleLint({
+              text: normalizedCandidateText,
+              fallbackText,
+            })
+          : {
+              text: normalizedCandidateText,
+              violations: [] as string[],
+            };
+    const rawSafeText = lintedOutreachText.text;
+    if (outreachMode === "good_morning" && lintedOutreachText.violations.length > 0) {
       await convex
         .mutation(convexRefs.systemRecordEvent, {
           source: "ai",
           eventType: "outreach.ai.good_morning_style_lint",
           threadId: item.threadId,
           toolRunId,
-          detail: `violations=${lintedGoodMorningText.violations.join(",")}; rewritten=true`,
+          detail: `violations=${lintedOutreachText.violations.join(",")}; rewritten=true`,
+        })
+        .catch(() => undefined);
+    }
+    if (outreachMode === "compliment" && lintedOutreachText.violations.length > 0) {
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "ai",
+          eventType: "outreach.ai.compliment_style_lint",
+          threadId: item.threadId,
+          toolRunId,
+          detail: `violations=${lintedOutreachText.violations.join(",")}; rewritten=true`,
         })
         .catch(() => undefined);
     }

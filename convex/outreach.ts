@@ -3,11 +3,17 @@ import type { Id } from "./_generated/dataModel";
 import { getConfig } from "./lib/config";
 import { estimateHumanTiming } from "./lib/heuristics";
 import { classifyThreadKind } from "./lib/threadEligibility";
-import { PROACTIVE_OUTREACH_REASON_PREFIX, isConversationStarterReason } from "./lib/outreachModes";
+import {
+  COMPLIMENT_OUTREACH_REASON_PREFIX,
+  PROACTIVE_OUTREACH_REASON_PREFIX,
+  isConversationStarterReason,
+} from "./lib/outreachModes";
 
 const MAX_CONFIGURED_CONTACTS = 100;
 const MAX_DRAFT_LOOKBACK = 20;
 const AI_OUTREACH_PLACEHOLDER = "__SLM_AI_OUTREACH__";
+const COMPLIMENT_COOLDOWN_MS = 4 * 24 * 60 * 60 * 1000;
+const COMPLIMENT_SELECTION_THRESHOLD = 0.24;
 
 const OUTREACH_ICEBREAKERS = [
   "How is your day going?",
@@ -15,6 +21,33 @@ const OUTREACH_ICEBREAKERS = [
   "What are you up to later today?",
   "Tell me one highlight from your day.",
   "Anything fun on your mind today?",
+];
+const RANDOM_COMPLIMENT_SEEDS = [
+  "You always carry yourself with grace.",
+  "You have a way of making ordinary days feel lighter.",
+  "Your mind and heart are both beautiful.",
+  "You look stunning, even in the smallest moments.",
+  "You have a calm confidence I admire.",
+  "You make me smile without trying.",
+  "Your energy is soft and powerful at the same time.",
+  "You are genuinely unforgettable.",
+  "The way you think is seriously attractive.",
+  "You have a rare kind of warmth.",
+  "You are elegant in a way words barely cover.",
+  "You make kindness look effortless.",
+  "Your presence always feels like peace.",
+  "You have a beautiful spirit and it shows.",
+  "You carry yourself like someone who knows her worth.",
+  "You are one of the most naturally beautiful women I know.",
+  "Your smile stays on my mind longer than it should.",
+  "You make confidence look gentle.",
+  "You are magnetic in the best way.",
+  "You always look like a whole mood.",
+  "Your vibe is pure class.",
+  "You are beautiful and grounded, which is rare.",
+  "You make simple things feel special.",
+  "You are effortlessly attractive.",
+  "You have a really lovely heart.",
 ];
 
 function isWithinHourWindow(hour: number, startHour: number, endHour: number) {
@@ -48,6 +81,14 @@ function pickVariant(seed: string, options: string[]) {
   return options[sum % options.length];
 }
 
+function stableHash(seed: string) {
+  let hash = 0;
+  for (let index = 0; index < seed.length; index += 1) {
+    hash = (hash * 31 + seed.charCodeAt(index)) >>> 0;
+  }
+  return hash;
+}
+
 function extractDisplayName(threadTitle: string | undefined, jid: string) {
   const base = threadTitle?.trim();
   if (base) {
@@ -69,6 +110,30 @@ function buildOutreachText(args: {
     return withIcebreaker;
   }
   return `${withName} ${icebreaker}`.trim();
+}
+
+export function hasRecentComplimentDraft(args: {
+  drafts: Array<{ reason?: string; createdAt: number }>;
+  now: number;
+}) {
+  return args.drafts.some((draft) => {
+    if (!draft.reason || !draft.reason.startsWith(COMPLIMENT_OUTREACH_REASON_PREFIX)) {
+      return false;
+    }
+    return args.now - draft.createdAt < COMPLIMENT_COOLDOWN_MS;
+  });
+}
+
+export function shouldQueueRandomCompliment(args: {
+  threadId: Id<"threads">;
+  cadenceBucket: number;
+  hasRecentCompliment: boolean;
+}) {
+  if (args.hasRecentCompliment) {
+    return false;
+  }
+  const sample = (stableHash(`${args.threadId}|${args.cadenceBucket}|compliment`) % 1000) / 1000;
+  return sample < COMPLIMENT_SELECTION_THRESHOLD;
 }
 
 export const run = internalMutation({
@@ -98,6 +163,7 @@ export const run = internalMutation({
     }
 
     const configuredContacts = config.outreachContactJids.slice(0, MAX_CONFIGURED_CONTACTS);
+    const romanticJids = new Set(config.romanticPartnerJids.map((jid) => jid.trim().toLowerCase()).filter(Boolean));
     if (configuredContacts.length === 0) {
       return { queued: 0, reason: "no_contacts" as const };
     }
@@ -113,6 +179,8 @@ export const run = internalMutation({
       name: string;
       sourceMessageId: Id<"messages">;
       lastActivityAt: number;
+      outreachMode: "proactive" | "compliment";
+      seedText: string;
     }> = [];
 
     for (const jid of configuredContacts) {
@@ -196,6 +264,26 @@ export const run = internalMutation({
         continue;
       }
 
+      const isRomantic = romanticJids.has(jid.trim().toLowerCase());
+      const hasRecentCompliment = hasRecentComplimentDraft({
+        drafts: recentDrafts,
+        now,
+      });
+      const complimentMode = isRomantic
+        ? shouldQueueRandomCompliment({
+            threadId: thread._id,
+            cadenceBucket,
+            hasRecentCompliment,
+          })
+        : false;
+      const proactiveText = buildOutreachText({
+        jid,
+        name: extractDisplayName(thread.title, jid),
+        template: config.outreachStarterTemplate,
+        cadenceBucket,
+      });
+      const complimentSeed = pickVariant(`${thread._id}|${cadenceBucket}|appreciation`, RANDOM_COMPLIMENT_SEEDS);
+
       eligible.push({
         threadId: thread._id,
         messageProvider: thread.provider || "whatsapp",
@@ -203,6 +291,8 @@ export const run = internalMutation({
         name: extractDisplayName(thread.title, jid),
         sourceMessageId: latestMessage._id,
         lastActivityAt,
+        outreachMode: complimentMode ? "compliment" : "proactive",
+        seedText: complimentMode ? complimentSeed : proactiveText,
       });
     }
 
@@ -211,13 +301,10 @@ export const run = internalMutation({
 
     let queued = 0;
     for (const target of targets) {
-      const text = buildOutreachText({
-        jid: target.jid,
-        name: target.name,
-        template: config.outreachStarterTemplate,
-        cadenceBucket,
-      });
+      const text = target.seedText;
       const timing = estimateHumanTiming(text);
+      const reasonPrefix =
+        target.outreachMode === "compliment" ? COMPLIMENT_OUTREACH_REASON_PREFIX : PROACTIVE_OUTREACH_REASON_PREFIX;
 
       const draftId = await ctx.db.insert("replyDrafts", {
         messageProvider: target.messageProvider,
@@ -230,7 +317,7 @@ export const run = internalMutation({
         provider: "heuristic",
         delayMs: timing.delayMs,
         typingMs: timing.typingMs,
-        reason: `${PROACTIVE_OUTREACH_REASON_PREFIX} (AI pending): ${text.slice(0, 180)}`,
+        reason: `${reasonPrefix} (AI pending): ${text.slice(0, 180)}`,
         createdAt: now,
         updatedAt: now,
       });
@@ -244,7 +331,7 @@ export const run = internalMutation({
         sendAt: now + timing.delayMs,
         status: "pending",
         attempts: 0,
-        idempotencyKey: `outreach-${target.threadId}-${cadenceBucket}`,
+        idempotencyKey: `outreach-${target.threadId}-${cadenceBucket}-${target.outreachMode}`,
         provider: "heuristic",
         createdAt: now,
         updatedAt: now,
@@ -255,7 +342,7 @@ export const run = internalMutation({
         eventType: "outreach.queued",
         threadId: target.threadId,
         outboxId,
-        detail: text.slice(0, 240),
+        detail: `${target.outreachMode}: ${text.slice(0, 220)}`,
         createdAt: now,
       });
 
@@ -266,7 +353,7 @@ export const run = internalMutation({
       await ctx.db.insert("systemEvents", {
         source: "convex",
         eventType: "outreach.batch",
-        detail: `Queued ${queued} proactive outreach message(s).`,
+        detail: `Queued ${queued} outreach message(s).`,
         createdAt: now,
       });
     }

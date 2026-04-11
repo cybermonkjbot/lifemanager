@@ -5,7 +5,7 @@ import {
 } from "../../shared/romance-morning";
 import { stripEmojiCharacters } from "./emoji-policy";
 
-type OutreachMode = "proactive" | "good_morning";
+type OutreachMode = "proactive" | "good_morning" | "compliment";
 type GhostReopenTone = "naija_tease" | "hard_banter" | "playful" | "warm";
 type GhostSeverity = "mild" | "moderate" | "severe";
 
@@ -19,6 +19,11 @@ const WARM_MODE_INTENT_LINES = [
   "Lead with soft affection and emotional presence before any practical topic.",
   "Keep the opener sweet, grounded, and emotionally attentive.",
   "Start with caring warmth and one gentle, natural check-in question.",
+];
+const COMPLIMENT_MODE_INTENT_LINES = [
+  "Lead with one sincere compliment and zero pressure.",
+  "Send one warm appreciation line that feels natural and specific.",
+  "Keep it sweet and confident, with no needy or transactional tone.",
 ];
 const ROMANCE_ROBOTIC_CUE_PATTERN =
   /\b(assistant|task\s*manager|automation|protocol|scheduled|workflow|ticket|per\s+plan|compliance)\b/i;
@@ -107,6 +112,13 @@ function resolveBoundaryReopenFallback(variant: number | undefined) {
   return BOUNDARY_REOPEN_FALLBACK_VARIATIONS[normalizeBoundaryVariant(variant)];
 }
 
+function resolveComplimentIntentLine(variant: number | undefined) {
+  const resolved = Math.round(variant ?? 0);
+  const index = ((resolved % COMPLIMENT_MODE_INTENT_LINES.length) + COMPLIMENT_MODE_INTENT_LINES.length) %
+    COMPLIMENT_MODE_INTENT_LINES.length;
+  return COMPLIMENT_MODE_INTENT_LINES[index];
+}
+
 export function buildOutreachPromptSeed(args: {
   outreachMode: OutreachMode;
   romanceMorningMode?: RomanceMorningMode;
@@ -146,6 +158,24 @@ export function buildOutreachPromptSeed(args: {
       .join("\n");
   }
 
+  if (args.outreachMode === "compliment") {
+    return [
+      "Write one out-of-the-blue appreciation message for this romantic contact.",
+      resolveComplimentIntentLine(args.romancePromptVariant),
+      "Make it feel like a spontaneous compliment, not a routine check-in.",
+      "Keep it to 1-2 short sentences in natural chat language.",
+      "Use plain conversational English only; do not use pidgin wording.",
+      "No robotic, assistant, task-manager, or sales wording.",
+      "Do not ask for validation, commitment, or immediate reply.",
+      "At most one gentle question and at most one emoji.",
+      "No guilt, pressure, jealousy cues, or accusatory tone.",
+      args.memorySummary,
+      `Contact first name: ${args.contactName}`,
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
+
   return [
     "Proactively start a fresh check-in conversation with this contact now.",
     "Use previous chat context so the opener feels natural, specific, and warm.",
@@ -176,6 +206,10 @@ export function buildOutreachFallbackText(args: {
       return "Good morning, I want to make today sweet for us. What time works for a quick plan later?";
     }
     return "Good morning, sending you warm energy. How are you feeling this morning?";
+  }
+
+  if (args.outreachMode === "compliment") {
+    return "You have such a beautiful energy, and I still catch myself smiling when I think of you.";
   }
 
   if (!args.longSilenceGhostReopen) {
@@ -317,6 +351,78 @@ export function enforceGoodMorningStyleLint(args: {
     violations.push("good_morning_opening_normalized");
   }
   next = openingNormalized.text;
+
+  const sentenceCount = countSentences(next);
+  if (sentenceCount > 2) {
+    violations.push("too_many_sentences");
+    next = trimToTwoSentences(next);
+  }
+
+  const originalQuestionCount = (normalizeSingleLine(args.text).match(/\?/g) || []).length;
+  if (originalQuestionCount > 1) {
+    violations.push("too_many_questions");
+  }
+  const questionCount = (next.match(/\?/g) || []).length;
+  if (questionCount > 1) {
+    next = keepAtMostOneQuestion(next);
+  }
+
+  const originalEmojiCount = (normalizeSingleLine(args.text).match(SIMPLE_EMOJI_TOKEN_REGEX) || []).length;
+  if (originalEmojiCount > 1) {
+    violations.push("too_many_emojis");
+  }
+  const emojiCount = (next.match(SIMPLE_EMOJI_TOKEN_REGEX) || []).length;
+  if (emojiCount > 1) {
+    next = keepAtMostOneEmoji(next);
+  }
+
+  next = normalizeSingleLine(next);
+  if (!next) {
+    return {
+      text: fallback,
+      violations: [...violations, "empty_after_rewrite"],
+    };
+  }
+  return {
+    text: next,
+    violations,
+  };
+}
+
+export function enforceComplimentStyleLint(args: {
+  text: string;
+  fallbackText: string;
+}) {
+  const violations: string[] = [];
+  let next = normalizeSingleLine(args.text);
+  const fallback = normalizeSingleLine(
+    args.fallbackText || "You have such a beautiful energy, and I still catch myself smiling when I think of you.",
+  );
+  if (!next) {
+    return {
+      text: fallback,
+      violations: ["empty_text"],
+    };
+  }
+
+  if (ROMANCE_ROBOTIC_CUE_PATTERN.test(next)) {
+    return {
+      text: fallback,
+      violations: ["robotic_task_wording"],
+    };
+  }
+  if (ROMANCE_PRESSURE_CUE_PATTERN.test(next)) {
+    return {
+      text: fallback,
+      violations: ["pressure_or_guilt_wording"],
+    };
+  }
+  if (ROMANCE_PIDGIN_CUE_PATTERN.test(next)) {
+    return {
+      text: fallback,
+      violations: ["pidgin_wording"],
+    };
+  }
 
   const sentenceCount = countSentences(next);
   if (sentenceCount > 2) {

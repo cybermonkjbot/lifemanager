@@ -96,5 +96,9 @@ test("resolveClaimOutreachMode derives mode from draft reason prefix", () => {
     resolveClaimOutreachMode("Proactive check-in outreach (AI pending): hey there"),
     "proactive",
   );
+  assert.equal(
+    resolveClaimOutreachMode("Random appreciation outreach (AI pending): you look amazing today"),
+    "compliment",
+  );
   assert.equal(resolveClaimOutreachMode("Some other reason"), undefined);
 });

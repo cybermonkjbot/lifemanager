@@ -233,7 +233,7 @@ export const claimDue = mutation({
       threadId: string;
       draftId: string;
       toolRunId?: string;
-      outreachMode?: "proactive" | "good_morning";
+      outreachMode?: "proactive" | "good_morning" | "compliment";
       messageText: string;
       typingMs: number;
       jid: string;
