@@ -53,9 +53,12 @@ export async function querySystemHealth() {
   return await client.query(convexRefs.systemHealth, {});
 }
 
-export async function approveDraft(draftId: string) {
+export async function approveDraft(draftId: string, options?: { sendImmediately?: boolean }) {
   const client = createConvexClient();
-  return await client.mutation(convexRefs.draftApprove, { draftId });
+  return await client.mutation(convexRefs.draftApprove, {
+    draftId,
+    sendImmediately: options?.sendImmediately,
+  });
 }
 
 export async function snoozeDraft(draftId: string, minutes: number) {

@@ -60,6 +60,14 @@ type SettingsState = {
   quietHoursEnabled: boolean;
   quietHoursStartHour: number;
   quietHoursEndHour: number;
+  autoMarkReadEnabled: boolean;
+  autoMarkReadGroups: boolean;
+  autoMarkReadStatus: boolean;
+  presenceSubscribeEnabled: boolean;
+  chatModifyQuietHoursEnabled: boolean;
+  aboutAutomationEnabled: boolean;
+  aboutAutomationIntervalMinutes: number;
+  aboutAutomationTemplate: string;
   sendRateWindowMinutes: number;
   sendMaxPerThreadInWindow: number;
   sendMaxGlobalInWindow: number;
@@ -210,6 +218,14 @@ function toState(source: Partial<SettingsState> | undefined): SettingsState {
     quietHoursEnabled: source?.quietHoursEnabled ?? false,
     quietHoursStartHour: source?.quietHoursStartHour ?? 23,
     quietHoursEndHour: source?.quietHoursEndHour ?? 7,
+    autoMarkReadEnabled: source?.autoMarkReadEnabled ?? true,
+    autoMarkReadGroups: source?.autoMarkReadGroups ?? false,
+    autoMarkReadStatus: source?.autoMarkReadStatus ?? false,
+    presenceSubscribeEnabled: source?.presenceSubscribeEnabled ?? true,
+    chatModifyQuietHoursEnabled: source?.chatModifyQuietHoursEnabled ?? false,
+    aboutAutomationEnabled: source?.aboutAutomationEnabled ?? false,
+    aboutAutomationIntervalMinutes: source?.aboutAutomationIntervalMinutes ?? 360,
+    aboutAutomationTemplate: source?.aboutAutomationTemplate ?? "",
     sendRateWindowMinutes: source?.sendRateWindowMinutes ?? 60,
     sendMaxPerThreadInWindow: source?.sendMaxPerThreadInWindow ?? 4,
     sendMaxGlobalInWindow: source?.sendMaxGlobalInWindow ?? 40,
@@ -293,6 +309,14 @@ function stateEquals(a: SettingsState, b: SettingsState) {
     a.quietHoursEnabled === b.quietHoursEnabled &&
     nearlyEqual(a.quietHoursStartHour, b.quietHoursStartHour) &&
     nearlyEqual(a.quietHoursEndHour, b.quietHoursEndHour) &&
+    a.autoMarkReadEnabled === b.autoMarkReadEnabled &&
+    a.autoMarkReadGroups === b.autoMarkReadGroups &&
+    a.autoMarkReadStatus === b.autoMarkReadStatus &&
+    a.presenceSubscribeEnabled === b.presenceSubscribeEnabled &&
+    a.chatModifyQuietHoursEnabled === b.chatModifyQuietHoursEnabled &&
+    a.aboutAutomationEnabled === b.aboutAutomationEnabled &&
+    nearlyEqual(a.aboutAutomationIntervalMinutes, b.aboutAutomationIntervalMinutes) &&
+    a.aboutAutomationTemplate === b.aboutAutomationTemplate &&
     nearlyEqual(a.sendRateWindowMinutes, b.sendRateWindowMinutes) &&
     nearlyEqual(a.sendMaxPerThreadInWindow, b.sendMaxPerThreadInWindow) &&
     nearlyEqual(a.sendMaxGlobalInWindow, b.sendMaxGlobalInWindow) &&
@@ -556,6 +580,14 @@ export function LiveSettings() {
           quietHoursEnabled: draft.quietHoursEnabled,
           quietHoursStartHour: Math.round(draft.quietHoursStartHour),
           quietHoursEndHour: Math.round(draft.quietHoursEndHour),
+          autoMarkReadEnabled: draft.autoMarkReadEnabled,
+          autoMarkReadGroups: draft.autoMarkReadGroups,
+          autoMarkReadStatus: draft.autoMarkReadStatus,
+          presenceSubscribeEnabled: draft.presenceSubscribeEnabled,
+          chatModifyQuietHoursEnabled: draft.chatModifyQuietHoursEnabled,
+          aboutAutomationEnabled: draft.aboutAutomationEnabled,
+          aboutAutomationIntervalMinutes: Math.round(draft.aboutAutomationIntervalMinutes),
+          aboutAutomationTemplate: draft.aboutAutomationTemplate,
           sendRateWindowMinutes: Math.round(draft.sendRateWindowMinutes),
           sendMaxPerThreadInWindow: Math.round(draft.sendMaxPerThreadInWindow),
           sendMaxGlobalInWindow: Math.round(draft.sendMaxGlobalInWindow),
@@ -1665,6 +1697,152 @@ export function LiveSettings() {
               aria-disabled={record.pending || !draft.quietHoursEnabled}
             />
             <span className="queue-meta">Server-local time window where sends are deferred.</span>
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Auto-mark inbound as read</span>
+            <select
+              value={draft.autoMarkReadEnabled ? "true" : "false"}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  autoMarkReadEnabled: event.target.value === "true",
+                }))
+              }
+              disabled={record.pending}
+              aria-disabled={record.pending}
+            >
+              <option value="true">Enabled</option>
+              <option value="false">Disabled</option>
+            </select>
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Auto-mark group chats as read</span>
+            <select
+              value={draft.autoMarkReadGroups ? "true" : "false"}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  autoMarkReadGroups: event.target.value === "true",
+                }))
+              }
+              disabled={record.pending || !draft.autoMarkReadEnabled}
+              aria-disabled={record.pending || !draft.autoMarkReadEnabled}
+            >
+              <option value="false">Disabled</option>
+              <option value="true">Enabled</option>
+            </select>
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Auto-mark status as read</span>
+            <select
+              value={draft.autoMarkReadStatus ? "true" : "false"}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  autoMarkReadStatus: event.target.value === "true",
+                }))
+              }
+              disabled={record.pending || !draft.autoMarkReadEnabled}
+              aria-disabled={record.pending || !draft.autoMarkReadEnabled}
+            >
+              <option value="false">Disabled</option>
+              <option value="true">Enabled</option>
+            </select>
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Presence subscribe before typing</span>
+            <select
+              value={draft.presenceSubscribeEnabled ? "true" : "false"}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  presenceSubscribeEnabled: event.target.value === "true",
+                }))
+              }
+              disabled={record.pending}
+              aria-disabled={record.pending}
+            >
+              <option value="true">Enabled</option>
+              <option value="false">Disabled</option>
+            </select>
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Sync chat mute during quiet hours</span>
+            <select
+              value={draft.chatModifyQuietHoursEnabled ? "true" : "false"}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  chatModifyQuietHoursEnabled: event.target.value === "true",
+                }))
+              }
+              disabled={record.pending || !draft.quietHoursEnabled}
+              aria-disabled={record.pending || !draft.quietHoursEnabled}
+            >
+              <option value="false">Disabled</option>
+              <option value="true">Enabled (mute/unmute chats)</option>
+            </select>
+            {!draft.quietHoursEnabled ? <span className="queue-meta">Enable quiet hours to use chat mute sync.</span> : null}
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Automate WhatsApp About text</span>
+            <select
+              value={draft.aboutAutomationEnabled ? "true" : "false"}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  aboutAutomationEnabled: event.target.value === "true",
+                }))
+              }
+              disabled={record.pending}
+              aria-disabled={record.pending}
+            >
+              <option value="false">Disabled</option>
+              <option value="true">Enabled</option>
+            </select>
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">About update interval (minutes)</span>
+            <input
+              type="number"
+              min={15}
+              max={10080}
+              step={1}
+              value={draft.aboutAutomationIntervalMinutes}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  aboutAutomationIntervalMinutes: parseNumber(event.target.value, prev.aboutAutomationIntervalMinutes),
+                }))
+              }
+              disabled={record.pending || !draft.aboutAutomationEnabled}
+              aria-disabled={record.pending || !draft.aboutAutomationEnabled}
+            />
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">About template (optional)</span>
+            <textarea
+              rows={2}
+              value={draft.aboutAutomationTemplate}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  aboutAutomationTemplate: event.target.value,
+                }))
+              }
+              disabled={record.pending || !draft.aboutAutomationEnabled}
+              aria-disabled={record.pending || !draft.aboutAutomationEnabled}
+              placeholder="Social Life Manager active • {date} {time}"
+            />
+            <span className="queue-meta">Supports placeholders: {"{date}"}, {"{time}"}, {"{datetime}"}.</span>
           </label>
 
           <label className="stack compact">

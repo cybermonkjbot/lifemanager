@@ -1,10 +1,14 @@
 import { DashboardPage } from "@/components/dashboard-page";
-import { LiveQueue } from "@/components/live-queue";
+import { HomeScreen } from "@/components/home-screen";
 
-export default async function QueuePage() {
+export default async function HomePage() {
   return (
-    <DashboardPage title="Action Queue" subtitle="Review pending replies, follow-up confirmations, todos, and guardrails.">
-      <LiveQueue />
+    <DashboardPage
+      title="Home"
+      subtitle="Start with queue triage, conversation tuning, and daily follow-through."
+      hideViewHeader
+    >
+      <HomeScreen />
     </DashboardPage>
   );
 }

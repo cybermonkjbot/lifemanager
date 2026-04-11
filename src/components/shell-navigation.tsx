@@ -1,16 +1,12 @@
 "use client";
 
 import { UIModal } from "@/components/ui-modal";
+import type { DashboardNavItem } from "@/lib/ui/dashboard-nav";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useMemo, useState } from "react";
 
-type NavItem = {
-  href: string;
-  label: string;
-  description: string;
-  primary?: boolean;
-};
+export type NavItem = DashboardNavItem;
 
 type ShellNavigationProps = {
   items: NavItem[];

@@ -86,6 +86,14 @@ export const save = mutation({
     quietHoursEnabled: v.optional(v.boolean()),
     quietHoursStartHour: v.optional(v.number()),
     quietHoursEndHour: v.optional(v.number()),
+    autoMarkReadEnabled: v.optional(v.boolean()),
+    autoMarkReadGroups: v.optional(v.boolean()),
+    autoMarkReadStatus: v.optional(v.boolean()),
+    presenceSubscribeEnabled: v.optional(v.boolean()),
+    chatModifyQuietHoursEnabled: v.optional(v.boolean()),
+    aboutAutomationEnabled: v.optional(v.boolean()),
+    aboutAutomationIntervalMinutes: v.optional(v.number()),
+    aboutAutomationTemplate: v.optional(v.string()),
     sendRateWindowMinutes: v.optional(v.number()),
     sendMaxPerThreadInWindow: v.optional(v.number()),
     sendMaxGlobalInWindow: v.optional(v.number()),
@@ -211,6 +219,18 @@ export const save = mutation({
       quietHoursEnabled: args.quietHoursEnabled ?? DEFAULT_APP_CONFIG.quietHoursEnabled,
       quietHoursStartHour: clampInt(args.quietHoursStartHour ?? DEFAULT_APP_CONFIG.quietHoursStartHour, 0, 23),
       quietHoursEndHour: clampInt(args.quietHoursEndHour ?? DEFAULT_APP_CONFIG.quietHoursEndHour, 0, 23),
+      autoMarkReadEnabled: args.autoMarkReadEnabled ?? DEFAULT_APP_CONFIG.autoMarkReadEnabled,
+      autoMarkReadGroups: args.autoMarkReadGroups ?? DEFAULT_APP_CONFIG.autoMarkReadGroups,
+      autoMarkReadStatus: args.autoMarkReadStatus ?? DEFAULT_APP_CONFIG.autoMarkReadStatus,
+      presenceSubscribeEnabled: args.presenceSubscribeEnabled ?? DEFAULT_APP_CONFIG.presenceSubscribeEnabled,
+      chatModifyQuietHoursEnabled: args.chatModifyQuietHoursEnabled ?? DEFAULT_APP_CONFIG.chatModifyQuietHoursEnabled,
+      aboutAutomationEnabled: args.aboutAutomationEnabled ?? DEFAULT_APP_CONFIG.aboutAutomationEnabled,
+      aboutAutomationIntervalMinutes: clampInt(
+        args.aboutAutomationIntervalMinutes ?? DEFAULT_APP_CONFIG.aboutAutomationIntervalMinutes,
+        15,
+        7 * 24 * 60,
+      ),
+      aboutAutomationTemplate: args.aboutAutomationTemplate?.trim() || "",
       sendRateWindowMinutes: clampInt(args.sendRateWindowMinutes ?? DEFAULT_APP_CONFIG.sendRateWindowMinutes, 5, 24 * 60),
       sendMaxPerThreadInWindow: clampInt(
         args.sendMaxPerThreadInWindow ?? DEFAULT_APP_CONFIG.sendMaxPerThreadInWindow,
@@ -359,6 +379,14 @@ export const save = mutation({
     await setConfigValue(ctx, "quietHoursEnabled", normalized.quietHoursEnabled ? "true" : "false");
     await setConfigValue(ctx, "quietHoursStartHour", String(normalized.quietHoursStartHour));
     await setConfigValue(ctx, "quietHoursEndHour", String(normalized.quietHoursEndHour));
+    await setConfigValue(ctx, "autoMarkReadEnabled", normalized.autoMarkReadEnabled ? "true" : "false");
+    await setConfigValue(ctx, "autoMarkReadGroups", normalized.autoMarkReadGroups ? "true" : "false");
+    await setConfigValue(ctx, "autoMarkReadStatus", normalized.autoMarkReadStatus ? "true" : "false");
+    await setConfigValue(ctx, "presenceSubscribeEnabled", normalized.presenceSubscribeEnabled ? "true" : "false");
+    await setConfigValue(ctx, "chatModifyQuietHoursEnabled", normalized.chatModifyQuietHoursEnabled ? "true" : "false");
+    await setConfigValue(ctx, "aboutAutomationEnabled", normalized.aboutAutomationEnabled ? "true" : "false");
+    await setConfigValue(ctx, "aboutAutomationIntervalMinutes", String(normalized.aboutAutomationIntervalMinutes));
+    await setConfigValue(ctx, "aboutAutomationTemplate", normalized.aboutAutomationTemplate);
     await setConfigValue(ctx, "sendRateWindowMinutes", String(normalized.sendRateWindowMinutes));
     await setConfigValue(ctx, "sendMaxPerThreadInWindow", String(normalized.sendMaxPerThreadInWindow));
     await setConfigValue(ctx, "sendMaxGlobalInWindow", String(normalized.sendMaxGlobalInWindow));

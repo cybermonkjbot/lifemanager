@@ -448,6 +448,20 @@ class WhatsAppSetupManager {
       printQRInTerminal: false,
       browser,
       markOnlineOnConnect: false,
+      // Keep setup socket direct-chat only (ignore group + broadcast/system).
+      shouldIgnoreJid: (jid) => {
+        const normalized = (jid || "").trim().toLowerCase();
+        if (normalized.endsWith("@g.us")) {
+          return true;
+        }
+        if (normalized === "status@broadcast") {
+          return true;
+        }
+        if (normalized.startsWith("status@")) {
+          return true;
+        }
+        return normalized.endsWith("@broadcast") || normalized.endsWith("@newsletter");
+      },
       syncFullHistory: historySyncEnabled,
       fireInitQueries: false,
       shouldSyncHistoryMessage: () => historySyncEnabled,

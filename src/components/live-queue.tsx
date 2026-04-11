@@ -123,7 +123,7 @@ function QueueContent() {
     void runAction(
       key,
       async () => {
-        await approveDraft({ draftId: draftId as Id<"replyDrafts"> });
+        await approveDraft({ draftId: draftId as Id<"replyDrafts">, sendImmediately: true });
       },
       {
         pendingLabel: "Sending...",
@@ -280,7 +280,7 @@ function QueueContent() {
       async () => {
         for (const id of ids) {
           if (mode === "send") {
-            await approveDraft({ draftId: id as Id<"replyDrafts"> });
+            await approveDraft({ draftId: id as Id<"replyDrafts">, sendImmediately: true });
           } else {
             await snoozeDraft({ draftId: id as Id<"replyDrafts">, minutes: 30 });
           }

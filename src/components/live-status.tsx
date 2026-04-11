@@ -174,7 +174,7 @@ export function LiveStatus() {
           />
           <div className="stack compact">
             <div className="queue-actions">
-              <Link href="/" className="btn btn-primary">
+              <Link href="/queue" className="btn btn-primary">
                 Open Action Queue
               </Link>
               {statusThreadId ? (
@@ -226,7 +226,7 @@ export function LiveStatus() {
               <p className="empty-line">No outbound status posts yet.</p>
               <p className="queue-meta">Approve one draft to start building timeline history.</p>
               <div className="queue-actions">
-                <Link href="/" className="btn btn-ghost">
+                <Link href="/queue" className="btn btn-ghost">
                   Review pending drafts
                 </Link>
               </div>

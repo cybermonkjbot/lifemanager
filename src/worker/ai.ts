@@ -462,24 +462,24 @@ const MODEL_TOOL_ROUTER_SCHEMA = {
       maxLength: 320,
     },
     candidateReply: {
-      type: "string",
+      type: ["string", "null"],
       maxLength: 600,
     },
     includeExtraction: {
-      type: "boolean",
+      type: ["boolean", "null"],
     },
     maxResults: {
-      type: "integer",
+      type: ["integer", "null"],
       minimum: 1,
       maximum: MODEL_TOOL_MAX_RESULTS_CAP,
     },
     maxToolsPerRun: {
-      type: "integer",
+      type: ["integer", "null"],
       minimum: 1,
       maximum: MODEL_TOOL_MAX_TOOLS_PER_RUN_CAP,
     },
   },
-  required: ["task"],
+  required: ["task", "candidateReply", "includeExtraction", "maxResults", "maxToolsPerRun"],
 } as const;
 const AWKWARD_CATCHPHRASE_PATTERNS = [
   /\b(?:please|kindly|abeg)\s+(?:just\s+)?(?:allow|pardon)\s+me(?:\s+small)?\b/i,
@@ -5092,13 +5092,13 @@ function parseToolRouterPlanInput(raw: unknown): { parsed?: ToolRouterPlanInput;
 
   const candidateReply = typeof payload.candidateReply === "string" ? payload.candidateReply.trim().slice(0, 600) : undefined;
   const includeExtraction = Boolean(payload.includeExtraction);
-  const maxResultsRaw = payload.maxResults;
+  const maxResultsRaw = payload.maxResults === null ? undefined : payload.maxResults;
   if (maxResultsRaw !== undefined && (!Number.isFinite(Number(maxResultsRaw)) || Number(maxResultsRaw) > MODEL_TOOL_MAX_RESULTS_CAP)) {
     return {
       error: `maxResults must be <= ${MODEL_TOOL_MAX_RESULTS_CAP}.`,
     };
   }
-  const maxToolsPerRunRaw = payload.maxToolsPerRun;
+  const maxToolsPerRunRaw = payload.maxToolsPerRun === null ? undefined : payload.maxToolsPerRun;
   if (
     maxToolsPerRunRaw !== undefined &&
     (!Number.isFinite(Number(maxToolsPerRunRaw)) || Number(maxToolsPerRunRaw) > MODEL_TOOL_MAX_TOOLS_PER_RUN_CAP)

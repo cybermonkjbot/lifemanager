@@ -957,7 +957,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
       key,
       async () => {
         await saveReviewDraftText(item);
-        await approveDraft({ draftId: item._id as Id<"replyDrafts"> });
+        await approveDraft({ draftId: item._id as Id<"replyDrafts">, sendImmediately: true });
       },
       {
         pendingLabel: "Sending...",

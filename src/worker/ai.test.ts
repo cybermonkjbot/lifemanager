@@ -2217,6 +2217,14 @@ test("generateReplyWithFallback executes one Responses tool round and resumes wi
     assert.equal(result.text, "Sure, I can send it now.");
     assert.equal(executedTasks.length, 1);
     assert.ok(Array.isArray(requestBodies[0]?.tools));
+    const firstTool = (requestBodies[0]?.tools as Array<Record<string, unknown>>)[0];
+    const params = (firstTool?.parameters ?? {}) as Record<string, unknown>;
+    assert.deepEqual(params.required, ["task", "candidateReply", "includeExtraction", "maxResults", "maxToolsPerRun"]);
+    const properties = (params.properties ?? {}) as Record<string, Record<string, unknown>>;
+    assert.deepEqual(properties.candidateReply?.type, ["string", "null"]);
+    assert.deepEqual(properties.includeExtraction?.type, ["boolean", "null"]);
+    assert.deepEqual(properties.maxResults?.type, ["integer", "null"]);
+    assert.deepEqual(properties.maxToolsPerRun?.type, ["integer", "null"]);
     assert.equal(requestBodies[0]?.tool_choice, "auto");
     assert.equal(requestBodies[0]?.parallel_tool_calls, true);
     const secondInput = requestBodies[1]?.input;

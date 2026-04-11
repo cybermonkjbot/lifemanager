@@ -75,6 +75,14 @@ export type AppConfig = {
   quietHoursEnabled: boolean;
   quietHoursStartHour: number;
   quietHoursEndHour: number;
+  autoMarkReadEnabled: boolean;
+  autoMarkReadGroups: boolean;
+  autoMarkReadStatus: boolean;
+  presenceSubscribeEnabled: boolean;
+  chatModifyQuietHoursEnabled: boolean;
+  aboutAutomationEnabled: boolean;
+  aboutAutomationIntervalMinutes: number;
+  aboutAutomationTemplate: string;
   sendRateWindowMinutes: number;
   sendMaxPerThreadInWindow: number;
   sendMaxGlobalInWindow: number;
@@ -155,6 +163,14 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
   quietHoursEnabled: false,
   quietHoursStartHour: 23,
   quietHoursEndHour: 7,
+  autoMarkReadEnabled: true,
+  autoMarkReadGroups: false,
+  autoMarkReadStatus: false,
+  presenceSubscribeEnabled: true,
+  chatModifyQuietHoursEnabled: false,
+  aboutAutomationEnabled: false,
+  aboutAutomationIntervalMinutes: 360,
+  aboutAutomationTemplate: "",
   sendRateWindowMinutes: 60,
   sendMaxPerThreadInWindow: 4,
   sendMaxGlobalInWindow: 40,
@@ -356,6 +372,26 @@ export async function getConfig(ctx: QueryCtx | MutationCtx): Promise<AppConfig>
     quietHoursEndHour: Math.round(
       clamp(parseNumber(map.get("quietHoursEndHour"), DEFAULT_APP_CONFIG.quietHoursEndHour), 0, 23),
     ),
+    autoMarkReadEnabled: parseBoolean(map.get("autoMarkReadEnabled"), DEFAULT_APP_CONFIG.autoMarkReadEnabled),
+    autoMarkReadGroups: parseBoolean(map.get("autoMarkReadGroups"), DEFAULT_APP_CONFIG.autoMarkReadGroups),
+    autoMarkReadStatus: parseBoolean(map.get("autoMarkReadStatus"), DEFAULT_APP_CONFIG.autoMarkReadStatus),
+    presenceSubscribeEnabled: parseBoolean(
+      map.get("presenceSubscribeEnabled"),
+      DEFAULT_APP_CONFIG.presenceSubscribeEnabled,
+    ),
+    chatModifyQuietHoursEnabled: parseBoolean(
+      map.get("chatModifyQuietHoursEnabled"),
+      DEFAULT_APP_CONFIG.chatModifyQuietHoursEnabled,
+    ),
+    aboutAutomationEnabled: parseBoolean(map.get("aboutAutomationEnabled"), DEFAULT_APP_CONFIG.aboutAutomationEnabled),
+    aboutAutomationIntervalMinutes: Math.round(
+      clamp(
+        parseNumber(map.get("aboutAutomationIntervalMinutes"), DEFAULT_APP_CONFIG.aboutAutomationIntervalMinutes),
+        15,
+        7 * 24 * 60,
+      ),
+    ),
+    aboutAutomationTemplate: (map.get("aboutAutomationTemplate") ?? DEFAULT_APP_CONFIG.aboutAutomationTemplate).trim(),
     sendRateWindowMinutes: Math.round(
       clamp(parseNumber(map.get("sendRateWindowMinutes"), DEFAULT_APP_CONFIG.sendRateWindowMinutes), 5, 24 * 60),
     ),

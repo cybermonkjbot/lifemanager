@@ -6,7 +6,7 @@ export async function POST(request: Request) {
   const draftId = String(form.get("draftId") || "");
 
   if (draftId) {
-    await approveDraft(draftId);
+    await approveDraft(draftId, { sendImmediately: true });
   }
 
   return NextResponse.redirect(new URL("/", request.url));

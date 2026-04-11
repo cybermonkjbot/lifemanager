@@ -59,6 +59,8 @@ type RunStats = {
   contextChars: number;
 };
 
+type RunOutcomeStatus = "success" | "warning" | "error";
+
 const execAsync = promisify(execCallback);
 
 const DEFAULT_CONFIG_PATH = "self-improvement.config.json";
@@ -681,8 +683,9 @@ async function runSingleCycle(params: {
   config: SelfImprovementConfig;
   dryRun: boolean;
   promptOverride?: string;
+  runMode: "once" | "daemon";
 }) {
-  const { projectRoot, config, dryRun, promptOverride } = params;
+  const { projectRoot, config, dryRun, promptOverride, runMode } = params;
   const start = Date.now();
   const runId = runIdFromDate(new Date(start));
   const outputRoot = resolve(projectRoot, config.outputDir);
@@ -694,75 +697,97 @@ async function runSingleCycle(params: {
     throw new Error(`Another self-improvement run is already active (${lockPath}).`);
   });
 
+  let finalError: Error | null = null;
   try {
     log(`starting run ${runId}`);
 
-    const { markdown: contextMarkdown, stats } = await buildContextMarkdown({
-      projectRoot,
-      config,
-      outputRoot,
-    });
-
-    const prompt = renderTemplate(config.promptTemplate, {
-      PROJECT_ROOT: projectRoot,
-      RUN_ID: runId,
-      TIMESTAMP: nowIso(),
-    });
-
-    const operatorPrompt = promptOverride
-      ? [
-          "",
-          "Operator Priority Prompt:",
-          "Treat this as a high-priority focus for this run:",
-          promptOverride,
-        ].join("\n")
-      : "";
-
-    const fullPrompt = [
-      prompt,
-      operatorPrompt,
-      "",
-      "---",
-      "Context below. Use it to produce specific, high-leverage improvements.",
-      "",
-      contextMarkdown,
-    ].join("\n");
-
-    await fs.writeFile(join(runDir, "prompt.md"), fullPrompt, "utf8");
-    await fs.writeFile(join(runDir, "context.md"), contextMarkdown, "utf8");
-
     let report = "";
+    let status: RunOutcomeStatus = "success";
     let codexExitCode: number | null = null;
     let codexErrorMessage: string | null = null;
-    if (dryRun) {
-      report = [
-        "# Dry Run",
-        "Codex execution was skipped because `--dry-run` was provided.",
-        "Use this prompt file to inspect what would be sent:",
-        `- ${join(runDir, "prompt.md")}`,
-      ].join("\n");
-    } else {
-      const tmpOut = join(tmpdir(), `self-improve-${runId}.md`);
-      const codexRun = await runCodexExecWithStreaming({
+    let fatalErrorMessage: string | null = null;
+    let stats: RunStats = {
+      includedSources: 0,
+      skippedOptionalSources: 0,
+      contextChars: 0,
+    };
+
+    try {
+      const context = await buildContextMarkdown({
         projectRoot,
         config,
-        fullPrompt,
-        tmpOut,
+        outputRoot,
       });
-      codexExitCode = codexRun.exitCode;
-      codexErrorMessage = codexRun.errorMessage;
+      stats = context.stats;
 
-      report = await fs.readFile(tmpOut, "utf8").catch(() => "");
-      await fs.unlink(tmpOut).catch(() => undefined);
-      if (!report.trim()) {
-        if (codexErrorMessage) {
-          throw new Error(`Codex failed and produced no report: ${codexErrorMessage}`);
+      const prompt = renderTemplate(config.promptTemplate, {
+        PROJECT_ROOT: projectRoot,
+        RUN_ID: runId,
+        TIMESTAMP: nowIso(),
+      });
+
+      const operatorPrompt = promptOverride
+        ? [
+            "",
+            "Operator Priority Prompt:",
+            "Treat this as a high-priority focus for this run:",
+            promptOverride,
+          ].join("\n")
+        : "";
+
+      const fullPrompt = [
+        prompt,
+        operatorPrompt,
+        "",
+        "---",
+        "Context below. Use it to produce specific, high-leverage improvements.",
+        "",
+        context.markdown,
+      ].join("\n");
+
+      await fs.writeFile(join(runDir, "prompt.md"), fullPrompt, "utf8");
+      await fs.writeFile(join(runDir, "context.md"), context.markdown, "utf8");
+
+      if (dryRun) {
+        report = [
+          "# Dry Run",
+          "Codex execution was skipped because `--dry-run` was provided.",
+          "Use this prompt file to inspect what would be sent:",
+          `- ${join(runDir, "prompt.md")}`,
+        ].join("\n");
+      } else {
+        const tmpOut = join(tmpdir(), `self-improve-${runId}.md`);
+        const codexRun = await runCodexExecWithStreaming({
+          projectRoot,
+          config,
+          fullPrompt,
+          tmpOut,
+        });
+        codexExitCode = codexRun.exitCode;
+        codexErrorMessage = codexRun.errorMessage;
+
+        report = await fs.readFile(tmpOut, "utf8").catch(() => "");
+        await fs.unlink(tmpOut).catch(() => undefined);
+        if (!report.trim()) {
+          if (codexErrorMessage) {
+            throw new Error(`Codex failed and produced no report: ${codexErrorMessage}`);
+          }
+          throw new Error("Codex returned an empty report.");
         }
-        throw new Error("Codex returned an empty report.");
+        if (codexErrorMessage) {
+          status = "warning";
+          log(`warning: codex exited non-zero but report was captured (${codexErrorMessage})`);
+        }
       }
-      if (codexErrorMessage) {
-        log(`warning: codex exited non-zero but report was captured (${codexErrorMessage})`);
-      }
+    } catch (error) {
+      finalError = error instanceof Error ? error : new Error(String(error));
+      fatalErrorMessage = finalError.message;
+      status = "error";
+      report = [
+        "# Self-Improvement Run Failed",
+        "",
+        fatalErrorMessage,
+      ].join("\n");
     }
 
     const meta = {
@@ -770,12 +795,15 @@ async function runSingleCycle(params: {
       startedAt: new Date(start).toISOString(),
       finishedAt: new Date().toISOString(),
       durationMs: Date.now() - start,
+      status,
+      runMode,
       dryRun,
       codexPath: config.codexPath,
       codexModel: config.codexModel,
       codexSandbox: config.codexSandbox,
       codexExitCode,
       codexErrorMessage,
+      fatalErrorMessage,
       promptOverride: promptOverride || null,
       stats,
     };
@@ -785,10 +813,14 @@ async function runSingleCycle(params: {
     await fs.writeFile(join(outputRoot, "latest.md"), report, "utf8");
     await fs.writeFile(join(outputRoot, "latest-meta.json"), `${JSON.stringify(meta, null, 2)}\n`, "utf8");
 
-    log(`finished run ${runId} in ${meta.durationMs}ms`);
+    log(`finished run ${runId} in ${meta.durationMs}ms (${status})`);
     log(`report: ${join(runDir, "report.md")}`);
   } finally {
     await releaseLock();
+  }
+
+  if (finalError) {
+    throw finalError;
   }
 }
 
@@ -814,7 +846,7 @@ async function runDaemon(params: {
   log(`daemon mode active, interval=${intervalMinutes} minutes`);
   while (!stopRequested) {
     try {
-      await runSingleCycle({ projectRoot, config, dryRun, promptOverride });
+      await runSingleCycle({ projectRoot, config, dryRun, promptOverride, runMode: "daemon" });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       log(`run failed: ${message}`);
@@ -858,6 +890,7 @@ async function main() {
     config,
     dryRun: args.dryRun,
     promptOverride: args.promptOverride,
+    runMode: "once",
   });
 }
 

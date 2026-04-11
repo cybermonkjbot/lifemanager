@@ -379,6 +379,7 @@ export const createGuardrailHold = mutation({
 export const approve = mutation({
   args: {
     draftId: v.id("replyDrafts"),
+    sendImmediately: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const draft = await ctx.db.get(args.draftId);
@@ -387,6 +388,10 @@ export const approve = mutation({
     }
 
     const now = Date.now();
+    const sendImmediately = args.sendImmediately === true;
+    const nextDelayMs = sendImmediately ? 0 : draft.delayMs;
+    const nextTypingMs = sendImmediately ? 0 : draft.typingMs;
+    const nextSendAt = now + nextDelayMs;
     const thread = await ctx.db.get(draft.threadId);
     const messageProvider = draft.messageProvider || thread?.provider || "whatsapp";
     const existingOutbox = await ctx.db
@@ -415,6 +420,8 @@ export const approve = mutation({
     if (claimedOutbox) {
       await ctx.db.patch(draft._id, {
         status: "approved",
+        delayMs: nextDelayMs,
+        typingMs: nextTypingMs,
         updatedAt: now,
       });
       await ctx.scheduler.runAfter(0, internal.backlog.refreshThread, {
@@ -427,13 +434,15 @@ export const approve = mutation({
     if (pendingOutbox) {
       await ctx.db.patch(draft._id, {
         status: "approved",
+        delayMs: nextDelayMs,
+        typingMs: nextTypingMs,
         updatedAt: now,
       });
 
       await ctx.db.patch(pendingOutbox._id, {
         messageProvider: pendingOutbox.messageProvider || messageProvider,
         toolRunId: draft.toolRunId,
-        sendAt: now + draft.delayMs,
+        sendAt: nextSendAt,
         messageText: draft.text,
         sendKind,
         reactionEmoji: draft.reactionEmoji,
@@ -456,6 +465,8 @@ export const approve = mutation({
 
     await ctx.db.patch(draft._id, {
       status: "approved",
+      delayMs: nextDelayMs,
+      typingMs: nextTypingMs,
       updatedAt: now,
     });
 
@@ -471,7 +482,7 @@ export const approve = mutation({
       reactionTargetWhatsAppMessageId,
       mediaAssetId: draft.mediaAssetId,
       mediaCaption: draft.mediaCaption,
-      sendAt: now + draft.delayMs,
+      sendAt: nextSendAt,
       status: "pending",
       attempts: 0,
       idempotencyKey: `${draft._id}-${now}`,

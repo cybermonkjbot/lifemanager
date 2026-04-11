@@ -52,6 +52,7 @@ import {
 } from "./history-context";
 import { decideOlderContextUsage } from "./context-recall-policy";
 import {
+  isBroadcastOrSystemJid,
   classifyThreadKindFromJid,
   getSenderJid,
   getThreadJid,
@@ -94,6 +95,7 @@ import { isSelfControlHelpCommand } from "./control-help-command";
 import { shouldAttemptSelfControlOnUpsert } from "./self-control-routing";
 import { isStrictSelfControlScope } from "./self-control-scope";
 import { parseSelfControlCommandText } from "./self-control-command-text";
+import { parseOpenClawCommand, type OpenClawCommand } from "./openclaw-command";
 
 const logger = pino({
   name: "slm-worker",
@@ -156,6 +158,14 @@ type RuntimeSettings = {
   statusBuilderAudienceSampleSize: number;
   quietHoursStartHour: number;
   quietHoursEndHour: number;
+  autoMarkReadEnabled: boolean;
+  autoMarkReadGroups: boolean;
+  autoMarkReadStatus: boolean;
+  presenceSubscribeEnabled: boolean;
+  chatModifyQuietHoursEnabled: boolean;
+  aboutAutomationEnabled: boolean;
+  aboutAutomationIntervalMinutes: number;
+  aboutAutomationTemplate: string;
 };
 
 type StyleProfileSnapshot = {
@@ -310,20 +320,20 @@ const CONTEXT_COMPACTION_MAX_DELETES = 260;
 const BLOCKLIST_CACHE_TTL_MS = 90 * 1000;
 const BLOCKLIST_FORCE_REFRESH_INTERVAL_MS = 8 * 60 * 1000;
 const PRIVACY_PREFLIGHT_MIN_INTERVAL_MS = 30 * 60 * 1000;
-const AUTO_MARK_READ_ENABLED = readEnvBoolean("SLM_AUTO_MARK_READ_ENABLED", true);
-const AUTO_MARK_READ_GROUPS_ENABLED = readEnvBoolean("SLM_AUTO_MARK_READ_GROUPS", false);
-const AUTO_MARK_READ_STATUS_ENABLED = readEnvBoolean("SLM_AUTO_MARK_READ_STATUS", false);
+const DEFAULT_AUTO_MARK_READ_ENABLED = readEnvBoolean("SLM_AUTO_MARK_READ_ENABLED", true);
+const DEFAULT_AUTO_MARK_READ_GROUPS_ENABLED = readEnvBoolean("SLM_AUTO_MARK_READ_GROUPS", false);
+const DEFAULT_AUTO_MARK_READ_STATUS_ENABLED = readEnvBoolean("SLM_AUTO_MARK_READ_STATUS", false);
 const READ_RECEIPT_DEDUPE_TTL_MS = 12 * 60 * 1000;
-const PRESENCE_SUBSCRIBE_ENABLED = readEnvBoolean("SLM_PRESENCE_SUBSCRIBE_ENABLED", true);
+const DEFAULT_PRESENCE_SUBSCRIBE_ENABLED = readEnvBoolean("SLM_PRESENCE_SUBSCRIBE_ENABLED", true);
 const PRESENCE_SUBSCRIBE_COOLDOWN_MS = 4 * 60 * 1000;
-const CHAT_MODIFY_QUIET_HOURS_ENABLED = readEnvBoolean("SLM_CHAT_MODIFY_QUIET_HOURS_ENABLED", false);
+const DEFAULT_CHAT_MODIFY_QUIET_HOURS_ENABLED = readEnvBoolean("SLM_CHAT_MODIFY_QUIET_HOURS_ENABLED", false);
 const CHAT_MODIFY_QUIET_HOURS_MIN_INTERVAL_MS = 3 * 60 * 1000;
-const ABOUT_AUTOMATION_ENABLED = readEnvBoolean("SLM_ABOUT_AUTOMATION_ENABLED", false);
-const ABOUT_AUTOMATION_INTERVAL_MS = Math.max(
-  15 * 60 * 1000,
-  Math.min(Number(process.env.SLM_ABOUT_AUTOMATION_INTERVAL_MINUTES || 360) * 60 * 1000, 7 * 24 * 60 * 60 * 1000),
+const DEFAULT_ABOUT_AUTOMATION_ENABLED = readEnvBoolean("SLM_ABOUT_AUTOMATION_ENABLED", false);
+const DEFAULT_ABOUT_AUTOMATION_INTERVAL_MINUTES = Math.max(
+  15,
+  Math.min(Number(process.env.SLM_ABOUT_AUTOMATION_INTERVAL_MINUTES || 360), 7 * 24 * 60),
 );
-const ABOUT_AUTOMATION_TEMPLATE = (process.env.SLM_ABOUT_AUTOMATION_TEMPLATE || "").trim();
+const DEFAULT_ABOUT_AUTOMATION_TEMPLATE = (process.env.SLM_ABOUT_AUTOMATION_TEMPLATE || "").trim();
 const CORE_HUMOR_PATTERN_GLOBAL = /\b(lol|lmao|lmfao|rofl|haha|hehe|funny|joke|banter|meme|roast|hilarious)\b/gi;
 const CORE_HUMOR_EMOJI_PATTERN = /[😂🤣😹😆😄😁😅😜🤪🙃]/u;
 const CORE_HUMOR_EMOJI_PATTERN_GLOBAL = /[😂🤣😹😆😄😁😅😜🤪🙃]/gu;
@@ -375,6 +385,42 @@ function readEnvBoolean(name: string, defaultValue: boolean) {
     return defaultValue;
   }
   return raw !== "false" && raw !== "0" && raw !== "off" && raw !== "no";
+}
+
+function resolveAutoMarkReadEnabled(runtimeSettings: RuntimeSettings | null) {
+  return runtimeSettings?.autoMarkReadEnabled ?? DEFAULT_AUTO_MARK_READ_ENABLED;
+}
+
+function resolveAutoMarkReadGroupsEnabled(runtimeSettings: RuntimeSettings | null) {
+  return runtimeSettings?.autoMarkReadGroups ?? DEFAULT_AUTO_MARK_READ_GROUPS_ENABLED;
+}
+
+function resolveAutoMarkReadStatusEnabled(runtimeSettings: RuntimeSettings | null) {
+  return runtimeSettings?.autoMarkReadStatus ?? DEFAULT_AUTO_MARK_READ_STATUS_ENABLED;
+}
+
+function resolvePresenceSubscribeEnabled(runtimeSettings: RuntimeSettings | null) {
+  return runtimeSettings?.presenceSubscribeEnabled ?? DEFAULT_PRESENCE_SUBSCRIBE_ENABLED;
+}
+
+function resolveChatModifyQuietHoursEnabled(runtimeSettings: RuntimeSettings | null) {
+  return runtimeSettings?.chatModifyQuietHoursEnabled ?? DEFAULT_CHAT_MODIFY_QUIET_HOURS_ENABLED;
+}
+
+function resolveAboutAutomationEnabled(runtimeSettings: RuntimeSettings | null) {
+  return runtimeSettings?.aboutAutomationEnabled ?? DEFAULT_ABOUT_AUTOMATION_ENABLED;
+}
+
+function resolveAboutAutomationIntervalMs(runtimeSettings: RuntimeSettings | null) {
+  const minutes = Math.round(
+    clamp(runtimeSettings?.aboutAutomationIntervalMinutes ?? DEFAULT_ABOUT_AUTOMATION_INTERVAL_MINUTES, 15, 7 * 24 * 60),
+  );
+  return minutes * 60 * 1000;
+}
+
+function resolveAboutAutomationTemplate(runtimeSettings: RuntimeSettings | null) {
+  const template = runtimeSettings?.aboutAutomationTemplate?.trim();
+  return template || DEFAULT_ABOUT_AUTOMATION_TEMPLATE;
 }
 
 function resolveRuntimeDeterministicModes(modes: string[] | undefined) {
@@ -1437,6 +1483,13 @@ async function createSocket(auth: Awaited<ReturnType<typeof useMultiFileAuthStat
     printQRInTerminal: true,
     browser: Browsers.macOS("Desktop"),
     markOnlineOnConnect: false,
+    // Keep socket processing direct-chat only:
+    // - ignore groups (`@g.us`)
+    // - ignore broadcast/system/status/newsletter threads
+    shouldIgnoreJid: (jid) => {
+      const normalized = (jid || "").trim().toLowerCase();
+      return isGroupJid(normalized) || isBroadcastOrSystemJid(normalized);
+    },
     syncFullHistory: syncHistory,
     fireInitQueries: false,
     shouldSyncHistoryMessage: () => syncHistory,
@@ -2844,17 +2897,18 @@ function resolveTextEmojiAllowlist() {
     message: {
       key: { id?: string | null; fromMe?: boolean | null; remoteJid?: string | null; participant?: string | null };
     };
+    runtimeSettings: RuntimeSettings | null;
     threadJid: string;
     threadKind: "direct" | "group" | "broadcast_or_system";
     isStatusBroadcast: boolean;
   }) => {
-    if (!AUTO_MARK_READ_ENABLED) {
+    if (!resolveAutoMarkReadEnabled(args.runtimeSettings)) {
       return;
     }
-    if (args.threadKind === "group" && !AUTO_MARK_READ_GROUPS_ENABLED) {
+    if (args.threadKind === "group" && !resolveAutoMarkReadGroupsEnabled(args.runtimeSettings)) {
       return;
     }
-    if (args.isStatusBroadcast && !AUTO_MARK_READ_STATUS_ENABLED) {
+    if (args.isStatusBroadcast && !resolveAutoMarkReadStatusEnabled(args.runtimeSettings)) {
       return;
     }
     if (args.message.key.fromMe) {
@@ -2904,8 +2958,9 @@ function resolveTextEmojiAllowlist() {
       }
     }
   };
-  const maybeSubscribePresence = async (jid: string) => {
-    if (!PRESENCE_SUBSCRIBE_ENABLED) {
+  const maybeSubscribePresence = async (jid: string, runtimeSettings?: RuntimeSettings | null) => {
+    const effectiveRuntimeSettings = runtimeSettings ?? (await getRuntimeSettings());
+    if (!resolvePresenceSubscribeEnabled(effectiveRuntimeSettings)) {
       return;
     }
     const threadKey = normalizeAccountJid(jid) || normalizeJidForLookup(jid);
@@ -2945,7 +3000,7 @@ function resolveTextEmojiAllowlist() {
     threadId?: Id<"threads">;
     reason: string;
   }) => {
-    if (!CHAT_MODIFY_QUIET_HOURS_ENABLED) {
+    if (!resolveChatModifyQuietHoursEnabled(args.runtimeSettings)) {
       return;
     }
     if (isGroupJid(args.jid) || args.jid === "status@broadcast") {
@@ -3001,7 +3056,7 @@ function resolveTextEmojiAllowlist() {
     threadId?: Id<"threads">;
     reason: string;
   }) => {
-    if (!CHAT_MODIFY_QUIET_HOURS_ENABLED) {
+    if (!resolveChatModifyQuietHoursEnabled(args.runtimeSettings)) {
       return;
     }
     if (isGroupJid(args.jid) || args.jid === "status@broadcast") {
@@ -3044,10 +3099,10 @@ function resolveTextEmojiAllowlist() {
         .catch(() => undefined);
     }
   };
-  const buildAutomatedAboutText = (nowMs: number) => {
+  const buildAutomatedAboutText = (nowMs: number, runtimeSettings: RuntimeSettings | null) => {
     const now = new Date(nowMs);
     const baseText =
-      ABOUT_AUTOMATION_TEMPLATE ||
+      resolveAboutAutomationTemplate(runtimeSettings) ||
       `Social Life Manager active • ${now.toLocaleDateString()} ${now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
     const rendered = baseText
       .replace(/\{date\}/gi, now.toLocaleDateString())
@@ -3056,16 +3111,17 @@ function resolveTextEmojiAllowlist() {
       .trim();
     return rendered.slice(0, 139).trim();
   };
-  const maybeRunAboutAutomation = async (reason: string, force = false) => {
-    if (!ABOUT_AUTOMATION_ENABLED) {
+  const maybeRunAboutAutomation = async (reason: string, runtimeSettings: RuntimeSettings | null, force = false) => {
+    if (!resolveAboutAutomationEnabled(runtimeSettings)) {
       return;
     }
     const now = Date.now();
-    if (!force && now - lastAboutAutomationAt < ABOUT_AUTOMATION_INTERVAL_MS) {
+    const intervalMs = resolveAboutAutomationIntervalMs(runtimeSettings);
+    if (!force && now - lastAboutAutomationAt < intervalMs) {
       return;
     }
     lastAboutAutomationAt = now;
-    const nextAbout = buildAutomatedAboutText(now);
+    const nextAbout = buildAutomatedAboutText(now, runtimeSettings);
     if (!nextAbout) {
       return;
     }
@@ -3541,11 +3597,19 @@ function resolveTextEmojiAllowlist() {
   const SELF_IMPROVE_ROOT = resolve(process.cwd(), ".slm", "self-improvement");
   const SELF_IMPROVE_LOCK_PATH = join(SELF_IMPROVE_ROOT, "runner.lock");
   const SELF_IMPROVE_LATEST_META_PATH = join(SELF_IMPROVE_ROOT, "latest-meta.json");
-  const SELF_IMPROVE_LATEST_REPORT_PATH = join(SELF_IMPROVE_ROOT, "latest.md");
-  const SELF_IMPROVE_STREAM_FLUSH_MS = 12_000;
-  const SELF_IMPROVE_STREAM_HEARTBEAT_MS = 45_000;
-  const SELF_IMPROVE_STREAM_MAX_LINES = 6;
   const SELF_CONTROL_MESSAGE_PREFIX = (process.env.SLM_SELF_CONTROL_MESSAGE_PREFIX || "").trim();
+  const OPENCLAW_CLI_PATH = (process.env.SLM_OPENCLAW_CLI_PATH || "openclaw").trim() || "openclaw";
+  const OPENCLAW_AGENT_ID = (process.env.SLM_OPENCLAW_AGENT_ID || "main").trim() || "main";
+  const OPENCLAW_AGENT_TIMEOUT_MS = (() => {
+    const raw = Number(process.env.SLM_OPENCLAW_AGENT_TIMEOUT_MS || 6 * 60 * 60 * 1000);
+    if (!Number.isFinite(raw)) {
+      return 6 * 60 * 60 * 1000;
+    }
+    return Math.max(1_000, Math.min(Math.round(raw), 24 * 60 * 60 * 1000));
+  })();
+  const OPENCLAW_PROBE_TIMEOUT_MS = Math.max(1_000, Math.min(OPENCLAW_AGENT_TIMEOUT_MS, 8_000));
+  const OPENCLAW_MAX_COMMAND_CHARS = 2_000;
+  const OPENCLAW_MAX_STDIO_CHARS = 1_024 * 1_024;
 
   const resolveSelfControlThread = (messageKey: SelfControlMessageKey): ResolvedSelfControlThread | null => {
     const rawThreadJid = getThreadJid(messageKey as Parameters<typeof getThreadJid>[0]);
@@ -3622,126 +3686,58 @@ function resolveTextEmojiAllowlist() {
     throw new Error(`self-control reply send failed: ${fallbackError}`);
   };
 
+  const formatAssistantReply = (speaker: "openclaw" | "codex", text: string) => {
+    const trimmed = (text || "").trim();
+    if (!trimmed) {
+      return `${speaker}: ...`;
+    }
+    return `${speaker}: ${trimmed}`;
+  };
+
   const monitorSelfImproveRunStream = (args: {
     child: ChildProcessWithoutNullStreams;
     selfControl: ResolvedSelfControlThread;
-    prompt: string;
   }) => {
     const startedAt = Date.now();
-    let runId = "";
-    let stdoutBuffer = "";
-    let stderrBuffer = "";
-    let queuedLines: string[] = [];
-    let lastUpdateAt = startedAt;
-    let flushInFlight = false;
-
-    const enqueueLine = (source: "stdout" | "stderr", rawLine: string) => {
-      const line = compactLogText(rawLine.replace(/\s+/g, " ").trim(), 230);
-      if (!line) {
-        return;
+    let stdoutTail = "";
+    let stderrTail = "";
+    const appendTail = (current: string, chunk: string, limit = 12_000) => {
+      const next = `${current}${chunk}`;
+      if (next.length <= limit) {
+        return next;
       }
-      const runMatch = line.match(/starting run\s+([^\s]+)/i);
-      if (runMatch?.[1]) {
-        runId = runMatch[1];
-      }
-      queuedLines.push(`${source === "stderr" ? "err" : "out"}: ${line}`);
-      if (queuedLines.length > 90) {
-        queuedLines = queuedLines.slice(-90);
-      }
-    };
-
-    const flushBuffer = (source: "stdout" | "stderr", force = false) => {
-      const buffer = source === "stdout" ? stdoutBuffer : stderrBuffer;
-      const parts = buffer.split(/\r?\n/);
-      const remainder = parts.pop() ?? "";
-      if (source === "stdout") {
-        stdoutBuffer = force ? "" : remainder;
-      } else {
-        stderrBuffer = force ? "" : remainder;
-      }
-      for (const row of parts) {
-        enqueueLine(source, row);
-      }
-      if (force && remainder.trim()) {
-        enqueueLine(source, remainder);
-      }
-    };
-
-    const flushUpdate = async (force = false) => {
-      if (flushInFlight) {
-        return;
-      }
-
-      const now = Date.now();
-      const hasLines = queuedLines.length > 0;
-      const shouldHeartbeat = !hasLines && now - lastUpdateAt >= SELF_IMPROVE_STREAM_HEARTBEAT_MS;
-      if (!force && !hasLines && !shouldHeartbeat) {
-        return;
-      }
-
-      const elapsedSeconds = Math.max(1, Math.round((now - startedAt) / 1000));
-      const lines = hasLines ? queuedLines.slice(-SELF_IMPROVE_STREAM_MAX_LINES) : [];
-      if (hasLines) {
-        queuedLines = [];
-      }
-
-      flushInFlight = true;
-      try {
-        const text = [
-          "Local Codex improvement live update",
-          `prompt: ${compactLogText(args.prompt, 120)}`,
-          ...(runId ? [`run: ${runId}`] : []),
-          `elapsed: ${elapsedSeconds}s`,
-          ...(lines.length > 0
-            ? [
-                "stream:",
-                ...lines.map((line) => `- ${line}`),
-              ]
-            : ["stream: still running..."]),
-          `report: ${SELF_IMPROVE_LATEST_REPORT_PATH}`,
-        ].join("\n");
-        await sendSelfControlText({ selfControl: args.selfControl, text });
-        lastUpdateAt = Date.now();
-      } catch {
-        // ignore stream update send errors; completion summary still attempts delivery
-      } finally {
-        flushInFlight = false;
-      }
+      return next.slice(next.length - limit);
     };
 
     args.child.stdout.setEncoding("utf8");
     args.child.stderr.setEncoding("utf8");
     args.child.stdout.on("data", (chunk: string) => {
-      stdoutBuffer += chunk;
-      flushBuffer("stdout", false);
+      stdoutTail = appendTail(stdoutTail, chunk);
     });
     args.child.stderr.on("data", (chunk: string) => {
-      stderrBuffer += chunk;
-      flushBuffer("stderr", false);
+      stderrTail = appendTail(stderrTail, chunk);
     });
 
-    const interval = setInterval(() => {
-      void flushUpdate(false);
-    }, SELF_IMPROVE_STREAM_FLUSH_MS);
-
-    args.child.once("close", (code, signal) => {
-      clearInterval(interval);
+    args.child.once("close", (code) => {
       void (async () => {
-        flushBuffer("stdout", true);
-        flushBuffer("stderr", true);
-        await flushUpdate(true);
         const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
-        const completedText = [
-          "Local Codex improvement run completed",
-          ...(runId ? [`run: ${runId}`] : []),
-          `elapsed: ${elapsedSeconds}s`,
-          typeof code === "number" && code === 0
-            ? "result: success"
-            : `result: warning (${signal ? `signal ${signal}` : `exit ${code ?? "unknown"}`})`,
-          `report: ${SELF_IMPROVE_LATEST_REPORT_PATH}`,
-          'check: send "improve latest"',
-        ].join("\n");
-        await sendSelfControlText({ selfControl: args.selfControl, text: completedText }).catch(() => undefined);
+        const success = typeof code === "number" && code === 0;
+        const briefDetail = compactLogText(
+          [stderrTail, stdoutTail]
+            .map((part) => part.trim())
+            .filter(Boolean)
+            .join(" | "),
+          220,
+        );
+
+        const text = success
+          ? formatAssistantReply("codex", `done. finished in ${elapsedSeconds}s.`)
+          : formatAssistantReply(
+              "codex",
+              `I hit an issue${briefDetail ? ` (${briefDetail})` : ""}.`,
+            );
+
+        await sendSelfControlText({ selfControl: args.selfControl, text }).catch(() => undefined);
       })();
     });
   };
@@ -3780,28 +3776,24 @@ function resolveTextEmojiAllowlist() {
     if (!prompt) {
       return {
         hasError: true,
-        responseText: "Local Codex improvement command failed\nreason: prompt is required",
+        responseText: formatAssistantReply("codex", 'tell me what to improve, e.g. "improve tighten retries".'),
       };
     }
 
     if (prompt.length > SELF_IMPROVE_MAX_PROMPT_CHARS) {
       return {
         hasError: true,
-        responseText: [
-          "Local Codex improvement command failed",
-          `reason: prompt too long (${prompt.length} chars, max ${SELF_IMPROVE_MAX_PROMPT_CHARS})`,
-        ].join("\n"),
+        responseText: formatAssistantReply(
+          "codex",
+          `that prompt is too long (${prompt.length} chars, max ${SELF_IMPROVE_MAX_PROMPT_CHARS}).`,
+        ),
       };
     }
 
     if (await isSelfImproveRunActive()) {
       return {
         hasError: true,
-        responseText: [
-          "Local Codex improvement command not started",
-          "reason: another self-improvement run is already active",
-          'check: send "improve status"',
-        ].join("\n"),
+        responseText: formatAssistantReply("codex", 'I am already running an improve task. send "improve status".'),
       };
     }
 
@@ -3815,74 +3807,45 @@ function resolveTextEmojiAllowlist() {
     monitorSelfImproveRunStream({
       child,
       selfControl: args.selfControl,
-      prompt,
     });
 
     return {
       hasError: false,
-      responseText: [
-        "Local Codex improvement run queued",
-        `prompt: ${compactLogText(prompt, 220)}`,
-        `status: started with live updates${child.pid ? ` (pid ${child.pid})` : ""}`,
-        `report: ${SELF_IMPROVE_LATEST_REPORT_PATH}`,
-        'check: wait for live updates, or send "improve status"',
-      ].join("\n"),
+      responseText: formatAssistantReply("codex", "on it. I will reply here when I am done."),
     };
   };
 
   const buildSelfImproveStatusText = async () => {
     const active = await isSelfImproveRunActive();
     const latest = await readLatestSelfImproveMeta();
-    const lines: string[] = ["Local Codex self-improve status", `active: ${active ? "running" : "idle"}`];
+    if (active) {
+      return formatAssistantReply("codex", "still working on your improve task.");
+    }
     if (!latest?.runId) {
-      lines.push("latest: no completed runs yet");
-      lines.push(`report: ${SELF_IMPROVE_LATEST_REPORT_PATH}`);
-      return lines.join("\n");
+      return formatAssistantReply("codex", "idle. no completed improve tasks yet.");
     }
 
-    lines.push(`latest run: ${latest.runId}`);
-    if (latest.finishedAt) {
-      lines.push(`finished: ${latest.finishedAt}`);
+    if (latest.codexErrorMessage || (typeof latest.codexExitCode === "number" && latest.codexExitCode !== 0)) {
+      return formatAssistantReply("codex", "idle. last improve task ended with an issue.");
     }
-    if (typeof latest.durationMs === "number" && Number.isFinite(latest.durationMs)) {
-      lines.push(`duration: ${Math.round(latest.durationMs / 1000)}s`);
-    }
-    if (latest.codexErrorMessage) {
-      lines.push(`last result: warning (${compactLogText(latest.codexErrorMessage, 120)})`);
-    } else if (typeof latest.codexExitCode === "number" && latest.codexExitCode !== 0) {
-      lines.push(`last result: warning (exit ${latest.codexExitCode})`);
-    } else {
-      lines.push("last result: ok");
-    }
-    lines.push(`report: ${SELF_IMPROVE_LATEST_REPORT_PATH}`);
-    return lines.join("\n");
+
+    const durationText =
+      typeof latest.durationMs === "number" && Number.isFinite(latest.durationMs)
+        ? ` last run took ${Math.round(latest.durationMs / 1000)}s.`
+        : "";
+    return formatAssistantReply("codex", `idle. last improve task finished successfully.${durationText}`);
   };
 
   const buildSelfImproveLatestText = async () => {
     const latest = await readLatestSelfImproveMeta();
     if (!latest?.runId) {
-      return [
-        "Local Codex self-improve latest",
-        "latest: no completed runs yet",
-        `report: ${SELF_IMPROVE_LATEST_REPORT_PATH}`,
-      ].join("\n");
+      return formatAssistantReply("codex", "no completed improve tasks yet.");
     }
-
-    const lines = [
-      "Local Codex self-improve latest",
-      `run: ${latest.runId}`,
-      latest.finishedAt ? `finished: ${latest.finishedAt}` : undefined,
-      typeof latest.durationMs === "number" && Number.isFinite(latest.durationMs)
-        ? `duration: ${Math.round(latest.durationMs / 1000)}s`
-        : undefined,
-      latest.codexErrorMessage
-        ? `codex: warning (${compactLogText(latest.codexErrorMessage, 120)})`
-        : typeof latest.codexExitCode === "number" && latest.codexExitCode !== 0
-          ? `codex: warning (exit ${latest.codexExitCode})`
-          : "codex: ok",
-      `report: ${SELF_IMPROVE_LATEST_REPORT_PATH}`,
-    ].filter(Boolean) as string[];
-    return lines.join("\n");
+    const hasError = Boolean(latest.codexErrorMessage) || (typeof latest.codexExitCode === "number" && latest.codexExitCode !== 0);
+    if (hasError) {
+      return formatAssistantReply("codex", "last improve task hit an issue.");
+    }
+    return formatAssistantReply("codex", "last improve task completed successfully.");
   };
 
   const buildSelfControlHelpText = () => {
@@ -3900,6 +3863,12 @@ function resolveTextEmojiAllowlist() {
       "- improve <prompt>",
       "- improve status",
       "- improve latest",
+      "",
+      "OpenClaw CLI:",
+      "- openclaw <instruction>",
+      "- @openclaw <instruction>",
+      "- openclaw status",
+      "- openclaw help",
       "",
       "Help:",
       "- help",
@@ -4078,6 +4047,380 @@ function resolveTextEmojiAllowlist() {
         ...detailLines.map((line) => `- ${line}`),
       ].join("\n"),
     };
+  };
+
+  const parseOpenClawReplyText = (payload: unknown): string => {
+    if (!payload || typeof payload !== "object") {
+      return "";
+    }
+
+    const record = payload as Record<string, unknown>;
+    const directCandidates = [record.reply, record.message, record.text, record.output, record.result];
+    for (const candidate of directCandidates) {
+      if (typeof candidate === "string" && candidate.trim()) {
+        return compactLogText(candidate.trim(), 520);
+      }
+    }
+
+    if (Array.isArray(record.payloads)) {
+      for (const item of record.payloads) {
+        if (!item || typeof item !== "object") {
+          continue;
+        }
+        const text = (item as Record<string, unknown>).text;
+        if (typeof text === "string" && text.trim()) {
+          return compactLogText(text.trim(), 520);
+        }
+      }
+    }
+
+    if (record.data && typeof record.data === "object") {
+      const nested = parseOpenClawReplyText(record.data);
+      if (nested) {
+        return nested;
+      }
+    }
+
+    if (record.result && typeof record.result === "object") {
+      const nested = parseOpenClawReplyText(record.result);
+      if (nested) {
+        return nested;
+      }
+    }
+
+    return "";
+  };
+
+  const parseOpenClawJsonObject = (raw: string): Record<string, unknown> | null => {
+    const trimmed = raw.trim();
+    if (!trimmed) {
+      return null;
+    }
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const parseOpenClawJsonFromStdout = (stdout: string) => {
+    const full = parseOpenClawJsonObject(stdout);
+    if (full) {
+      return full;
+    }
+
+    const lines = stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .reverse();
+    for (const line of lines) {
+      const parsed = parseOpenClawJsonObject(line);
+      if (parsed) {
+        return parsed;
+      }
+    }
+    return null;
+  };
+
+  const appendWithLimit = (current: string, chunk: string) => {
+    const next = current + chunk;
+    if (next.length <= OPENCLAW_MAX_STDIO_CHARS) {
+      return next;
+    }
+    return next.slice(next.length - OPENCLAW_MAX_STDIO_CHARS);
+  };
+
+  const runOpenClawCli = async (cliArgs: string[], timeoutMs: number) => {
+    return await new Promise<{
+      stdout: string;
+      stderr: string;
+      exitCode: number | null;
+      signal: NodeJS.Signals | null;
+      timedOut: boolean;
+      spawnError: string;
+    }>((resolve) => {
+      let stdout = "";
+      let stderr = "";
+      let timedOut = false;
+      let spawnError = "";
+
+      const child = spawn(OPENCLAW_CLI_PATH, cliArgs, {
+        cwd: process.cwd(),
+        env: process.env,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+
+      if (child.stdout) {
+        child.stdout.setEncoding("utf8");
+        child.stdout.on("data", (chunk: string) => {
+          stdout = appendWithLimit(stdout, chunk);
+        });
+      }
+      if (child.stderr) {
+        child.stderr.setEncoding("utf8");
+        child.stderr.on("data", (chunk: string) => {
+          stderr = appendWithLimit(stderr, chunk);
+        });
+      }
+
+      const timer = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGTERM");
+        setTimeout(() => {
+          child.kill("SIGKILL");
+        }, 1_500).unref();
+      }, timeoutMs);
+
+      child.once("error", (error) => {
+        spawnError = error instanceof Error ? error.message : String(error);
+      });
+
+      child.once("close", (exitCode, signal) => {
+        clearTimeout(timer);
+        resolve({
+          stdout: stdout.trim(),
+          stderr: stderr.trim(),
+          exitCode,
+          signal,
+          timedOut,
+          spawnError: spawnError.trim(),
+        });
+      });
+    });
+  };
+
+  const buildOpenClawHelpText = () => {
+    return formatAssistantReply(
+      "openclaw",
+      'say "openclaw <task>" or "@openclaw <task>". send "openclaw status" anytime.',
+    );
+  };
+
+  const buildOpenClawStatusText = async () => {
+    const probe = await runOpenClawCli(["--version"], OPENCLAW_PROBE_TIMEOUT_MS);
+    const probeDetail = compactLogText(
+      [probe.spawnError, probe.stderr, probe.stdout]
+        .map((part) => (part || "").trim())
+        .filter(Boolean)
+        .join(" | "),
+      180,
+    );
+
+    if (probe.timedOut) {
+      return formatAssistantReply("openclaw", "not ready right now (status probe timed out).");
+    }
+    if (probe.spawnError) {
+      return formatAssistantReply("openclaw", "not ready right now (could not launch CLI).");
+    }
+    if (probe.exitCode !== 0) {
+      return formatAssistantReply(
+        "openclaw",
+        `not ready right now (status check failed${probeDetail ? `: ${probeDetail}` : ""}).`,
+      );
+    }
+    return formatAssistantReply("openclaw", "ready.");
+  };
+
+  const runOpenClawCommand = async (args: {
+    command: OpenClawCommand;
+  }): Promise<{ responseText: string; hasError: boolean }> => {
+    if (args.command.action === "help") {
+      return {
+        responseText: buildOpenClawHelpText(),
+        hasError: false,
+      };
+    }
+
+    if (args.command.action === "status") {
+      return {
+        responseText: await buildOpenClawStatusText(),
+        hasError: false,
+      };
+    }
+
+    const input = args.command.input.trim();
+    if (!input) {
+      return {
+        responseText: formatAssistantReply("openclaw", "tell me what to do."),
+        hasError: true,
+      };
+    }
+    if (input.length > OPENCLAW_MAX_COMMAND_CHARS) {
+      return {
+        responseText: formatAssistantReply(
+          "openclaw",
+          `that request is too long (${input.length} chars, max ${OPENCLAW_MAX_COMMAND_CHARS}).`,
+        ),
+        hasError: true,
+      };
+    }
+
+    const cli = await runOpenClawCli(
+      ["agent", "--agent", OPENCLAW_AGENT_ID, "--message", input, "--json"],
+      OPENCLAW_AGENT_TIMEOUT_MS,
+    );
+    const parsed = parseOpenClawJsonFromStdout(cli.stdout);
+    const replyText =
+      parseOpenClawReplyText(parsed) ||
+      compactLogText([cli.stdout, cli.stderr].filter(Boolean).join(" | "), 420) ||
+      "no output";
+
+    if (cli.timedOut) {
+      return {
+        responseText: formatAssistantReply("openclaw", "sorry, that took too long to finish."),
+        hasError: true,
+      };
+    }
+    if (cli.spawnError) {
+      return {
+        responseText: formatAssistantReply("openclaw", "sorry, I could not start that task."),
+        hasError: true,
+      };
+    }
+    if (cli.exitCode !== 0) {
+      return {
+        responseText: formatAssistantReply("openclaw", "sorry, that task failed."),
+        hasError: true,
+      };
+    }
+
+    return {
+      responseText: formatAssistantReply("openclaw", replyText),
+      hasError: false,
+    };
+  };
+
+  let openClawRunCounter = 0;
+  const nextOpenClawLocalRunId = () => {
+    openClawRunCounter += 1;
+    return `oc-${Date.now().toString(36)}-${openClawRunCounter.toString(36)}`;
+  };
+
+  const launchOpenClawForwardCommand = (args: {
+    command: Extract<OpenClawCommand, { action: "forward" }>;
+    selfControl: ResolvedSelfControlThread;
+  }) => {
+    const localRunId = nextOpenClawLocalRunId();
+
+    void (async () => {
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: "openclaw.command.started",
+          detail: compactLogText(`${localRunId}: ${args.command.raw}`, 280),
+        })
+        .catch(() => undefined);
+
+      const cli = await runOpenClawCli(
+        ["agent", "--agent", OPENCLAW_AGENT_ID, "--message", args.command.input.trim(), "--json"],
+        OPENCLAW_AGENT_TIMEOUT_MS,
+      );
+      const parsed = parseOpenClawJsonFromStdout(cli.stdout);
+      const replyText =
+        parseOpenClawReplyText(parsed) ||
+        compactLogText([cli.stdout, cli.stderr].filter(Boolean).join(" | "), 420) ||
+        "no output";
+
+      let responseText = "";
+      let hasError = false;
+      if (cli.timedOut) {
+        responseText = formatAssistantReply("openclaw", "sorry, that took too long to finish.");
+        hasError = true;
+      } else if (cli.spawnError) {
+        responseText = formatAssistantReply("openclaw", "sorry, I could not start that task.");
+        hasError = true;
+      } else if (cli.exitCode !== 0) {
+        responseText = formatAssistantReply("openclaw", "sorry, that task failed.");
+        hasError = true;
+      } else {
+        responseText = formatAssistantReply("openclaw", replyText);
+      }
+
+      await sendSelfControlText({ selfControl: args.selfControl, text: responseText }).catch(async (error) => {
+        const err = error instanceof Error ? error.message : String(error);
+        await convex
+          .mutation(convexRefs.systemRecordEvent, {
+            source: "worker",
+            eventType: "openclaw.command.delivery_failed",
+            detail: compactLogText(`${localRunId}: ${err}`, 280),
+          })
+          .catch(() => undefined);
+      });
+
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: hasError ? "openclaw.command.failed" : "openclaw.command.executed",
+          detail: compactLogText(`${localRunId}: ${responseText}`, 280),
+        })
+        .catch(() => undefined);
+    })();
+
+    return localRunId;
+  };
+
+  const maybeHandleOpenClawCommand = async (message: {
+    key: SelfControlMessageKey;
+    message?: unknown;
+  }) => {
+    const parsed = parseInboundMessage(message.message as Parameters<typeof parseInboundMessage>[0]);
+    if (parsed.kind !== "text") {
+      return false;
+    }
+
+    const selfControl = resolveSelfControlThread(message.key);
+    if (!selfControl) {
+      return false;
+    }
+
+    const commandText = parseSelfControlCommandText({
+      rawText: parsed.text,
+      prefix: SELF_CONTROL_MESSAGE_PREFIX,
+    });
+    if (!commandText) {
+      return false;
+    }
+
+    const command = parseOpenClawCommand(commandText);
+    if (!command) {
+      return false;
+    }
+
+    await convex
+      .mutation(convexRefs.systemRecordEvent, {
+        source: "worker",
+        eventType: "openclaw.command.received",
+        detail: compactLogText(command.raw, 260),
+      })
+      .catch(() => undefined);
+
+    if (command.action === "forward") {
+      const localRunId = launchOpenClawForwardCommand({ command, selfControl });
+      const queuedText = formatAssistantReply("openclaw", "on it. I will reply here when it is done.");
+      await sendSelfControlText({ selfControl, text: queuedText });
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: "openclaw.command.queued",
+          detail: compactLogText(`${localRunId}: ${command.raw}`, 280),
+        })
+        .catch(() => undefined);
+      return true;
+    }
+
+    const outcome = await runOpenClawCommand({ command });
+    await sendSelfControlText({ selfControl, text: outcome.responseText });
+    await convex
+      .mutation(convexRefs.systemRecordEvent, {
+        source: "worker",
+        eventType: outcome.hasError ? "openclaw.command.failed" : "openclaw.command.executed",
+        detail: compactLogText(outcome.responseText, 280),
+      })
+      .catch(() => undefined);
+
+    return true;
   };
 
   const maybeHandleSelfImproveCommand = async (message: {
@@ -5026,6 +5369,7 @@ function resolveTextEmojiAllowlist() {
 
       await maybeMarkInboundAsRead({
         message,
+        runtimeSettings,
         threadJid: rawThreadJid || threadJid,
         threadKind,
         isStatusBroadcast,
@@ -5801,9 +6145,10 @@ function resolveTextEmojiAllowlist() {
           reconnectAttempts = 0;
           logger.info("WhatsApp connection established");
           await reportListener(true, "Worker listener is active. AI reply automation is running.");
+          const runtimeSettings = await getRuntimeSettings();
           await refreshBlocklist("connection_open", true);
           await runPrivacyPreflight("connection_open", true);
-          await maybeRunAboutAutomation("connection_open", true);
+          await maybeRunAboutAutomation("connection_open", runtimeSettings, true);
         }
       });
     });
@@ -5934,6 +6279,10 @@ function resolveTextEmojiAllowlist() {
           }
           const selfImproveCommandHandled = await maybeHandleSelfImproveCommand(message);
           if (selfImproveCommandHandled) {
+            continue;
+          }
+          const openClawCommandHandled = await maybeHandleOpenClawCommand(message);
+          if (openClawCommandHandled) {
             continue;
           }
           const runtimeCommandHandled = await maybeHandleRuntimeControlCommand(message);
@@ -6960,7 +7309,7 @@ function resolveTextEmojiAllowlist() {
                 if (!hydrated.mediaAssetId) {
                   throw new Error("Meme outbox item missing media asset id.");
                 }
-                await maybeSubscribePresence(item.jid);
+                await maybeSubscribePresence(item.jid, runtimeSettings);
                 await sock.sendPresenceUpdate("composing", item.jid);
                 await convex.mutation(convexRefs.outboxMarkTyping, { outboxId: item.outboxId });
                 await sleep(hydrated.typingMs);
@@ -6979,7 +7328,7 @@ function resolveTextEmojiAllowlist() {
                 }, quotedMessageOptions);
                 await sock.sendPresenceUpdate("paused", item.jid);
               } else {
-                await maybeSubscribePresence(item.jid);
+                await maybeSubscribePresence(item.jid, runtimeSettings);
                 await sock.sendPresenceUpdate("composing", item.jid);
                 await convex.mutation(convexRefs.outboxMarkTyping, { outboxId: item.outboxId });
                 await sleep(hydrated.typingMs);
@@ -7223,18 +7572,20 @@ function resolveTextEmojiAllowlist() {
   }, MAINTENANCE_TICK_MS);
   setInterval(() => {
     runBackgroundTask("whatsapp.maintenance.safety_sync", async () => {
+      const runtimeSettings = await getRuntimeSettings();
       await refreshBlocklist("maintenance", false);
       await runPrivacyPreflight("maintenance", false);
-      await maybeRunAboutAutomation("maintenance", false);
+      await maybeRunAboutAutomation("maintenance", runtimeSettings, false);
     });
   }, MAINTENANCE_TICK_MS);
   runBackgroundTask("whatsapp.sticker.context_backfill.startup", runStickerContextBackfillPass);
   runBackgroundTask("whatsapp.maintenance.status_cleanup.startup", () => maybeRunStatusCleanup(true));
   runBackgroundTask("whatsapp.maintenance.context_compaction.startup", () => maybeRunContextCompaction(true));
   runBackgroundTask("whatsapp.maintenance.safety_sync.startup", async () => {
+    const runtimeSettings = await getRuntimeSettings();
     await refreshBlocklist("startup", true);
     await runPrivacyPreflight("startup", true);
-    await maybeRunAboutAutomation("startup", true);
+    await maybeRunAboutAutomation("startup", runtimeSettings, true);
   });
 
   logger.info(
@@ -7257,6 +7608,13 @@ function resolveTextEmojiAllowlist() {
       contextCompactionMaxThreads: startupSettings?.contextCompactionMaxThreads ?? CONTEXT_COMPACTION_MAX_THREADS,
       contextCompactionMaxDeletes: startupSettings?.contextCompactionMaxDeletes ?? CONTEXT_COMPACTION_MAX_DELETES,
       compactContextGroupJidsConfigured: startupSettings?.compactContextGroupJids?.length || 0,
+      autoMarkReadEnabled: resolveAutoMarkReadEnabled(startupSettings),
+      autoMarkReadGroups: resolveAutoMarkReadGroupsEnabled(startupSettings),
+      autoMarkReadStatus: resolveAutoMarkReadStatusEnabled(startupSettings),
+      presenceSubscribeEnabled: resolvePresenceSubscribeEnabled(startupSettings),
+      chatModifyQuietHoursEnabled: resolveChatModifyQuietHoursEnabled(startupSettings),
+      aboutAutomationEnabled: resolveAboutAutomationEnabled(startupSettings),
+      aboutAutomationIntervalMinutes: Math.round(resolveAboutAutomationIntervalMs(startupSettings) / 60_000),
     },
     "Social Life Manager worker started",
   );

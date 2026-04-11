@@ -40,7 +40,7 @@ cp .env.example .env.local
 - `AZURE_AI_ENDPOINT`
 - `AZURE_AI_API_KEY`
 - `AZURE_AI_MODEL` (for example `gpt-5.4`)
-- `SLM_HISTORY_SYNC_ENABLED=true` (recommended for history/context enrichment)
+- `SLM_HISTORY_SYNC_ENABLED=true` (full history sync for direct chats; group + broadcast/status JIDs are ignored)
 - `SLM_EMBEDDINGS_LOCAL_ENABLED=true` (semantic context rerank)
 
 If you use an Azure AI Foundry `.../responses` URI, set `AZURE_AI_API_STYLE=responses` (or keep `auto` and it will be inferred).
@@ -122,6 +122,30 @@ Notes:
 - Runs execute in the background via `bun run self-improve -- --prompt "<prompt>"`.
 - Latest report path: `.slm/self-improvement/latest.md`.
 
+## OpenClaw CLI Commands (Self Chat)
+
+Your current WhatsApp workflow stays intact. These commands trigger your local OpenClaw CLI from self chat (no OpenClaw WhatsApp channel required):
+
+- `openclaw <instruction>`
+- `openclaw status`
+- `openclaw help`
+- `@openclaw <instruction>`
+- `anything @openclaw <instruction>`
+- `anything openclaw: <instruction>`
+
+Example:
+- `openclaw summarize inbox and suggest top 3 follow-ups`
+- `yo @openclaw summarize inbox and give me next actions`
+
+Environment variables:
+- `SLM_OPENCLAW_CLI_PATH` (optional, default `openclaw`)
+- `SLM_OPENCLAW_AGENT_ID` (optional, default `main`)
+- `SLM_OPENCLAW_AGENT_TIMEOUT_MS` (optional, default `21600000` = 6h)
+
+Long-running behavior:
+- `openclaw <instruction>` and `@openclaw <instruction>` are queued and run in background.
+- You get an immediate queued confirmation, then a final completion/failure message when OpenClaw finishes (supports multi-hour jobs).
+
 ## Useful Commands
 
 - `bun run dev:next` - Next.js dashboard only
@@ -140,6 +164,7 @@ This repo includes a local recurring job runner that feeds project context/logs 
 - Runner: `scripts/self-improvement-cycle.ts`
 - Reports output: `.slm/self-improvement/runs/<run-id>/report.md`
 - Latest report shortcut: `.slm/self-improvement/latest.md`
+- UI workspace: `/self-improvement` (history, status, errors, and full run reports)
 
 Run one cycle:
 
@@ -194,5 +219,6 @@ Notes:
 ## Notes
 
 - The worker stores WhatsApp auth at `WHATSAPP_AUTH_PATH` (default `.wa_auth`).
+- `SLM_HISTORY_SYNC_ENABLED` defaults to `true`; group + broadcast/system JIDs are ignored at the socket layer so sync stays direct-chat only.
 - Group chats are ignored by default unless rules override behavior.
 - High-risk inbound content is guardrail-blocked for manual review.
