@@ -9,6 +9,7 @@ import { formatDateTime, formatDateTimeWithRelative, trim } from "@/lib/format";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
 import { followupRescheduleDueAt, type FollowupItem } from "@/lib/ui/followups";
 import type { MediaPreviewResource } from "@/lib/ui/media";
+import { generateTodoTitleWithAi } from "@/lib/ui/todos";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { useMutation, useQuery } from "convex/react";
@@ -43,6 +44,15 @@ type TodoCandidateItem = {
   _id: string;
   title: string;
   suggestedDueAt?: number;
+  thread?: { _id?: string; title?: string; jid?: string } | null;
+  sourceMessage?:
+    | {
+        _id?: string;
+        text?: string;
+        messageAt?: number;
+        direction?: "inbound" | "outbound";
+      }
+    | null;
 };
 
 type GuardrailFlagItem = {
@@ -80,6 +90,7 @@ function QueueContent() {
   const cancelFollowup = useMutation(api.followups.cancel);
   const clearAllFollowups = useMutation(api.followups.clearAll);
   const createTodoFromCandidate = useMutation(api.todos.fromCandidate);
+  const updateTodoCandidateTitle = useMutation(api.todos.updateCandidateTitle);
   const clearAllTodos = useMutation(api.todos.clearAll);
   const resolveGuardrail = useMutation(api.queue.resolveGuardrail);
   const clearAllGuardrails = useMutation(api.queue.clearAllGuardrails);
@@ -210,18 +221,27 @@ function QueueContent() {
     ).then((outcome) => closeReviewOnSuccess("followups", followUpId, outcome));
   };
 
-  const onConvertTodo = (candidateId: string) => {
-    const key = `todo:${candidateId}`;
+  const onConvertTodo = (item: TodoCandidateItem) => {
+    const key = `todo:${item._id}`;
     void runAction(
       key,
       async () => {
-        await createTodoFromCandidate({ candidateId: candidateId as Id<"todoCandidates"> });
+        const generatedTitle = await generateTodoTitleWithAi({
+          currentTitle: item.title,
+          sourceText: item.sourceMessage?.text,
+          threadId: item.thread?._id,
+        });
+        await updateTodoCandidateTitle({
+          candidateId: item._id as Id<"todoCandidates">,
+          title: generatedTitle,
+        });
+        await createTodoFromCandidate({ candidateId: item._id as Id<"todoCandidates"> });
       },
       {
-        pendingLabel: "Converting...",
-        successMessage: "Candidate converted to TODO.",
+        pendingLabel: "Generating TODO...",
+        successMessage: "TODO generated with AI and added.",
       },
-    ).then((outcome) => closeReviewOnSuccess("todos", candidateId, outcome));
+    ).then((outcome) => closeReviewOnSuccess("todos", item._id, outcome));
   };
 
   const onReject = (draftId: string) => {
@@ -832,11 +852,11 @@ function QueueContent() {
             <button
               type="button"
               className="btn btn-primary"
-              onClick={() => onConvertTodo(reviewState.item._id)}
+              onClick={() => onConvertTodo(reviewState.item)}
               disabled={getRecord(`todo:${reviewState.item._id}`).pending}
               aria-disabled={getRecord(`todo:${reviewState.item._id}`).pending}
             >
-              {getRecord(`todo:${reviewState.item._id}`).pending ? "Converting..." : "Convert to TODO"}
+              {getRecord(`todo:${reviewState.item._id}`).pending ? "Generating..." : "Generate TODO with AI"}
             </button>
             {getRecord(`todo:${reviewState.item._id}`).error ? (
               <p className="queue-meta action-inline-error" role="alert">

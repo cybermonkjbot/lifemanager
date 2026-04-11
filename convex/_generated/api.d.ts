@@ -9,6 +9,7 @@
  */
 
 import type * as backlog from "../backlog.js";
+import type * as calls from "../calls.js";
 import type * as chatTools from "../chatTools.js";
 import type * as contextTools from "../contextTools.js";
 import type * as crons from "../crons.js";
@@ -54,6 +55,7 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   backlog: typeof backlog;
+  calls: typeof calls;
   chatTools: typeof chatTools;
   contextTools: typeof contextTools;
   crons: typeof crons;

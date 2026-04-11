@@ -365,6 +365,18 @@ const AI_DENIAL_PATTERNS = [
   /\bi\s+reply\s+myself(?:\s+only)?\b/i,
   /\bmanual(?:ly)?\s+only\b/i,
 ];
+const AI_IDENTITY_DISCLOSURE_CUE_PATTERNS = [
+  /\b(?:are|r)\s+(?:you|u)\s+(?:an?\s+)?(?:ai|bot|assistant)\b/i,
+  /\bis\s+this\s+(?:an?\s+)?(?:ai|bot|assistant)\b/i,
+  /\b(?:you(?:'|’)re|you are)\s+(?:an?\s+)?(?:ai|bot|assistant)\b/i,
+  /\b(?:who\s+(?:are|r)\s+(?:you|u)|what\s+are\s+you)\b/i,
+  /\b(?:who\s+(?:built|made|designed|created)\s+(?:you|this)|where\s+did\s+you\s+come\s+from|what(?:'|’)s\s+your\s+origin|what\s+is\s+your\s+origin)\b/i,
+  /\b(?:is\s+this\s+chatgpt|are\s+you\s+chatgpt|is\s+this\s+automated|is\s+this\s+a\s+bot)\b/i,
+];
+const AI_IDENTITY_DISCLOSURE_RULE =
+  "Identity disclosure protocol: when asked whether this is AI or asked about origin, disclose transparently and professionally. State that you are a conversational intelligence tool designed by Joshua to augment his business and social bandwidth. Mention Joshua uses state-of-the-art AI for timely high-quality communication, remains the primary authority, may be active in this thread or review logs later, and your role is an assistant bridging the gap when he is unavailable. Keep the wording tech-forward, human, and concise.";
+const JADL_DISCLOSURE_RESPONSE_TEMPLATE =
+  "Correct - you are speaking with Joshua's digital liaison. I am a conversational intelligence tool designed by Joshua to augment his business and social bandwidth. He uses state-of-the-art AI to keep communication timely and high quality, and he remains the primary authority. He may be active in this thread or review it later. I am here as his assistant to bridge the gap when he is unavailable. How can I help on his behalf?";
 const MATH_CUE_PATTERNS = [
   /\b(calculate|calc|solve|equation|evaluate|simplify|work out|find)\b/i,
   /\b(sum|difference|total|average|mean|remainder|plus|minus|times|multipl(?:y|ied)|divide|divided|percentage|percent)\b/i,
@@ -868,6 +880,27 @@ const CLOSE_MODE_REOPEN_PATTERNS = [
   /\b(what do you think|how does that sound|does that work|is that okay)\b/i,
   /\b(anything else|any other thing|any thoughts?)\b/i,
   /\b(feel free to .*reach out|reach out if you need)\b/i,
+];
+const HEALTH_DISCLOSURE_PATTERNS = [
+  /\b(sick|ill|unwell|not feeling well|fever|flu|migraine|pain|injur(?:ed|y)|hurt)\b/i,
+  /\b(accident|car crash|bike crash|motor accident|slip and fall|fell down)\b/i,
+  /\b(hospital|clinic|doctor said|diagnos(?:ed|is)|emergency room|er)\b/i,
+];
+const HEALTH_SELF_CARE_ADVICE_PATTERNS = [
+  /\b(take care(?: of yourself)?|rest(?: up)?|get some rest|sleep well)\b/i,
+  /\b(drink (?:water|fluids)|hydrate|eat well)\b/i,
+  /\b(take (?:your )?meds?|take medication|medicine)\b/i,
+  /\b(see a doctor|go to (?:the )?(?:hospital|clinic)|check with a doctor)\b/i,
+];
+const HEALTH_EMPATHY_REPLY_EN_VARIANTS = [
+  "I am sorry to hear that. I hope you feel better soon.",
+  "I am really sorry that happened. I hope you recover quickly.",
+  "Sorry you are dealing with that. I hope you get better soon.",
+];
+const HEALTH_EMPATHY_REPLY_PIDGIN_VARIANTS = [
+  "Sorry say this happen. I hope you feel better soon.",
+  "Ah sorry o, that one no easy. I hope you recover quickly.",
+  "Sorry you're dealing with that. I hope you get better soon.",
 ];
 
 function clamp01(value: number) {
@@ -1737,6 +1770,7 @@ type ResponseWorkbench = {
   personalDomain: PersonalConversationDomain;
   toneNeed: PersonalToneNeed;
   businessStyleRisk: boolean;
+  capitalMarketsGuidanceCue: boolean;
   emotionalCue: boolean;
   planningCue: boolean;
   friendshipCohort?: FriendshipGenerationCohort;
@@ -1884,6 +1918,11 @@ const PROFESSIONAL_LINGUA_SIGNAL_PATTERNS: Array<{ id: string; pattern: RegExp; 
   { id: "work_keywords", pattern: /\b(client|proposal|brief|deadline|stakeholder|meeting|action item)\b/i, weight: 0.7 },
   { id: "polite_formality", pattern: /\b(please|kindly|appreciate|thank you)\b/i, weight: 0.28 },
 ];
+const CAPITAL_MARKETS_INSTRUMENT_PATTERN =
+  /\b(stock|stocks|equity|equities|share|shares|ngx|nse|nigeria exchange|nigerian stock market|bonds?|fgn|sukuk|treasury bill|treasury bills|t-bill|tbill)\b/i;
+const CAPITAL_MARKETS_GUIDANCE_PATTERN =
+  /\b(guidance|guide|advice|advise|recommend(?:ation)?|view|outlook|buy|sell|hold|accumulate|entry|target|stop(?:-|\s*)loss|portfolio|allocation|yield|coupon|risk|analysis|afri-?invest|stanbic|investor portal)\b/i;
+const INVENTORY_CONTEXT_PATTERN = /\b(in stock|for sale|available for orders?|order now|buy now|promo code)\b/i;
 
 function inferFriendshipScenarioHint(text: string) {
   for (const hint of FRIENDSHIP_SCENARIO_HINTS) {
@@ -2050,13 +2089,27 @@ function detectPersonalConversationDomain(text: string): PersonalConversationDom
   if (/\b(stress|anxious|upset|sad|depressed|sick|hospital|therapy|overwhelmed|tired|hurt|pain|panic)\b/i.test(normalized)) {
     return "wellbeing";
   }
-  if (/\b(rent|salary|budget|cash|money|transfer|owe|debt|loan|invoice|payment)\b/i.test(normalized)) {
+  if (
+    /\b(rent|salary|budget|cash|money|transfer|owe|debt|loan|invoice|payment)\b/i.test(normalized) ||
+    (CAPITAL_MARKETS_INSTRUMENT_PATTERN.test(normalized) && CAPITAL_MARKETS_GUIDANCE_PATTERN.test(normalized))
+  ) {
     return "finances";
   }
   if (/\b(client|deliverable|deadline|kpi|sla|ticket|escalat|stakeholder|proposal|quote)\b/i.test(normalized)) {
     return "work_admin";
   }
   return "general";
+}
+
+function hasCapitalMarketsGuidanceCue(text: string) {
+  const normalized = normalizeOutboundText(text).toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  if (INVENTORY_CONTEXT_PATTERN.test(normalized)) {
+    return false;
+  }
+  return CAPITAL_MARKETS_INSTRUMENT_PATTERN.test(normalized) && CAPITAL_MARKETS_GUIDANCE_PATTERN.test(normalized);
 }
 
 function inferPersonalToneNeed(args: { inboundText: string; personalDomain: PersonalConversationDomain }): PersonalToneNeed {
@@ -2109,11 +2162,13 @@ function inferPersonalContextProfile(args: {
     /\b(when|where|time|schedule|plan|send|share|confirm|book|arrange|tomorrow|tonight|weekend|eta)\b/i.test(corpus) ||
     /\?/.test(args.inboundText);
   const businessStyleRisk = /\b(client|deliverable|deadline|kpi|sla|ticket|escalat|stakeholder|proposal|quote)\b/i.test(corpus);
+  const capitalMarketsGuidanceCue = hasCapitalMarketsGuidanceCue(corpus);
 
   return {
     personalDomain,
     toneNeed,
     businessStyleRisk,
+    capitalMarketsGuidanceCue,
     emotionalCue,
     planningCue,
   };
@@ -2882,6 +2937,12 @@ function buildPrompt(args: {
     inboundText: args.inboundText,
     historyLines: args.historyLines,
   });
+  const aiIdentityDisclosureCue = hasAiIdentityDisclosureCue(args.inboundText);
+  const aiDisclosureInstruction = aiIdentityDisclosureCue
+    ? AI_IDENTITY_DISCLOSURE_RULE
+    : aiDisclosureContext
+      ? "You have already disclosed in this chat that an AI assistant helps you. Do not deny or contradict that. Keep references brief and only when relevant."
+      : "Do not mention AI, policies, prompt rules, or internal reasoning.";
   const steeringInstruction = steeringInstructionForMode(steeringMode);
   const steeringPriorityInstruction =
     "Steering priority order: (1) explicit safety/closure cues, (2) latest inbound ask, (3) relevant conversation context, (4) style/persona polish. If these conflict, follow this order.";
@@ -3005,9 +3066,8 @@ function buildPrompt(args: {
       "Sound conversational and specific, never stiff or corporate.",
       "Avoid customer-support phrasing (ticket, escalation, SLA, thanks for reaching out) and avoid email-style sign-offs.",
       "Directly react to something concrete in the latest inbound message (topic, emotion, or request).",
-      aiDisclosureContext
-        ? "You have already disclosed in this chat that an AI assistant helps you. Do not deny or contradict that. Keep references brief and only when relevant."
-        : "Do not mention AI, policies, prompt rules, or internal reasoning.",
+      "If someone says they are sick or had an accident, do not give care instructions (no 'take care', 'rest up', or medical tips). Use brief empathy and a get-better wish.",
+      aiDisclosureInstruction,
       "Do not overpromise. If timing is uncertain, say you'll confirm shortly.",
       "Do not prolong the conversation unnecessarily. If the intent is complete, close gracefully in one short line.",
       "When the other person hands you the choice or sounds indecisive, take the lead with one practical recommendation instead of bouncing back vague follow-up prompts.",
@@ -3270,6 +3330,14 @@ function hasDeclaredAiAssistantContext(args: { inboundText: string; historyLines
   return AI_DISCLOSURE_PATTERNS.some((pattern) => pattern.test(context));
 }
 
+function hasAiIdentityDisclosureCue(inboundText: string) {
+  const normalized = normalizeOutboundText(inboundText || "");
+  if (!normalized) {
+    return false;
+  }
+  return AI_IDENTITY_DISCLOSURE_CUE_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
 function stripAiDisclosureContradictions(text: string, aiDeclared: boolean) {
   if (!aiDeclared) {
     return normalizeOutboundText(text);
@@ -3288,6 +3356,26 @@ function stripAiDisclosureContradictions(text: string, aiDeclared: boolean) {
     return "";
   }
   return normalizeOutboundText(kept.join(" "));
+}
+
+function enforceAiIdentityDisclosure(args: { inboundText: string; replyText: string }) {
+  const reply = normalizeOutboundText(args.replyText || "");
+  if (!hasAiIdentityDisclosureCue(args.inboundText)) {
+    return reply;
+  }
+  const disclosureIndicators = [
+    /\bconversational intelligence tool\b/i,
+    /\bdigital liaison\b/i,
+    /\bdesigned by joshua\b/i,
+    /\bstate-of-the-art ai\b/i,
+    /\bprimary authority\b/i,
+    /\bbridge(?:s|ing)? the gap\b/i,
+  ];
+  const hasStrongDisclosure = disclosureIndicators.filter((pattern) => pattern.test(reply)).length >= 3;
+  if (hasStrongDisclosure) {
+    return reply;
+  }
+  return JADL_DISCLOSURE_RESPONSE_TEMPLATE;
 }
 
 function inferKnownGenderFromContext(args: { inboundText: string; historyLines?: string[] }): "male" | "female" | null {
@@ -3509,6 +3597,37 @@ function removeRepeatedDirectNameAddress(text: string, inboundText: string, thei
     .trim();
 }
 
+function hasHealthDisclosureCue(text: string) {
+  const normalized = normalizeOutboundText(text || "");
+  if (!normalized) {
+    return false;
+  }
+  return HEALTH_DISCLOSURE_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+function hasSelfCareAdviceCue(text: string) {
+  const normalized = normalizeOutboundText(text || "");
+  if (!normalized) {
+    return false;
+  }
+  return HEALTH_SELF_CARE_ADVICE_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+function enforceHealthEmpathyOnlyReply(args: { inboundText: string; replyText: string; pidginMode: boolean }) {
+  const reply = normalizeOutboundText(args.replyText || "");
+  if (!reply) {
+    return reply;
+  }
+  if (!hasHealthDisclosureCue(args.inboundText)) {
+    return reply;
+  }
+  if (!hasSelfCareAdviceCue(reply)) {
+    return reply;
+  }
+  const variants = args.pidginMode ? HEALTH_EMPATHY_REPLY_PIDGIN_VARIANTS : HEALTH_EMPATHY_REPLY_EN_VARIANTS;
+  return normalizeOutboundText(pickVariant(`${args.inboundText}:${reply}:health_empathy_only`, variants));
+}
+
 export function postProcessReplyText(args: {
   text: string;
   inboundText: string;
@@ -3552,6 +3671,10 @@ export function postProcessReplyText(args: {
     historyLines: args.historyLines || [],
   });
   const withoutAiContradiction = stripAiDisclosureContradictions(withoutSalesClaims, aiDeclared);
+  const withIdentityDisclosure = enforceAiIdentityDisclosure({
+    inboundText: args.inboundText,
+    replyText: withoutAiContradiction,
+  });
   const jokeContext = hasJokeContextCue({
     inboundText: args.inboundText,
     historyLines: args.historyLines || [],
@@ -3561,7 +3684,7 @@ export function postProcessReplyText(args: {
     inboundText: args.inboundText,
     historyLines: args.historyLines || [],
   });
-  const withoutGenderedWording = stripGenderedWording(withoutAiContradiction, knownGender, jokeContext);
+  const withoutGenderedWording = stripGenderedWording(withIdentityDisclosure, knownGender, jokeContext);
   const withoutAwkwardCatchphrase = stripAwkwardCatchphrases(withoutGenderedWording);
   const withAntiPuppetTone = applyAntiPuppetTone({
     inboundText: args.inboundText,
@@ -3572,12 +3695,16 @@ export function postProcessReplyText(args: {
     inboundText: args.inboundText,
     replyText: withAntiPuppetTone,
   });
+  const withHealthEmpathyOnly = enforceHealthEmpathyOnlyReply({
+    inboundText: args.inboundText,
+    replyText: withAntiCalculatorTone,
+    pidginMode,
+  });
   const shouldForceCloseOut =
-    shouldForceNoFollowUpQuestion(steeringMode) &&
-    (/\?/.test(withAntiCalculatorTone) || hasCloseModeReopenCue(withAntiCalculatorTone));
+    shouldForceNoFollowUpQuestion(steeringMode) && (/\?/.test(withHealthEmpathyOnly) || hasCloseModeReopenCue(withHealthEmpathyOnly));
   const withoutFollowUpQuestion = shouldForceCloseOut
     ? normalizeOutboundText(heuristicReply(args.inboundText, args.historyLines || []))
-    : withAntiCalculatorTone;
+    : withHealthEmpathyOnly;
   const finalText = withoutFollowUpQuestion || fallback;
   return hasAwkwardCatchphrase(finalText) ? fallback : finalText;
 }

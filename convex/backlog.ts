@@ -139,7 +139,12 @@ function computeScore(args: {
   const guardrail = evaluateGuardrail(args.latestText || "");
   const hasQuestion = looksLikeQuestion(args.latestText);
   const hasPromise = Boolean(detectPromiseOrPlan(args.latestText));
-  const hasTodo = Boolean(detectTodoCandidate(args.latestText));
+  const hasTodo = Boolean(
+    detectTodoCandidate({
+      text: args.latestText,
+      direction: "inbound",
+    }),
+  );
 
   let score = RELATIONSHIP_WEIGHT[args.relationship];
 
@@ -200,7 +205,12 @@ function recommendAction(args: {
   const pendingHours = msToHours(args.pendingAgeMs);
   const hasQuestion = looksLikeQuestion(args.latestText);
   const hasPromise = Boolean(detectPromiseOrPlan(args.latestText));
-  const hasTodo = Boolean(detectTodoCandidate(args.latestText));
+  const hasTodo = Boolean(
+    detectTodoCandidate({
+      text: args.latestText,
+      direction: "inbound",
+    }),
+  );
 
   if (pendingHours <= 24) {
     return "answer";

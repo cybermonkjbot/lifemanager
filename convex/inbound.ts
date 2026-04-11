@@ -5,7 +5,6 @@ import { internal } from "./_generated/api";
 import { mutation } from "./_generated/server";
 import { detectFutureCommitment, hasRecentFollowupDuplicate } from "./lib/commitments";
 import { getConfig } from "./lib/config";
-import { detectTodoCandidate } from "./lib/heuristics";
 import {
   classifyThreadKind,
   eligibilityReasonLabel,
@@ -38,6 +37,8 @@ type IngestHistoricalResult = {
   promiseDetected?: boolean;
   todoDetected?: boolean;
   nightPausedUntil?: number;
+  callReplyBarrierAt?: number;
+  callReplyBarrierBlocked?: boolean;
 };
 
 function normalizeTimestampMs(raw: number | undefined, fallbackMs: number) {
@@ -225,6 +226,7 @@ export const ingest = mutation({
         isArchived: args.isArchived || false,
         archivedAt: args.isArchived ? normalizedArchivedAt : undefined,
         ghostedUntil: undefined,
+        callReplyBarrierAt: undefined,
         lastMessageAt: isStatusMessage ? 0 : messageAt,
         createdAt: now,
         updatedAt: now,
@@ -263,6 +265,11 @@ export const ingest = mutation({
     if ((nightPausedUntil || 0) <= now) {
       nightPausedUntil = undefined;
     }
+    let callReplyBarrierAt = thread.callReplyBarrierAt;
+    if ((callReplyBarrierAt || 0) <= 0) {
+      callReplyBarrierAt = undefined;
+    }
+    let callReplyBarrierBlocked = false;
 
     const explicitIgnore = await ctx.db
       .query("ignoreRules")
@@ -298,6 +305,8 @@ export const ingest = mutation({
           promiseDetected: false,
           todoDetected: false,
           nightPausedUntil,
+          callReplyBarrierAt,
+          callReplyBarrierBlocked,
         };
       }
     }
@@ -314,6 +323,31 @@ export const ingest = mutation({
 
     const latestMessage = recentWindowMessages[0];
     const stale = isHistoryIngest ? false : Boolean(latestMessage && messageAt + INBOUND_STALE_GRACE_MS < latestMessage.messageAt);
+
+    const shouldEvaluateCallBarrier =
+      !isHistoryIngest &&
+      threadKind === "direct" &&
+      !isStatusMessage &&
+      messageType !== "reaction" &&
+      !stale;
+    if (shouldEvaluateCallBarrier && (callReplyBarrierAt || 0) > 0) {
+      if (messageAt > (callReplyBarrierAt || 0)) {
+        callReplyBarrierAt = undefined;
+        await ctx.db.patch(thread._id, {
+          callReplyBarrierAt: undefined,
+          updatedAt: now,
+        });
+        await ctx.db.insert("systemEvents", {
+          source: "worker",
+          eventType: "thread.call.reply_barrier.cleared",
+          threadId: thread._id,
+          detail: "Post-call inbound received; call reply barrier cleared.",
+          createdAt: now,
+        });
+      } else {
+        callReplyBarrierBlocked = true;
+      }
+    }
 
     const eligibleForGhostStart =
       !isHistoryIngest &&
@@ -441,6 +475,8 @@ export const ingest = mutation({
           ? ingestMode === "history_fetch"
             ? "inbound.history_fetch.received"
             : "inbound.history_sync.received"
+          : callReplyBarrierBlocked
+            ? "inbound.call_reply_barrier.skipped"
           : messageType === "reaction"
             ? "inbound.reaction"
             : stale
@@ -521,22 +557,17 @@ export const ingest = mutation({
         });
       }
 
-      const todo = detectTodoCandidate(normalizedText);
-      if (todo) {
-        todoDetected = true;
-        await ctx.db.insert("todoCandidates", {
-          threadId: thread._id,
-          sourceMessageId: messageId,
-          title: todo.title,
-          suggestedDueAt: todo.suggestedDueAt,
-          status: "suggested",
-          createdAt: now,
-          updatedAt: now,
-        });
-      }
     }
 
-    if (!isHistoryIngest && !ignored && !stale && !isStatusMessage && messageType !== "reaction" && !args.skipDraftGeneration) {
+    if (
+      !isHistoryIngest &&
+      !ignored &&
+      !stale &&
+      !isStatusMessage &&
+      messageType !== "reaction" &&
+      !callReplyBarrierBlocked &&
+      !args.skipDraftGeneration
+    ) {
       await ctx.scheduler.runAfter(0, internal.draft.generate, {
         threadId: thread._id,
         sourceMessageId: messageId,
@@ -568,6 +599,8 @@ export const ingest = mutation({
       todoDetected,
       ingestMode,
       nightPausedUntil,
+      callReplyBarrierAt,
+      callReplyBarrierBlocked,
     };
   },
 });
@@ -638,6 +671,7 @@ export const ingestHistorical = mutation({
         isArchived: args.isArchived || false,
         archivedAt: args.isArchived ? normalizedArchivedAt : undefined,
         ghostedUntil: undefined,
+        callReplyBarrierAt: undefined,
         lastMessageAt: isStatusMessage ? 0 : messageAt,
         createdAt: now,
         updatedAt: now,

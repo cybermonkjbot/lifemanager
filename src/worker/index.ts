@@ -89,6 +89,11 @@ import {
   resolveMemeAssetWithFallback,
   type MemeAssetSource,
 } from "./meme-policy";
+import {
+  extractStickerProviderContentHashFromMessage,
+  normalizeHexHashToken,
+  shouldCaptureMediaAfterIngest,
+} from "./sticker-dedupe";
 import { parseRuntimeCommand, type RuntimeCommand, type RuntimeCommandTarget } from "./runtime-commands";
 import { parseSelfImproveCommand, type SelfImproveCommand } from "./self-improve-command";
 import { isSelfControlHelpCommand } from "./control-help-command";
@@ -308,12 +313,18 @@ const TEXT_EMOJI_NON_ALLOWLIST_WARMUP_MAX_PER_WINDOW = 2;
 const TEXT_EMOJI_WINDOW_MS = 6 * 60 * 60 * 1000;
 const STICKER_COMPANION_COOLDOWN_MS = 45 * 60 * 1000;
 const CALL_FALLBACK_COOLDOWN_MS = 20 * 60 * 1000;
+const CALL_CONTEXT_MIN_DURATION_MS = Math.round(
+  clamp(Number(process.env.SLM_CALL_CONTEXT_MIN_DURATION_MS || 2 * 60 * 1000), 30_000, 30 * 60 * 1000),
+);
 const CALL_AUTO_DECLINE_FALLBACK_TEXT =
   process.env.SLM_CALL_FALLBACK_TEXT?.trim() ||
   "I can't take WhatsApp calls here right now. Please send a message and I'll reply here.";
 const STATUS_RETENTION_MS = 40 * 60 * 1000;
 const STATUS_CLEANUP_INTERVAL_MS = 40 * 60 * 1000;
 const STATUS_CLEANUP_BATCH_LIMIT = 160;
+const STICKER_DEDUPE_INTERVAL_MS = 30 * 60 * 1000;
+const STICKER_DEDUPE_SCAN_GROUP_LIMIT = 200;
+const STICKER_DEDUPE_MERGE_LIMIT = 25;
 const CONTEXT_COMPACTION_INTERVAL_MS = 12 * 60 * 1000;
 const CONTEXT_COMPACTION_MAX_THREADS = 24;
 const CONTEXT_COMPACTION_MAX_DELETES = 260;
@@ -3438,6 +3449,7 @@ function resolveTextEmojiAllowlist() {
     kind: CapturableMediaKind;
     threadId?: string;
     whatsappMessageId?: string;
+    providerContentHash?: string;
     mimeType?: string;
     direction: "inbound" | "outbound";
     ingestMode: "live" | "history_sync" | "history_fetch";
@@ -3458,6 +3470,10 @@ function resolveTextEmojiAllowlist() {
       }
 
       const contentHash = createHash("sha256").update(buffer).digest("hex");
+      const providerContentHash =
+        args.kind === "sticker"
+          ? normalizeHexHashToken(args.providerContentHash) || extractStickerProviderContentHashFromMessage(args.message)
+          : undefined;
       const cacheKey = mediaCacheKey(args.kind, contentHash);
       const cachedAssetId = mediaAssetIdByKey.get(cacheKey);
       if (cachedAssetId) {
@@ -3539,6 +3555,7 @@ function resolveTextEmojiAllowlist() {
         threadId: args.threadId as Id<"threads"> | undefined,
         enabled: true,
         contentHash,
+        providerContentHash,
       })) as Id<"mediaAssets">;
 
       mediaAssetIdByKey.set(cacheKey, assetId);
@@ -4744,9 +4761,19 @@ function resolveTextEmojiAllowlist() {
         duplicate: boolean;
       };
 
+      if (ingested.duplicate) {
+        return;
+      }
+
       const runtimeSettings = await getRuntimeSettings();
       const shouldCaptureGroupMedia = runtimeSettings?.captureGroupMediaEnabled ?? false;
-      if (mediaKind && ingested.messageId && (shouldCaptureGroupMedia || !isGroupJid(rawThreadJid || ""))) {
+      if (shouldCaptureMediaAfterIngest({
+        duplicate: ingested.duplicate,
+        hasMediaKind: Boolean(mediaKind),
+        hasMessageId: Boolean(ingested.messageId),
+        shouldCaptureGroupMedia,
+        isGroupThread: isGroupJid(rawThreadJid || ""),
+      })) {
         await maybeCaptureMediaAsset({
           message: message as Parameters<typeof downloadMediaMessage>[0],
           messageId: ingested.messageId,
@@ -4776,24 +4803,61 @@ function resolveTextEmojiAllowlist() {
     chatId?: string;
     groupJid?: string;
     isGroup?: boolean;
-    status?: string;
+    isVideo?: boolean;
+    offline?: boolean;
+    date?: Date;
+    status?: "offer" | "ringing" | "timeout" | "reject" | "accept" | "terminate" | string;
   }) => {
     try {
-      const callStatus = callEvent.status || "";
-      if (callStatus !== "offer") {
+      const callStatus = (callEvent.status || "").trim();
+      if (
+        callStatus !== "offer" &&
+        callStatus !== "ringing" &&
+        callStatus !== "timeout" &&
+        callStatus !== "reject" &&
+        callStatus !== "accept" &&
+        callStatus !== "terminate"
+      ) {
         return;
       }
 
       const callId = (callEvent.id || "").trim();
       const callFrom = (callEvent.from || "").trim();
       const threadJid = (callEvent.chatId || callEvent.groupJid || callFrom || "").trim();
-      if (!callId || !callFrom || !threadJid) {
+      if (!callId || !threadJid) {
         return;
       }
 
       const threadKind = classifyThreadKindFromJid(threadJid);
       const isGroupThread = threadKind === "group";
       const fallbackKey = isGroupThread ? threadJid : normalizeAccountJid(threadJid) || threadJid;
+      const callEventAt = callEvent.date instanceof Date ? callEvent.date.getTime() : Date.now();
+      const callFromAccount = normalizeAccountJid(callFrom);
+      const isFromSelf = Boolean(callFromAccount && getSelfAccountIds().includes(callFromAccount));
+
+      await convex
+        .mutation(convexRefs.callsRecordEvent, {
+          provider: "whatsapp",
+          callId,
+          threadJid,
+          fromJid: callFrom || undefined,
+          status: callStatus,
+          eventAt: callEventAt,
+          isGroup: callEvent.isGroup,
+          isVideo: callEvent.isVideo,
+          offline: callEvent.offline,
+          isFromSelf,
+          minDurationMs: CALL_CONTEXT_MIN_DURATION_MS,
+        })
+        .catch(() => undefined);
+
+      if (callStatus !== "offer") {
+        return;
+      }
+
+      if (!callFrom) {
+        return;
+      }
 
       const eligibility = (await convex
         .query(convexRefs.threadsGetEligibilityByJid, {
@@ -5003,10 +5067,23 @@ function resolveTextEmojiAllowlist() {
         stale?: boolean;
         reactionTargetMessageId?: string;
         nightPausedUntil?: number;
+        callReplyBarrierAt?: number;
+        callReplyBarrierBlocked?: boolean;
       };
 
       const shouldCaptureGroupMedia = runtimeSettings?.captureGroupMediaEnabled ?? false;
-      if (mediaKind && ingest.messageId && (shouldCaptureGroupMedia || !isGroupJid(rawThreadJid || ""))) {
+      if (ingest.duplicate) {
+        logger.info({ threadJid, whatsappMessageId: message.key.id }, "Inbound duplicate ignored");
+        return;
+      }
+
+      if (shouldCaptureMediaAfterIngest({
+        duplicate: ingest.duplicate,
+        hasMediaKind: Boolean(mediaKind),
+        hasMessageId: Boolean(ingest.messageId),
+        shouldCaptureGroupMedia,
+        isGroupThread: isGroupJid(rawThreadJid || ""),
+      })) {
         await maybeCaptureMediaAsset({
           message: message as Parameters<typeof downloadMediaMessage>[0],
           messageId: ingest.messageId,
@@ -5019,11 +5096,6 @@ function resolveTextEmojiAllowlist() {
         });
       }
 
-      if (ingest.duplicate) {
-        logger.info({ threadJid, whatsappMessageId: message.key.id }, "Inbound duplicate ignored");
-        return;
-      }
-
       if (ingest.stale) {
         logger.info(
           { threadJid, whatsappMessageId: message.key.id, messageAt },
@@ -5034,6 +5106,18 @@ function resolveTextEmojiAllowlist() {
 
       if (ingest.ignored) {
         logger.info({ threadJid, blockedReason: ingest.blockedReason }, "Inbound ignored by rules");
+        return;
+      }
+
+      if (!isStatusBroadcast && ingest.callReplyBarrierBlocked) {
+        logger.info(
+          {
+            threadJid,
+            callReplyBarrierAt: ingest.callReplyBarrierAt,
+            whatsappMessageId: message.key.id,
+          },
+          "Inbound skipped by call reply barrier",
+        );
         return;
       }
 
@@ -7585,8 +7669,57 @@ function resolveTextEmojiAllowlist() {
     }
   };
 
+  const runStickerExactDedupePass = async () => {
+    try {
+      const result = (await convex.mutation(convexRefs.mediaDedupeStickerExactPass, {
+        scanGroupLimit: STICKER_DEDUPE_SCAN_GROUP_LIMIT,
+        mergeLimit: STICKER_DEDUPE_MERGE_LIMIT,
+      })) as {
+        mergedGroups?: number;
+        mergedAssets?: number;
+        duplicateGroups?: number;
+        scannedGroups?: number;
+        hasMore?: boolean;
+      } | null;
+
+      if (!result) {
+        return;
+      }
+
+      const mergedAssets = Number(result.mergedAssets || 0);
+      const mergedGroups = Number(result.mergedGroups || 0);
+      if (mergedAssets <= 0) {
+        return;
+      }
+
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: "media.sticker.dedupe",
+          detail: `Merged ${mergedAssets} duplicate sticker asset(s) across ${mergedGroups} group(s) (scanned groups=${Number(result.scannedGroups || 0)}, duplicate groups=${Number(result.duplicateGroups || 0)}).`,
+        })
+        .catch(() => undefined);
+
+      if (result.hasMore) {
+        setTimeout(() => {
+          void runStickerExactDedupePass();
+        }, 1_500);
+      }
+    } catch (error) {
+      const err = error instanceof Error ? error.message : String(error);
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: "media.sticker.dedupe_error",
+          detail: compactLogText(err, 280),
+        })
+        .catch(() => undefined);
+    }
+  };
+
   let lastStatusCleanupAt = 0;
   let lastContextCompactionAt = 0;
+  let lastStickerDedupeAt = 0;
   const MAINTENANCE_TICK_MS = 60_000;
 
   const maybeRunStatusCleanup = async (force = false) => {
@@ -7615,6 +7748,15 @@ function resolveTextEmojiAllowlist() {
     }
     lastContextCompactionAt = now;
     await runContextCompactionPass(runtimeSettings);
+  };
+
+  const maybeRunStickerDedupe = async (force = false) => {
+    const now = Date.now();
+    if (!force && now - lastStickerDedupeAt < STICKER_DEDUPE_INTERVAL_MS) {
+      return;
+    }
+    lastStickerDedupeAt = now;
+    await runStickerExactDedupePass();
   };
 
   const runBackgroundTask = (taskName: string, task: () => Promise<void>) => {
@@ -7648,6 +7790,9 @@ function resolveTextEmojiAllowlist() {
     runBackgroundTask("whatsapp.maintenance.context_compaction", maybeRunContextCompaction);
   }, MAINTENANCE_TICK_MS);
   setInterval(() => {
+    runBackgroundTask("whatsapp.maintenance.sticker_dedupe", maybeRunStickerDedupe);
+  }, MAINTENANCE_TICK_MS);
+  setInterval(() => {
     runBackgroundTask("whatsapp.maintenance.safety_sync", async () => {
       const runtimeSettings = await getRuntimeSettings();
       await refreshBlocklist("maintenance", false);
@@ -7658,6 +7803,7 @@ function resolveTextEmojiAllowlist() {
   runBackgroundTask("whatsapp.sticker.context_backfill.startup", runStickerContextBackfillPass);
   runBackgroundTask("whatsapp.maintenance.status_cleanup.startup", () => maybeRunStatusCleanup(true));
   runBackgroundTask("whatsapp.maintenance.context_compaction.startup", () => maybeRunContextCompaction(true));
+  runBackgroundTask("whatsapp.maintenance.sticker_dedupe.startup", () => maybeRunStickerDedupe(true));
   runBackgroundTask("whatsapp.maintenance.safety_sync.startup", async () => {
     const runtimeSettings = await getRuntimeSettings();
     await refreshBlocklist("startup", true);
@@ -7684,6 +7830,9 @@ function resolveTextEmojiAllowlist() {
       ),
       contextCompactionMaxThreads: startupSettings?.contextCompactionMaxThreads ?? CONTEXT_COMPACTION_MAX_THREADS,
       contextCompactionMaxDeletes: startupSettings?.contextCompactionMaxDeletes ?? CONTEXT_COMPACTION_MAX_DELETES,
+      stickerDedupeIntervalMinutes: Math.round(STICKER_DEDUPE_INTERVAL_MS / 60_000),
+      stickerDedupeScanGroupLimit: STICKER_DEDUPE_SCAN_GROUP_LIMIT,
+      stickerDedupeMergeLimit: STICKER_DEDUPE_MERGE_LIMIT,
       compactContextGroupJidsConfigured: startupSettings?.compactContextGroupJids?.length || 0,
       autoMarkReadEnabled: resolveAutoMarkReadEnabled(startupSettings),
       autoMarkReadGroups: resolveAutoMarkReadGroupsEnabled(startupSettings),

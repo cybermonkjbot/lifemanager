@@ -172,9 +172,9 @@ const FRIENDSHIP_CROSS_GEN_SCENARIOS: FriendshipCrossGenScenarioTemplate[] = [
     scenario: "health_update",
     inbound: "I haven't been feeling well lately.",
     tags: ["health", "support", "care"],
-    boomerReply: "I am sorry to hear that. Please take care of yourself and keep me posted.",
-    genZReply: "sorry you're dealing with that. please take care and keep me posted.",
-    bridgeReply: "I am sorry you are dealing with that. Please take care and keep me updated.",
+    boomerReply: "I am sorry to hear that. I hope you feel better soon.",
+    genZReply: "sorry you're dealing with that. i hope you feel better soon.",
+    bridgeReply: "I am sorry you are dealing with that. I hope you feel better soon.",
   },
   {
     scenario: "grief_support",

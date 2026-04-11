@@ -8,6 +8,7 @@ import { UIModal } from "@/components/ui-modal";
 import { followupRescheduleDueAt } from "@/lib/ui/followups";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
 import type { MediaPreviewResource } from "@/lib/ui/media";
+import { generateTodoTitleWithAi } from "@/lib/ui/todos";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { useMutation, useQuery } from "convex/react";
@@ -727,6 +728,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
   const rescheduleFollowup = useMutation(api.followups.reschedule);
   const cancelFollowup = useMutation(api.followups.cancel);
   const createTodoFromCandidate = useMutation(api.todos.fromCandidate);
+  const updateTodoCandidateTitle = useMutation(api.todos.updateCandidateTitle);
   const resolveGuardrail = useMutation(api.queue.resolveGuardrail);
   const setThreadPersonality = useMutation(api.personality.setThreadSetting);
   const setThreadPromptProfile = useMutation(api.personality.setThreadPromptProfile);
@@ -1134,16 +1136,25 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
     );
   };
 
-  const onReviewConvertTodo = (candidateId: string) => {
-    const key = `todo:${candidateId}`;
+  const onReviewConvertTodo = (item: ThreadReviewTodoItem) => {
+    const key = `todo:${item._id}`;
     void runAction(
       key,
       async () => {
-        await createTodoFromCandidate({ candidateId: candidateId as Id<"todoCandidates"> });
+        const generatedTitle = await generateTodoTitleWithAi({
+          currentTitle: item.title,
+          sourceText: item.sourceMessage?.text,
+          threadId: selectedThreadId,
+        });
+        await updateTodoCandidateTitle({
+          candidateId: item._id as Id<"todoCandidates">,
+          title: generatedTitle,
+        });
+        await createTodoFromCandidate({ candidateId: item._id as Id<"todoCandidates"> });
       },
       {
-        pendingLabel: "Converting...",
-        successMessage: "Candidate converted to TODO.",
+        pendingLabel: "Generating TODO...",
+        successMessage: "TODO generated with AI and added.",
       },
     );
   };
@@ -1447,11 +1458,11 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
             <button
               type="button"
               className="btn btn-primary"
-              onClick={() => onReviewConvertTodo(item._id)}
+              onClick={() => onReviewConvertTodo(item)}
               disabled={isPending(`todo:${item._id}`)}
               aria-disabled={isPending(`todo:${item._id}`)}
             >
-              {isPending(`todo:${item._id}`) ? "Converting..." : "Convert to TODO"}
+              {isPending(`todo:${item._id}`) ? "Generating..." : "Generate TODO with AI"}
             </button>
           </div>
           {getRecord(`todo:${item._id}`).error ? (

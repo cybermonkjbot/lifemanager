@@ -33,6 +33,8 @@ function clampInt(value: number | undefined, fallback: number, min: number, max:
 
 type MediaKind = Doc<"mediaAssets">["kind"];
 
+type RegistrationLookupCandidate = Pick<Doc<"mediaAssets">, "_id" | "kind" | "contentHash" | "providerContentHash">;
+
 function matchesDashboardFilter(kind: MediaKind, filter: "all" | "stickers" | "memes" | "images" | "video" | "audio" | "documents") {
   if (filter === "all") {
     return true;
@@ -100,6 +102,93 @@ function mergeContextSummary(primary?: string, secondary?: string) {
     return left.slice(0, 240);
   }
   return `${left} | ${right}`.slice(0, 240);
+}
+
+function normalizeHashToken(value?: string | null) {
+  const normalized = value?.trim().toLowerCase() || "";
+  return normalized || undefined;
+}
+
+function resolveStickerIdentityKey(asset: {
+  providerContentHash?: string;
+  contentHash?: string;
+}) {
+  return normalizeHashToken(asset.providerContentHash) || normalizeHashToken(asset.contentHash);
+}
+
+function rankAssetForCanonical(asset: Doc<"mediaAssets">) {
+  const tagsScore = Math.min(20, asset.tags?.length || 0) * 12;
+  const contextTagScore = Math.min(20, asset.contextTags?.length || 0) * 10;
+  const contextTriggerScore = Math.min(20, asset.contextTriggers?.length || 0) * 10;
+  const contextAvoidScore = Math.min(20, asset.contextAvoid?.length || 0) * 4;
+  const contextSummaryScore = asset.contextSummary ? 70 : 0;
+  const contextConfidenceScore = asset.contextConfidence !== undefined ? Math.round(Math.max(0, Math.min(1, asset.contextConfidence)) * 20) : 0;
+  const generationContextScore = asset.generationContextSnippet ? 20 : 0;
+  const contentHashScore = asset.contentHash ? 8 : 0;
+  const providerHashScore = asset.providerContentHash ? 12 : 0;
+  const enabledScore = asset.enabled ? 700 : 0;
+  const labelScore = Math.min(100, asset.label?.trim().length || 0);
+
+  return (
+    enabledScore +
+    tagsScore +
+    contextTagScore +
+    contextTriggerScore +
+    contextAvoidScore +
+    contextSummaryScore +
+    contextConfidenceScore +
+    generationContextScore +
+    contentHashScore +
+    providerHashScore +
+    labelScore
+  );
+}
+
+function compareCanonicalPriority(left: Doc<"mediaAssets">, right: Doc<"mediaAssets">) {
+  const scoreDelta = rankAssetForCanonical(right) - rankAssetForCanonical(left);
+  if (scoreDelta !== 0) {
+    return scoreDelta;
+  }
+  const timeDelta = left._creationTime - right._creationTime;
+  if (timeDelta !== 0) {
+    return timeDelta;
+  }
+  return String(left._id).localeCompare(String(right._id));
+}
+
+export function pickCanonicalAssetForDedupe(assets: Doc<"mediaAssets">[]) {
+  return [...assets].sort(compareCanonicalPriority)[0] || null;
+}
+
+export function resolveAssetRegistrationMatch(args: {
+  kind: MediaKind;
+  normalizedContentHash: string;
+  normalizedProviderContentHash?: string;
+  existingByProviderContentHash?: RegistrationLookupCandidate | null;
+  existingByContentHash?: RegistrationLookupCandidate | null;
+}) {
+  if (args.kind === "sticker" && args.normalizedProviderContentHash && args.existingByProviderContentHash) {
+    return {
+      existing: args.existingByProviderContentHash,
+      matchedBy: "providerContentHash" as const,
+      shouldPatchProviderContentHash: false,
+    };
+  }
+  if (args.existingByContentHash) {
+    return {
+      existing: args.existingByContentHash,
+      matchedBy: "contentHash" as const,
+      shouldPatchProviderContentHash:
+        args.kind === "sticker" &&
+        Boolean(args.normalizedProviderContentHash) &&
+        !normalizeHashToken(args.existingByContentHash.providerContentHash),
+    };
+  }
+  return {
+    existing: null,
+    matchedBy: null,
+    shouldPatchProviderContentHash: false,
+  };
 }
 
 type AssetReferenceRewriteResult = {
@@ -172,6 +261,7 @@ export const registerAsset = mutation({
     fileId: v.id("_storage"),
     mimeType: v.string(),
     contentHash: v.optional(v.string()),
+    providerContentHash: v.optional(v.string()),
     source: v.optional(v.union(v.literal("uploaded"), v.literal("generated"), v.literal("captured"))),
     threadId: v.optional(v.id("threads")),
     generationPromptHash: v.optional(v.string()),
@@ -179,6 +269,11 @@ export const registerAsset = mutation({
     enabled: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
+    const normalizedContentHash = normalizeHashToken(args.contentHash) || "";
+    const normalizedProviderHash = args.kind === "sticker" ? normalizeHashToken(args.providerContentHash) : undefined;
+    if (args.kind === "sticker" && !normalizedContentHash) {
+      throw new Error("Sticker uploads require contentHash.");
+    }
     const now = Date.now();
     return await ctx.db.insert("mediaAssets", {
       kind: args.kind,
@@ -188,7 +283,8 @@ export const registerAsset = mutation({
       threadId: args.threadId,
       fileId: args.fileId,
       mimeType: args.mimeType.trim(),
-      contentHash: args.contentHash?.trim() || undefined,
+      contentHash: normalizedContentHash || undefined,
+      providerContentHash: normalizedProviderHash,
       generationPromptHash: args.generationPromptHash?.trim() || undefined,
       generationContextSnippet: args.generationContextSnippet?.trim().slice(0, 400) || undefined,
       enabled: args.enabled ?? true,
@@ -204,7 +300,7 @@ export const findAssetByContentHash = query({
     contentHash: v.string(),
   },
   handler: async (ctx, args) => {
-    const normalized = args.contentHash.trim();
+    const normalized = normalizeHashToken(args.contentHash);
     if (!normalized) {
       return null;
     }
@@ -223,6 +319,7 @@ export const registerAssetIfMissing = mutation({
     fileId: v.id("_storage"),
     mimeType: v.string(),
     contentHash: v.string(),
+    providerContentHash: v.optional(v.string()),
     source: v.optional(v.union(v.literal("uploaded"), v.literal("generated"), v.literal("captured"))),
     threadId: v.optional(v.id("threads")),
     generationPromptHash: v.optional(v.string()),
@@ -230,14 +327,39 @@ export const registerAssetIfMissing = mutation({
     enabled: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
-    const normalizedHash = args.contentHash.trim();
-    const existing = await ctx.db
+    const normalizedHash = normalizeHashToken(args.contentHash) || "";
+    const normalizedProviderHash = args.kind === "sticker" ? normalizeHashToken(args.providerContentHash) : undefined;
+    if (!normalizedHash) {
+      throw new Error("contentHash is required.");
+    }
+    let existingByProviderContentHash: RegistrationLookupCandidate | null = null;
+    if (args.kind === "sticker" && normalizedProviderHash) {
+      existingByProviderContentHash = await ctx.db
+        .query("mediaAssets")
+        .withIndex("by_kind_and_providerContentHash", (q) => q.eq("kind", "sticker").eq("providerContentHash", normalizedProviderHash))
+        .first();
+    }
+    const existingByContentHash = await ctx.db
       .query("mediaAssets")
       .withIndex("by_kind_and_contentHash", (q) => q.eq("kind", args.kind).eq("contentHash", normalizedHash))
       .first();
-    if (existing) {
+    const resolvedMatch = resolveAssetRegistrationMatch({
+      kind: args.kind,
+      normalizedContentHash: normalizedHash,
+      normalizedProviderContentHash: normalizedProviderHash,
+      existingByProviderContentHash,
+      existingByContentHash,
+    });
+
+    if (resolvedMatch.existing) {
+      if (resolvedMatch.shouldPatchProviderContentHash && normalizedProviderHash) {
+        await ctx.db.patch(resolvedMatch.existing._id, {
+          providerContentHash: normalizedProviderHash,
+          updatedAt: Date.now(),
+        });
+      }
       await ctx.storage.delete(args.fileId);
-      return existing._id;
+      return resolvedMatch.existing._id;
     }
 
     const now = Date.now();
@@ -250,6 +372,7 @@ export const registerAssetIfMissing = mutation({
       fileId: args.fileId,
       mimeType: args.mimeType.trim(),
       contentHash: normalizedHash,
+      providerContentHash: normalizedProviderHash,
       generationPromptHash: args.generationPromptHash?.trim() || undefined,
       generationContextSnippet: args.generationContextSnippet?.trim().slice(0, 400) || undefined,
       enabled: args.enabled ?? true,
@@ -899,6 +1022,81 @@ export const updateAssetMetadata = mutation({
   },
 });
 
+function buildMergedAssetPatch(args: {
+  target: Doc<"mediaAssets">;
+  source: Doc<"mediaAssets">;
+  now: number;
+}) {
+  const mergedTags = normalizeTags([...(args.target.tags || []), ...(args.source.tags || [])]);
+  const mergedSummary = mergeContextSummary(args.target.contextSummary, args.source.contextSummary);
+  const mergedContextTags = normalizeContextPhrases([...(args.target.contextTags || []), ...(args.source.contextTags || [])]);
+  const mergedContextTriggers = normalizeContextPhrases([...(args.target.contextTriggers || []), ...(args.source.contextTriggers || [])]);
+  const mergedContextAvoid = normalizeContextPhrases([...(args.target.contextAvoid || []), ...(args.source.contextAvoid || [])]);
+  const mergedContextConfidence =
+    args.target.contextConfidence !== undefined || args.source.contextConfidence !== undefined
+      ? Math.max(args.target.contextConfidence || 0, args.source.contextConfidence || 0)
+      : undefined;
+
+  return {
+    label: normalizeLabel(args.target.label, args.source.label || args.target.kind),
+    tags: mergedTags,
+    enabled: args.target.enabled || args.source.enabled,
+    contentHash: normalizeHashToken(args.target.contentHash) || normalizeHashToken(args.source.contentHash),
+    providerContentHash: normalizeHashToken(args.target.providerContentHash) || normalizeHashToken(args.source.providerContentHash),
+    generationContextSnippet: args.target.generationContextSnippet || args.source.generationContextSnippet,
+    contextSummary: mergedSummary,
+    contextTags: mergedContextTags,
+    contextTriggers: mergedContextTriggers,
+    contextAvoid: mergedContextAvoid,
+    contextConfidence: mergedContextConfidence,
+    contextSource: args.target.contextSource || args.source.contextSource,
+    contextUpdatedAt:
+      mergedSummary || mergedContextTags || mergedContextTriggers || mergedContextAvoid || mergedContextConfidence !== undefined
+        ? args.now
+        : args.target.contextUpdatedAt,
+    updatedAt: args.now,
+  };
+}
+
+async function mergeSourceAssetIntoTarget(
+  ctx: MutationCtx,
+  args: {
+    source: Doc<"mediaAssets">;
+    target: Doc<"mediaAssets">;
+  },
+) {
+  const referenceRewrite = await rewriteAssetReferences(ctx, {
+    fromAssetId: args.source._id,
+    toAssetId: args.target._id,
+    blockOnActiveOutbox: false,
+  });
+
+  const now = Date.now();
+  await ctx.db.patch(args.target._id, buildMergedAssetPatch({
+    target: args.target,
+    source: args.source,
+    now,
+  }));
+
+  await ctx.db.delete(args.source._id);
+  if (args.source.fileId !== args.target.fileId) {
+    await ctx.storage.delete(args.source.fileId as Id<"_storage">);
+  }
+
+  const refreshedTarget = await ctx.db.get(args.target._id);
+  if (!refreshedTarget) {
+    throw new Error("Target asset disappeared while merging.");
+  }
+
+  return {
+    sourceAssetId: args.source._id,
+    targetAssetId: args.target._id,
+    kind: args.target.kind,
+    movedReferences: referenceRewrite,
+    target: refreshedTarget,
+  };
+}
+
 export const mergeAssets = mutation({
   args: {
     sourceAssetId: v.id("mediaAssets"),
@@ -916,52 +1114,132 @@ export const mergeAssets = mutation({
     if (source.kind !== target.kind) {
       throw new Error("You can only merge assets of the same kind.");
     }
+    const merged = await mergeSourceAssetIntoTarget(ctx, { source, target });
+    return {
+      sourceAssetId: merged.sourceAssetId,
+      targetAssetId: merged.targetAssetId,
+      kind: merged.kind,
+      movedReferences: merged.movedReferences,
+    };
+  },
+});
 
-    const referenceRewrite = await rewriteAssetReferences(ctx, {
-      fromAssetId: source._id,
-      toAssetId: target._id,
-      blockOnActiveOutbox: false,
-    });
+export const dedupeStickerExactPass = mutation({
+  args: {
+    scanGroupLimit: v.optional(v.number()),
+    mergeLimit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const scanGroupLimit = clampInt(args.scanGroupLimit, 200, 10, 800);
+    const mergeLimit = clampInt(args.mergeLimit, 25, 1, 120);
+    const scanAssetLimit = Math.max(scanGroupLimit * 4, 400);
 
-    const now = Date.now();
-    const mergedTags = normalizeTags([...(target.tags || []), ...(source.tags || [])]);
-    const mergedSummary = mergeContextSummary(target.contextSummary, source.contextSummary);
-    const mergedContextTags = normalizeContextPhrases([...(target.contextTags || []), ...(source.contextTags || [])]);
-    const mergedContextTriggers = normalizeContextPhrases([...(target.contextTriggers || []), ...(source.contextTriggers || [])]);
-    const mergedContextAvoid = normalizeContextPhrases([...(target.contextAvoid || []), ...(source.contextAvoid || [])]);
-    const mergedContextConfidence =
-      target.contextConfidence !== undefined || source.contextConfidence !== undefined
-        ? Math.max(target.contextConfidence || 0, source.contextConfidence || 0)
-        : undefined;
+    const rows = await ctx.db
+      .query("mediaAssets")
+      .withIndex("by_kind", (q) => q.eq("kind", "sticker"))
+      .order("desc")
+      .take(scanAssetLimit);
 
-    await ctx.db.patch(target._id, {
-      label: normalizeLabel(target.label, source.label || target.kind),
-      tags: mergedTags,
-      enabled: target.enabled || source.enabled,
-      generationContextSnippet: target.generationContextSnippet || source.generationContextSnippet,
-      contextSummary: mergedSummary,
-      contextTags: mergedContextTags,
-      contextTriggers: mergedContextTriggers,
-      contextAvoid: mergedContextAvoid,
-      contextConfidence: mergedContextConfidence,
-      contextSource: target.contextSource || source.contextSource,
-      contextUpdatedAt:
-        mergedSummary || mergedContextTags || mergedContextTriggers || mergedContextAvoid || mergedContextConfidence !== undefined
-          ? now
-          : target.contextUpdatedAt,
-      updatedAt: now,
-    });
-
-    await ctx.db.delete(source._id);
-    if (source.fileId !== target.fileId) {
-      await ctx.storage.delete(source.fileId as Id<"_storage">);
+    const grouped = new Map<string, Doc<"mediaAssets">[]>();
+    let droppedGroupCandidates = 0;
+    for (const row of rows) {
+      const identityKey = resolveStickerIdentityKey(row);
+      if (!identityKey) {
+        continue;
+      }
+      const existing = grouped.get(identityKey);
+      if (existing) {
+        existing.push(row);
+        continue;
+      }
+      if (grouped.size >= scanGroupLimit) {
+        droppedGroupCandidates += 1;
+        continue;
+      }
+      grouped.set(identityKey, [row]);
     }
 
+    const duplicateGroups = [...grouped.entries()]
+      .map(([identityKey, assets]) => ({
+        identityKey,
+        assets: [...assets].sort(compareCanonicalPriority),
+      }))
+      .filter((group) => group.assets.length > 1)
+      .sort((left, right) => {
+        const leftNewest = left.assets[0]?._creationTime || 0;
+        const rightNewest = right.assets[0]?._creationTime || 0;
+        return rightNewest - leftNewest;
+      });
+
+    let mergedGroups = 0;
+    let mergedAssets = 0;
+    let messagesUpdated = 0;
+    let draftsUpdated = 0;
+    let outboxUpdated = 0;
+    let reachedMergeLimit = false;
+
+    for (const group of duplicateGroups) {
+      if (mergedAssets >= mergeLimit) {
+        reachedMergeLimit = true;
+        break;
+      }
+      let target = pickCanonicalAssetForDedupe(group.assets);
+      if (!target) {
+        continue;
+      }
+      let groupMergedAny = false;
+
+      for (let index = 1; index < group.assets.length; index += 1) {
+        if (mergedAssets >= mergeLimit) {
+          reachedMergeLimit = true;
+          break;
+        }
+        const sourceCandidate = await ctx.db.get(group.assets[index]._id);
+        if (!sourceCandidate || sourceCandidate._id === target._id) {
+          continue;
+        }
+        const latestTarget = await ctx.db.get(target._id);
+        if (!latestTarget) {
+          break;
+        }
+
+        const merged = await mergeSourceAssetIntoTarget(ctx, {
+          source: sourceCandidate,
+          target: latestTarget,
+        });
+        target = merged.target;
+        groupMergedAny = true;
+        mergedAssets += 1;
+        messagesUpdated += merged.movedReferences.messagesUpdated;
+        draftsUpdated += merged.movedReferences.draftsUpdated;
+        outboxUpdated += merged.movedReferences.outboxUpdated;
+      }
+
+      if (groupMergedAny) {
+        mergedGroups += 1;
+      }
+    }
+
+    const remainingDuplicateGroups = duplicateGroups
+      .slice(mergedGroups)
+      .some((group) => group.assets.length > 1);
+    const scanTruncated = rows.length >= scanAssetLimit;
+    const hasMore = reachedMergeLimit || remainingDuplicateGroups || droppedGroupCandidates > 0 || scanTruncated;
+
     return {
-      sourceAssetId: source._id,
-      targetAssetId: target._id,
-      kind: target.kind,
-      movedReferences: referenceRewrite,
+      scanGroupLimit,
+      mergeLimit,
+      scannedAssets: rows.length,
+      scannedGroups: grouped.size,
+      duplicateGroups: duplicateGroups.length,
+      mergedGroups,
+      mergedAssets,
+      rewrittenReferences: {
+        messagesUpdated,
+        draftsUpdated,
+        outboxUpdated,
+      },
+      hasMore,
     };
   },
 });

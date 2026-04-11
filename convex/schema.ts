@@ -19,6 +19,7 @@ export default defineSchema({
     archivedAt: v.optional(v.number()),
     ghostedUntil: v.optional(v.number()),
     nightPausedUntil: v.optional(v.number()),
+    callReplyBarrierAt: v.optional(v.number()),
     lastMessageAt: v.number(),
     createdAt: v.number(),
     updatedAt: v.number(),
@@ -30,6 +31,41 @@ export default defineSchema({
     .index("by_threadKind_and_lastMessageAt", ["threadKind", "lastMessageAt"])
     .index("by_provider_and_threadKind_and_lastMessageAt", ["provider", "threadKind", "lastMessageAt"])
     .index("by_ignored", ["isIgnored"]),
+
+  callSessions: defineTable({
+    provider: v.union(v.literal("whatsapp"), v.literal("instagram")),
+    callId: v.string(),
+    threadId: v.id("threads"),
+    threadJid: v.string(),
+    threadKind: v.optional(v.union(v.literal("direct"), v.literal("group"), v.literal("broadcast_or_system"))),
+    fromJid: v.optional(v.string()),
+    initiatorJid: v.optional(v.string()),
+    isGroup: v.optional(v.boolean()),
+    isVideo: v.optional(v.boolean()),
+    offeredAt: v.optional(v.number()),
+    ringingAt: v.optional(v.number()),
+    acceptedAt: v.optional(v.number()),
+    endedAt: v.optional(v.number()),
+    durationMs: v.optional(v.number()),
+    lastStatus: v.union(
+      v.literal("offer"),
+      v.literal("ringing"),
+      v.literal("timeout"),
+      v.literal("reject"),
+      v.literal("accept"),
+      v.literal("terminate"),
+    ),
+    sawSelfEvent: v.boolean(),
+    sawPeerEvent: v.boolean(),
+    qualifiesForReplyBarrier: v.boolean(),
+    replyBarrierAppliedAt: v.optional(v.number()),
+    offline: v.optional(v.boolean()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_provider_and_callId", ["provider", "callId"])
+    .index("by_threadId_and_updatedAt", ["threadId", "updatedAt"])
+    .index("by_threadId_and_endedAt", ["threadId", "endedAt"]),
 
   messages: defineTable({
     provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
@@ -466,6 +502,7 @@ export default defineSchema({
     fileId: v.id("_storage"),
     mimeType: v.string(),
     contentHash: v.optional(v.string()),
+    providerContentHash: v.optional(v.string()),
     generationPromptHash: v.optional(v.string()),
     generationContextSnippet: v.optional(v.string()),
     lastUsedAt: v.optional(v.number()),
@@ -482,6 +519,7 @@ export default defineSchema({
     .index("by_kind_and_enabled", ["kind", "enabled"])
     .index("by_kind", ["kind"])
     .index("by_kind_and_contentHash", ["kind", "contentHash"])
+    .index("by_kind_and_providerContentHash", ["kind", "providerContentHash"])
     .index("by_kind_and_source_and_threadId_and_enabled", ["kind", "source", "threadId", "enabled"]),
 
   threadGrounding: defineTable({

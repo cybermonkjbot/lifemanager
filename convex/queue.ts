@@ -137,10 +137,21 @@ export const list = query({
 
     const enrichedTodoCandidates = await Promise.all(
       todoCandidates.map(async (candidate) => {
-        const thread = await ctx.db.get(candidate.threadId);
+        const [thread, sourceMessage] = await Promise.all([
+          ctx.db.get(candidate.threadId),
+          ctx.db.get(candidate.sourceMessageId),
+        ]);
         return {
           ...candidate,
           thread,
+          sourceMessage: sourceMessage
+            ? {
+                _id: sourceMessage._id,
+                text: sourceMessage.text,
+                messageAt: sourceMessage.messageAt,
+                direction: sourceMessage.direction,
+              }
+            : null,
         };
       }),
     );

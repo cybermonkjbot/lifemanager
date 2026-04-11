@@ -7,7 +7,7 @@ import { formatDateTime } from "@/lib/format";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { useMutation, useQuery } from "convex/react";
-import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type SettingsState = {
   ignoreGroupsByDefault: boolean;
@@ -157,6 +157,8 @@ type MediaAsset = {
   tags: string[];
   enabled: boolean;
   fileUrl?: string | null;
+  contentHash?: string;
+  createdAt?: number;
   contextSummary?: string;
   contextTags?: string[];
   contextTriggers?: string[];
@@ -173,7 +175,10 @@ type MergeSuggestion = {
   targetAssetId: string;
   targetLabel: string;
   score: number;
-  sharedTokens: string[];
+  similaritySource: "visual_hash" | "content_hash";
+  distanceBits?: number;
+  groupKey: string;
+  groupLabel: string;
 };
 
 type SetupState = {
@@ -192,46 +197,25 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string }> = [
 ];
 
 const STATUS_BUILDER_MAX_TEXT_POST_RATIO = 0.45;
-const MERGE_TOKEN_STOP_WORDS = new Set([
-  "the",
-  "and",
-  "for",
-  "with",
-  "that",
-  "this",
-  "from",
-  "your",
-  "you",
-  "are",
-  "was",
-  "were",
-  "have",
-  "has",
-  "had",
-  "just",
-  "like",
-  "into",
-  "about",
-  "when",
-  "then",
-  "than",
-  "them",
-  "they",
-  "their",
-  "there",
-  "what",
-  "where",
-  "while",
-  "will",
-  "would",
-  "could",
-  "should",
-  "dont",
-  "does",
-  "did",
-  "its",
-  "it",
-]);
+const HEX_CHAR_TO_INT: Record<string, number> = {
+  "0": 0,
+  "1": 1,
+  "2": 2,
+  "3": 3,
+  "4": 4,
+  "5": 5,
+  "6": 6,
+  "7": 7,
+  "8": 8,
+  "9": 9,
+  a: 10,
+  b: 11,
+  c: 12,
+  d: 13,
+  e: 14,
+  f: 15,
+};
+const BIT_COUNTS = [0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4];
 
 function toState(source: Partial<SettingsState> | undefined): SettingsState {
   return {
@@ -437,6 +421,13 @@ function parseTagInput(input: string) {
   return [...new Set(tags)].slice(0, 20);
 }
 
+async function hashFileSha256Hex(file: File) {
+  const bytes = await file.arrayBuffer();
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  const parts = Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, "0"));
+  return parts.join("");
+}
+
 function clamp01(value: number) {
   if (!Number.isFinite(value)) {
     return 0.7;
@@ -444,32 +435,74 @@ function clamp01(value: number) {
   return Math.max(0, Math.min(value, 1));
 }
 
-function tokenizeMergeText(value: string) {
-  if (!value) {
-    return [];
+function normalizeHexHash(value?: string) {
+  const normalized = (value || "").trim().toLowerCase();
+  if (!normalized || !/^[0-9a-f]+$/.test(normalized)) {
+    return null;
   }
-  return value
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .map((token) => token.trim())
-    .filter((token) => token.length >= 3 && !MERGE_TOKEN_STOP_WORDS.has(token));
+  return normalized;
 }
 
-function buildMergeTokenSet(asset: MediaAsset) {
-  const tokenSet = new Set<string>();
-  const fields = [
-    asset.label,
-    ...(asset.tags || []),
-    asset.contextSummary || "",
-    ...(asset.contextTags || []),
-    ...(asset.contextTriggers || []),
-  ];
-  for (const field of fields) {
-    for (const token of tokenizeMergeText(field)) {
-      tokenSet.add(token);
-    }
+function hammingDistanceHex(a: string, b: string) {
+  const length = Math.min(a.length, b.length);
+  if (length === 0) {
+    return null;
   }
-  return tokenSet;
+  let distance = 0;
+  for (let i = 0; i < length; i += 1) {
+    const left = HEX_CHAR_TO_INT[a[i]];
+    const right = HEX_CHAR_TO_INT[b[i]];
+    if (left === undefined || right === undefined) {
+      return null;
+    }
+    distance += BIT_COUNTS[left ^ right];
+  }
+  return {
+    bits: distance,
+    maxBits: length * 4,
+  };
+}
+
+function buildAverageImageHash(url: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.decoding = "async";
+    img.onload = () => {
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = 8;
+        canvas.height = 8;
+        const context = canvas.getContext("2d");
+        if (!context) {
+          resolve(null);
+          return;
+        }
+        context.drawImage(img, 0, 0, 8, 8);
+        const imageData = context.getImageData(0, 0, 8, 8);
+        const values: number[] = [];
+        for (let i = 0; i < imageData.data.length; i += 4) {
+          const r = imageData.data[i];
+          const g = imageData.data[i + 1];
+          const b = imageData.data[i + 2];
+          const gray = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+          values.push(gray);
+        }
+        const avg = values.reduce((sum, value) => sum + value, 0) / values.length;
+        const bits = values.map((value) => (value >= avg ? "1" : "0")).join("");
+        const hexParts: string[] = [];
+        for (let i = 0; i < bits.length; i += 4) {
+          const nibble = bits.slice(i, i + 4);
+          hexParts.push(Number.parseInt(nibble, 2).toString(16));
+        }
+        resolve(hexParts.join(""));
+      } catch {
+        resolve(null);
+      }
+    };
+    img.onerror = () => resolve(null);
+    img.src = url;
+  });
 }
 
 function pickMergeDirection(a: MediaAsset, b: MediaAsset) {
@@ -582,7 +615,7 @@ export function LiveSettings() {
   const deletePersonalityProfile = useMutation(api.personality.deleteProfile);
   const rollbackProfileVersion = useMutation(api.personality.rollbackProfileVersion);
   const generateUploadUrl = useMutation(api.media.generateUploadUrl);
-  const registerAsset = useMutation(api.media.registerAsset);
+  const registerAssetIfMissing = useMutation(api.media.registerAssetIfMissing);
   const toggleAsset = useMutation(api.media.toggleAsset);
   const updateAssetMetadata = useMutation(api.media.updateAssetMetadata);
   const mergeMediaAssets = useMutation(api.media.mergeAssets);
@@ -598,12 +631,17 @@ export function LiveSettings() {
     () => (mediaAssets || []).filter((asset) => asset.kind === "sticker" || asset.kind === "meme"),
     [mediaAssets],
   );
+  const visualHashAttemptedRef = useRef<Set<string>>(new Set());
+  const [visualHashByAssetId, setVisualHashByAssetId] = useState<Record<string, string>>({});
   const suggestedMerges = useMemo(() => {
     const pairCandidates: Array<{
       source: MediaAsset;
       target: MediaAsset;
       score: number;
-      sharedTokens: string[];
+      similaritySource: "visual_hash" | "content_hash";
+      distanceBits?: number;
+      groupKey: string;
+      groupLabel: string;
     }> = [];
     const byKind = new Map<"sticker" | "meme", MediaAsset[]>();
     for (const asset of curatedMediaAssets) {
@@ -614,30 +652,46 @@ export function LiveSettings() {
     }
 
     for (const [, assets] of byKind) {
-      const tokensById = new Map<string, Set<string>>();
-      for (const asset of assets) {
-        tokensById.set(asset._id, buildMergeTokenSet(asset));
-      }
-
       for (let i = 0; i < assets.length; i += 1) {
         for (let j = i + 1; j < assets.length; j += 1) {
           const first = assets[i];
           const second = assets[j];
-          const firstTokens = tokensById.get(first._id) || new Set<string>();
-          const secondTokens = tokensById.get(second._id) || new Set<string>();
-          if (firstTokens.size === 0 || secondTokens.size === 0) {
-            continue;
+          const firstVisualHash = normalizeHexHash(visualHashByAssetId[first._id]);
+          const secondVisualHash = normalizeHexHash(visualHashByAssetId[second._id]);
+
+          let score = 0;
+          let similaritySource: "visual_hash" | "content_hash" | null = null;
+          let distanceBits: number | undefined;
+          let groupKey = "";
+          let groupLabel = "";
+
+          if (firstVisualHash && secondVisualHash && firstVisualHash.length === secondVisualHash.length) {
+            const distance = hammingDistanceHex(firstVisualHash, secondVisualHash);
+            if (!distance) {
+              continue;
+            }
+            const similarity = 1 - distance.bits / distance.maxBits;
+            if (similarity < 0.84) {
+              continue;
+            }
+            score = similarity;
+            similaritySource = "visual_hash";
+            distanceBits = distance.bits;
+            groupKey = `v:${firstVisualHash.slice(0, 6)}:${secondVisualHash.slice(0, 6)}`;
+            groupLabel = `Visual hash (~${Math.round(similarity * 100)}%)`;
+          } else {
+            const firstContentHash = normalizeHexHash(first.contentHash);
+            const secondContentHash = normalizeHexHash(second.contentHash);
+            if (!firstContentHash || !secondContentHash || firstContentHash !== secondContentHash) {
+              continue;
+            }
+            score = 1;
+            similaritySource = "content_hash";
+            groupKey = `c:${firstContentHash.slice(0, 12)}`;
+            groupLabel = "Exact content hash match";
           }
 
-          const sharedTokens = [...firstTokens].filter((token) => secondTokens.has(token));
-          if (sharedTokens.length === 0) {
-            continue;
-          }
-          const unionSize = new Set([...firstTokens, ...secondTokens]).size;
-          const overlapScore = sharedTokens.length / Math.min(firstTokens.size, secondTokens.size);
-          const jaccardScore = sharedTokens.length / unionSize;
-          const finalScore = overlapScore * 0.65 + jaccardScore * 0.35;
-          if (finalScore < 0.52) {
+          if (!similaritySource) {
             continue;
           }
 
@@ -645,8 +699,11 @@ export function LiveSettings() {
           pairCandidates.push({
             source,
             target,
-            score: finalScore,
-            sharedTokens: sharedTokens.slice(0, 4),
+            score,
+            similaritySource,
+            distanceBits,
+            groupKey,
+            groupLabel,
           });
         }
       }
@@ -675,12 +732,34 @@ export function LiveSettings() {
         targetAssetId: candidate.target._id,
         targetLabel: candidate.target.label,
         score: candidate.score,
-        sharedTokens: candidate.sharedTokens,
+        similaritySource: candidate.similaritySource,
+        distanceBits: candidate.distanceBits,
+        groupKey: candidate.groupKey,
+        groupLabel: candidate.groupLabel,
       });
     }
 
-    return [...dedupedByPair.values()].sort((a, b) => b.score - a.score).slice(0, 10);
-  }, [curatedMediaAssets]);
+    return [...dedupedByPair.values()].sort((a, b) => b.score - a.score);
+  }, [curatedMediaAssets, visualHashByAssetId]);
+  const suggestedMergeGroups = useMemo(() => {
+    const grouped = new Map<string, { label: string; items: MergeSuggestion[] }>();
+    for (const suggestion of suggestedMerges) {
+      const existing = grouped.get(suggestion.groupKey);
+      if (existing) {
+        existing.items.push(suggestion);
+      } else {
+        grouped.set(suggestion.groupKey, {
+          label: suggestion.groupLabel,
+          items: [suggestion],
+        });
+      }
+    }
+    return [...grouped.entries()].map(([groupKey, group]) => ({
+      groupKey,
+      label: group.label,
+      items: group.items.sort((a, b) => b.score - a.score),
+    }));
+  }, [suggestedMerges]);
   const mediaAssetsLoading = mediaAssets === undefined;
   const settingsLoading = settings === undefined || defaults === undefined;
   const contactsLoading = contacts === undefined;
@@ -711,7 +790,6 @@ export function LiveSettings() {
   const [editContextTriggers, setEditContextTriggers] = useState("");
   const [editContextAvoid, setEditContextAvoid] = useState("");
   const [editContextConfidence, setEditContextConfidence] = useState("");
-  const [mergeTargetByAssetId, setMergeTargetByAssetId] = useState<Record<string, string>>({});
   const [autoMergeSuggestionsEnabled, setAutoMergeSuggestionsEnabled] = useState(true);
   const attemptedAutoMergeSignatureRef = useRef("");
   const [newProfileSlug, setNewProfileSlug] = useState("");
@@ -725,28 +803,47 @@ export function LiveSettings() {
   }, [remoteState]);
 
   useEffect(() => {
-    setMergeTargetByAssetId((prev) => {
-      const next: Record<string, string> = {};
-      for (const asset of curatedMediaAssets) {
-        const candidates = curatedMediaAssets.filter((item) => item.kind === asset.kind && item._id !== asset._id);
-        if (candidates.length === 0) {
+    const missing = curatedMediaAssets.filter((asset) => {
+      if (!asset.fileUrl) {
+        return false;
+      }
+      if (visualHashByAssetId[asset._id]) {
+        return false;
+      }
+      return !visualHashAttemptedRef.current.has(asset._id);
+    });
+    if (missing.length === 0) {
+      return;
+    }
+
+    let cancelled = false;
+    const computeHashes = async () => {
+      for (const asset of missing) {
+        visualHashAttemptedRef.current.add(asset._id);
+        const hash = await buildAverageImageHash(asset.fileUrl as string);
+        if (cancelled) {
+          return;
+        }
+        if (!hash) {
           continue;
         }
-        const selected = prev[asset._id];
-        const fallback = candidates[0]?._id || "";
-        const resolved = candidates.some((item) => item._id === selected) ? selected : fallback;
-        if (resolved) {
-          next[asset._id] = resolved;
-        }
+        setVisualHashByAssetId((prev) => {
+          if (prev[asset._id] === hash) {
+            return prev;
+          }
+          return {
+            ...prev,
+            [asset._id]: hash,
+          };
+        });
       }
-      const prevKeys = Object.keys(prev);
-      const nextKeys = Object.keys(next);
-      if (prevKeys.length === nextKeys.length && nextKeys.every((key) => prev[key] === next[key])) {
-        return prev;
-      }
-      return next;
-    });
-  }, [curatedMediaAssets]);
+    };
+    void computeHashes();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [curatedMediaAssets, visualHashByAssetId]);
 
   const selectedEditorSlug = editorSlug || profiles[0]?.slug || "";
   const selectedEditorProfile = profiles.find((profile) => profile.slug === selectedEditorSlug) || null;
@@ -1022,6 +1119,7 @@ export function LiveSettings() {
     void runAction(
       mediaKey,
       async () => {
+        const contentHash = await hashFileSha256Hex(assetFile);
         const uploadUrl = await generateUploadUrl({});
         const upload = await fetch(uploadUrl as string, {
           method: "POST",
@@ -1040,12 +1138,13 @@ export function LiveSettings() {
           throw new Error("Upload response missing storageId.");
         }
 
-        await registerAsset({
+        await registerAssetIfMissing({
           kind: assetKind,
           label: assetLabel.trim() || assetFile.name,
           tags: parseTagInput(assetTags),
           fileId: payload.storageId as Id<"_storage">,
           mimeType: assetFile.type || "application/octet-stream",
+          contentHash,
           enabled: true,
         });
 
@@ -1117,43 +1216,26 @@ export function LiveSettings() {
     );
   };
 
-  const getMergeCandidates = (asset: MediaAsset) => {
-    return curatedMediaAssets.filter((item) => item.kind === asset.kind && item._id !== asset._id);
-  };
-
-  const getMergeTarget = (asset: MediaAsset) => {
-    const candidates = getMergeCandidates(asset);
-    if (candidates.length === 0) {
-      return "";
-    }
-    const selected = mergeTargetByAssetId[asset._id];
-    if (selected && candidates.some((item) => item._id === selected)) {
-      return selected;
-    }
-    return candidates[0]?._id || "";
-  };
-
-  const mergeAssetIntoTarget = (asset: MediaAsset, explicitTargetId?: string) => {
-    const targetId = explicitTargetId || getMergeTarget(asset);
-    if (!targetId) {
+  const mergeSuggestedPair = (sourceAssetId: string, targetAssetId: string) => {
+    const source = curatedMediaAssets.find((asset) => asset._id === sourceAssetId);
+    const target = curatedMediaAssets.find((asset) => asset._id === targetAssetId);
+    if (!source) {
       return;
     }
-    const target = curatedMediaAssets.find((item) => item._id === targetId);
     if (!target) {
       return;
     }
-    if (!window.confirm(`Merge "${asset.label}" into "${target.label}"? This deletes the source asset.`)) {
+    if (!window.confirm(`Merge "${source.label}" into "${target.label}"? This deletes the source asset.`)) {
       return;
     }
-
     void runAction(
       mediaKey,
       async () => {
         await mergeMediaAssets({
-          sourceAssetId: asset._id as Id<"mediaAssets">,
+          sourceAssetId: source._id as Id<"mediaAssets">,
           targetAssetId: target._id as Id<"mediaAssets">,
         });
-        if (editingAssetId === asset._id) {
+        if (editingAssetId === source._id) {
           cancelAssetEdit();
         }
       },
@@ -1164,19 +1246,11 @@ export function LiveSettings() {
     );
   };
 
-  const mergeSuggestedPair = (sourceAssetId: string, targetAssetId: string) => {
-    const source = curatedMediaAssets.find((asset) => asset._id === sourceAssetId);
-    if (!source) {
-      return;
-    }
-    mergeAssetIntoTarget(source, targetAssetId);
-  };
-
-  const mergeAllSuggestedPairs = () => {
+  const mergeAllSuggestedPairs = useCallback((options?: { requireConfirm?: boolean }) => {
     if (suggestedMerges.length === 0) {
       return;
     }
-    if (!window.confirm(`Merge all ${suggestedMerges.length} suggested pair(s)?`)) {
+    if (options?.requireConfirm !== false && !window.confirm(`Merge all ${suggestedMerges.length} suggested pair(s)?`)) {
       return;
     }
 
@@ -1195,7 +1269,14 @@ export function LiveSettings() {
             });
             merged += 1;
             if (editingAssetId === suggestion.sourceAssetId) {
-              cancelAssetEdit();
+              setEditingAssetId(null);
+              setEditAssetLabel("");
+              setEditAssetTags("");
+              setEditContextSummary("");
+              setEditContextTags("");
+              setEditContextTriggers("");
+              setEditContextAvoid("");
+              setEditContextConfidence("");
             }
           } catch (error) {
             const message = error instanceof Error ? error.message.toLowerCase() : "";
@@ -1230,7 +1311,30 @@ export function LiveSettings() {
         pushNotice("success", message);
       }
     });
-  };
+  }, [
+    editingAssetId,
+    mediaKey,
+    mergeMediaAssets,
+    pushNotice,
+    runAction,
+    suggestedMerges,
+  ]);
+
+  useEffect(() => {
+    if (suggestedMerges.length === 0) {
+      attemptedAutoMergeSignatureRef.current = "";
+      return;
+    }
+    if (!autoMergeSuggestionsEnabled || mediaRecord.pending) {
+      return;
+    }
+    const signature = suggestedMerges.map((item) => item.key).sort().join("|");
+    if (!signature || attemptedAutoMergeSignatureRef.current === signature) {
+      return;
+    }
+    attemptedAutoMergeSignatureRef.current = signature;
+    mergeAllSuggestedPairs({ requireConfirm: false });
+  }, [autoMergeSuggestionsEnabled, mediaRecord.pending, mergeAllSuggestedPairs, suggestedMerges]);
 
   if (settingsLoading) {
     return (
@@ -3004,41 +3108,65 @@ export function LiveSettings() {
           <div className="stack">
             <div className="topbar-controls">
               <h3>Suggested Merges</h3>
+              <label className="queue-meta" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                <input
+                  type="checkbox"
+                  checked={autoMergeSuggestionsEnabled}
+                  onChange={(event) => setAutoMergeSuggestionsEnabled(event.target.checked)}
+                  disabled={mediaRecord.pending}
+                  aria-disabled={mediaRecord.pending}
+                />
+                Auto-merge suggestions
+              </label>
               <button
                 type="button"
                 className="btn btn-ghost"
-                onClick={mergeAllSuggestedPairs}
+                onClick={() => mergeAllSuggestedPairs({ requireConfirm: true })}
                 disabled={mediaRecord.pending || suggestedMerges.length === 0}
                 aria-disabled={mediaRecord.pending || suggestedMerges.length === 0}
               >
                 Merge All Suggestions
               </button>
             </div>
-            <p className="queue-meta">Suggestions are based on label, tags, and context overlap.</p>
-            {suggestedMerges.map((suggestion) => (
-              <div key={suggestion.key} className="queue-item">
+            <p className="queue-meta">Suggestions are grouped by visual hash similarity (sticker appearance) or exact content hash match.</p>
+            {suggestedMergeGroups.map((group) => (
+              <div key={group.groupKey} className="stack compact">
                 <p className="queue-title">
-                  Merge {suggestion.sourceLabel} into {suggestion.targetLabel} ({suggestion.kind})
+                  {group.label} · {group.items.length} pair{group.items.length === 1 ? "" : "s"}
                 </p>
-                <p className="queue-meta">
-                  Similarity {Math.round(suggestion.score * 100)}%
-                  {suggestion.sharedTokens.length > 0 ? ` · shared: ${suggestion.sharedTokens.join(", ")}` : ""}
-                </p>
-                <div className="queue-actions">
-                  <button
-                    type="button"
-                    className="btn btn-ghost"
-                    onClick={() => mergeSuggestedPair(suggestion.sourceAssetId, suggestion.targetAssetId)}
-                    disabled={mediaRecord.pending}
-                    aria-disabled={mediaRecord.pending}
-                  >
-                    Merge Suggested Pair
-                  </button>
-                </div>
+                {group.items.map((suggestion) => (
+                  <div key={suggestion.key} className="queue-item">
+                    <p className="queue-title">
+                      Merge {suggestion.sourceLabel} into {suggestion.targetLabel} ({suggestion.kind})
+                    </p>
+                    <p className="queue-meta">
+                      Similarity {Math.round(suggestion.score * 100)}%
+                      {suggestion.similaritySource === "visual_hash"
+                        ? suggestion.distanceBits !== undefined
+                          ? ` · visual hash distance ${suggestion.distanceBits} bits`
+                          : " · visual hash"
+                        : " · exact content hash"}
+                    </p>
+                    <div className="queue-actions">
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        onClick={() => mergeSuggestedPair(suggestion.sourceAssetId, suggestion.targetAssetId)}
+                        disabled={mediaRecord.pending}
+                        aria-disabled={mediaRecord.pending}
+                      >
+                        Merge Suggested Pair
+                      </button>
+                    </div>
+                  </div>
+                ))}
               </div>
             ))}
             {!mediaAssetsLoading && curatedMediaAssets.length > 1 && suggestedMerges.length === 0 ? (
-              <p className="empty-line">No high-confidence merge suggestions yet.</p>
+              <p className="empty-line">No hash-similar merge suggestions yet.</p>
+            ) : null}
+            {autoMergeSuggestionsEnabled && suggestedMerges.length > 0 ? (
+              <p className="queue-meta">Auto-merge is ON. New hash-based suggestion batches merge automatically.</p>
             ) : null}
           </div>
           <div className="media-settings-grid">
@@ -3213,41 +3341,6 @@ export function LiveSettings() {
                   </button>
                 </div>
 
-                {getMergeCandidates(asset).length > 0 ? (
-                  <div className="stack compact">
-                    <label className="setup-input-group">
-                      <span className="queue-meta">Merge Into</span>
-                      <select
-                        value={getMergeTarget(asset)}
-                        onChange={(event) =>
-                          setMergeTargetByAssetId((prev) => ({
-                            ...prev,
-                            [asset._id]: event.target.value,
-                          }))
-                        }
-                        disabled={mediaRecord.pending}
-                        aria-disabled={mediaRecord.pending}
-                      >
-                        {getMergeCandidates(asset).map((candidate) => (
-                          <option key={candidate._id} value={candidate._id}>
-                            {candidate.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <button
-                      type="button"
-                      className="btn btn-ghost"
-                      onClick={() => mergeAssetIntoTarget(asset)}
-                      disabled={mediaRecord.pending}
-                      aria-disabled={mediaRecord.pending}
-                    >
-                      Merge This Asset
-                    </button>
-                  </div>
-                ) : (
-                  <p className="queue-meta">No merge target available for this {asset.kind}.</p>
-                )}
               </article>
             ))}
             {!mediaAssetsLoading && curatedMediaAssets.length === 0 ? <p className="empty-line">No media assets yet.</p> : null}

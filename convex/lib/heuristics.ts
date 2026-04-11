@@ -1,4 +1,6 @@
 import { DEFAULT_DELAY_RANGE_MS, DEFAULT_TYPING_RANGE_MS } from "./constants";
+import { detectFutureCommitment } from "./commitments";
+import type { CommitmentDirection } from "./commitments";
 
 export type GuardrailResult = {
   blocked: boolean;
@@ -15,6 +17,12 @@ const HIGH_RISK_PATTERNS = [
 ];
 
 const MEDIUM_RISK_PATTERNS = [/medical/i, /lawsuit/i, /contract/i, /refund/i];
+const TODO_COMMITMENT_INTENT_REGEX = /\b(i(?:'|’)ll|i will|let me|i can|i(?:'|’)m going to|on it|leave it with me)\b/i;
+const TODO_ACCEPTANCE_ONLY_REGEX = /^(yes|yeah|yep|sure|ok(?:ay)?|alright|sounds good|deal|on it|got it|i got you)[.!]*$/i;
+const TODO_ACTION_VERB_REGEX =
+  /\b(send|share|call|text|reply|update|follow[\s-]?up|check|confirm|review|deliver|pay|transfer|book|schedule|remind|bring|drop|submit|finish|complete|handle)\b/i;
+const TODO_REQUEST_PREFIX_REGEX =
+  /^(can you|could you|will you|would you|please|remember to|don(?:'|’)t forget to|make sure you)\s+/i;
 
 export function evaluateGuardrail(text: string): GuardrailResult {
   if (HIGH_RISK_PATTERNS.some((p) => p.test(text))) {
@@ -75,18 +83,77 @@ export function detectPromiseOrPlan(text: string): null | { reason: string; dueA
   return null;
 }
 
-export function detectTodoCandidate(text: string): null | { title: string; suggestedDueAt?: number } {
-  const t = text.trim();
-  const lowered = t.toLowerCase();
+function compactText(text: string | undefined) {
+  return (text || "").trim().replace(/\s+/g, " ");
+}
 
-  if (/(remind me|don'?t forget|please send|need to)/i.test(t)) {
-    return {
-      title: t.slice(0, 110),
-      suggestedDueAt: lowered.includes("tomorrow") ? Date.now() + 24 * 60 * 60 * 1000 : undefined,
-    };
+function stripRequestPrefix(text: string) {
+  return text.replace(TODO_REQUEST_PREFIX_REGEX, "").replace(/\?\s*$/, "").trim();
+}
+
+function inferDueHint(text: string, now: number) {
+  const lowered = text.toLowerCase();
+  if (lowered.includes("tomorrow")) {
+    return now + 24 * 60 * 60 * 1000;
+  }
+  if (lowered.includes("next week")) {
+    return now + 7 * 24 * 60 * 60 * 1000;
+  }
+  if (lowered.includes("later today") || /\btoday\b/i.test(lowered)) {
+    return now + 4 * 60 * 60 * 1000;
+  }
+  if (lowered.includes("tonight") || lowered.includes("this evening")) {
+    return now + 8 * 60 * 60 * 1000;
+  }
+  return undefined;
+}
+
+export function detectTodoCandidate(args: {
+  text: string;
+  direction: CommitmentDirection;
+  now?: number;
+  contextText?: string;
+}): null | { title: string; suggestedDueAt?: number } {
+  if (args.direction !== "outbound") {
+    return null;
   }
 
-  return null;
+  const outboundText = compactText(args.text);
+  if (!outboundText) {
+    return null;
+  }
+
+  const hasCommitmentIntent = TODO_COMMITMENT_INTENT_REGEX.test(outboundText);
+  const isAcceptanceOnly = TODO_ACCEPTANCE_ONLY_REGEX.test(outboundText);
+  if (!hasCommitmentIntent && !isAcceptanceOnly) {
+    return null;
+  }
+
+  const contextText = compactText(args.contextText);
+  const actionCorpus = `${outboundText} ${contextText}`.trim();
+  if (!TODO_ACTION_VERB_REGEX.test(actionCorpus)) {
+    return null;
+  }
+
+  const now = args.now ?? Date.now();
+  const commitment = detectFutureCommitment({
+    text: outboundText,
+    direction: "outbound",
+    now,
+  });
+  const suggestedDueAt =
+    commitment.outcome === "actionable" ? commitment.candidate.dueAt : inferDueHint(actionCorpus, now);
+
+  const titleSource = isAcceptanceOnly && contextText ? stripRequestPrefix(contextText) : outboundText;
+  const title = compactText(titleSource).slice(0, 110);
+  if (!title) {
+    return null;
+  }
+
+  return {
+    title,
+    suggestedDueAt,
+  };
 }
 
 export function estimateHumanTiming(text: string) {

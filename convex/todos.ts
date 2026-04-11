@@ -57,6 +57,37 @@ export const fromCandidate = mutation({
   },
 });
 
+export const updateCandidateTitle = mutation({
+  args: {
+    candidateId: v.id("todoCandidates"),
+    title: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const candidate = await ctx.db.get(args.candidateId);
+    if (!candidate) {
+      throw new Error("Candidate not found");
+    }
+    if (candidate.status !== "suggested") {
+      throw new Error("Candidate is no longer open for review");
+    }
+
+    const title = args.title.trim().replace(/\s+/g, " ");
+    if (!title) {
+      throw new Error("Title is required");
+    }
+    if (title.length > 180) {
+      throw new Error("Title is too long");
+    }
+
+    await ctx.db.patch(candidate._id, {
+      title,
+      updatedAt: Date.now(),
+    });
+
+    return candidate._id;
+  },
+});
+
 export const dismissCandidate = mutation({
   args: {
     candidateId: v.id("todoCandidates"),

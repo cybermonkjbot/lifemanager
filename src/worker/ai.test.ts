@@ -191,6 +191,26 @@ test("postProcessReplyText strips king/queen outside joke context when gender is
   assert.equal(output, "Thanks, noted.");
 });
 
+test("postProcessReplyText rewrites self-care advice for health disclosures to empathy-only get-better wording", () => {
+  const output = postProcessReplyText({
+    text: "I am sorry that happened. Please take care of yourself and get some rest.",
+    inboundText: "I had an accident earlier today.",
+    historyLines: [],
+  });
+  assert.doesNotMatch(output, /\b(take care|rest(?: up)?|drink water|hydrate|meds?|doctor|hospital|clinic)\b/i);
+  assert.match(output, /\b(i hope|hope)\b/i);
+  assert.match(output, /\b(better|recover)\b/i);
+});
+
+test("postProcessReplyText keeps non-health take-care phrasing unchanged", () => {
+  const output = postProcessReplyText({
+    text: "Take care and talk soon.",
+    inboundText: "Thanks for sorting this out.",
+    historyLines: [],
+  });
+  assert.equal(output, "Take care and talk soon.");
+});
+
 test("postProcessReplyText strips AI-denial lines when AI was previously disclosed", () => {
   const output = postProcessReplyText({
     text: "I don't use any AI for this. I can check and get back.",
@@ -207,6 +227,18 @@ test("postProcessReplyText keeps AI-denial lines when no prior AI disclosure exi
     historyLines: [],
   });
   assert.equal(output, "I don't use any AI for this.");
+});
+
+test("postProcessReplyText enforces JADL disclosure when inbound asks if this is AI", () => {
+  const output = postProcessReplyText({
+    text: "No AI here, just me.",
+    inboundText: "Are you an AI or a real person?",
+    historyLines: [],
+  });
+  assert.match(output, /Joshua's digital liaison/i);
+  assert.match(output, /conversational intelligence tool designed by Joshua/i);
+  assert.match(output, /state-of-the-art AI/i);
+  assert.match(output, /primary authority/i);
 });
 
 test("postProcessReplyText strips awkward catchphrase prefix while keeping core response", () => {
@@ -2000,6 +2032,44 @@ test("generateReplyWithFallback injects AI-disclosure consistency instruction wh
   }
 });
 
+test("generateReplyWithFallback injects JADL identity disclosure protocol when inbound asks origin", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  const requestBodies: string[] = [];
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      requestBodies.push(typeof init?.body === "string" ? init.body : "");
+      return new Response(JSON.stringify({ output_text: "I can help with that." }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "Who built you and where did you come from?",
+      historyLines: ["Them: Who built you and where did you come from?"],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "log_only",
+      },
+    });
+
+    assert.equal(result.provider, "azure");
+    assert.ok(requestBodies.some((body) => /Identity disclosure protocol/i.test(body)));
+    assert.ok(requestBodies.some((body) => /conversational intelligence tool designed by Joshua/i.test(body)));
+    assert.ok(requestBodies.some((body) => /primary authority/i.test(body)));
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
 test("generateReplyWithFallback injects personal-first anti-corporate instruction", async () => {
   const snapshot = clearAiEnv();
   const originalFetch = globalThis.fetch;
@@ -2830,6 +2900,18 @@ test("selectFewShotsForPrompt can prioritize preferred cohort and scenario tags"
   assert.ok(selected.length > 0);
   assert.equal(selected[0]?.cohort, "gen_z");
   assert.equal(selected[0]?.scenario, "check_in");
+});
+
+test("friendship health_update few-shots stay empathy-only without self-care advice", () => {
+  const pack = getPersonaPackById("friendship_cross_gen.v1");
+  assert.ok(pack);
+  const healthExamples = pack!.fewShots.filter((example) => example.scenario === "health_update");
+  assert.equal(healthExamples.length, 3);
+  for (const example of healthExamples) {
+    assert.match(example.reply, /\b(i hope|hope)\b/i);
+    assert.match(example.reply, /\b(better|recover)\b/i);
+    assert.doesNotMatch(example.reply, /\b(take care|rest(?: up)?|keep me posted|keep me updated)\b/i);
+  }
 });
 
 test("parsePersonaPackForTests accepts optional example metadata fields", () => {

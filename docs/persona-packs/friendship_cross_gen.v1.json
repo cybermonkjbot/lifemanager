@@ -569,7 +569,7 @@
     },
     {
       "inbound": "I haven't been feeling well lately.",
-      "reply": "I am sorry to hear that. Please take care of yourself and keep me posted.",
+      "reply": "I am sorry to hear that. I hope you feel better soon.",
       "cohort": "boomer",
       "scenario": "health_update",
       "tags": [
@@ -580,7 +580,7 @@
     },
     {
       "inbound": "I haven't been feeling well lately.",
-      "reply": "sorry you're dealing with that. please take care and keep me posted.",
+      "reply": "sorry you're dealing with that. i hope you feel better soon.",
       "cohort": "gen_z",
       "scenario": "health_update",
       "tags": [
@@ -591,7 +591,7 @@
     },
     {
       "inbound": "I haven't been feeling well lately.",
-      "reply": "I am sorry you are dealing with that. Please take care and keep me updated.",
+      "reply": "I am sorry you are dealing with that. I hope you feel better soon.",
       "cohort": "bridge",
       "scenario": "health_update",
       "tags": [

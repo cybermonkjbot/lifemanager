@@ -4,6 +4,7 @@ export const convexRefs = {
   queueList: makeFunctionReference<"query">("queue:list"),
   threadsList: makeFunctionReference<"query">("threads:list"),
   threadGet: makeFunctionReference<"query">("threads:get"),
+  callsListByThread: makeFunctionReference<"query">("calls:listByThread"),
   threadsGetEligibility: makeFunctionReference<"query">("threads:getEligibility"),
   threadsGetEligibilityByJid: makeFunctionReference<"query">("threads:getEligibilityByJid"),
   followupsList: makeFunctionReference<"query">("followups:list"),
@@ -44,6 +45,7 @@ export const convexRefs = {
   rulesUpsertIgnoreRule: makeFunctionReference<"mutation">("rules:upsertIgnoreRule"),
   threadsUpsertMetadata: makeFunctionReference<"mutation">("threads:upsertMetadata"),
   threadsSetNightPause: makeFunctionReference<"mutation">("threads:setNightPause"),
+  callsRecordEvent: makeFunctionReference<"mutation">("calls:recordEvent"),
 
   outboxClaimDue: makeFunctionReference<"mutation">("outbox:claimDue"),
   outboxMarkTyping: makeFunctionReference<"mutation">("outbox:markTyping"),
@@ -81,6 +83,7 @@ export const convexRefs = {
   mediaRegisterAsset: makeFunctionReference<"mutation">("media:registerAsset"),
   mediaFindAssetByContentHash: makeFunctionReference<"query">("media:findAssetByContentHash"),
   mediaRegisterAssetIfMissing: makeFunctionReference<"mutation">("media:registerAssetIfMissing"),
+  mediaDedupeStickerExactPass: makeFunctionReference<"mutation">("media:dedupeStickerExactPass"),
   mediaUpsertAssetContext: makeFunctionReference<"mutation">("media:upsertAssetContext"),
   mediaListStickerAssetsNeedingContext: makeFunctionReference<"query">("media:listStickerAssetsNeedingContext"),
   mediaListAssets: makeFunctionReference<"query">("media:listAssets"),

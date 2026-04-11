@@ -5,6 +5,7 @@ import { internalMutation, mutation, query } from "./_generated/server";
 import { detectFutureCommitment, hasRecentFollowupDuplicate } from "./lib/commitments";
 import { DEFAULT_LEASE_MS, DEFAULT_RETRY_LIMIT } from "./lib/constants";
 import { getConfig } from "./lib/config";
+import { detectTodoCandidate } from "./lib/heuristics";
 import {
   countUnansweredOutboundStreak,
   latestInboundMessageAt,
@@ -19,6 +20,7 @@ import {
 } from "./lib/threadEligibility";
 
 const UNANSWERED_OUTBOUND_RECHECK_MS = 5 * 60 * 1000;
+const CALL_REPLY_BARRIER_RECHECK_MS = 5 * 60 * 1000;
 const UNANSWERED_OUTBOUND_SCAN_LIMIT = 25;
 const refStyleLearnFromOutboundEmoji = makeFunctionReference<"mutation">("style:learnFromOutboundEmoji");
 const refChatRebuildThreadStyleProfile = makeFunctionReference<"mutation">("chatTools:rebuildThreadStyleProfile");
@@ -213,6 +215,25 @@ export const claimDue = mutation({
         continue;
       }
       const threadKind = thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup });
+      const callReplyBarrierAt = (thread.callReplyBarrierAt || 0) > 0 ? thread.callReplyBarrierAt : undefined;
+      if (threadKind === "direct" && callReplyBarrierAt) {
+        await ctx.db.patch(item._id, {
+          status: "pending",
+          workerId: undefined,
+          leaseExpiresAt: undefined,
+          sendAt: Math.max(item.sendAt, now + CALL_REPLY_BARRIER_RECHECK_MS),
+          updatedAt: now,
+        });
+        await ctx.db.insert("systemEvents", {
+          source: "worker",
+          eventType: "outbox.deferred.call_reply_barrier",
+          threadId: item.threadId,
+          outboxId: item._id,
+          detail: `Deferred send until a new inbound arrives after qualified call barrier (${new Date(callReplyBarrierAt).toISOString()}).`,
+          createdAt: now,
+        });
+        continue;
+      }
       const sourceMessage = await ctx.db.get(draft.sourceMessageId);
       const shouldQuoteSource = sourceMessage?.direction === "inbound";
       const duplicateCandidateKey = buildOutboundDuplicateKey({
@@ -639,6 +660,21 @@ export const getSendDisposition = query({
       return {
         canSend: false,
         reason: `outbox_not_claimed:${outbox.status}`,
+      };
+    }
+
+    const thread = await ctx.db.get(outbox.threadId);
+    if (!thread) {
+      return {
+        canSend: false,
+        reason: "thread_missing",
+      };
+    }
+    const threadKind = thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup, provider: thread.provider });
+    if (threadKind === "direct" && (thread.callReplyBarrierAt || 0) > 0) {
+      return {
+        canSend: false,
+        reason: `call_reply_barrier:${thread.callReplyBarrierAt}`,
       };
     }
 
@@ -1185,6 +1221,32 @@ export const markSent = mutation({
           threadId: item.threadId,
           outboxId: item._id,
           detail: `${commitment.reason} · ${commitment.sourceSnippet}`.slice(0, 240),
+          createdAt: now,
+        });
+      }
+
+      const todo = detectTodoCandidate({
+        text: item.messageText,
+        direction: "outbound",
+        now,
+        contextText: sourceMessage?.direction === "inbound" ? sourceMessage.text : undefined,
+      });
+      if (todo) {
+        await ctx.db.insert("todoCandidates", {
+          threadId: item.threadId,
+          sourceMessageId: insertedMessageId,
+          title: todo.title,
+          suggestedDueAt: todo.suggestedDueAt,
+          status: "suggested",
+          createdAt: now,
+          updatedAt: now,
+        });
+        await ctx.db.insert("systemEvents", {
+          source: "worker",
+          eventType: "todo.detected",
+          threadId: item.threadId,
+          outboxId: item._id,
+          detail: todo.title.slice(0, 240),
           createdAt: now,
         });
       }
