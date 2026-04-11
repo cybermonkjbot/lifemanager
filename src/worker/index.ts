@@ -7,7 +7,7 @@ import makeWASocket, {
   type WAMessage,
   type UserFacingSocketConfig,
 } from "baileys";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFile, rm, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -66,6 +66,7 @@ import {
 } from "./vision-filter";
 import { transcribeWithWhisperCpp, type WhisperTranscriptionResult } from "./stt";
 import {
+  buildStatusInterestSearchQueries,
   evaluateStatusOutreachLimit,
   forceDeclarativeStatusText,
   isLikelyMarketingStatus,
@@ -229,6 +230,17 @@ type ExternalWebTrendSearchPayload = {
   warnings?: string[];
 };
 
+type StatusVoiceHintsPayload = {
+  tool?: "style.status_voice";
+  totalSamples?: number;
+  recurringPhrases?: string[];
+  toneNotes?: string[];
+  sampleLines?: string[];
+  avgWords?: number;
+  emojiRate?: number;
+  questionRate?: number;
+};
+
 type StickerAssetSnapshot = {
   _id: string;
   label: string;
@@ -260,6 +272,7 @@ type ThreadContextSnapshot = {
   messages: Array<{
     _id: string;
     direction: "inbound" | "outbound";
+    isStatus?: boolean;
     text: string;
     messageType?: string;
     whatsappMessageId?: string;
@@ -294,6 +307,23 @@ const STATUS_CLEANUP_BATCH_LIMIT = 160;
 const CONTEXT_COMPACTION_INTERVAL_MS = 12 * 60 * 1000;
 const CONTEXT_COMPACTION_MAX_THREADS = 24;
 const CONTEXT_COMPACTION_MAX_DELETES = 260;
+const BLOCKLIST_CACHE_TTL_MS = 90 * 1000;
+const BLOCKLIST_FORCE_REFRESH_INTERVAL_MS = 8 * 60 * 1000;
+const PRIVACY_PREFLIGHT_MIN_INTERVAL_MS = 30 * 60 * 1000;
+const AUTO_MARK_READ_ENABLED = readEnvBoolean("SLM_AUTO_MARK_READ_ENABLED", true);
+const AUTO_MARK_READ_GROUPS_ENABLED = readEnvBoolean("SLM_AUTO_MARK_READ_GROUPS", false);
+const AUTO_MARK_READ_STATUS_ENABLED = readEnvBoolean("SLM_AUTO_MARK_READ_STATUS", false);
+const READ_RECEIPT_DEDUPE_TTL_MS = 12 * 60 * 1000;
+const PRESENCE_SUBSCRIBE_ENABLED = readEnvBoolean("SLM_PRESENCE_SUBSCRIBE_ENABLED", true);
+const PRESENCE_SUBSCRIBE_COOLDOWN_MS = 4 * 60 * 1000;
+const CHAT_MODIFY_QUIET_HOURS_ENABLED = readEnvBoolean("SLM_CHAT_MODIFY_QUIET_HOURS_ENABLED", false);
+const CHAT_MODIFY_QUIET_HOURS_MIN_INTERVAL_MS = 3 * 60 * 1000;
+const ABOUT_AUTOMATION_ENABLED = readEnvBoolean("SLM_ABOUT_AUTOMATION_ENABLED", false);
+const ABOUT_AUTOMATION_INTERVAL_MS = Math.max(
+  15 * 60 * 1000,
+  Math.min(Number(process.env.SLM_ABOUT_AUTOMATION_INTERVAL_MINUTES || 360) * 60 * 1000, 7 * 24 * 60 * 60 * 1000),
+);
+const ABOUT_AUTOMATION_TEMPLATE = (process.env.SLM_ABOUT_AUTOMATION_TEMPLATE || "").trim();
 const CORE_HUMOR_PATTERN_GLOBAL = /\b(lol|lmao|lmfao|rofl|haha|hehe|funny|joke|banter|meme|roast|hilarious)\b/gi;
 const CORE_HUMOR_EMOJI_PATTERN = /[😂🤣😹😆😄😁😅😜🤪🙃]/u;
 const CORE_HUMOR_EMOJI_PATTERN_GLOBAL = /[😂🤣😹😆😄😁😅😜🤪🙃]/gu;
@@ -338,6 +368,14 @@ const ALLOWED_RUNTIME_DETERMINISTIC_MODE_SET = new Set<ConversationSteeringMode>
   "loop",
   "wrap_up",
 ]);
+
+function readEnvBoolean(name: string, defaultValue: boolean) {
+  const raw = (process.env[name] || "").trim().toLowerCase();
+  if (!raw) {
+    return defaultValue;
+  }
+  return raw !== "false" && raw !== "0" && raw !== "off" && raw !== "no";
+}
 
 function resolveRuntimeDeterministicModes(modes: string[] | undefined) {
   const parsed = (modes || [])
@@ -1486,6 +1524,10 @@ async function run() {
   let processingOutbox = false;
   let sock: Awaited<ReturnType<typeof createSocket>>;
   let workerRuntimePaused = false;
+  let lastBlocklistForceRefreshAt = 0;
+  let lastPrivacyPreflightAt = 0;
+  let lastAboutAutomationAt = 0;
+  let lastAutomatedAboutText = "";
 
   const normalizeAccountJid = (jid: string | null | undefined) => {
     if (!jid) {
@@ -1497,12 +1539,41 @@ async function run() {
   };
 
   const getSelfJid = () => {
-    const fromSocket = sock?.user?.id || "";
-    if (fromSocket) {
-      return fromSocket;
+    const [primary = ""] = getSelfIdentityJids();
+    return primary;
+  };
+
+  const normalizeJidForLookup = (jid: string | null | undefined) => {
+    return (jid || "").trim().toLowerCase();
+  };
+
+  const getSelfIdentityJids = () => {
+    const raw = new Set<string>();
+    const push = (jid: string | null | undefined) => {
+      const trimmed = (jid || "").trim();
+      if (!trimmed) {
+        return;
+      }
+      raw.add(trimmed);
+    };
+
+    push(sock?.user?.id || "");
+    const creds = (state as { creds?: { me?: { id?: string; lid?: string } } }).creds;
+    push(creds?.me?.id || "");
+    push(creds?.me?.lid || "");
+
+    return [...raw];
+  };
+
+  const getSelfAccountIds = () => {
+    const ids = new Set<string>();
+    for (const jid of getSelfIdentityJids()) {
+      const accountId = normalizeAccountJid(jid);
+      if (accountId) {
+        ids.add(accountId);
+      }
     }
-    const creds = (state as { creds?: { me?: { id?: string } } }).creds;
-    return creds?.me?.id || "";
+    return [...ids];
   };
 
   const buildStatusSendOptions = (audienceJids: string[] | undefined) => {
@@ -1635,6 +1706,12 @@ async function run() {
     expiresAt: 0,
     inFlight: null,
   };
+  const blocklistCache: CacheState<Set<string>> = {
+    value: new Set<string>(),
+    hasValue: false,
+    expiresAt: 0,
+    inFlight: null,
+  };
   const styleProfileCache: CacheState<StyleProfileSnapshot> = {
     value: null,
     hasValue: false,
@@ -1692,6 +1769,151 @@ function resolveTextEmojiAllowlist() {
     });
     applyRuntimeConcurrency(settings);
     return settings;
+  };
+
+  const buildJidLookupCandidates = (jid: string | null | undefined) => {
+    const normalized = normalizeJidForLookup(jid);
+    if (!normalized) {
+      return [] as string[];
+    }
+    const account = normalizeAccountJid(normalized);
+    const keys = new Set<string>([normalized]);
+    if (account) {
+      keys.add(account);
+      keys.add(`${account}@s.whatsapp.net`);
+      keys.add(`${account}@lid`);
+    }
+    return [...keys];
+  };
+
+  const loadBlocklist = async () => {
+    try {
+      const rows = await sock.fetchBlocklist();
+      const blocked = new Set<string>();
+      for (const row of rows || []) {
+        for (const key of buildJidLookupCandidates(typeof row === "string" ? row : "")) {
+          blocked.add(key);
+        }
+      }
+      return blocked;
+    } catch (error) {
+      const err = error instanceof Error ? error.message : String(error);
+      logger.warn({ err }, "Failed to load WhatsApp blocklist");
+      if (blocklistCache.hasValue) {
+        return new Set(blocklistCache.value);
+      }
+      return new Set<string>();
+    }
+  };
+
+  const getBlocklist = async (force = false) => {
+    if (force) {
+      blocklistCache.hasValue = false;
+      blocklistCache.expiresAt = 0;
+    }
+    return resolveTtlCache(blocklistCache, BLOCKLIST_CACHE_TTL_MS, loadBlocklist);
+  };
+
+  const refreshBlocklist = async (reason: string, force = false) => {
+    const blocked = await getBlocklist(force);
+    if (force) {
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: "whatsapp.blocklist.refreshed",
+          detail: compactLogText(`reason=${reason} count=${blocked.size} force=${force ? 1 : 0}`, 220),
+        })
+        .catch(() => undefined);
+    }
+    return blocked;
+  };
+
+  const isJidBlocked = async (jid: string | null | undefined) => {
+    const lookup = buildJidLookupCandidates(jid);
+    if (lookup.length === 0) {
+      return false;
+    }
+
+    const blocked = await getBlocklist(false);
+    if (lookup.some((key) => blocked.has(key))) {
+      return true;
+    }
+
+    const now = Date.now();
+    if (now - lastBlocklistForceRefreshAt < BLOCKLIST_FORCE_REFRESH_INTERVAL_MS) {
+      return false;
+    }
+    lastBlocklistForceRefreshAt = now;
+
+    const refreshed = await getBlocklist(true);
+    return lookup.some((key) => refreshed.has(key));
+  };
+
+  const pickPrivacySetting = (settings: Record<string, string>, key: string) => {
+    if (typeof settings[key] === "string") {
+      return settings[key];
+    }
+    const normalizedKey = key.replace(/[_\s-]+/g, "").toLowerCase();
+    for (const [rawKey, rawValue] of Object.entries(settings)) {
+      if (rawKey.replace(/[_\s-]+/g, "").toLowerCase() === normalizedKey) {
+        return rawValue;
+      }
+    }
+    return "";
+  };
+
+  const runPrivacyPreflight = async (reason: string, force = false) => {
+    const now = Date.now();
+    if (!force && now - lastPrivacyPreflightAt < PRIVACY_PREFLIGHT_MIN_INTERVAL_MS) {
+      return;
+    }
+    lastPrivacyPreflightAt = now;
+
+    try {
+      const settings = (await sock.fetchPrivacySettings(force)) || {};
+      const readReceipts = pickPrivacySetting(settings, "readreceipts");
+      const lastSeen = pickPrivacySetting(settings, "last");
+      const online = pickPrivacySetting(settings, "online");
+      const statusPrivacy = pickPrivacySetting(settings, "status");
+      const groupsAdd = pickPrivacySetting(settings, "groupadd");
+
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: "whatsapp.privacy.preflight.loaded",
+          detail: compactLogText(
+            `reason=${reason} readreceipts=${readReceipts || "unknown"} last_seen=${lastSeen || "unknown"} online=${online || "unknown"} status=${statusPrivacy || "unknown"} groups_add=${groupsAdd || "unknown"}`,
+            280,
+          ),
+        })
+        .catch(() => undefined);
+
+      const warnings: string[] = [];
+      if (readReceipts === "none") {
+        warnings.push("Read receipts are disabled; automated read markers may not appear to contacts.");
+      }
+      if (statusPrivacy === "none") {
+        warnings.push("Status privacy is set to none; status-based workflows may have limited effect.");
+      }
+      if (warnings.length > 0) {
+        await convex
+          .mutation(convexRefs.systemRecordEvent, {
+            source: "worker",
+            eventType: "whatsapp.privacy.preflight.warning",
+            detail: compactLogText(`reason=${reason} ${warnings.join(" | ")}`, 280),
+          })
+          .catch(() => undefined);
+      }
+    } catch (error) {
+      const err = error instanceof Error ? error.message : String(error);
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: "whatsapp.privacy.preflight.error",
+          detail: compactLogText(`reason=${reason} ${err}`, 280),
+        })
+        .catch(() => undefined);
+    }
   };
 
   const emitAiPipelineMetrics = async (args: {
@@ -2528,6 +2750,10 @@ function resolveTextEmojiAllowlist() {
   const recentEmojiOutboundByThread = new Map<string, number>();
   const recentStickerCompanionByThread = new Map<string, number>();
   const recentCallFallbackByThread = new Map<string, number>();
+  const recentMarkedReadByMessage = new Map<string, number>();
+  const recentPresenceSubscribeByThread = new Map<string, number>();
+  const quietHoursMutedByThread = new Map<string, number>();
+  const quietHoursMuteTouchedAtByThread = new Map<string, number>();
   const mediaAssetIdByKey = new Map<string, Id<"mediaAssets">>();
   const inboundImageVisionLastSentAtByThread = new Map<string, number>();
   let inboundConcurrency = Math.round(clamp(Number(process.env.SLM_INBOUND_CONCURRENCY || 4), 1, 16));
@@ -2605,6 +2831,267 @@ function resolveTextEmojiAllowlist() {
     pruneRecentCallFallbackByThread();
     const sentAt = recentCallFallbackByThread.get(threadJid);
     return typeof sentAt === "number" && sentAt > 0;
+  };
+  const pruneRecentMarkedReadByMessage = () => {
+    const cutoff = Date.now() - READ_RECEIPT_DEDUPE_TTL_MS;
+    for (const [messageKey, seenAt] of recentMarkedReadByMessage.entries()) {
+      if (seenAt < cutoff) {
+        recentMarkedReadByMessage.delete(messageKey);
+      }
+    }
+  };
+  const maybeMarkInboundAsRead = async (args: {
+    message: {
+      key: { id?: string | null; fromMe?: boolean | null; remoteJid?: string | null; participant?: string | null };
+    };
+    threadJid: string;
+    threadKind: "direct" | "group" | "broadcast_or_system";
+    isStatusBroadcast: boolean;
+  }) => {
+    if (!AUTO_MARK_READ_ENABLED) {
+      return;
+    }
+    if (args.threadKind === "group" && !AUTO_MARK_READ_GROUPS_ENABLED) {
+      return;
+    }
+    if (args.isStatusBroadcast && !AUTO_MARK_READ_STATUS_ENABLED) {
+      return;
+    }
+    if (args.message.key.fromMe) {
+      return;
+    }
+    const messageId = (args.message.key.id || "").trim();
+    if (!messageId) {
+      return;
+    }
+    const remoteJid = (args.message.key.remoteJid || args.threadJid || "").trim();
+    if (!remoteJid) {
+      return;
+    }
+
+    const dedupeKey = `${remoteJid}:${messageId}`;
+    pruneRecentMarkedReadByMessage();
+    if (recentMarkedReadByMessage.has(dedupeKey)) {
+      return;
+    }
+
+    try {
+      await sock.readMessages([
+        {
+          remoteJid,
+          fromMe: false,
+          id: messageId,
+          participant: args.message.key.participant || undefined,
+        },
+      ]);
+      recentMarkedReadByMessage.set(dedupeKey, Date.now());
+    } catch (error) {
+      const err = error instanceof Error ? error.message : String(error);
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: "inbound.read_receipt.error",
+          detail: compactLogText(`jid=${remoteJid} message=${messageId} err=${err}`, 280),
+        })
+        .catch(() => undefined);
+    }
+  };
+  const pruneRecentPresenceSubscribeByThread = () => {
+    const cutoff = Date.now() - PRESENCE_SUBSCRIBE_COOLDOWN_MS;
+    for (const [threadKey, subscribedAt] of recentPresenceSubscribeByThread.entries()) {
+      if (subscribedAt < cutoff) {
+        recentPresenceSubscribeByThread.delete(threadKey);
+      }
+    }
+  };
+  const maybeSubscribePresence = async (jid: string) => {
+    if (!PRESENCE_SUBSCRIBE_ENABLED) {
+      return;
+    }
+    const threadKey = normalizeAccountJid(jid) || normalizeJidForLookup(jid);
+    if (!threadKey) {
+      return;
+    }
+    pruneRecentPresenceSubscribeByThread();
+    const subscribedAt = recentPresenceSubscribeByThread.get(threadKey) || 0;
+    if (Date.now() - subscribedAt < PRESENCE_SUBSCRIBE_COOLDOWN_MS) {
+      return;
+    }
+    try {
+      await sock.presenceSubscribe(jid);
+      recentPresenceSubscribeByThread.set(threadKey, Date.now());
+    } catch (error) {
+      const err = error instanceof Error ? error.message : String(error);
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: "presence.subscribe.error",
+          detail: compactLogText(`jid=${jid} err=${err}`, 260),
+        })
+        .catch(() => undefined);
+    }
+  };
+  const resolveQuietHoursWindow = (runtimeSettings: RuntimeSettings | null, nowMs: number) => {
+    const startHour = normalizeHour(runtimeSettings?.quietHoursStartHour, DEFAULT_NIGHT_WIND_DOWN_START_HOUR);
+    const endHour = normalizeHour(runtimeSettings?.quietHoursEndHour, DEFAULT_NIGHT_WIND_DOWN_END_HOUR);
+    const hour = new Date(nowMs).getHours();
+    const active = isWithinHourWindow(hour, startHour, endHour);
+    const muteUntilMs = active ? computeNextWindowEnd(nowMs, startHour, endHour) : undefined;
+    return { active, muteUntilMs };
+  };
+  const maybeApplyQuietHoursMute = async (args: {
+    jid: string;
+    runtimeSettings: RuntimeSettings | null;
+    threadId?: Id<"threads">;
+    reason: string;
+  }) => {
+    if (!CHAT_MODIFY_QUIET_HOURS_ENABLED) {
+      return;
+    }
+    if (isGroupJid(args.jid) || args.jid === "status@broadcast") {
+      return;
+    }
+    const now = Date.now();
+    const quietHours = resolveQuietHoursWindow(args.runtimeSettings, now);
+    if (!quietHours.active || !quietHours.muteUntilMs) {
+      return;
+    }
+    const threadKey = normalizeAccountJid(args.jid) || normalizeJidForLookup(args.jid);
+    if (!threadKey) {
+      return;
+    }
+    const previousMuteUntil = quietHoursMutedByThread.get(threadKey) || 0;
+    const lastTouchedAt = quietHoursMuteTouchedAtByThread.get(threadKey) || 0;
+    if (
+      previousMuteUntil >= quietHours.muteUntilMs &&
+      now - lastTouchedAt < CHAT_MODIFY_QUIET_HOURS_MIN_INTERVAL_MS
+    ) {
+      return;
+    }
+    try {
+      await sock.chatModify({ mute: Math.floor(quietHours.muteUntilMs / 1000) }, args.jid);
+      quietHoursMutedByThread.set(threadKey, quietHours.muteUntilMs);
+      quietHoursMuteTouchedAtByThread.set(threadKey, now);
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: "whatsapp.chat_quiet_hours.muted",
+          ...(args.threadId ? { threadId: args.threadId } : {}),
+          detail: compactLogText(
+            `jid=${args.jid} mute_until=${new Date(quietHours.muteUntilMs).toISOString()} reason=${args.reason}`,
+            280,
+          ),
+        })
+        .catch(() => undefined);
+    } catch (error) {
+      const err = error instanceof Error ? error.message : String(error);
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: "whatsapp.chat_quiet_hours.mute_error",
+          ...(args.threadId ? { threadId: args.threadId } : {}),
+          detail: compactLogText(`jid=${args.jid} reason=${args.reason} err=${err}`, 280),
+        })
+        .catch(() => undefined);
+    }
+  };
+  const maybeClearQuietHoursMute = async (args: {
+    jid: string;
+    runtimeSettings: RuntimeSettings | null;
+    threadId?: Id<"threads">;
+    reason: string;
+  }) => {
+    if (!CHAT_MODIFY_QUIET_HOURS_ENABLED) {
+      return;
+    }
+    if (isGroupJid(args.jid) || args.jid === "status@broadcast") {
+      return;
+    }
+    const threadKey = normalizeAccountJid(args.jid) || normalizeJidForLookup(args.jid);
+    if (!threadKey || !quietHoursMutedByThread.has(threadKey)) {
+      return;
+    }
+    const now = Date.now();
+    const quietHours = resolveQuietHoursWindow(args.runtimeSettings, now);
+    if (quietHours.active) {
+      return;
+    }
+    const lastTouchedAt = quietHoursMuteTouchedAtByThread.get(threadKey) || 0;
+    if (now - lastTouchedAt < CHAT_MODIFY_QUIET_HOURS_MIN_INTERVAL_MS) {
+      return;
+    }
+    try {
+      await sock.chatModify({ mute: null }, args.jid);
+      quietHoursMutedByThread.delete(threadKey);
+      quietHoursMuteTouchedAtByThread.set(threadKey, now);
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: "whatsapp.chat_quiet_hours.unmuted",
+          ...(args.threadId ? { threadId: args.threadId } : {}),
+          detail: compactLogText(`jid=${args.jid} reason=${args.reason}`, 240),
+        })
+        .catch(() => undefined);
+    } catch (error) {
+      const err = error instanceof Error ? error.message : String(error);
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: "whatsapp.chat_quiet_hours.unmute_error",
+          ...(args.threadId ? { threadId: args.threadId } : {}),
+          detail: compactLogText(`jid=${args.jid} reason=${args.reason} err=${err}`, 280),
+        })
+        .catch(() => undefined);
+    }
+  };
+  const buildAutomatedAboutText = (nowMs: number) => {
+    const now = new Date(nowMs);
+    const baseText =
+      ABOUT_AUTOMATION_TEMPLATE ||
+      `Social Life Manager active • ${now.toLocaleDateString()} ${now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+    const rendered = baseText
+      .replace(/\{date\}/gi, now.toLocaleDateString())
+      .replace(/\{time\}/gi, now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }))
+      .replace(/\{datetime\}/gi, now.toLocaleString())
+      .trim();
+    return rendered.slice(0, 139).trim();
+  };
+  const maybeRunAboutAutomation = async (reason: string, force = false) => {
+    if (!ABOUT_AUTOMATION_ENABLED) {
+      return;
+    }
+    const now = Date.now();
+    if (!force && now - lastAboutAutomationAt < ABOUT_AUTOMATION_INTERVAL_MS) {
+      return;
+    }
+    lastAboutAutomationAt = now;
+    const nextAbout = buildAutomatedAboutText(now);
+    if (!nextAbout) {
+      return;
+    }
+    if (!force && nextAbout === lastAutomatedAboutText) {
+      return;
+    }
+    try {
+      await sock.updateProfileStatus(nextAbout);
+      lastAutomatedAboutText = nextAbout;
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: "whatsapp.about.updated",
+          detail: compactLogText(`reason=${reason} text="${nextAbout}"`, 280),
+        })
+        .catch(() => undefined);
+    } catch (error) {
+      const err = error instanceof Error ? error.message : String(error);
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: "whatsapp.about.update_error",
+          detail: compactLogText(`reason=${reason} err=${err}`, 280),
+        })
+        .catch(() => undefined);
+    }
   };
 
   const mediaCacheKey = (kind: CapturableMediaKind, contentHash: string) => `${kind}:${contentHash}`;
@@ -3055,6 +3542,9 @@ function resolveTextEmojiAllowlist() {
   const SELF_IMPROVE_LOCK_PATH = join(SELF_IMPROVE_ROOT, "runner.lock");
   const SELF_IMPROVE_LATEST_META_PATH = join(SELF_IMPROVE_ROOT, "latest-meta.json");
   const SELF_IMPROVE_LATEST_REPORT_PATH = join(SELF_IMPROVE_ROOT, "latest.md");
+  const SELF_IMPROVE_STREAM_FLUSH_MS = 12_000;
+  const SELF_IMPROVE_STREAM_HEARTBEAT_MS = 45_000;
+  const SELF_IMPROVE_STREAM_MAX_LINES = 6;
   const SELF_CONTROL_MESSAGE_PREFIX = (process.env.SLM_SELF_CONTROL_MESSAGE_PREFIX || "").trim();
 
   const resolveSelfControlThread = (messageKey: SelfControlMessageKey): ResolvedSelfControlThread | null => {
@@ -3065,16 +3555,15 @@ function resolveTextEmojiAllowlist() {
       return null;
     }
 
-    const selfJid = getSelfJid();
-    const selfAccount = normalizeAccountJid(selfJid);
-    if (!selfAccount) {
+    const selfAccounts = getSelfAccountIds();
+    if (selfAccounts.length === 0) {
       return null;
     }
 
     const threadAccount = normalizeAccountJid(threadJid);
     const senderAccount = normalizeAccountJid(senderJid);
     const selfScoped = isStrictSelfControlScope({
-      selfAccount,
+      selfAccounts,
       threadAccount,
       senderAccount,
       fromMe: Boolean(messageKey.fromMe),
@@ -3100,11 +3589,16 @@ function resolveTextEmojiAllowlist() {
 
     pushReplyJid(threadJid);
     pushReplyJid(senderJid);
-    pushReplyJid(`${selfAccount}@s.whatsapp.net`);
-    pushReplyJid(`${selfAccount}@lid`);
+    for (const selfJid of getSelfIdentityJids()) {
+      pushReplyJid(selfJid);
+    }
+    for (const selfAccount of selfAccounts) {
+      pushReplyJid(`${selfAccount}@s.whatsapp.net`);
+      pushReplyJid(`${selfAccount}@lid`);
+    }
 
     return {
-      threadJid: threadJid || senderJid || `${selfAccount}@s.whatsapp.net`,
+      threadJid: threadJid || senderJid || `${selfAccounts[0]}@s.whatsapp.net`,
       replyJids,
     };
   };
@@ -3126,6 +3620,130 @@ function resolveTextEmojiAllowlist() {
     const fallbackError =
       lastError instanceof Error ? lastError.message : lastError ? String(lastError) : "no reply JID available";
     throw new Error(`self-control reply send failed: ${fallbackError}`);
+  };
+
+  const monitorSelfImproveRunStream = (args: {
+    child: ChildProcessWithoutNullStreams;
+    selfControl: ResolvedSelfControlThread;
+    prompt: string;
+  }) => {
+    const startedAt = Date.now();
+    let runId = "";
+    let stdoutBuffer = "";
+    let stderrBuffer = "";
+    let queuedLines: string[] = [];
+    let lastUpdateAt = startedAt;
+    let flushInFlight = false;
+
+    const enqueueLine = (source: "stdout" | "stderr", rawLine: string) => {
+      const line = compactLogText(rawLine.replace(/\s+/g, " ").trim(), 230);
+      if (!line) {
+        return;
+      }
+      const runMatch = line.match(/starting run\s+([^\s]+)/i);
+      if (runMatch?.[1]) {
+        runId = runMatch[1];
+      }
+      queuedLines.push(`${source === "stderr" ? "err" : "out"}: ${line}`);
+      if (queuedLines.length > 90) {
+        queuedLines = queuedLines.slice(-90);
+      }
+    };
+
+    const flushBuffer = (source: "stdout" | "stderr", force = false) => {
+      const buffer = source === "stdout" ? stdoutBuffer : stderrBuffer;
+      const parts = buffer.split(/\r?\n/);
+      const remainder = parts.pop() ?? "";
+      if (source === "stdout") {
+        stdoutBuffer = force ? "" : remainder;
+      } else {
+        stderrBuffer = force ? "" : remainder;
+      }
+      for (const row of parts) {
+        enqueueLine(source, row);
+      }
+      if (force && remainder.trim()) {
+        enqueueLine(source, remainder);
+      }
+    };
+
+    const flushUpdate = async (force = false) => {
+      if (flushInFlight) {
+        return;
+      }
+
+      const now = Date.now();
+      const hasLines = queuedLines.length > 0;
+      const shouldHeartbeat = !hasLines && now - lastUpdateAt >= SELF_IMPROVE_STREAM_HEARTBEAT_MS;
+      if (!force && !hasLines && !shouldHeartbeat) {
+        return;
+      }
+
+      const elapsedSeconds = Math.max(1, Math.round((now - startedAt) / 1000));
+      const lines = hasLines ? queuedLines.slice(-SELF_IMPROVE_STREAM_MAX_LINES) : [];
+      if (hasLines) {
+        queuedLines = [];
+      }
+
+      flushInFlight = true;
+      try {
+        const text = [
+          "Local Codex improvement live update",
+          `prompt: ${compactLogText(args.prompt, 120)}`,
+          ...(runId ? [`run: ${runId}`] : []),
+          `elapsed: ${elapsedSeconds}s`,
+          ...(lines.length > 0
+            ? [
+                "stream:",
+                ...lines.map((line) => `- ${line}`),
+              ]
+            : ["stream: still running..."]),
+          `report: ${SELF_IMPROVE_LATEST_REPORT_PATH}`,
+        ].join("\n");
+        await sendSelfControlText({ selfControl: args.selfControl, text });
+        lastUpdateAt = Date.now();
+      } catch {
+        // ignore stream update send errors; completion summary still attempts delivery
+      } finally {
+        flushInFlight = false;
+      }
+    };
+
+    args.child.stdout.setEncoding("utf8");
+    args.child.stderr.setEncoding("utf8");
+    args.child.stdout.on("data", (chunk: string) => {
+      stdoutBuffer += chunk;
+      flushBuffer("stdout", false);
+    });
+    args.child.stderr.on("data", (chunk: string) => {
+      stderrBuffer += chunk;
+      flushBuffer("stderr", false);
+    });
+
+    const interval = setInterval(() => {
+      void flushUpdate(false);
+    }, SELF_IMPROVE_STREAM_FLUSH_MS);
+
+    args.child.once("close", (code, signal) => {
+      clearInterval(interval);
+      void (async () => {
+        flushBuffer("stdout", true);
+        flushBuffer("stderr", true);
+        await flushUpdate(true);
+        const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+        const completedText = [
+          "Local Codex improvement run completed",
+          ...(runId ? [`run: ${runId}`] : []),
+          `elapsed: ${elapsedSeconds}s`,
+          typeof code === "number" && code === 0
+            ? "result: success"
+            : `result: warning (${signal ? `signal ${signal}` : `exit ${code ?? "unknown"}`})`,
+          `report: ${SELF_IMPROVE_LATEST_REPORT_PATH}`,
+          'check: send "improve latest"',
+        ].join("\n");
+        await sendSelfControlText({ selfControl: args.selfControl, text: completedText }).catch(() => undefined);
+      })();
+    });
   };
 
   const isSelfImproveRunActive = async () => {
@@ -3153,7 +3771,11 @@ function resolveTextEmojiAllowlist() {
     }
   };
 
-  const launchSelfImproveRun = async (command: Extract<SelfImproveCommand, { action: "run" }>) => {
+  const launchSelfImproveRun = async (args: {
+    command: Extract<SelfImproveCommand, { action: "run" }>;
+    selfControl: ResolvedSelfControlThread;
+  }) => {
+    const command = args.command;
     const prompt = command.prompt.trim();
     if (!prompt) {
       return {
@@ -3187,19 +3809,23 @@ function resolveTextEmojiAllowlist() {
     const child = spawn(bunBin, ["run", "self-improve", "--", "--prompt", prompt], {
       cwd: process.cwd(),
       env: process.env,
-      detached: true,
-      stdio: "ignore",
+      stdio: ["pipe", "pipe", "pipe"],
     });
-    child.unref();
+
+    monitorSelfImproveRunStream({
+      child,
+      selfControl: args.selfControl,
+      prompt,
+    });
 
     return {
       hasError: false,
       responseText: [
         "Local Codex improvement run queued",
         `prompt: ${compactLogText(prompt, 220)}`,
-        `status: started in background${child.pid ? ` (pid ${child.pid})` : ""}`,
+        `status: started with live updates${child.pid ? ` (pid ${child.pid})` : ""}`,
         `report: ${SELF_IMPROVE_LATEST_REPORT_PATH}`,
-        'check: send "improve status" or "improve latest"',
+        'check: wait for live updates, or send "improve status"',
       ].join("\n"),
     };
   };
@@ -3493,7 +4119,10 @@ function resolveTextEmojiAllowlist() {
     let hasError = false;
     try {
       if (command.action === "run") {
-        const started = await launchSelfImproveRun(command);
+        const started = await launchSelfImproveRun({
+          command,
+          selfControl,
+        });
         responseText = started.responseText;
         hasError = started.hasError;
       } else if (command.action === "status") {
@@ -3934,6 +4563,16 @@ function resolveTextEmojiAllowlist() {
 
       const messageAt = normalizeIncomingMessageTimestamp(message.messageTimestamp, Date.now());
       const threadKind = classifyThreadKindFromJid(threadJid);
+      if (threadKind === "direct" && (await isJidBlocked(senderJid))) {
+        await convex
+          .mutation(convexRefs.systemRecordEvent, {
+            source: "worker",
+            eventType: "inbound.blocked_contact.skipped",
+            detail: compactLogText(`thread=${threadJid} sender=${senderJid}`, 220),
+          })
+          .catch(() => undefined);
+        return;
+      }
       const archivedState = chatArchiveState.get(threadJid);
       const mediaKind = resolveCapturableMediaKind(effectiveParsed);
       const runtimeSettings = await getRuntimeSettings();
@@ -4107,6 +4746,14 @@ function resolveTextEmojiAllowlist() {
       const nightWindDownUntil = nightWindDownActive
         ? computeNextWindowEnd(now, nightStartHour, nightEndHour)
         : undefined;
+      if (!nightWindDownUntil && !isStatusBroadcast && threadKind === "direct") {
+        await maybeClearQuietHoursMute({
+          jid: threadJid,
+          runtimeSettings,
+          threadId: ingest.threadId as Id<"threads">,
+          reason: "outside_quiet_hours_inbound",
+        });
+      }
       const activeNightPauseUntil =
         !isStatusBroadcast && (ingest.nightPausedUntil || 0) > now ? ingest.nightPausedUntil : undefined;
 
@@ -4254,6 +4901,7 @@ function resolveTextEmojiAllowlist() {
         const threadSnapshot = (await convex
           .query(convexRefs.threadGet, {
             threadId: ingest.threadId,
+            includeStatusMessages: isStatusBroadcast,
           })
           .catch(() => null)) as ThreadContextSnapshot;
         const statusLimit = evaluateStatusOutreachLimit({
@@ -4376,6 +5024,13 @@ function resolveTextEmojiAllowlist() {
           .catch(() => undefined);
       }
 
+      await maybeMarkInboundAsRead({
+        message,
+        threadJid: rawThreadJid || threadJid,
+        threadKind,
+        isStatusBroadcast,
+      });
+
       if (effectiveParsed.kind === "reaction") {
         return;
       }
@@ -4434,6 +5089,7 @@ function resolveTextEmojiAllowlist() {
           threadContextForPolicy = (await convex
             .query(convexRefs.threadGet, {
               threadId: ingest.threadId,
+              includeStatusMessages: isStatusBroadcast,
             })
             .catch(() => null)) as ThreadContextSnapshot;
           const ackHistoryLines = (threadContextForPolicy?.messages || []).map((m) => {
@@ -4545,6 +5201,7 @@ function resolveTextEmojiAllowlist() {
         threadContextForPolicy = (await convex
           .query(convexRefs.threadGet, {
             threadId: ingest.threadId,
+            includeStatusMessages: isStatusBroadcast,
           })
           .catch(() => null)) as ThreadContextSnapshot;
         outboundPolicy = await decideOutboundPolicy({
@@ -4572,6 +5229,7 @@ function resolveTextEmojiAllowlist() {
           threadContextForPolicy ||
           ((await convex.query(convexRefs.threadGet, {
             threadId: ingest.threadId,
+            includeStatusMessages: isStatusBroadcast,
           })) as ThreadContextSnapshot);
         historyLines = (threadContext?.messages || []).map((m) => {
           return `${m.direction === "inbound" ? "Them" : "Me"}: ${m.text}`;
@@ -4694,6 +5352,7 @@ function resolveTextEmojiAllowlist() {
           if (fetchResult.requested) {
             threadContext = (await convex.query(convexRefs.threadGet, {
               threadId: ingest.threadId,
+              includeStatusMessages: isStatusBroadcast,
             })) as ThreadContextSnapshot;
             historyLines = (threadContext?.messages || []).map((m) => {
               return `${m.direction === "inbound" ? "Them" : "Me"}: ${m.text}`;
@@ -5069,6 +5728,12 @@ function resolveTextEmojiAllowlist() {
             pauseUntil: nightWindDownUntil,
           })
           .catch(() => undefined);
+        await maybeApplyQuietHoursMute({
+          jid: threadJid,
+          runtimeSettings,
+          threadId: ingest.threadId as Id<"threads">,
+          reason: "night_wind_down",
+        });
       }
     } catch (error) {
       const err = error instanceof Error ? error.message : String(error);
@@ -5136,6 +5801,9 @@ function resolveTextEmojiAllowlist() {
           reconnectAttempts = 0;
           logger.info("WhatsApp connection established");
           await reportListener(true, "Worker listener is active. AI reply automation is running.");
+          await refreshBlocklist("connection_open", true);
+          await runPrivacyPreflight("connection_open", true);
+          await maybeRunAboutAutomation("connection_open", true);
         }
       });
     });
@@ -5630,72 +6298,147 @@ function resolveTextEmojiAllowlist() {
     const demographic = (item.statusDemographicHint || "mixed").trim();
     const audienceCount = Math.max(0, item.statusAudienceJids?.length || 0);
     const requestedFormat: "text" | "meme" = item.statusFormat === "meme" ? "meme" : "text";
-    const internetTrendQuery = compactLogText(
-      `latest social media and pop-culture trends ${new Date().getFullYear()} for ${trendTheme} audience`,
-      220,
-    );
+    const statusVoice = (await convex
+      .query(convexRefs.styleGetStatusVoice, {
+        limit: 10,
+      })
+      .catch(() => null)) as StatusVoiceHintsPayload | null;
+    const statusVoiceSamples = (statusVoice?.sampleLines || []).slice(0, 3);
+    const statusVoicePhrases = (statusVoice?.recurringPhrases || []).slice(0, 3);
+    const statusVoiceNotes = (statusVoice?.toneNotes || []).slice(0, 3);
+    const trendSearchPlan = buildStatusInterestSearchQueries({
+      trendTheme,
+      demographicHint: demographic,
+      nowMs: Date.now(),
+      maxQueries: 3,
+    });
+    const trendQueries = trendSearchPlan.queries
+      .map((query) => compactLogText(query, 220))
+      .filter(Boolean)
+      .slice(0, 3);
     let internetTrendLines: string[] = [];
     let internetTrendTheme = "";
+    const mergedRowsByKey = new Map<
+      string,
+      {
+        title: string;
+        snippet: string;
+        confidence: number;
+        source: string;
+        query: string;
+      }
+    >();
 
-    try {
-      const webSearch = (await convex.action(convexRefs.chatExternalWebSearch, {
-        query: internetTrendQuery,
-        maxResults: 4,
-      })) as ExternalWebTrendSearchPayload;
-
-      const internetRows = (webSearch.results || [])
-        .map((row) => {
-          const title = compactLogText((row.title || "").replace(/\s+/g, " ").trim(), 90);
-          const snippet = compactLogText((row.snippet || "").replace(/\s+/g, " ").trim(), 120);
-          const confidence = clamp(Number(row.confidence ?? 0), 0, 1);
-          return {
-            title,
-            snippet,
-            confidence,
-          };
-        })
-        .filter((row) => row.title && (row.snippet || row.confidence >= 0.45))
-        .slice(0, 3);
-
-      internetTrendTheme = internetRows
-        .map((row) => row.title)
-        .filter((value): value is string => Boolean(value))
-        .slice(0, 2)
-        .join(", ");
-
-      internetTrendLines = internetRows.map((row, index) =>
-        compactLogText(`Web trend ${index + 1}: ${row.title}${row.snippet ? ` — ${row.snippet}` : ""}`, 180),
-      );
-
+    if (trendQueries.length > 0) {
       await convex
         .mutation(convexRefs.systemRecordEvent, {
           source: "ai",
-          eventType: "status_builder.internet_trends.loaded",
+          eventType: "status_builder.internet_trends.plan",
           threadId: item.threadId as Id<"threads">,
           toolRunId,
-          detail: `query="${internetTrendQuery}" provider=${webSearch.provider || "unknown"} results=${internetRows.length}`,
-        })
-        .catch(() => undefined);
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      await convex
-        .mutation(convexRefs.systemRecordEvent, {
-          source: "ai",
-          eventType: "status_builder.internet_trends.failed",
-          threadId: item.threadId as Id<"threads">,
-          toolRunId,
-          detail: compactLogText(errorMessage, 220),
+          detail: compactLogText(
+            `interests=${(trendSearchPlan.interests || []).join(", ") || "none"} queries=${trendQueries.join(" || ")}`,
+            280,
+          ),
         })
         .catch(() => undefined);
     }
 
+    for (let index = 0; index < trendQueries.length; index += 1) {
+      const query = trendQueries[index];
+      const maxResults = index === 0 ? 5 : 3;
+      try {
+        const webSearch = (await convex.action(convexRefs.chatExternalWebSearch, {
+          query,
+          maxResults,
+        })) as ExternalWebTrendSearchPayload;
+
+        const internetRows = (webSearch.results || [])
+          .map((row) => {
+            const title = compactLogText((row.title || "").replace(/\s+/g, " ").trim(), 90);
+            const snippet = compactLogText((row.snippet || "").replace(/\s+/g, " ").trim(), 120);
+            const confidence = clamp(Number(row.confidence ?? 0), 0, 1);
+            const url = (row.url || "").trim().toLowerCase();
+            const source = (row.source || "unknown").trim().toLowerCase();
+            const dedupeKey = url || `${source}:${title.toLowerCase()}`;
+            return {
+              title,
+              snippet,
+              confidence,
+              dedupeKey,
+              source,
+            };
+          })
+          .filter((row) => row.title && (row.snippet || row.confidence >= 0.45))
+          .slice(0, maxResults);
+
+        for (const row of internetRows) {
+          const existing = mergedRowsByKey.get(row.dedupeKey);
+          if (!existing || row.confidence > existing.confidence) {
+            mergedRowsByKey.set(row.dedupeKey, {
+              title: row.title,
+              snippet: row.snippet,
+              confidence: row.confidence,
+              source: row.source,
+              query,
+            });
+          }
+        }
+
+        await convex
+          .mutation(convexRefs.systemRecordEvent, {
+            source: "ai",
+            eventType: "status_builder.internet_trends.loaded",
+            threadId: item.threadId as Id<"threads">,
+            toolRunId,
+            detail: compactLogText(
+              `query="${query}" provider=${webSearch.provider || "unknown"} results=${internetRows.length} warnings=${(webSearch.warnings || []).length}`,
+              260,
+            ),
+          })
+          .catch(() => undefined);
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        await convex
+          .mutation(convexRefs.systemRecordEvent, {
+            source: "ai",
+            eventType: "status_builder.internet_trends.failed",
+            threadId: item.threadId as Id<"threads">,
+            toolRunId,
+            detail: compactLogText(`query="${query}" error=${errorMessage}`, 260),
+          })
+          .catch(() => undefined);
+      }
+    }
+
+    const mergedInternetRows = [...mergedRowsByKey.values()]
+      .sort((a, b) => b.confidence - a.confidence || a.title.localeCompare(b.title))
+      .slice(0, 4);
+
+    internetTrendTheme = mergedInternetRows
+      .map((row) => row.title)
+      .filter((value): value is string => Boolean(value))
+      .slice(0, 2)
+      .join(", ");
+
+    internetTrendLines = mergedInternetRows.map((row, index) =>
+      compactLogText(
+        `Web trend ${index + 1}: ${row.title}${row.snippet ? ` — ${row.snippet}` : ""}${row.query ? ` [${row.query}]` : ""}`,
+        180,
+      ),
+    );
+
     const blendedTrendTheme = [trendTheme, internetTrendTheme].filter(Boolean).join(", ");
+    const interestTheme = trendSearchPlan.interests.length > 0 ? trendSearchPlan.interests.join(", ") : trendTheme;
 
     const promptSeed = [
       "Generate one WhatsApp status update as a confident, relatable statement.",
       `Audience size: ${audienceCount}.`,
       `Audience mix: ${demographic}.`,
       `Trending topics from my chats: ${trendTheme}.`,
+      `Interest themes from my chats: ${interestTheme}.`,
+      ...(statusVoiceNotes.length > 0 ? [`My posting voice notes: ${statusVoiceNotes.join(" | ")}.`] : []),
+      ...(statusVoicePhrases.length > 0 ? [`My recurring status phrases: ${statusVoicePhrases.join(" | ")}.`] : []),
       ...(internetTrendLines.length > 0 ? [`Internet trend pulse: ${internetTrendLines.join(" | ")}.`] : []),
       `Required format: ${requestedFormat === "meme" ? "short meme caption" : "text-only status"}.`,
       "Style: concise, playful, human, and natural.",
@@ -5708,14 +6451,21 @@ function resolveTextEmojiAllowlist() {
       inboundText: promptSeed,
       historyLines: [
         `Trend keywords: ${blendedTrendTheme || trendTheme}`,
+        `Interest themes: ${interestTheme}`,
         `Demographic mix: ${demographic}`,
         `Audience count: ${audienceCount}`,
+        ...(statusVoiceSamples.length > 0 ? [`Recent self-posted statuses: ${statusVoiceSamples.join(" | ")}`] : []),
+        ...(statusVoicePhrases.length > 0 ? [`Recurring status phrases: ${statusVoicePhrases.join(" | ")}`] : []),
+        ...(statusVoiceNotes.length > 0 ? [`Posting voice notes: ${statusVoiceNotes.join(" | ")}`] : []),
         ...internetTrendLines,
       ],
       styleHints: [
         "status",
         "engagement",
         `demographic:${demographic}`,
+        ...trendSearchPlan.interests.slice(0, 3).map((interest) => `interest:${interest}`),
+        ...statusVoicePhrases.map((phrase) => `status_phrase:${phrase}`),
+        ...statusVoiceNotes.map((note) => `status_voice:${note}`),
         ...(internetTrendTheme ? [`internet:${internetTrendTheme}`] : []),
       ],
       runtime: {
@@ -5966,6 +6716,33 @@ function resolveTextEmojiAllowlist() {
                 }
               }
 
+              if (!isStatusBroadcastSend && (await isJidBlocked(item.jid))) {
+                await convex.mutation(convexRefs.outboxMarkFailed, {
+                  outboxId: item.outboxId,
+                  error: "Blocked by WhatsApp blocklist.",
+                  forceFinal: true,
+                });
+                await convex
+                  .mutation(convexRefs.systemRecordEvent, {
+                    source: "worker",
+                    eventType: "outbox.blocked.blocklist",
+                    threadId: item.threadId as Id<"threads">,
+                    outboxId: item.outboxId as Id<"outbox">,
+                    detail: compactLogText(`jid=${item.jid}`, 180),
+                  })
+                  .catch(() => undefined);
+                return;
+              }
+
+              if (!isStatusBroadcastSend) {
+                await maybeClearQuietHoursMute({
+                  jid: item.jid,
+                  runtimeSettings,
+                  threadId: item.threadId as Id<"threads">,
+                  reason: "pre_send_outbox",
+                });
+              }
+
               if (
                 runtimeSettings?.aiFallbackMode === "azure_only" &&
                 item.provider !== "azure" &&
@@ -6183,6 +6960,7 @@ function resolveTextEmojiAllowlist() {
                 if (!hydrated.mediaAssetId) {
                   throw new Error("Meme outbox item missing media asset id.");
                 }
+                await maybeSubscribePresence(item.jid);
                 await sock.sendPresenceUpdate("composing", item.jid);
                 await convex.mutation(convexRefs.outboxMarkTyping, { outboxId: item.outboxId });
                 await sleep(hydrated.typingMs);
@@ -6201,6 +6979,7 @@ function resolveTextEmojiAllowlist() {
                 }, quotedMessageOptions);
                 await sock.sendPresenceUpdate("paused", item.jid);
               } else {
+                await maybeSubscribePresence(item.jid);
                 await sock.sendPresenceUpdate("composing", item.jid);
                 await convex.mutation(convexRefs.outboxMarkTyping, { outboxId: item.outboxId });
                 await sleep(hydrated.typingMs);
@@ -6442,9 +7221,21 @@ function resolveTextEmojiAllowlist() {
   setInterval(() => {
     runBackgroundTask("whatsapp.maintenance.context_compaction", maybeRunContextCompaction);
   }, MAINTENANCE_TICK_MS);
+  setInterval(() => {
+    runBackgroundTask("whatsapp.maintenance.safety_sync", async () => {
+      await refreshBlocklist("maintenance", false);
+      await runPrivacyPreflight("maintenance", false);
+      await maybeRunAboutAutomation("maintenance", false);
+    });
+  }, MAINTENANCE_TICK_MS);
   runBackgroundTask("whatsapp.sticker.context_backfill.startup", runStickerContextBackfillPass);
   runBackgroundTask("whatsapp.maintenance.status_cleanup.startup", () => maybeRunStatusCleanup(true));
   runBackgroundTask("whatsapp.maintenance.context_compaction.startup", () => maybeRunContextCompaction(true));
+  runBackgroundTask("whatsapp.maintenance.safety_sync.startup", async () => {
+    await refreshBlocklist("startup", true);
+    await runPrivacyPreflight("startup", true);
+    await maybeRunAboutAutomation("startup", true);
+  });
 
   logger.info(
     {

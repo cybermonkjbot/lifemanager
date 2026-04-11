@@ -198,6 +198,7 @@ export const getEligibility = query({
       },
       ignoreGroupsByDefault: config.ignoreGroupsByDefault,
       explicitIgnoreEnabled: Boolean(explicitIgnore?.enabled),
+      groupRuleEnabled: threadKind === "group" ? explicitIgnore?.enabled : undefined,
       nowMs: Date.now(),
     });
 
@@ -302,6 +303,7 @@ export const getEligibilityByJid = query({
       },
       ignoreGroupsByDefault: config.ignoreGroupsByDefault,
       explicitIgnoreEnabled: Boolean(explicitIgnore?.enabled),
+      groupRuleEnabled: threadKind === "group" ? explicitIgnore?.enabled : undefined,
       nowMs: now,
     });
 
@@ -475,9 +477,99 @@ export const backfillEligibilityFields = mutation({
   },
 });
 
+export const backfillLastMessageAtFromNonStatus = mutation({
+  args: {
+    cursorJid: v.optional(v.string()),
+    limit: v.optional(v.number()),
+    maxMessagesPerThread: v.optional(v.number()),
+    includeBroadcastThreads: v.optional(v.boolean()),
+    dryRun: v.optional(v.boolean()),
+  },
+  handler: async (ctx, args) => {
+    const limit = clampInt(args.limit, 120, 1, 300);
+    const maxMessagesPerThread = clampInt(args.maxMessagesPerThread, 1000, 50, 10_000);
+    const includeBroadcastThreads = args.includeBroadcastThreads === true;
+    const dryRun = args.dryRun === true;
+
+    const threads = await (args.cursorJid
+      ? ctx.db
+          .query("threads")
+          .withIndex("by_jid", (q) => q.gt("jid", args.cursorJid as string))
+          .take(limit)
+      : ctx.db.query("threads").withIndex("by_jid").take(limit));
+
+    const now = Date.now();
+    let updated = 0;
+    let unchanged = 0;
+    let skippedBroadcast = 0;
+    let skippedScanLimit = 0;
+    let scannedMessages = 0;
+
+    for (const thread of threads) {
+      const threadKind =
+        thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup, provider: thread.provider });
+
+      if (threadKind === "broadcast_or_system" && !includeBroadcastThreads) {
+        skippedBroadcast += 1;
+        continue;
+      }
+
+      let inspectedForThread = 0;
+      let newestNonStatusMessageAt: number | undefined;
+
+      const messages = ctx.db
+        .query("messages")
+        .withIndex("by_thread", (q) => q.eq("threadId", thread._id))
+        .order("desc");
+      for await (const message of messages) {
+        inspectedForThread += 1;
+        scannedMessages += 1;
+
+        if (!message.isStatus) {
+          newestNonStatusMessageAt = message.messageAt;
+          break;
+        }
+        if (inspectedForThread >= maxMessagesPerThread) {
+          skippedScanLimit += 1;
+          break;
+        }
+      }
+
+      const resolvedLastMessageAt = Math.max(0, newestNonStatusMessageAt ?? 0);
+      if (thread.lastMessageAt === resolvedLastMessageAt) {
+        unchanged += 1;
+        continue;
+      }
+
+      if (!dryRun) {
+        await ctx.db.patch(thread._id, {
+          lastMessageAt: resolvedLastMessageAt,
+          updatedAt: now,
+        });
+      }
+      updated += 1;
+    }
+
+    const last = threads[threads.length - 1];
+    const done = threads.length < limit;
+    return {
+      scannedThreads: threads.length,
+      scannedMessages,
+      updated,
+      unchanged,
+      skippedBroadcast,
+      skippedScanLimit,
+      done,
+      dryRun,
+      nextCursorJid: done ? undefined : last?.jid,
+    };
+  },
+});
+
 export const get = query({
   args: {
     threadId: v.id("threads"),
+    includeStatusMessages: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const thread = await ctx.db.get(args.threadId);
@@ -492,6 +584,11 @@ export const get = query({
       .withIndex("by_thread_messageAt", (q) => q.eq("threadId", args.threadId))
       .order("desc")
       .take(80);
+    const includeStatusMessages = args.includeStatusMessages === true;
+    const visibleMessages =
+      includeStatusMessages || threadKind === "broadcast_or_system"
+        ? messages
+        : messages.filter((message) => !message.isStatus);
 
     const draftRows = await ctx.db
       .query("replyDrafts")
@@ -621,7 +718,7 @@ export const get = query({
       }
     >();
     const mediaAssetIds = new Set<Id<"mediaAssets">>();
-    for (const message of messages) {
+    for (const message of visibleMessages) {
       if (message.mediaAssetId) {
         mediaAssetIds.add(message.mediaAssetId);
       }
@@ -654,7 +751,7 @@ export const get = query({
       }),
     );
 
-    const messageIds = messages.map((message) => message._id);
+    const messageIds = visibleMessages.map((message) => message._id);
     let reactions: Array<{
       messageId: string;
       actorJid: string;
@@ -757,7 +854,7 @@ export const get = query({
         isGroup: threadKind === "group",
         threadKind,
       },
-      messages: messages
+      messages: visibleMessages
         .reverse()
         .map((message) => ({
           ...message,
@@ -930,6 +1027,10 @@ export const getGenerationContext = internalQuery({
       .withIndex("by_thread_messageAt", (q) => q.eq("threadId", args.threadId))
       .order("desc")
       .take(20);
+    const threadKind =
+      thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup, provider: thread.provider });
+    const recentMessages =
+      threadKind === "broadcast_or_system" ? messages : messages.filter((message) => !message.isStatus);
 
     const profile = await ctx.db
       .query("styleProfiles")
@@ -944,7 +1045,7 @@ export const getGenerationContext = internalQuery({
     return {
       thread,
       sourceMessage,
-      recentMessages: messages.reverse(),
+      recentMessages: recentMessages.reverse(),
       styleProfile: profile,
       grounding: grounding || null,
     };

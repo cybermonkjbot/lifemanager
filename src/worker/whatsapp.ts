@@ -80,6 +80,7 @@ function unwrapNestedMessage(message: proto.IMessage | null | undefined): proto.
       current.viewOnceMessage?.message ||
       current.viewOnceMessageV2?.message ||
       current.viewOnceMessageV2Extension?.message ||
+      current.deviceSentMessage?.message ||
       current.documentWithCaptionMessage?.message ||
       current.editedMessage?.message ||
       current.groupMentionedMessage?.message ||

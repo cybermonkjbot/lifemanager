@@ -26,6 +26,16 @@ test("shouldAttemptSelfControlOnUpsert allows recent self append during ingest",
     }),
     true,
   );
+  assert.equal(
+    shouldAttemptSelfControlOnUpsert({
+      ingestMode: "history_sync",
+      upsertType: "append",
+      fromMe: false,
+      messageAt: now - 30_000,
+      nowMs: now,
+    }),
+    true,
+  );
 });
 
 test("shouldAttemptSelfControlOnUpsert rejects non-self or stale ingest events", () => {
@@ -38,7 +48,7 @@ test("shouldAttemptSelfControlOnUpsert rejects non-self or stale ingest events",
       messageAt: now - 10_000,
       nowMs: now,
     }),
-    false,
+    true,
   );
   assert.equal(
     shouldAttemptSelfControlOnUpsert({

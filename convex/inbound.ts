@@ -192,6 +192,7 @@ export const ingest = mutation({
     const messageProvider = normalizeProvider(args.provider);
     const ingestMode: IngestMode = args.ingestMode || "live";
     const isHistoryIngest = ingestMode !== "live";
+    const isStatusMessage = args.isStatus === true;
     const messageAt = normalizeTimestampMs(args.messageAt, now);
     const messageType = args.messageType || "text";
     const normalizedText = args.text.trim();
@@ -224,7 +225,7 @@ export const ingest = mutation({
         isArchived: args.isArchived || false,
         archivedAt: args.isArchived ? normalizedArchivedAt : undefined,
         ghostedUntil: undefined,
-        lastMessageAt: messageAt,
+        lastMessageAt: isStatusMessage ? 0 : messageAt,
         createdAt: now,
         updatedAt: now,
       });
@@ -246,7 +247,7 @@ export const ingest = mutation({
             : args.isArchived
               ? normalizedArchivedAt
               : undefined,
-        lastMessageAt: Math.max(thread.lastMessageAt, messageAt),
+        lastMessageAt: isStatusMessage ? thread.lastMessageAt : Math.max(thread.lastMessageAt, messageAt),
         updatedAt: now,
       });
     }
@@ -351,6 +352,7 @@ export const ingest = mutation({
       },
       ignoreGroupsByDefault: config.ignoreGroupsByDefault,
       explicitIgnoreEnabled: Boolean(explicitIgnore?.enabled),
+      groupRuleEnabled: threadKind === "group" ? explicitIgnore?.enabled : undefined,
       nowMs: now,
     });
     const ignored = isHistoryIngest ? false : !eligibility.allowed;
@@ -423,7 +425,7 @@ export const ingest = mutation({
       }
     }
 
-    if (!isHistoryIngest && messageType === "text") {
+    if (!isHistoryIngest && !isStatusMessage && messageType === "text") {
       await updateAutoAliases({
         ctx,
         threadId: thread._id,
@@ -457,7 +459,7 @@ export const ingest = mutation({
     let promiseDetected = false;
     let todoDetected = false;
 
-    if (!isHistoryIngest && !stale && messageType === "text") {
+    if (!isHistoryIngest && !stale && !isStatusMessage && messageType === "text") {
       const commitment = detectFutureCommitment({
         text: normalizedText,
         direction: "inbound",
@@ -534,20 +536,20 @@ export const ingest = mutation({
       }
     }
 
-    if (!isHistoryIngest && !ignored && !stale && messageType !== "reaction" && !args.skipDraftGeneration) {
+    if (!isHistoryIngest && !ignored && !stale && !isStatusMessage && messageType !== "reaction" && !args.skipDraftGeneration) {
       await ctx.scheduler.runAfter(0, internal.draft.generate, {
         threadId: thread._id,
         sourceMessageId: messageId,
       });
     }
 
-    if (!isHistoryIngest && !stale) {
+    if (!isHistoryIngest && !stale && !isStatusMessage) {
       await ctx.scheduler.runAfter(0, internal.memory.summarize, {
         threadId: thread._id,
       });
     }
 
-    if (!isHistoryIngest) {
+    if (!isHistoryIngest && !isStatusMessage) {
       await ctx.scheduler.runAfter(0, internal.backlog.refreshThread, {
         threadId: thread._id,
       });
@@ -607,6 +609,7 @@ export const ingestHistorical = mutation({
   handler: async (ctx, args): Promise<IngestHistoricalResult> => {
     const now = Date.now();
     const messageProvider = normalizeProvider(args.provider);
+    const isStatusMessage = args.isStatus === true;
     const messageAt = normalizeTimestampMs(args.messageAt, now);
     const threadKind =
       args.threadKind || classifyThreadKind({ jid: args.threadJid, isGroupHint: args.isGroup, provider: messageProvider });
@@ -635,7 +638,7 @@ export const ingestHistorical = mutation({
         isArchived: args.isArchived || false,
         archivedAt: args.isArchived ? normalizedArchivedAt : undefined,
         ghostedUntil: undefined,
-        lastMessageAt: messageAt,
+        lastMessageAt: isStatusMessage ? 0 : messageAt,
         createdAt: now,
         updatedAt: now,
       });
@@ -656,7 +659,7 @@ export const ingestHistorical = mutation({
             : args.isArchived
               ? normalizedArchivedAt
               : undefined,
-        lastMessageAt: Math.max(thread.lastMessageAt, messageAt),
+        lastMessageAt: isStatusMessage ? thread.lastMessageAt : Math.max(thread.lastMessageAt, messageAt),
         updatedAt: now,
       });
     }

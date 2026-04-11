@@ -21,10 +21,38 @@ import {
 const UNANSWERED_OUTBOUND_RECHECK_MS = 5 * 60 * 1000;
 const UNANSWERED_OUTBOUND_SCAN_LIMIT = 25;
 const refStyleLearnFromOutboundEmoji = makeFunctionReference<"mutation">("style:learnFromOutboundEmoji");
+const refChatRebuildThreadStyleProfile = makeFunctionReference<"mutation">("chatTools:rebuildThreadStyleProfile");
 type MessageProvider = "whatsapp" | "instagram";
+const OUTBOUND_DUPLICATE_WINDOW_MS = 6 * 60 * 60 * 1000;
+const OUTBOUND_DUPLICATE_MIN_KEY_LENGTH = 16;
 
 function normalizeMessageProvider(provider?: MessageProvider): MessageProvider {
   return provider === "instagram" ? "instagram" : "whatsapp";
+}
+
+function normalizeOutboundDuplicateKey(text: string | undefined) {
+  const normalized = (text || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (normalized.length < OUTBOUND_DUPLICATE_MIN_KEY_LENGTH) {
+    return "";
+  }
+  return normalized;
+}
+
+function buildOutboundDuplicateKey(args: {
+  sendKind?: "text" | "reaction" | "sticker" | "meme";
+  messageText?: string;
+  mediaCaption?: string;
+}) {
+  const sendKind = args.sendKind || "text";
+  if (sendKind !== "text" && sendKind !== "meme") {
+    return "";
+  }
+  const candidate = sendKind === "meme" ? args.mediaCaption || args.messageText || "" : args.messageText || "";
+  return normalizeOutboundDuplicateKey(candidate);
 }
 
 function isWithinQuietHours(hour: number, startHour: number, endHour: number) {
@@ -169,6 +197,7 @@ export const claimDue = mutation({
       replyTargetText?: string;
       replyTargetMessageAt?: number;
     }>;
+    const claimedDuplicateKeysByThread = new Map<string, Set<string>>();
     const unansweredOutboundStateByThread = new Map<
       string,
       {
@@ -186,6 +215,47 @@ export const claimDue = mutation({
       const threadKind = thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup });
       const sourceMessage = await ctx.db.get(draft.sourceMessageId);
       const shouldQuoteSource = sourceMessage?.direction === "inbound";
+      const duplicateCandidateKey = buildOutboundDuplicateKey({
+        sendKind: item.sendKind,
+        messageText: item.messageText,
+        mediaCaption: item.mediaCaption,
+      });
+
+      const seenDuplicateKeys = claimedDuplicateKeysByThread.get(thread._id);
+      if (duplicateCandidateKey && seenDuplicateKeys?.has(duplicateCandidateKey)) {
+        const reason = "Suppressed: duplicate outbound text in same claim batch.";
+        await ctx.db.patch(item._id, {
+          status: "failed",
+          workerId: undefined,
+          leaseExpiresAt: undefined,
+          error: reason,
+          updatedAt: now,
+        });
+        if (draft.status !== "sent" && draft.status !== "rejected") {
+          await ctx.db.patch(draft._id, {
+            status: "rejected",
+            updatedAt: now,
+          });
+        }
+        if (item.followUpId) {
+          const followUp = await ctx.db.get(item.followUpId);
+          if (followUp && followUp.status !== "sent" && followUp.status !== "failed" && followUp.status !== "cancelled") {
+            await ctx.db.patch(followUp._id, {
+              status: "failed",
+              updatedAt: now,
+            });
+          }
+        }
+        await ctx.db.insert("systemEvents", {
+          source: "worker",
+          eventType: "outbox.suppressed.duplicate",
+          threadId: item.threadId,
+          outboxId: item._id,
+          detail: reason,
+          createdAt: now,
+        });
+        continue;
+      }
 
       let deferUntil = 0;
       const deferReasons: string[] = [];
@@ -225,17 +295,74 @@ export const claimDue = mutation({
 
       const windowMs = sendRateLimits.windowMinutes * 60 * 1000;
       const cutoff = now - windowMs;
+      const duplicateWindowMs = Math.max(windowMs, OUTBOUND_DUPLICATE_WINDOW_MS);
+      const duplicateCutoff = now - duplicateWindowMs;
 
       const recentThread = await ctx.db
         .query("messages")
-        .withIndex("by_thread_messageAt", (q) => q.eq("threadId", thread._id).gte("messageAt", cutoff))
+        .withIndex("by_thread_messageAt", (q) => q.eq("threadId", thread._id).gte("messageAt", duplicateCutoff))
         .order("desc")
-        .take(Math.min(sendRateLimits.maxPerThread + 5, 120));
-      const recentThreadOutbound = recentThread.filter((message) => message.direction === "outbound");
+        .take(Math.min(Math.max(sendRateLimits.maxPerThread + 24, 80), 220));
+      const recentThreadOutbound = recentThread.filter(
+        (message) => message.direction === "outbound" && message.messageAt >= cutoff,
+      );
       if (recentThreadOutbound.length >= sendRateLimits.maxPerThread) {
         const oldestThreadWindow = Math.min(...recentThreadOutbound.slice(0, sendRateLimits.maxPerThread).map((message) => message.messageAt));
         deferUntil = Math.max(deferUntil, oldestThreadWindow + windowMs + 1_000);
         deferReasons.push("thread-rate-limit");
+      }
+
+      if (duplicateCandidateKey) {
+        const hasRecentDuplicateOutbound = recentThread.some((message) => {
+          if (message.direction !== "outbound") {
+            return false;
+          }
+          const outboundSendKind =
+            message.messageType === "meme" ? "meme" : message.messageType === undefined || message.messageType === "text" ? "text" : undefined;
+          if (!outboundSendKind) {
+            return false;
+          }
+          const outboundKey = buildOutboundDuplicateKey({
+            sendKind: outboundSendKind,
+            messageText: message.text,
+            mediaCaption: message.mediaCaption,
+          });
+          return outboundKey !== "" && outboundKey === duplicateCandidateKey;
+        });
+        if (hasRecentDuplicateOutbound) {
+          const reason = "Suppressed: duplicate outbound text sent recently to this thread.";
+          await ctx.db.patch(item._id, {
+            status: "failed",
+            workerId: undefined,
+            leaseExpiresAt: undefined,
+            error: reason,
+            updatedAt: now,
+          });
+          if (draft.status !== "sent" && draft.status !== "rejected") {
+            await ctx.db.patch(draft._id, {
+              status: "rejected",
+              updatedAt: now,
+            });
+          }
+          if (item.followUpId) {
+            const followUp = await ctx.db.get(item.followUpId);
+            if (followUp && followUp.status !== "sent" && followUp.status !== "failed" && followUp.status !== "cancelled") {
+              await ctx.db.patch(followUp._id, {
+                status: "failed",
+                updatedAt: now,
+              });
+            }
+          }
+          await ctx.db.insert("systemEvents", {
+            source: "worker",
+            eventType: "outbox.suppressed.duplicate",
+            threadId: item.threadId,
+            outboxId: item._id,
+            detail: reason,
+            createdAt: now,
+          });
+          continue;
+        }
       }
 
       const recentGlobal = await ctx.db
@@ -340,6 +467,7 @@ export const claimDue = mutation({
           },
           ignoreGroupsByDefault: config.ignoreGroupsByDefault,
           explicitIgnoreEnabled: Boolean(explicitIgnore?.enabled),
+          groupRuleEnabled: threadKind === "group" ? explicitIgnore?.enabled : undefined,
           nowMs: now,
         });
         if (!eligibility.allowed) {
@@ -424,6 +552,14 @@ export const claimDue = mutation({
             latestInboundAt: undefined,
           });
         }
+      }
+      if (duplicateCandidateKey) {
+        let threadKeys = claimedDuplicateKeysByThread.get(thread._id);
+        if (!threadKeys) {
+          threadKeys = new Set<string>();
+          claimedDuplicateKeysByThread.set(thread._id, threadKeys);
+        }
+        threadKeys.add(duplicateCandidateKey);
       }
 
       claimed.push({
@@ -630,6 +766,22 @@ export const suppressForManualIntervention = mutation({
         messageAt,
       })
       .catch(() => undefined);
+
+    if (threadKind === "direct" && !args.isStatus && args.messageType !== "reaction") {
+      await ctx.scheduler
+        .runAfter(0, refChatRebuildThreadStyleProfile, {
+          threadId: thread._id,
+          lookbackMessages: 220,
+        })
+        .catch(() => undefined);
+      await ctx.db.insert("systemEvents", {
+        source: "worker",
+        eventType: "style.thread.manual_rebuild_queued",
+        threadId: thread._id,
+        detail: "Queued thread-style refresh after manual outbound intervention.",
+        createdAt: now,
+      });
+    }
 
     const pending = await ctx.db
       .query("outbox")

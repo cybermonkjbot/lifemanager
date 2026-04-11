@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { extractReusablePhrases, normalizeCommonPhraseList } from "./style";
+import { buildStatusVoiceHintsFromTexts, extractReusablePhrases, normalizeCommonPhraseList } from "./style";
 
 test("normalizeCommonPhraseList strict mode removes noisy glue fragments", () => {
   const cleaned = normalizeCommonPhraseList(
@@ -57,4 +57,25 @@ test("extractReusablePhrases keeps meaningful phrase candidates", () => {
 
   assert.equal(phrases.includes("yakubu pro max"), true);
   assert.equal(phrases.includes("pro max energy"), true);
+});
+
+test("buildStatusVoiceHintsFromTexts summarizes status voice from samples", () => {
+  const profile = buildStatusVoiceHintsFromTexts([
+    "small win, big grin 😂",
+    "small win, big grin 😂",
+    "running this week with calm focus",
+    "small win, big grin 😂",
+  ]);
+
+  assert.equal(profile.totalSamples, 4);
+  assert.equal(profile.sampleLines.length, 4);
+  assert.equal(profile.toneNotes.length >= 2, true);
+  assert.equal(profile.recurringPhrases.includes("small win big"), true);
+});
+
+test("buildStatusVoiceHintsFromTexts handles empty inputs", () => {
+  const profile = buildStatusVoiceHintsFromTexts([]);
+  assert.equal(profile.totalSamples, 0);
+  assert.deepEqual(profile.recurringPhrases, []);
+  assert.deepEqual(profile.toneNotes, []);
 });

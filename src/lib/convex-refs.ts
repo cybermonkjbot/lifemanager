@@ -69,6 +69,7 @@ export const convexRefs = {
   chatExtractContactMemoryFacts: makeFunctionReference<"mutation">("chatTools:extractContactMemoryFacts"),
 
   styleGetProfile: makeFunctionReference<"query">("style:getProfile"),
+  styleGetStatusVoice: makeFunctionReference<"query">("style:getStatusVoice"),
   styleSetMimicry: makeFunctionReference<"mutation">("style:setMimicry"),
   styleLearnFromHumorSignal: makeFunctionReference<"mutation">("style:learnFromHumorSignal"),
   personalityListProfiles: makeFunctionReference<"query">("personality:listProfiles"),

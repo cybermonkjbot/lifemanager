@@ -233,11 +233,12 @@ async function computeLiveSignals(
   thread: ThreadLike,
   existing?: Doc<"backlogThreadState"> | null,
 ): Promise<LiveSignals> {
-  const messages = await ctx.db
+  const allMessages = await ctx.db
     .query("messages")
     .withIndex("by_thread_messageAt", (q) => q.eq("threadId", thread._id))
     .order("desc")
     .take(140);
+  const messages = allMessages.filter((message) => !message.isStatus);
 
   if (messages.length === 0) {
     const relationship = resolveRelationship({

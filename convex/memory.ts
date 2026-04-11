@@ -15,9 +15,10 @@ export const summarize = internalMutation({
       .query("messages")
       .withIndex("by_thread_messageAt", (q) => q.eq("threadId", args.threadId))
       .order("desc")
-      .take(10);
+      .take(24);
+    const conversationalMessages = recentMessages.filter((message) => !message.isStatus).slice(0, 10);
 
-    const snippet = recentMessages
+    const snippet = conversationalMessages
       .reverse()
       .map((message) => `${message.direction === "inbound" ? "Them" : "You"}: ${message.text}`)
       .join("\n");

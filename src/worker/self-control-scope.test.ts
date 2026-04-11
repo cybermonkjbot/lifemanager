@@ -46,3 +46,24 @@ test("isStrictSelfControlScope rejects third-party DMs", () => {
     false,
   );
 });
+
+test("isStrictSelfControlScope accepts alternate self aliases", () => {
+  assert.equal(
+    isStrictSelfControlScope({
+      selfAccounts: ["2348012345678", "247953243545784"],
+      threadAccount: "247953243545784",
+      senderAccount: "",
+      fromMe: true,
+    }),
+    true,
+  );
+  assert.equal(
+    isStrictSelfControlScope({
+      selfAccounts: ["2348012345678", "247953243545784"],
+      threadAccount: "247953243545784",
+      senderAccount: "2348012345678",
+      fromMe: false,
+    }),
+    true,
+  );
+});

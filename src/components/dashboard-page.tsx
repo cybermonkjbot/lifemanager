@@ -7,11 +7,18 @@ type DashboardPageProps = {
   subtitle: string;
   children: ReactNode;
   showLogWatcher?: boolean;
+  hideViewHeader?: boolean;
 };
 
-export function DashboardPage({ title, subtitle, children, showLogWatcher = false }: DashboardPageProps) {
+export function DashboardPage({ title, subtitle, children, showLogWatcher = false, hideViewHeader = false }: DashboardPageProps) {
   return (
-    <DashboardShell title={title} subtitle={subtitle} convexUrl={getConvexUrl()} showLogWatcher={showLogWatcher}>
+    <DashboardShell
+      title={title}
+      subtitle={subtitle}
+      convexUrl={getConvexUrl()}
+      showLogWatcher={showLogWatcher}
+      hideViewHeader={hideViewHeader}
+    >
       {children}
     </DashboardShell>
   );

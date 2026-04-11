@@ -55,6 +55,7 @@ export function resolveThreadEligibility(args: {
   thread: Pick<Doc<"threads">, "jid" | "isIgnored" | "isArchived" | "threadKind" | "ghostedUntil">;
   ignoreGroupsByDefault: boolean;
   explicitIgnoreEnabled: boolean;
+  groupRuleEnabled?: boolean;
   nowMs?: number;
 }): EligibilityResult {
   const nowMs = args.nowMs ?? Date.now();
@@ -82,11 +83,21 @@ export function resolveThreadEligibility(args: {
     };
   }
 
-  if (threadKind === "group" && args.ignoreGroupsByDefault) {
-    return {
-      allowed: false,
-      reason: "group_ignored",
-    };
+  if (threadKind === "group") {
+    if (args.groupRuleEnabled === true) {
+      return {
+        allowed: false,
+        reason: "explicit_ignore",
+      };
+    }
+
+    // A stored group rule with enabled=false is an explicit allow override.
+    if (args.groupRuleEnabled !== false && args.ignoreGroupsByDefault) {
+      return {
+        allowed: false,
+        reason: "group_ignored",
+      };
+    }
   }
 
   if ((args.thread.ghostedUntil || 0) > nowMs) {

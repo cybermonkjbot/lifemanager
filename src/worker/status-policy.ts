@@ -31,6 +31,43 @@ const DECLARATIVE_STATUS_FALLBACKS = [
   "Small wins are stacking up nicely.",
   "Keeping it simple and moving forward.",
 ];
+const STATUS_INTEREST_STOPWORDS = new Set([
+  "a",
+  "an",
+  "and",
+  "around",
+  "audience",
+  "daily",
+  "demographic",
+  "for",
+  "fun",
+  "general",
+  "interest",
+  "interests",
+  "in",
+  "life",
+  "mixed",
+  "motivation",
+  "news",
+  "of",
+  "on",
+  "social",
+  "status",
+  "story",
+  "the",
+  "topic",
+  "topics",
+  "trend",
+  "trends",
+  "update",
+  "updates",
+  "with",
+]);
+
+export type StatusInterestSearchPlan = {
+  interests: string[];
+  queries: string[];
+};
 
 function finiteTimestamp(value: unknown): number | undefined {
   const parsed = Number(value);
@@ -46,6 +83,21 @@ function computeStableHash(input: string) {
     hash = (hash * 31 + input.charCodeAt(index)) >>> 0;
   }
   return hash;
+}
+
+function normalizeInterestPhrase(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function clampRound(value: number | undefined, fallback: number, min: number, max: number) {
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.max(min, Math.min(max, Math.round(value as number)));
 }
 
 export function evaluateStatusOutreachLimit(args: {
@@ -173,4 +225,107 @@ export function isLikelyMarketingStatus(text: string): boolean {
   const hasCta = MARKETING_CTA_PATTERN.test(normalized);
   const hasPrice = MARKETING_PRICE_PATTERN.test(normalized) || MARKETING_DISCOUNT_PATTERN.test(normalized);
   return (hasIntent && hasCta) || (hasIntent && hasPrice);
+}
+
+export function extractStatusInterests(theme: string): string[] {
+  const raw = String(theme || "").trim();
+  if (!raw) {
+    return [];
+  }
+
+  const seen = new Set<string>();
+  const picked: string[] = [];
+  const pushCandidate = (candidate: string) => {
+    const cleaned = normalizeInterestPhrase(candidate);
+    if (!cleaned || seen.has(cleaned)) {
+      return;
+    }
+    const tokens = cleaned.split(" ").filter(Boolean);
+    if (tokens.length === 0 || tokens.length > 5) {
+      return;
+    }
+    if (tokens.every((token) => STATUS_INTEREST_STOPWORDS.has(token) || token.length < 2)) {
+      return;
+    }
+    if (tokens.some((token) => token.length >= 2 && !STATUS_INTEREST_STOPWORDS.has(token))) {
+      seen.add(cleaned);
+      picked.push(cleaned);
+    }
+  };
+
+  const commaChunks = raw
+    .split(/[|,;]+/)
+    .map((segment) => normalizeInterestPhrase(segment))
+    .filter(Boolean)
+    .slice(0, 12);
+  for (const chunk of commaChunks) {
+    pushCandidate(chunk);
+  }
+
+  if (picked.length === 0) {
+    const normalized = normalizeInterestPhrase(raw);
+    const wordChunks = normalized
+      .split(/\s+/)
+      .map((token) => token.trim())
+      .filter((token) => token.length >= 2 && !STATUS_INTEREST_STOPWORDS.has(token))
+      .slice(0, 6);
+    for (const chunk of wordChunks) {
+      pushCandidate(chunk);
+    }
+  }
+
+  return picked.slice(0, 4);
+}
+
+export function buildStatusInterestSearchQueries(args: {
+  trendTheme: string;
+  demographicHint?: string;
+  nowMs?: number;
+  maxQueries?: number;
+}): StatusInterestSearchPlan {
+  const interests = extractStatusInterests(args.trendTheme).slice(0, 3);
+  const maxQueries = clampRound(args.maxQueries, 3, 1, 5);
+  const nowMs = Math.max(0, Number(args.nowMs) || Date.now());
+  const year = new Date(nowMs).getFullYear();
+  const demographic = normalizeInterestPhrase(args.demographicHint || "");
+  const demographicSuffix = demographic && demographic !== "mixed" ? ` for ${demographic} audience` : "";
+
+  const queries: string[] = [];
+  const seenQueries = new Set<string>();
+  const pushQuery = (query: string) => {
+    if (queries.length >= maxQueries) {
+      return;
+    }
+    const normalized = query.replace(/\s+/g, " ").trim().slice(0, 240);
+    if (!normalized) {
+      return;
+    }
+    const key = normalized.toLowerCase();
+    if (seenQueries.has(key)) {
+      return;
+    }
+    seenQueries.add(key);
+    queries.push(normalized);
+  };
+
+  if (interests.length > 0) {
+    pushQuery(`latest ${year} updates and social conversation on ${interests.join(", ")}${demographicSuffix}`);
+    for (const interest of interests) {
+      pushQuery(`latest ${year} news and online trends about ${interest}${demographicSuffix}`);
+      pushQuery(`${year} talking points and memes around ${interest}${demographicSuffix}`);
+      if (queries.length >= maxQueries) {
+        break;
+      }
+    }
+  }
+
+  if (queries.length === 0) {
+    pushQuery(`latest ${year} social and pop-culture trends${demographicSuffix}`);
+    pushQuery(`what people are discussing online right now${demographicSuffix}`);
+  }
+
+  return {
+    interests,
+    queries,
+  };
 }

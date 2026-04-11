@@ -1,15 +1,34 @@
 export function isStrictSelfControlScope(args: {
-  selfAccount: string;
+  selfAccount?: string;
+  selfAccounts?: string[];
   threadAccount: string;
   senderAccount: string;
   fromMe: boolean;
 }) {
-  const self = (args.selfAccount || "").trim();
+  const selfSet = new Set<string>();
+  const pushSelf = (value: string | undefined) => {
+    const trimmed = (value || "").trim();
+    if (!trimmed) {
+      return;
+    }
+    selfSet.add(trimmed);
+  };
+  pushSelf(args.selfAccount);
+  for (const selfAccount of args.selfAccounts || []) {
+    pushSelf(selfAccount);
+  }
+
   const thread = (args.threadAccount || "").trim();
   const sender = (args.senderAccount || "").trim();
-  if (!self || !thread) {
+  if (selfSet.size === 0 || !thread) {
     return false;
   }
-  const effectiveSender = args.fromMe ? self : sender;
-  return thread === self && effectiveSender === self;
+
+  if (!selfSet.has(thread)) {
+    return false;
+  }
+  if (args.fromMe) {
+    return true;
+  }
+  return selfSet.has(sender);
 }

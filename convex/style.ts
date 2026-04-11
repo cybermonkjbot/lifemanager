@@ -447,6 +447,84 @@ function inferHumorNotes(args: {
   return [...new Set(notes)];
 }
 
+function wordCount(text: string) {
+  return normalizeTraitValue(text)
+    .split(/\s+/)
+    .filter(Boolean).length;
+}
+
+export function buildStatusVoiceHintsFromTexts(texts: string[]) {
+  const cleaned = texts
+    .map((text) => normalizeTraitValue(text))
+    .filter((text) => text.length > 0)
+    .slice(0, 120);
+
+  if (cleaned.length === 0) {
+    return {
+      totalSamples: 0,
+      recurringPhrases: [] as string[],
+      toneNotes: [] as string[],
+      sampleLines: [] as string[],
+      avgWords: 0,
+      emojiRate: 0,
+      questionRate: 0,
+    };
+  }
+
+  const phrasePool: string[] = [];
+  let emojiCount = 0;
+  let questionCount = 0;
+  let totalWords = 0;
+  for (const text of cleaned) {
+    phrasePool.push(...extractReusablePhrases(text).slice(0, 2));
+    if (/[😂🤣😹😆😄😁😅😜🤪🙃❤️🔥💯]/u.test(text)) {
+      emojiCount += 1;
+    }
+    if (text.includes("?")) {
+      questionCount += 1;
+    }
+    totalWords += wordCount(text);
+  }
+
+  const recurringPhrases = normalizeCommonPhraseList(phrasePool, 8, { strict: true }).slice(0, 5);
+  const avgWords = totalWords / Math.max(1, cleaned.length);
+  const emojiRate = emojiCount / cleaned.length;
+  const questionRate = questionCount / cleaned.length;
+
+  const toneNotes: string[] = [];
+  if (avgWords <= 12) {
+    toneNotes.push("Prefers short punchy status lines.");
+  } else if (avgWords >= 20) {
+    toneNotes.push("Sometimes writes fuller status captions.");
+  } else {
+    toneNotes.push("Uses medium-length conversational status lines.");
+  }
+
+  if (questionRate <= 0.2) {
+    toneNotes.push("Mostly declarative updates over question prompts.");
+  } else {
+    toneNotes.push("Occasionally uses question-led status hooks.");
+  }
+
+  if (emojiRate >= 0.45) {
+    toneNotes.push("Often uses emoji as tone markers.");
+  } else if (emojiRate > 0.05) {
+    toneNotes.push("Uses emoji sparingly for emphasis.");
+  } else {
+    toneNotes.push("Mostly text-first style with minimal emoji.");
+  }
+
+  return {
+    totalSamples: cleaned.length,
+    recurringPhrases,
+    toneNotes: [...new Set(toneNotes)].slice(0, 4),
+    sampleLines: cleaned.slice(0, 5),
+    avgWords,
+    emojiRate,
+    questionRate,
+  };
+}
+
 function hasHumorSignal(args: {
   inboundText: string;
   signalKind: "text" | "reaction";
@@ -573,6 +651,43 @@ export const getProfile = query({
       spellingNotes: [],
       updatedAt: Date.now(),
     }, learnedEmojiProfile);
+  },
+});
+
+export const getStatusVoice = query({
+  args: {
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const limit = Math.max(1, Math.min(Math.round(args.limit ?? 10), 24));
+    const scanLimit = Math.max(limit * 6, 80);
+    const statusRows = await ctx.db
+      .query("messages")
+      .withIndex("by_isStatus_and_messageAt", (q) => q.eq("isStatus", true))
+      .order("desc")
+      .take(scanLimit);
+
+    const manualStatusTexts = statusRows
+      .filter((row) => isManualSelfAuthoredMessage(row))
+      .map((row) => {
+        const primary = normalizeTraitValue(row.text || "");
+        const caption = normalizeTraitValue(row.mediaCaption || "");
+        if (row.messageType === "reaction") {
+          return "";
+        }
+        if (caption && caption !== primary) {
+          return `${primary} ${caption}`.trim();
+        }
+        return primary || caption;
+      })
+      .filter((text) => text.length > 0)
+      .slice(0, limit);
+
+    const hints = buildStatusVoiceHintsFromTexts(manualStatusTexts);
+    return {
+      ...hints,
+      tool: "style.status_voice",
+    };
   },
 });
 

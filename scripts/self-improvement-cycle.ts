@@ -1,4 +1,4 @@
-import { exec as execCallback, execFile as execFileCallback } from "node:child_process";
+import { exec as execCallback, spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import type { Dirent } from "node:fs";
 import { tmpdir } from "node:os";
@@ -60,7 +60,6 @@ type RunStats = {
 };
 
 const execAsync = promisify(execCallback);
-const execFileAsync = promisify(execFileCallback);
 
 const DEFAULT_CONFIG_PATH = "self-improvement.config.json";
 
@@ -533,6 +532,150 @@ function log(message: string) {
   console.log(`[self-improve] ${message}`);
 }
 
+function compactInline(text: string, maxChars: number) {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxChars) {
+    return normalized;
+  }
+  return `${normalized.slice(0, Math.max(0, maxChars - 3))}...`;
+}
+
+async function runCodexExecWithStreaming(params: {
+  projectRoot: string;
+  config: SelfImprovementConfig;
+  fullPrompt: string;
+  tmpOut: string;
+}) {
+  const { projectRoot, config, fullPrompt, tmpOut } = params;
+
+  const args = [
+    "exec",
+    "--model",
+    config.codexModel,
+    "--sandbox",
+    config.codexSandbox,
+    "--output-last-message",
+    tmpOut,
+    fullPrompt,
+  ];
+
+  return await new Promise<{ exitCode: number | null; errorMessage: string | null }>((resolve) => {
+    let settled = false;
+    let timedOut = false;
+    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+    let stdoutBuffer = "";
+    let stderrBuffer = "";
+
+    const finish = (result: { exitCode: number | null; errorMessage: string | null }) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
+      resolve(result);
+    };
+
+    const child = spawn(config.codexPath, args, {
+      cwd: projectRoot,
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    const flushLines = (channel: "stdout" | "stderr", force = false) => {
+      const buffer = channel === "stdout" ? stdoutBuffer : stderrBuffer;
+      const lines = buffer.split(/\r?\n/);
+      const remainder = lines.pop() ?? "";
+      if (channel === "stdout") {
+        stdoutBuffer = force ? "" : remainder;
+      } else {
+        stderrBuffer = force ? "" : remainder;
+      }
+
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line) {
+          continue;
+        }
+        log(`[codex ${channel}] ${compactInline(line, 260)}`);
+      }
+
+      if (force && remainder.trim()) {
+        log(`[codex ${channel}] ${compactInline(remainder.trim(), 260)}`);
+      }
+    };
+
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      stdoutBuffer += chunk;
+      flushLines("stdout", false);
+    });
+    child.stderr?.on("data", (chunk: string) => {
+      stderrBuffer += chunk;
+      flushLines("stderr", false);
+    });
+
+    timeoutHandle = setTimeout(() => {
+      timedOut = true;
+      log(`codex timed out after ${config.timeoutMs}ms, terminating process`);
+      child.kill("SIGTERM");
+      setTimeout(() => {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          // ignore
+        }
+      }, 1500);
+    }, config.timeoutMs);
+
+    child.once("error", (error) => {
+      flushLines("stdout", true);
+      flushLines("stderr", true);
+      const message = error instanceof Error ? error.message : String(error);
+      finish({
+        exitCode: null,
+        errorMessage: `failed to start codex process: ${message}`,
+      });
+    });
+
+    child.once("close", (code, signal) => {
+      flushLines("stdout", true);
+      flushLines("stderr", true);
+
+      if (timedOut) {
+        finish({
+          exitCode: typeof code === "number" ? code : null,
+          errorMessage: `codex timed out after ${config.timeoutMs}ms`,
+        });
+        return;
+      }
+
+      if (typeof code === "number" && code !== 0) {
+        finish({
+          exitCode: code,
+          errorMessage: `codex exited with code ${code}${signal ? ` (${signal})` : ""}`,
+        });
+        return;
+      }
+
+      if (typeof code !== "number" && signal) {
+        finish({
+          exitCode: null,
+          errorMessage: `codex terminated by signal ${signal}`,
+        });
+        return;
+      }
+
+      finish({
+        exitCode: typeof code === "number" ? code : null,
+        errorMessage: null,
+      });
+    });
+  });
+}
+
 async function runSingleCycle(params: {
   projectRoot: string;
   config: SelfImprovementConfig;
@@ -600,21 +743,14 @@ async function runSingleCycle(params: {
       ].join("\n");
     } else {
       const tmpOut = join(tmpdir(), `self-improve-${runId}.md`);
-      try {
-        await execFileAsync(
-          config.codexPath,
-          ["exec", "--model", config.codexModel, "--sandbox", config.codexSandbox, "--output-last-message", tmpOut, fullPrompt],
-          {
-            cwd: projectRoot,
-            timeout: config.timeoutMs,
-            maxBuffer: 10 * 1024 * 1024,
-          },
-        );
-      } catch (error) {
-        const err = error as Error & { code?: number | string };
-        codexExitCode = typeof err.code === "number" ? err.code : null;
-        codexErrorMessage = err.message;
-      }
+      const codexRun = await runCodexExecWithStreaming({
+        projectRoot,
+        config,
+        fullPrompt,
+        tmpOut,
+      });
+      codexExitCode = codexRun.exitCode;
+      codexErrorMessage = codexRun.errorMessage;
 
       report = await fs.readFile(tmpOut, "utf8").catch(() => "");
       await fs.unlink(tmpOut).catch(() => undefined);

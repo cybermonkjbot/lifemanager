@@ -53,6 +53,21 @@ test("resolveThreadEligibility keeps group ignore dynamic", () => {
     reason: "group_ignored",
   });
 
+  const allowedByExplicitGroupRule = resolveThreadEligibility({
+    thread: {
+      jid: "12345@g.us",
+      isIgnored: true,
+      isArchived: false,
+      threadKind: "group",
+    },
+    ignoreGroupsByDefault: true,
+    explicitIgnoreEnabled: false,
+    groupRuleEnabled: false,
+  });
+  assert.deepEqual(allowedByExplicitGroupRule, {
+    allowed: true,
+  });
+
   const allowed = resolveThreadEligibility({
     thread: {
       jid: "12345@g.us",

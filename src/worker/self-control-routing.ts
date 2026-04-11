@@ -1,7 +1,7 @@
 export function shouldAttemptSelfControlOnUpsert(args: {
   ingestMode: "history_sync" | "history_fetch" | null;
   upsertType: string;
-  fromMe: boolean;
+  fromMe?: boolean;
   messageAt: number;
   nowMs?: number;
   maxAgeMs?: number;
@@ -10,7 +10,7 @@ export function shouldAttemptSelfControlOnUpsert(args: {
     return true;
   }
 
-  if (args.upsertType !== "append" || !args.fromMe) {
+  if (args.upsertType !== "append") {
     return false;
   }
 

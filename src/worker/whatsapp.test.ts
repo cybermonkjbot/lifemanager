@@ -92,6 +92,22 @@ test("parseInboundMessage unwraps ephemeral wrappers", () => {
   });
 });
 
+test("parseInboundMessage unwraps device-sent wrappers", () => {
+  const parsed = parseInboundMessage({
+    deviceSentMessage: {
+      message: {
+        extendedTextMessage: {
+          text: "slm help",
+        },
+      },
+    },
+  } as unknown as Parameters<typeof parseInboundMessage>[0]);
+  assert.deepEqual(parsed, {
+    kind: "text",
+    text: "slm help",
+  });
+});
+
 test("isBroadcastOrSystemJid detects status and newsletter threads", () => {
   assert.equal(isBroadcastOrSystemJid("status@broadcast"), true);
   assert.equal(isBroadcastOrSystemJid("12345@newsletter"), true);

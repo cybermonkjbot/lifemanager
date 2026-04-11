@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  buildStatusInterestSearchQueries,
   STATUS_OUTREACH_MIN_GAP_MS,
   evaluateStatusOutreachLimit,
+  extractStatusInterests,
   forceDeclarativeStatusText,
   isLikelyMarketingStatus,
   pickLaughReactionEmoji,
@@ -97,4 +99,36 @@ test("isLikelyMarketingStatus flags status promotions with CTA", () => {
 test("isLikelyMarketingStatus ignores normal personal updates", () => {
   const result = isLikelyMarketingStatus("Gym done. Back home and cooking jollof now.");
   assert.equal(result, false);
+});
+
+test("extractStatusInterests picks concrete topics and drops generic filler", () => {
+  const interests = extractStatusInterests("daily life, ai, bitcoin, motivation, social trends");
+  assert.deepEqual(interests, ["ai", "bitcoin"]);
+});
+
+test("buildStatusInterestSearchQueries returns bounded interest-focused queries", () => {
+  const plan = buildStatusInterestSearchQueries({
+    trendTheme: "ai, bitcoin, football",
+    demographicHint: "social",
+    nowMs: new Date("2026-02-05T10:00:00.000Z").getTime(),
+    maxQueries: 3,
+  });
+
+  assert.deepEqual(plan.interests, ["ai", "bitcoin", "football"]);
+  assert.equal(plan.queries.length, 3);
+  assert.match(plan.queries[0] || "", /2026/i);
+  assert.match(plan.queries[0] || "", /ai/i);
+});
+
+test("buildStatusInterestSearchQueries falls back when theme is empty", () => {
+  const plan = buildStatusInterestSearchQueries({
+    trendTheme: "daily life, motivation, fun",
+    demographicHint: "mixed",
+    nowMs: new Date("2026-03-01T08:00:00.000Z").getTime(),
+    maxQueries: 2,
+  });
+
+  assert.deepEqual(plan.interests, []);
+  assert.equal(plan.queries.length, 2);
+  assert.match(plan.queries[0] || "", /social and pop-culture trends/i);
 });
