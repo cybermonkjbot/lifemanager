@@ -1,6 +1,7 @@
 import { v } from "convex/values";
-import { mutation, query } from "./_generated/server";
+import { type MutationCtx, mutation, query } from "./_generated/server";
 import { type AiDeterministicMode, DEFAULT_APP_CONFIG, getConfig, setConfigValue } from "./lib/config";
+import { classifyThreadKind } from "./lib/threadEligibility";
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(value, max));
@@ -18,9 +19,114 @@ const ALLOWED_AI_DETERMINISTIC_MODE_SET = new Set<AiDeterministicMode>([
   "loop",
   "wrap_up",
 ]);
+const ROMANTIC_PARTNER_PROFILE_SLUG = "relationship";
+const ROMANTIC_PARTNER_DEFAULT_INTENSITY = 0.78;
 
 function isAiDeterministicMode(value: string): value is AiDeterministicMode {
   return ALLOWED_AI_DETERMINISTIC_MODE_SET.has(value as AiDeterministicMode);
+}
+
+function isDirectWhatsAppThread(thread: {
+  provider?: "whatsapp" | "instagram";
+  jid: string;
+  isGroup: boolean;
+  threadKind?: "direct" | "group" | "broadcast_or_system";
+}) {
+  const provider = thread.provider || "whatsapp";
+  if (provider !== "whatsapp") {
+    return false;
+  }
+  const kind = thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup, provider });
+  return kind === "direct";
+}
+
+async function upsertRomanticPartnerMappings(ctx: MutationCtx, romanticPartnerJids: string[]) {
+  if (romanticPartnerJids.length === 0) {
+    return { matchedThreads: 0 };
+  }
+
+  const now = Date.now();
+  let matchedThreads = 0;
+
+  for (const jid of romanticPartnerJids) {
+    const threadByProvider = await ctx.db
+      .query("threads")
+      .withIndex("by_provider_and_jid", (q) => q.eq("provider", "whatsapp").eq("jid", jid))
+      .first();
+    const threadByJid =
+      threadByProvider ||
+      (await ctx.db
+        .query("threads")
+        .withIndex("by_jid", (q) => q.eq("jid", jid))
+        .first());
+
+    if (!threadByJid || !isDirectWhatsAppThread(threadByJid)) {
+      continue;
+    }
+
+    const personalitySetting = await ctx.db
+      .query("threadPersonalitySettings")
+      .withIndex("by_thread", (q) => q.eq("threadId", threadByJid._id))
+      .first();
+    if (!personalitySetting) {
+      await ctx.db.insert("threadPersonalitySettings", {
+        threadId: threadByJid._id,
+        profileSlug: ROMANTIC_PARTNER_PROFILE_SLUG,
+        intensity: ROMANTIC_PARTNER_DEFAULT_INTENSITY,
+        memePolicyMode: "auto",
+        createdAt: now,
+        updatedAt: now,
+      });
+    } else if (personalitySetting.profileSlug !== ROMANTIC_PARTNER_PROFILE_SLUG) {
+      await ctx.db.patch(personalitySetting._id, {
+        profileSlug: ROMANTIC_PARTNER_PROFILE_SLUG,
+        updatedAt: now,
+      });
+    }
+
+    const backlogState = await ctx.db
+      .query("backlogThreadState")
+      .withIndex("by_threadId", (q) => q.eq("threadId", threadByJid._id))
+      .first();
+    if (!backlogState) {
+      await ctx.db.insert("backlogThreadState", {
+        threadId: threadByJid._id,
+        importanceOverride: undefined,
+        relationshipOverride: "relationship",
+        snoozedUntil: undefined,
+        snoozeReason: undefined,
+        unresolvedCount: 0,
+        pendingSince: undefined,
+        latestUnresolvedAt: undefined,
+        latestUnresolvedMessageId: undefined,
+        latestUnresolvedText: undefined,
+        lastInboundAt: undefined,
+        lastOutboundAt: undefined,
+        relationship: "relationship",
+        importance: "low",
+        recommendation: "answer",
+        score: 0,
+        lastActionAt: undefined,
+        lastActionType: undefined,
+        lastEvaluatedAt: now,
+        createdAt: now,
+        updatedAt: now,
+      });
+    } else if (
+      backlogState.relationshipOverride !== "relationship" ||
+      backlogState.relationship !== "relationship"
+    ) {
+      await ctx.db.patch(backlogState._id, {
+        relationshipOverride: "relationship",
+        relationship: "relationship",
+        updatedAt: now,
+      });
+    }
+
+    matchedThreads += 1;
+  }
+
+  return { matchedThreads };
 }
 
 export const get = query({
@@ -97,6 +203,13 @@ export const save = mutation({
     sendRateWindowMinutes: v.optional(v.number()),
     sendMaxPerThreadInWindow: v.optional(v.number()),
     sendMaxGlobalInWindow: v.optional(v.number()),
+    romanticPartnerJids: v.optional(v.array(v.string())),
+    romanticMorningEnabled: v.optional(v.boolean()),
+    romanticMorningStartHour: v.optional(v.number()),
+    romanticMorningEndHour: v.optional(v.number()),
+    romanticMorningLeadRatio: v.optional(v.number()),
+    romanticMorningCollisionCooldownHours: v.optional(v.number()),
+    romanticMorningMaxPerThreadPerDay: v.optional(v.number()),
     outreachEnabled: v.boolean(),
     outreachCadenceHours: v.number(),
     outreachMaxContactsPerRun: v.number(),
@@ -120,6 +233,10 @@ export const save = mutation({
     instagramStoryDailyMaxPosts: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    const romanticPartnerJids = [...new Set((args.romanticPartnerJids || []).map((item) => item.trim().toLowerCase()).filter(Boolean))].slice(
+      0,
+      300,
+    );
     const outreachContactJids = [...new Set(args.outreachContactJids.map((item) => item.trim()).filter(Boolean))];
     const statusBuilderAudienceJids = [
       ...new Set((args.statusBuilderAudienceJids || []).map((item) => item.trim()).filter(Boolean)),
@@ -238,6 +355,33 @@ export const save = mutation({
         100,
       ),
       sendMaxGlobalInWindow: clampInt(args.sendMaxGlobalInWindow ?? DEFAULT_APP_CONFIG.sendMaxGlobalInWindow, 1, 1000),
+      romanticPartnerJids,
+      romanticMorningEnabled: args.romanticMorningEnabled ?? DEFAULT_APP_CONFIG.romanticMorningEnabled,
+      romanticMorningStartHour: clampInt(
+        args.romanticMorningStartHour ?? DEFAULT_APP_CONFIG.romanticMorningStartHour,
+        0,
+        23,
+      ),
+      romanticMorningEndHour: clampInt(
+        args.romanticMorningEndHour ?? DEFAULT_APP_CONFIG.romanticMorningEndHour,
+        0,
+        23,
+      ),
+      romanticMorningLeadRatio: clamp(
+        args.romanticMorningLeadRatio ?? DEFAULT_APP_CONFIG.romanticMorningLeadRatio,
+        0,
+        1,
+      ),
+      romanticMorningCollisionCooldownHours: clampInt(
+        args.romanticMorningCollisionCooldownHours ?? DEFAULT_APP_CONFIG.romanticMorningCollisionCooldownHours,
+        1,
+        72,
+      ),
+      romanticMorningMaxPerThreadPerDay: clampInt(
+        args.romanticMorningMaxPerThreadPerDay ?? DEFAULT_APP_CONFIG.romanticMorningMaxPerThreadPerDay,
+        1,
+        3,
+      ),
       outreachEnabled: args.outreachEnabled,
       outreachCadenceHours: clampInt(args.outreachCadenceHours, 6, 24 * 14),
       outreachMaxContactsPerRun: clampInt(args.outreachMaxContactsPerRun, 1, 25),
@@ -327,6 +471,8 @@ export const save = mutation({
       normalized.instagramTypingMaxMs = swapped;
     }
 
+    const romanticSyncResult = await upsertRomanticPartnerMappings(ctx, normalized.romanticPartnerJids);
+
     await setConfigValue(ctx, "ignoreGroupsByDefault", normalized.ignoreGroupsByDefault ? "true" : "false");
     await setConfigValue(ctx, "reactionsEnabled", normalized.reactionsEnabled ? "true" : "false");
     await setConfigValue(ctx, "stickersEnabled", normalized.stickersEnabled ? "true" : "false");
@@ -390,6 +536,21 @@ export const save = mutation({
     await setConfigValue(ctx, "sendRateWindowMinutes", String(normalized.sendRateWindowMinutes));
     await setConfigValue(ctx, "sendMaxPerThreadInWindow", String(normalized.sendMaxPerThreadInWindow));
     await setConfigValue(ctx, "sendMaxGlobalInWindow", String(normalized.sendMaxGlobalInWindow));
+    await setConfigValue(ctx, "romanticPartnerJids", normalized.romanticPartnerJids.join("\n"));
+    await setConfigValue(ctx, "romanticMorningEnabled", normalized.romanticMorningEnabled ? "true" : "false");
+    await setConfigValue(ctx, "romanticMorningStartHour", String(normalized.romanticMorningStartHour));
+    await setConfigValue(ctx, "romanticMorningEndHour", String(normalized.romanticMorningEndHour));
+    await setConfigValue(ctx, "romanticMorningLeadRatio", String(normalized.romanticMorningLeadRatio));
+    await setConfigValue(
+      ctx,
+      "romanticMorningCollisionCooldownHours",
+      String(normalized.romanticMorningCollisionCooldownHours),
+    );
+    await setConfigValue(
+      ctx,
+      "romanticMorningMaxPerThreadPerDay",
+      String(normalized.romanticMorningMaxPerThreadPerDay),
+    );
     await setConfigValue(ctx, "outreachEnabled", normalized.outreachEnabled ? "true" : "false");
     await setConfigValue(ctx, "outreachCadenceHours", String(normalized.outreachCadenceHours));
     await setConfigValue(ctx, "outreachMaxContactsPerRun", String(normalized.outreachMaxContactsPerRun));
@@ -415,7 +576,7 @@ export const save = mutation({
     await ctx.db.insert("systemEvents", {
       source: "dashboard",
       eventType: "settings.updated",
-      detail: "Runtime settings updated from Settings page.",
+      detail: `Runtime settings updated from Settings page. Romantic partner threads synced: ${romanticSyncResult.matchedThreads}.`,
       createdAt: Date.now(),
     });
 

@@ -71,6 +71,13 @@ type SettingsState = {
   sendRateWindowMinutes: number;
   sendMaxPerThreadInWindow: number;
   sendMaxGlobalInWindow: number;
+  romanticPartnerJids: string[];
+  romanticMorningEnabled: boolean;
+  romanticMorningStartHour: number;
+  romanticMorningEndHour: number;
+  romanticMorningLeadRatio: number;
+  romanticMorningCollisionCooldownHours: number;
+  romanticMorningMaxPerThreadPerDay: number;
   instagramDmDelayMinMs: number;
   instagramDmDelayMaxMs: number;
   instagramTypingMinMs: number;
@@ -96,6 +103,7 @@ type SettingsState = {
 
 type KnownContact = {
   _id: string;
+  provider?: "whatsapp" | "instagram";
   jid: string;
   title?: string;
 };
@@ -281,6 +289,13 @@ function toState(source: Partial<SettingsState> | undefined): SettingsState {
     sendRateWindowMinutes: source?.sendRateWindowMinutes ?? 60,
     sendMaxPerThreadInWindow: source?.sendMaxPerThreadInWindow ?? 4,
     sendMaxGlobalInWindow: source?.sendMaxGlobalInWindow ?? 40,
+    romanticPartnerJids: source?.romanticPartnerJids ?? [],
+    romanticMorningEnabled: source?.romanticMorningEnabled ?? true,
+    romanticMorningStartHour: source?.romanticMorningStartHour ?? 6,
+    romanticMorningEndHour: source?.romanticMorningEndHour ?? 10,
+    romanticMorningLeadRatio: source?.romanticMorningLeadRatio ?? 0.7,
+    romanticMorningCollisionCooldownHours: source?.romanticMorningCollisionCooldownHours ?? 8,
+    romanticMorningMaxPerThreadPerDay: source?.romanticMorningMaxPerThreadPerDay ?? 1,
     instagramDmDelayMinMs: source?.instagramDmDelayMinMs ?? 16000,
     instagramDmDelayMaxMs: source?.instagramDmDelayMaxMs ?? 75000,
     instagramTypingMinMs: source?.instagramTypingMinMs ?? 3000,
@@ -372,6 +387,13 @@ function stateEquals(a: SettingsState, b: SettingsState) {
     nearlyEqual(a.sendRateWindowMinutes, b.sendRateWindowMinutes) &&
     nearlyEqual(a.sendMaxPerThreadInWindow, b.sendMaxPerThreadInWindow) &&
     nearlyEqual(a.sendMaxGlobalInWindow, b.sendMaxGlobalInWindow) &&
+    a.romanticPartnerJids.join("\n") === b.romanticPartnerJids.join("\n") &&
+    a.romanticMorningEnabled === b.romanticMorningEnabled &&
+    nearlyEqual(a.romanticMorningStartHour, b.romanticMorningStartHour) &&
+    nearlyEqual(a.romanticMorningEndHour, b.romanticMorningEndHour) &&
+    nearlyEqual(a.romanticMorningLeadRatio, b.romanticMorningLeadRatio) &&
+    nearlyEqual(a.romanticMorningCollisionCooldownHours, b.romanticMorningCollisionCooldownHours) &&
+    nearlyEqual(a.romanticMorningMaxPerThreadPerDay, b.romanticMorningMaxPerThreadPerDay) &&
     nearlyEqual(a.instagramDmDelayMinMs, b.instagramDmDelayMinMs) &&
     nearlyEqual(a.instagramDmDelayMaxMs, b.instagramDmDelayMaxMs) &&
     nearlyEqual(a.instagramTypingMinMs, b.instagramTypingMinMs) &&
@@ -773,6 +795,10 @@ export function LiveSettings() {
   const remoteState = useMemo(() => toState(settings), [settings]);
   const defaultState = useMemo(() => toState(defaults), [defaults]);
   const knownContacts = useMemo(() => contacts || [], [contacts]);
+  const knownWhatsAppContacts = useMemo(
+    () => knownContacts.filter((contact) => (contact.provider || "whatsapp") === "whatsapp"),
+    [knownContacts],
+  );
   const profiles = profilesQuery || [];
   const availablePersonaPacks = personaPacks?.packs || [];
   const [tab, setTab] = useState<SettingsTab>("runtime");
@@ -935,6 +961,13 @@ export function LiveSettings() {
           sendRateWindowMinutes: Math.round(draft.sendRateWindowMinutes),
           sendMaxPerThreadInWindow: Math.round(draft.sendMaxPerThreadInWindow),
           sendMaxGlobalInWindow: Math.round(draft.sendMaxGlobalInWindow),
+          romanticPartnerJids: draft.romanticPartnerJids,
+          romanticMorningEnabled: draft.romanticMorningEnabled,
+          romanticMorningStartHour: Math.round(draft.romanticMorningStartHour),
+          romanticMorningEndHour: Math.round(draft.romanticMorningEndHour),
+          romanticMorningLeadRatio: draft.romanticMorningLeadRatio,
+          romanticMorningCollisionCooldownHours: Math.round(draft.romanticMorningCollisionCooldownHours),
+          romanticMorningMaxPerThreadPerDay: Math.round(draft.romanticMorningMaxPerThreadPerDay),
           instagramDmDelayMinMs: Math.round(draft.instagramDmDelayMinMs),
           instagramDmDelayMaxMs: Math.round(draft.instagramDmDelayMaxMs),
           instagramTypingMinMs: Math.round(draft.instagramTypingMinMs),
@@ -972,6 +1005,30 @@ export function LiveSettings() {
 
   const restoreDefaults = () => {
     setDraft(defaultState);
+  };
+
+  const addRomanticPartner = (jid: string) => {
+    const normalized = jid.trim();
+    if (!normalized) {
+      return;
+    }
+
+    setDraft((prev) => {
+      if (prev.romanticPartnerJids.includes(normalized)) {
+        return prev;
+      }
+      return {
+        ...prev,
+        romanticPartnerJids: [...prev.romanticPartnerJids, normalized],
+      };
+    });
+  };
+
+  const removeRomanticPartner = (jid: string) => {
+    setDraft((prev) => ({
+      ...prev,
+      romanticPartnerJids: prev.romanticPartnerJids.filter((item) => item !== jid),
+    }));
   };
 
   const addOutreachContact = (jid: string) => {
@@ -1385,7 +1442,7 @@ export function LiveSettings() {
         <ActionNotices notices={notices} onDismiss={dismissNotice} />
         <h3>AI Runtime</h3>
         <form onSubmit={onSubmit} className="stack compact" aria-busy={record.pending}>
-          <label className="stack compact">
+          <div className="stack compact">
             <span className="queue-meta">Temperature</span>
             <input
               type="number"
@@ -1397,9 +1454,9 @@ export function LiveSettings() {
               disabled={record.pending}
               aria-disabled={record.pending}
             />
-          </label>
+          </div>
 
-          <label className="stack compact">
+          <div className="stack compact">
             <span className="queue-meta">Max output tokens</span>
             <input
               type="number"
@@ -1411,7 +1468,7 @@ export function LiveSettings() {
               disabled={record.pending}
               aria-disabled={record.pending}
             />
-          </label>
+          </div>
 
           <label className="stack compact">
             <span className="queue-meta">Max reply chars</span>
@@ -2616,6 +2673,182 @@ export function LiveSettings() {
 
         {showAutomation ? (
           <>
+            <article className="panel-card">
+        <h3>Romantic Partners</h3>
+        <div className="stack compact">
+          <div className="stack compact">
+            <span className="queue-meta">Partner contacts (WhatsApp JIDs)</span>
+            <select
+              value=""
+              onChange={(event) => {
+                if (!event.target.value) {
+                  return;
+                }
+                addRomanticPartner(event.target.value);
+              }}
+              disabled={record.pending || contactsLoading}
+              aria-disabled={record.pending || contactsLoading}
+            >
+              <option value="">
+                {contactsLoading ? "Loading WhatsApp contacts..." : "Add from previous WhatsApp contacts"}
+              </option>
+              {knownWhatsAppContacts.map((contact) => (
+                <option key={contact._id} value={contact.jid}>
+                  {contact.title ? `${contact.title} (${contact.jid})` : contact.jid}
+                </option>
+              ))}
+            </select>
+            <textarea
+              rows={6}
+              placeholder={"2348012345678@s.whatsapp.net\n2348098765432@s.whatsapp.net"}
+              value={draft.romanticPartnerJids.join("\n")}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  romanticPartnerJids: parseContactJids(event.target.value),
+                }))
+              }
+              disabled={record.pending}
+              aria-disabled={record.pending}
+            />
+            <span className="queue-meta">Select from contacts or paste one WhatsApp JID per line.</span>
+            <label className="stack compact">
+              <span className="queue-meta">Enable adaptive good-morning protocol</span>
+              <select
+                value={draft.romanticMorningEnabled ? "true" : "false"}
+                onChange={(event) =>
+                  setDraft((prev) => ({
+                    ...prev,
+                    romanticMorningEnabled: event.target.value === "true",
+                  }))
+                }
+                disabled={record.pending}
+                aria-disabled={record.pending}
+              >
+                <option value="true">Yes</option>
+                <option value="false">No</option>
+              </select>
+            </label>
+            <label className="stack compact">
+              <span className="queue-meta">Morning start hour (24h)</span>
+              <input
+                type="number"
+                min={0}
+                max={23}
+                step={1}
+                value={draft.romanticMorningStartHour}
+                onChange={(event) =>
+                  setDraft((prev) => ({
+                    ...prev,
+                    romanticMorningStartHour: parseNumber(event.target.value, prev.romanticMorningStartHour),
+                  }))
+                }
+                disabled={record.pending || !draft.romanticMorningEnabled}
+                aria-disabled={record.pending || !draft.romanticMorningEnabled}
+              />
+            </label>
+            <label className="stack compact">
+              <span className="queue-meta">Morning end hour (24h)</span>
+              <input
+                type="number"
+                min={0}
+                max={23}
+                step={1}
+                value={draft.romanticMorningEndHour}
+                onChange={(event) =>
+                  setDraft((prev) => ({
+                    ...prev,
+                    romanticMorningEndHour: parseNumber(event.target.value, prev.romanticMorningEndHour),
+                  }))
+                }
+                disabled={record.pending || !draft.romanticMorningEnabled}
+                aria-disabled={record.pending || !draft.romanticMorningEnabled}
+              />
+            </label>
+            <label className="stack compact">
+              <span className="queue-meta">Lead opener ratio: {Math.round(draft.romanticMorningLeadRatio * 100)}%</span>
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={draft.romanticMorningLeadRatio}
+                onChange={(event) =>
+                  setDraft((prev) => ({
+                    ...prev,
+                    romanticMorningLeadRatio: parseNumber(event.target.value, prev.romanticMorningLeadRatio),
+                  }))
+                }
+                disabled={record.pending || !draft.romanticMorningEnabled}
+                aria-disabled={record.pending || !draft.romanticMorningEnabled}
+              />
+            </label>
+            <label className="stack compact">
+              <span className="queue-meta">Starter collision cooldown (hours)</span>
+              <input
+                type="number"
+                min={1}
+                max={72}
+                step={1}
+                value={draft.romanticMorningCollisionCooldownHours}
+                onChange={(event) =>
+                  setDraft((prev) => ({
+                    ...prev,
+                    romanticMorningCollisionCooldownHours: parseNumber(
+                      event.target.value,
+                      prev.romanticMorningCollisionCooldownHours,
+                    ),
+                  }))
+                }
+                disabled={record.pending || !draft.romanticMorningEnabled}
+                aria-disabled={record.pending || !draft.romanticMorningEnabled}
+              />
+            </label>
+            <label className="stack compact">
+              <span className="queue-meta">Max good-morning messages per thread/day</span>
+              <input
+                type="number"
+                min={1}
+                max={3}
+                step={1}
+                value={draft.romanticMorningMaxPerThreadPerDay}
+                onChange={(event) =>
+                  setDraft((prev) => ({
+                    ...prev,
+                    romanticMorningMaxPerThreadPerDay: parseNumber(
+                      event.target.value,
+                      prev.romanticMorningMaxPerThreadPerDay,
+                    ),
+                  }))
+                }
+                disabled={record.pending || !draft.romanticMorningEnabled}
+                aria-disabled={record.pending || !draft.romanticMorningEnabled}
+              />
+            </label>
+            {draft.romanticPartnerJids.length > 0 ? (
+              <div className="stack compact">
+                {draft.romanticPartnerJids.map((jid) => (
+                  <div key={jid} className="queue-item">
+                    <p className="queue-body">{jid}</p>
+                    <div className="queue-actions">
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        onClick={() => removeRomanticPartner(jid)}
+                        disabled={record.pending}
+                        aria-disabled={record.pending}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </article>
+
             <article className="panel-card">
         <h3>Proactive Outreach</h3>
         <div className="stack compact">

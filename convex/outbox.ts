@@ -14,6 +14,7 @@ import {
   resolveLongSilenceReopenWeeks,
   shouldAllowLongSilenceConversationStarter,
 } from "./lib/outboundGuard";
+import { deriveOutreachModeFromReason } from "./lib/outreachModes";
 import {
   classifyThreadKind,
   eligibilityReasonLabel,
@@ -30,6 +31,10 @@ const refChatRebuildThreadStyleProfile = makeFunctionReference<"mutation">("chat
 type MessageProvider = "whatsapp" | "instagram";
 const OUTBOUND_DUPLICATE_WINDOW_MS = 6 * 60 * 60 * 1000;
 const OUTBOUND_DUPLICATE_MIN_KEY_LENGTH = 16;
+
+export function resolveClaimOutreachMode(reason?: string) {
+  return deriveOutreachModeFromReason(reason);
+}
 
 function normalizeMessageProvider(provider?: MessageProvider): MessageProvider {
   return provider === "instagram" ? "instagram" : "whatsapp";
@@ -227,6 +232,7 @@ export const claimDue = mutation({
       threadId: string;
       draftId: string;
       toolRunId?: string;
+      outreachMode?: "proactive" | "good_morning";
       messageText: string;
       typingMs: number;
       jid: string;
@@ -532,7 +538,7 @@ export const claimDue = mutation({
           unansweredStreak: unansweredState.unansweredStreak,
           latestInboundAt: unansweredState.latestInboundAt,
           nowMs: now,
-          isConversationStarter: Boolean(draft.reason?.startsWith("Proactive check-in outreach")),
+          isConversationStarter: Boolean(resolveClaimOutreachMode(draft.reason)),
         });
 
         if (unansweredState.unansweredStreak >= MAX_UNANSWERED_OUTBOUND_STREAK && !allowLongSilenceStarter) {
@@ -693,6 +699,7 @@ export const claimDue = mutation({
         threadId: item.threadId,
         draftId: item.draftId,
         toolRunId: item.toolRunId,
+        outreachMode: resolveClaimOutreachMode(draft.reason),
         messageText: item.messageText,
         typingMs: draft.typingMs,
         jid: thread.jid,

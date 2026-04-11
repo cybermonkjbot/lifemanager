@@ -589,6 +589,19 @@ export default defineSchema({
     .index("by_threadId", ["threadId"])
     .index("by_unresolvedCount_and_updatedAt", ["unresolvedCount", "updatedAt"])
     .index("by_importance_and_updatedAt", ["importance", "updatedAt"])
+    .index("by_relationship_and_updatedAt", ["relationship", "updatedAt"])
     .index("by_snoozedUntil", ["snoozedUntil"])
+    .index("by_updatedAt", ["updatedAt"]),
+
+  romanceMorningState: defineTable({
+    threadId: v.id("threads"),
+    lastSentAt: v.optional(v.number()),
+    lastMode: v.optional(v.union(v.literal("lead"), v.literal("warm"))),
+    lastPromptFingerprint: v.optional(v.string()),
+    lastInboundAfterSendAt: v.optional(v.number()),
+    noReplyStreak: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_threadId", ["threadId"])
     .index("by_updatedAt", ["updatedAt"]),
 });

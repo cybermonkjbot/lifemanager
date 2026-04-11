@@ -3,6 +3,7 @@ import type { Id } from "./_generated/dataModel";
 import { getConfig } from "./lib/config";
 import { estimateHumanTiming } from "./lib/heuristics";
 import { classifyThreadKind } from "./lib/threadEligibility";
+import { PROACTIVE_OUTREACH_REASON_PREFIX, isConversationStarterReason } from "./lib/outreachModes";
 
 const MAX_CONFIGURED_CONTACTS = 100;
 const MAX_DRAFT_LOOKBACK = 20;
@@ -176,10 +177,17 @@ export const run = internalMutation({
         .order("desc")
         .take(MAX_DRAFT_LOOKBACK);
 
-      const hasRecentOutreachDraft = recentDrafts.some((draft) => {
-        return Boolean(draft.reason?.startsWith("Proactive check-in outreach")) && draft.createdAt + cadenceMs > now;
+      const conversationStarterCooldownMs = Math.max(
+        60 * 60 * 1000,
+        Math.round((config.romanticMorningCollisionCooldownHours || 8) * 60 * 60 * 1000),
+      );
+      const hasRecentConversationStarter = recentDrafts.some((draft) => {
+        if (!isConversationStarterReason(draft.reason)) {
+          return false;
+        }
+        return draft.createdAt + conversationStarterCooldownMs > now;
       });
-      if (hasRecentOutreachDraft) {
+      if (hasRecentConversationStarter) {
         continue;
       }
 
@@ -222,7 +230,7 @@ export const run = internalMutation({
         provider: "heuristic",
         delayMs: timing.delayMs,
         typingMs: timing.typingMs,
-        reason: `Proactive check-in outreach (AI pending): ${text.slice(0, 180)}`,
+        reason: `${PROACTIVE_OUTREACH_REASON_PREFIX} (AI pending): ${text.slice(0, 180)}`,
         createdAt: now,
         updatedAt: now,
       });

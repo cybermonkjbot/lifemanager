@@ -180,6 +180,12 @@ type RuntimeSettings = {
   aboutAutomationEnabled: boolean;
   aboutAutomationIntervalMinutes: number;
   aboutAutomationTemplate: string;
+  romanticMorningEnabled: boolean;
+  romanticMorningStartHour: number;
+  romanticMorningEndHour: number;
+  romanticMorningLeadRatio: number;
+  romanticMorningCollisionCooldownHours: number;
+  romanticMorningMaxPerThreadPerDay: number;
 };
 
 type StyleProfileSnapshot = {
@@ -217,6 +223,7 @@ type OutboxClaimedItem = {
   toolRunId?: string;
   jid: string;
   messageProvider: "whatsapp" | "instagram";
+  outreachMode?: "proactive" | "good_morning";
   messageText: string;
   typingMs: number;
   provider: "azure" | "codex" | "heuristic";

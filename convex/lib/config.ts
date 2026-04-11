@@ -86,6 +86,13 @@ export type AppConfig = {
   sendRateWindowMinutes: number;
   sendMaxPerThreadInWindow: number;
   sendMaxGlobalInWindow: number;
+  romanticPartnerJids: string[];
+  romanticMorningEnabled: boolean;
+  romanticMorningStartHour: number;
+  romanticMorningEndHour: number;
+  romanticMorningLeadRatio: number;
+  romanticMorningCollisionCooldownHours: number;
+  romanticMorningMaxPerThreadPerDay: number;
   outreachEnabled: boolean;
   outreachCadenceHours: number;
   outreachMaxContactsPerRun: number;
@@ -174,6 +181,13 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
   sendRateWindowMinutes: 60,
   sendMaxPerThreadInWindow: 4,
   sendMaxGlobalInWindow: 40,
+  romanticPartnerJids: [],
+  romanticMorningEnabled: true,
+  romanticMorningStartHour: 6,
+  romanticMorningEndHour: 10,
+  romanticMorningLeadRatio: 0.7,
+  romanticMorningCollisionCooldownHours: 8,
+  romanticMorningMaxPerThreadPerDay: 1,
   outreachEnabled: false,
   outreachCadenceHours: 36,
   outreachMaxContactsPerRun: 3,
@@ -404,6 +418,39 @@ export async function getConfig(ctx: QueryCtx | MutationCtx): Promise<AppConfig>
     ),
     sendMaxGlobalInWindow: Math.round(
       clamp(parseNumber(map.get("sendMaxGlobalInWindow"), DEFAULT_APP_CONFIG.sendMaxGlobalInWindow), 1, 1000),
+    ),
+    romanticPartnerJids: parseList(map.get("romanticPartnerJids")).slice(0, 300),
+    romanticMorningEnabled: parseBoolean(map.get("romanticMorningEnabled"), DEFAULT_APP_CONFIG.romanticMorningEnabled),
+    romanticMorningStartHour: Math.round(
+      clamp(parseNumber(map.get("romanticMorningStartHour"), DEFAULT_APP_CONFIG.romanticMorningStartHour), 0, 23),
+    ),
+    romanticMorningEndHour: Math.round(
+      clamp(parseNumber(map.get("romanticMorningEndHour"), DEFAULT_APP_CONFIG.romanticMorningEndHour), 0, 23),
+    ),
+    romanticMorningLeadRatio: clamp(
+      parseNumber(map.get("romanticMorningLeadRatio"), DEFAULT_APP_CONFIG.romanticMorningLeadRatio),
+      0,
+      1,
+    ),
+    romanticMorningCollisionCooldownHours: Math.round(
+      clamp(
+        parseNumber(
+          map.get("romanticMorningCollisionCooldownHours"),
+          DEFAULT_APP_CONFIG.romanticMorningCollisionCooldownHours,
+        ),
+        1,
+        72,
+      ),
+    ),
+    romanticMorningMaxPerThreadPerDay: Math.round(
+      clamp(
+        parseNumber(
+          map.get("romanticMorningMaxPerThreadPerDay"),
+          DEFAULT_APP_CONFIG.romanticMorningMaxPerThreadPerDay,
+        ),
+        1,
+        3,
+      ),
     ),
     outreachEnabled: parseBoolean(map.get("outreachEnabled"), DEFAULT_APP_CONFIG.outreachEnabled),
     outreachCadenceHours: Math.round(
