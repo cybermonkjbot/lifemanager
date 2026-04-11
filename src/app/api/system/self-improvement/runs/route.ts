@@ -241,6 +241,7 @@ export async function GET(request: Request) {
     | {
         runId: string;
         meta: RunMeta | null;
+        codexResponse: string;
         report: string;
         prompt: string;
         contextPreview: string;
@@ -255,10 +256,12 @@ export async function GET(request: Request) {
       readTextFile(join(runDir, "prompt.md")),
       readTextFile(join(runDir, "context.md")),
     ]);
+    const codexResponse = truncate(reportRaw, MAX_TEXT_SIZE);
     detail = {
       runId: detailRunId,
       meta,
-      report: truncate(reportRaw, MAX_TEXT_SIZE),
+      codexResponse,
+      report: codexResponse,
       prompt: truncate(promptRaw, MAX_TEXT_SIZE),
       contextPreview: truncate(contextRaw, MAX_CONTEXT_PREVIEW_SIZE),
     };

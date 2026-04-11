@@ -60,6 +60,15 @@ type KnownContact = {
   title?: string;
 };
 
+type SystemTab = "overview" | "testAi" | "runs" | "events";
+
+const SYSTEM_TABS: Array<{ id: SystemTab; label: string }> = [
+  { id: "overview", label: "Overview" },
+  { id: "testAi", label: "AI Test" },
+  { id: "runs", label: "Runs" },
+  { id: "events", label: "Events" },
+];
+
 async function readApiError(response: Response) {
   try {
     const payload = (await response.json()) as { error?: string };
@@ -230,6 +239,7 @@ function AiTestBench() {
 }
 
 function SystemContent() {
+  const [tab, setTab] = useState<SystemTab>("overview");
   const health = useQuery(api.system.health, {}) as
     | {
         metrics?: {
@@ -301,130 +311,170 @@ function SystemContent() {
   const metrics = health?.metrics;
   const alerts = health?.alerts || [];
   const runbooks = health?.runbooks || [];
+  const showOverview = tab === "overview";
+  const showTestAi = tab === "testAi";
+  const showRuns = tab === "runs";
+  const showEvents = tab === "events";
 
   return (
-    <section className="panel-grid two-col">
-      <AiTestBench />
+    <section className="stack">
+      <div className="queue-focus-tabs" role="tablist" aria-label="System sections">
+        {SYSTEM_TABS.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            role="tab"
+            aria-selected={tab === item.id}
+            className={`btn ${tab === item.id ? "btn-primary" : "btn-ghost"}`}
+            onClick={() => setTab(item.id)}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
 
-      <article className="panel-card">
-        <h3>SLO Snapshot</h3>
-        {healthLoading ? (
-          <LoadingBlock label="Loading SLO metrics…" rows={4} />
-        ) : metrics ? (
-          <div className="stack">
-            <p className="queue-meta">
-              Provider success/error: {metrics.providerSuccess}/{metrics.providerErrors} (window {metrics.providerRunsWindow})
-            </p>
-              <p className="queue-meta">Provider error rate: {(metrics.providerErrorRate * 100).toFixed(1)}%</p>
-              <p className="queue-meta">Fallback rate: {(metrics.providerFallbackRate * 100).toFixed(1)}%</p>
-              <p className="queue-meta">P95 provider latency: {Math.round(metrics.providerP95LatencyMs)}ms</p>
-              <p className="queue-meta">
-                Provider tokens (in/out/total): {metrics.providerInputTokens}/{metrics.providerOutputTokens}/{metrics.providerTotalTokens}
-              </p>
-              <p className="queue-meta">
-                Estimated AI cost (window): ${metrics.providerEstimatedCostUsd.toFixed(6)} ({metrics.providerPricedRuns} priced runs)
-              </p>
-              <p className="queue-meta">Open guardrails: {metrics.openGuardrails}</p>
-            <p className="queue-meta">Outbox pending/due: {metrics.pendingOutbox}/{metrics.dueOutbox}</p>
-            <p className="queue-meta">Recent failed outbox items: {metrics.failedOutboxRecent}</p>
-            <p className="queue-meta">Follow-up detections: {metrics.followupDetections}</p>
-            <p className="queue-meta">Follow-up confirmation rate: {(metrics.followupConfirmationRate * 100).toFixed(1)}%</p>
-            <p className="queue-meta">Follow-up dismissal rate: {(metrics.followupDismissalRate * 100).toFixed(1)}%</p>
-            <p className="queue-meta">Follow-up sent/failed: {metrics.followupSent}/{metrics.followupFailed}</p>
-            <p className="queue-meta">Overdue follow-ups: {metrics.followupOverdueCount}</p>
-          </div>
-        ) : (
-          <p className="empty-line">No metrics yet.</p>
-        )}
-      </article>
+      <div className="panel-grid two-col">
+        {showTestAi ? <AiTestBench /> : null}
 
-      <article className="panel-card">
-        <h3>Active Alerts</h3>
-        <div className="stack">
-          {healthLoading ? <LoadingBlock label="Loading alerts…" rows={2} compact /> : null}
-          {alerts.map((alert, index) => (
-            <div key={`${index}:${alert}`} className="queue-item">
-              <p className="queue-body">{alert}</p>
-            </div>
-          ))}
-          {!healthLoading && alerts.length === 0 ? <p className="empty-line">No active alerts.</p> : null}
-        </div>
-      </article>
-
-      <article className="panel-card">
-        <h3>Provider Runs</h3>
-        <div className="stack">
-          {healthLoading ? <LoadingBlock label="Loading provider runs…" rows={3} compact /> : null}
-          {providerRuns.map((run) => (
-            <div key={run._id} className="queue-item">
-              <p className="queue-title">
-                {run.provider.toUpperCase()} · {run.status}
-              </p>
-              <p className="queue-meta">
-                Model: {run.model} · Latency: {run.latencyMs}ms · {formatDateTime(run.createdAt)}
-              </p>
-              {run.totalTokens !== undefined || run.inputTokens !== undefined || run.outputTokens !== undefined ? (
+        {showOverview ? (
+          <article className="panel-card">
+            <h3>SLO Snapshot</h3>
+            {healthLoading ? (
+              <LoadingBlock label="Loading SLO metrics…" rows={4} />
+            ) : metrics ? (
+              <div className="stack">
                 <p className="queue-meta">
-                  Tokens in/out/total: {run.inputTokens ?? 0}/{run.outputTokens ?? 0}/
-                  {run.totalTokens ?? (run.inputTokens ?? 0) + (run.outputTokens ?? 0)}
-                  {run.usageSource ? ` · ${run.usageSource}` : ""}
+                  Provider success/error: {metrics.providerSuccess}/{metrics.providerErrors} (window {metrics.providerRunsWindow})
                 </p>
+                <p className="queue-meta">Provider error rate: {(metrics.providerErrorRate * 100).toFixed(1)}%</p>
+                <p className="queue-meta">Fallback rate: {(metrics.providerFallbackRate * 100).toFixed(1)}%</p>
+                <p className="queue-meta">P95 provider latency: {Math.round(metrics.providerP95LatencyMs)}ms</p>
+                <p className="queue-meta">
+                  Provider tokens (in/out/total): {metrics.providerInputTokens}/{metrics.providerOutputTokens}/{metrics.providerTotalTokens}
+                </p>
+                <p className="queue-meta">
+                  Estimated AI cost (window): ${metrics.providerEstimatedCostUsd.toFixed(6)} ({metrics.providerPricedRuns} priced runs)
+                </p>
+                <p className="queue-meta">Open guardrails: {metrics.openGuardrails}</p>
+                <p className="queue-meta">Outbox pending/due: {metrics.pendingOutbox}/{metrics.dueOutbox}</p>
+                <p className="queue-meta">Recent failed outbox items: {metrics.failedOutboxRecent}</p>
+                <p className="queue-meta">Follow-up detections: {metrics.followupDetections}</p>
+                <p className="queue-meta">Follow-up confirmation rate: {(metrics.followupConfirmationRate * 100).toFixed(1)}%</p>
+                <p className="queue-meta">Follow-up dismissal rate: {(metrics.followupDismissalRate * 100).toFixed(1)}%</p>
+                <p className="queue-meta">Follow-up sent/failed: {metrics.followupSent}/{metrics.followupFailed}</p>
+                <p className="queue-meta">Overdue follow-ups: {metrics.followupOverdueCount}</p>
+              </div>
+            ) : (
+              <p className="empty-line">No metrics yet.</p>
+            )}
+          </article>
+        ) : null}
+
+        {showOverview ? (
+          <article className="panel-card">
+            <h3>Active Alerts</h3>
+            <div className="stack">
+              {healthLoading ? <LoadingBlock label="Loading alerts…" rows={2} compact /> : null}
+              {alerts.map((alert, index) => (
+                <div key={`${index}:${alert}`} className="queue-item">
+                  <p className="queue-body">{alert}</p>
+                </div>
+              ))}
+              {!healthLoading && alerts.length === 0 ? <p className="empty-line">No active alerts.</p> : null}
+            </div>
+          </article>
+        ) : null}
+
+        {showRuns ? (
+          <article className="panel-card">
+            <h3>Provider Runs</h3>
+            <div className="stack">
+              {healthLoading ? <LoadingBlock label="Loading provider runs…" rows={3} compact /> : null}
+              {providerRuns.map((run) => (
+                <div key={run._id} className="queue-item">
+                  <p className="queue-title">
+                    {run.provider.toUpperCase()} · {run.status}
+                  </p>
+                  <p className="queue-meta">
+                    Model: {run.model} · Latency: {run.latencyMs}ms · {formatDateTime(run.createdAt)}
+                  </p>
+                  {run.totalTokens !== undefined || run.inputTokens !== undefined || run.outputTokens !== undefined ? (
+                    <p className="queue-meta">
+                      Tokens in/out/total: {run.inputTokens ?? 0}/{run.outputTokens ?? 0}/
+                      {run.totalTokens ?? (run.inputTokens ?? 0) + (run.outputTokens ?? 0)}
+                      {run.usageSource ? ` · ${run.usageSource}` : ""}
+                    </p>
+                  ) : null}
+                  {run.estimatedCostUsd !== undefined ? <p className="queue-meta">Estimated cost: ${run.estimatedCostUsd.toFixed(6)}</p> : null}
+                  {run.error ? <p className="queue-body">{trim(run.error, 180)}</p> : null}
+                </div>
+              ))}
+              {!healthLoading && providerRuns.length === 0 ? <p className="empty-line">No provider runs logged yet.</p> : null}
+            </div>
+          </article>
+        ) : null}
+
+        {showRuns ? (
+          <article className="panel-card">
+            <h3>Transcription Runs</h3>
+            <div className="stack">
+              {healthLoading ? <LoadingBlock label="Loading transcription runs…" rows={2} compact /> : null}
+              {latestTranscriptions.map((event) => (
+                <div key={event._id} className="queue-item">
+                  <p className="queue-title">{event.eventType}</p>
+                  <p className="queue-body">{trim(event.detail, 520)}</p>
+                  <p className="queue-meta">{formatDateTime(event.createdAt)}</p>
+                </div>
+              ))}
+              {!healthLoading && latestTranscriptions.length === 0 ? (
+                <p className="empty-line">No transcription runs captured yet.</p>
               ) : null}
-              {run.estimatedCostUsd !== undefined ? <p className="queue-meta">Estimated cost: ${run.estimatedCostUsd.toFixed(6)}</p> : null}
-              {run.error ? <p className="queue-body">{trim(run.error, 180)}</p> : null}
             </div>
-          ))}
-          {!healthLoading && providerRuns.length === 0 ? <p className="empty-line">No provider runs logged yet.</p> : null}
-        </div>
-      </article>
+          </article>
+        ) : null}
 
-      <article className="panel-card">
-        <h3>Transcription Runs</h3>
-        <div className="stack">
-          {healthLoading ? <LoadingBlock label="Loading transcription runs…" rows={2} compact /> : null}
-          {latestTranscriptions.map((event) => (
-            <div key={event._id} className="queue-item">
-              <p className="queue-title">{event.eventType}</p>
-              <p className="queue-body">{trim(event.detail, 520)}</p>
-              <p className="queue-meta">{formatDateTime(event.createdAt)}</p>
+        {showEvents ? (
+          <article className="panel-card">
+            <h3>System Events</h3>
+            <div className="stack">
+              {healthLoading ? <LoadingBlock label="Loading system events…" rows={3} compact /> : null}
+              {latestEvents.map((event) => (
+                <div key={event._id} className="queue-item">
+                  <p className="queue-title">
+                    {event.source} · {event.eventType}
+                  </p>
+                  <p className="queue-body">{trim(event.detail, 180)}</p>
+                  <p className="queue-meta">{formatDateTime(event.createdAt)}</p>
+                </div>
+              ))}
+              {!healthLoading && latestEvents.length === 0 ? <p className="empty-line">No events captured yet.</p> : null}
             </div>
-          ))}
-          {!healthLoading && latestTranscriptions.length === 0 ? (
-            <p className="empty-line">No transcription runs captured yet.</p>
-          ) : null}
-        </div>
-      </article>
+          </article>
+        ) : null}
 
-      <article className="panel-card">
-        <h3>System Events</h3>
-        <div className="stack">
-          {healthLoading ? <LoadingBlock label="Loading system events…" rows={3} compact /> : null}
-          {latestEvents.map((event) => (
-            <div key={event._id} className="queue-item">
-              <p className="queue-title">
-                {event.source} · {event.eventType}
-              </p>
-              <p className="queue-body">{trim(event.detail, 180)}</p>
-              <p className="queue-meta">{formatDateTime(event.createdAt)}</p>
+        {showEvents ? (
+          <article className="panel-card">
+            <h3>Runbooks</h3>
+            <div className="stack">
+              {healthLoading ? <LoadingBlock label="Loading runbooks…" rows={2} compact /> : null}
+              {runbooks.map((book) => (
+                <div key={book.key} className="queue-item">
+                  <p className="queue-title">{book.title}</p>
+                  <p className="queue-body">{book.steps}</p>
+                </div>
+              ))}
+              {!healthLoading && runbooks.length === 0 ? <p className="empty-line">No runbooks defined.</p> : null}
             </div>
-          ))}
-          {!healthLoading && latestEvents.length === 0 ? <p className="empty-line">No events captured yet.</p> : null}
-        </div>
-      </article>
+          </article>
+        ) : null}
 
-      <article className="panel-card">
-        <h3>Runbooks</h3>
-        <div className="stack">
-          {healthLoading ? <LoadingBlock label="Loading runbooks…" rows={2} compact /> : null}
-          {runbooks.map((book) => (
-            <div key={book.key} className="queue-item">
-              <p className="queue-title">{book.title}</p>
-              <p className="queue-body">{book.steps}</p>
-            </div>
-          ))}
-          {!healthLoading && runbooks.length === 0 ? <p className="empty-line">No runbooks defined.</p> : null}
-        </div>
-      </article>
+        {showTestAi && !healthLoading && providerRuns.length === 0 && latestEvents.length === 0 ? (
+          <article className="panel-card">
+            <h3>System Snapshot</h3>
+            <p className="empty-line">Runtime health data will appear here once provider and event logs are available.</p>
+          </article>
+        ) : null}
+      </div>
     </section>
   );
 }

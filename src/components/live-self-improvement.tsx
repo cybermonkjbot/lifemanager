@@ -44,6 +44,7 @@ type RunsResponse = {
         meta: {
           runMode?: RunMode;
         } | null;
+        codexResponse: string;
         report: string;
         prompt: string;
         contextPreview: string;
@@ -204,7 +205,7 @@ export function LiveSelfImprovement() {
                   ) : run.reportPreview ? (
                     <p className="queue-body">{trim(run.reportPreview, 220)}</p>
                   ) : (
-                    <p className="queue-meta">No report captured.</p>
+                    <p className="queue-meta">No Codex response captured.</p>
                   )}
                 </button>
               );
@@ -242,9 +243,9 @@ export function LiveSelfImprovement() {
               </div>
             ) : null}
             <details className="queue-item" open>
-              <summary className="queue-title">Report</summary>
+              <summary className="queue-title">Codex Response</summary>
               <pre className="queue-body" style={{ whiteSpace: "pre-wrap", marginTop: 12 }}>
-                {payload.detail.report || "No report content."}
+                {payload.detail.codexResponse || payload.detail.report || "No response content."}
               </pre>
             </details>
             <details className="queue-item">

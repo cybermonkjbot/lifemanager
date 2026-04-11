@@ -3594,9 +3594,12 @@ function resolveTextEmojiAllowlist() {
   };
 
   const SELF_IMPROVE_MAX_PROMPT_CHARS = 1200;
+  const SELF_IMPROVE_MAX_REPLY_CHARS = 3_500;
+  const SELF_IMPROVE_MAX_SINGLE_LINE_CHARS = 1_600;
   const SELF_IMPROVE_ROOT = resolve(process.cwd(), ".slm", "self-improvement");
   const SELF_IMPROVE_LOCK_PATH = join(SELF_IMPROVE_ROOT, "runner.lock");
   const SELF_IMPROVE_LATEST_META_PATH = join(SELF_IMPROVE_ROOT, "latest-meta.json");
+  const SELF_IMPROVE_LATEST_REPORT_PATH = join(SELF_IMPROVE_ROOT, "latest.md");
   const SELF_CONTROL_MESSAGE_PREFIX = (process.env.SLM_SELF_CONTROL_MESSAGE_PREFIX || "").trim();
   const OPENCLAW_CLI_PATH = (process.env.SLM_OPENCLAW_CLI_PATH || "openclaw").trim() || "openclaw";
   const OPENCLAW_AGENT_ID = (process.env.SLM_OPENCLAW_AGENT_ID || "main").trim() || "main";
@@ -3730,12 +3733,19 @@ function resolveTextEmojiAllowlist() {
           220,
         );
 
-        const text = success
-          ? formatAssistantReply("codex", `done. finished in ${elapsedSeconds}s.`)
-          : formatAssistantReply(
-              "codex",
-              `I hit an issue${briefDetail ? ` (${briefDetail})` : ""}.`,
-            );
+        let text = "";
+        if (success) {
+          const latestReport = await readLatestSelfImproveReport();
+          const reportReply = buildSelfImproveReportReply(latestReport);
+          text = reportReply
+            ? formatAssistantReply("codex", reportReply)
+            : formatAssistantReply("codex", `done. finished in ${elapsedSeconds}s.`);
+        } else {
+          text = formatAssistantReply(
+            "codex",
+            `I hit an issue${briefDetail ? ` (${briefDetail})` : ""}.`,
+          );
+        }
 
         await sendSelfControlText({ selfControl: args.selfControl, text }).catch(() => undefined);
       })();
@@ -3765,6 +3775,40 @@ function resolveTextEmojiAllowlist() {
     } catch {
       return null;
     }
+  };
+
+  const readLatestSelfImproveReport = async () => {
+    try {
+      const text = await readFile(SELF_IMPROVE_LATEST_REPORT_PATH, "utf8");
+      return text;
+    } catch {
+      return "";
+    }
+  };
+
+  const truncateForReply = (text: string, maxChars: number) => {
+    const trimmed = text.trim();
+    if (!trimmed) {
+      return "";
+    }
+    if (trimmed.length <= maxChars) {
+      return trimmed;
+    }
+    return `${trimmed.slice(0, Math.max(0, maxChars - 3)).trimEnd()}...`;
+  };
+
+  const buildSelfImproveReportReply = (report: string) => {
+    const trimmed = report.trim();
+    if (!trimmed) {
+      return "";
+    }
+
+    const singleLine = compactLogText(trimmed.replace(/\s+/g, " "), SELF_IMPROVE_MAX_SINGLE_LINE_CHARS);
+    if (singleLine && singleLine.length >= Math.min(180, Math.round(trimmed.length * 0.7))) {
+      return singleLine;
+    }
+
+    return truncateForReply(trimmed, SELF_IMPROVE_MAX_REPLY_CHARS);
   };
 
   const launchSelfImproveRun = async (args: {
@@ -3837,11 +3881,18 @@ function resolveTextEmojiAllowlist() {
   };
 
   const buildSelfImproveLatestText = async () => {
-    const latest = await readLatestSelfImproveMeta();
-    if (!latest?.runId) {
+    const [latest, latestReport] = await Promise.all([readLatestSelfImproveMeta(), readLatestSelfImproveReport()]);
+    if (!latest?.runId && !latestReport.trim()) {
       return formatAssistantReply("codex", "no completed improve tasks yet.");
     }
-    const hasError = Boolean(latest.codexErrorMessage) || (typeof latest.codexExitCode === "number" && latest.codexExitCode !== 0);
+
+    const reportReply = buildSelfImproveReportReply(latestReport);
+    if (reportReply) {
+      return formatAssistantReply("codex", reportReply);
+    }
+
+    const hasError =
+      Boolean(latest?.codexErrorMessage) || (typeof latest?.codexExitCode === "number" && latest.codexExitCode !== 0);
     if (hasError) {
       return formatAssistantReply("codex", "last improve task hit an issue.");
     }

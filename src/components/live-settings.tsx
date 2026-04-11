@@ -163,6 +163,16 @@ type SetupState = {
   hasAuth?: boolean;
   listenerActive?: boolean;
 };
+
+type SettingsTab = "runtime" | "automation" | "personality" | "media";
+
+const SETTINGS_TABS: Array<{ id: SettingsTab; label: string }> = [
+  { id: "runtime", label: "Runtime" },
+  { id: "automation", label: "Automation" },
+  { id: "personality", label: "Personality" },
+  { id: "media", label: "Media" },
+];
+
 const STATUS_BUILDER_MAX_TEXT_POST_RATIO = 0.45;
 
 function toState(source: Partial<SettingsState> | undefined): SettingsState {
@@ -488,6 +498,7 @@ export function LiveSettings() {
   const knownContacts = useMemo(() => contacts || [], [contacts]);
   const profiles = profilesQuery || [];
   const availablePersonaPacks = personaPacks?.packs || [];
+  const [tab, setTab] = useState<SettingsTab>("runtime");
   const [draft, setDraft] = useState<SettingsState>(remoteState);
   const [editorSlug, setEditorSlug] = useState("");
   const [assetKind, setAssetKind] = useState<"sticker" | "meme">("sticker");
@@ -519,9 +530,12 @@ export function LiveSettings() {
   const record = getRecord(key);
   const profileRecord = getRecord(profileKey);
   const mediaRecord = getRecord(mediaKey);
+  const showRuntime = tab === "runtime";
+  const showAutomation = tab === "automation";
+  const showPersonality = tab === "personality";
+  const showMedia = tab === "media";
 
-  const onSubmit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
+  const saveDraft = () => {
     if (!hasChanged) {
       return;
     }
@@ -619,6 +633,11 @@ export function LiveSettings() {
         successMessage: "Settings saved.",
       },
     );
+  };
+
+  const onSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    saveDraft();
   };
 
   const restoreDefaults = () => {
@@ -825,8 +844,35 @@ export function LiveSettings() {
   }
 
   return (
-    <section className="panel-grid two-col">
-      <article className="panel-card">
+    <section className="stack">
+      <div className="queue-focus-tabs" role="tablist" aria-label="Settings sections">
+        {SETTINGS_TABS.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            role="tab"
+            aria-selected={tab === item.id}
+            className={`btn ${tab === item.id ? "btn-primary" : "btn-ghost"}`}
+            onClick={() => setTab(item.id)}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="topbar-controls">
+        <button type="button" className="btn btn-primary" onClick={saveDraft} disabled={record.pending || !hasChanged} aria-disabled={record.pending || !hasChanged}>
+          {record.pending ? "Saving..." : "Save Settings"}
+        </button>
+        <button type="button" className="btn" onClick={restoreDefaults} disabled={record.pending} aria-disabled={record.pending}>
+          Restore Defaults
+        </button>
+      </div>
+
+      <div className="panel-grid two-col">
+        {showRuntime ? (
+          <>
+            <article className="panel-card">
         <ActionNotices notices={notices} onDismiss={dismissNotice} />
         <h3>AI Runtime</h3>
         <form onSubmit={onSubmit} className="stack compact" aria-busy={record.pending}>
@@ -1083,25 +1129,9 @@ export function LiveSettings() {
             />
           </label>
 
-          <div className="topbar-controls">
-            <button
-              type="submit"
-              className="btn btn-primary"
-              disabled={record.pending || !hasChanged}
-              aria-disabled={record.pending || !hasChanged}
-            >
-              {record.pending ? "Saving..." : "Save Settings"}
-            </button>
-            <button
-              type="button"
-              className="btn"
-              onClick={restoreDefaults}
-              disabled={record.pending}
-              aria-disabled={record.pending}
-            >
-              Restore Defaults
-            </button>
-          </div>
+          <button type="submit" className="btn btn-primary" disabled={record.pending || !hasChanged} aria-disabled={record.pending || !hasChanged}>
+            {record.pending ? "Saving..." : "Save Settings"}
+          </button>
         </form>
       </article>
 
@@ -2072,8 +2102,12 @@ export function LiveSettings() {
           ) : null}
         </div>
       </article>
+          </>
+        ) : null}
 
-      <article className="panel-card">
+        {showAutomation ? (
+          <>
+            <article className="panel-card">
         <h3>Proactive Outreach</h3>
         <div className="stack compact">
           <label className="stack compact">
@@ -2206,7 +2240,7 @@ export function LiveSettings() {
         </div>
       </article>
 
-      <article className="panel-card">
+            <article className="panel-card">
         <h3>Auto Status Builder</h3>
         <div className="stack compact">
           <label className="stack compact">
@@ -2385,8 +2419,11 @@ export function LiveSettings() {
           </label>
         </div>
       </article>
+          </>
+        ) : null}
 
-      <article className="panel-card">
+        {showPersonality ? (
+          <article className="panel-card">
         <h3>Personality Profiles</h3>
         {profilesLoading ? (
           <LoadingBlock label="Loading personality profiles…" rows={4} />
@@ -2501,8 +2538,10 @@ export function LiveSettings() {
           <p className="empty-line">No personality profiles configured yet.</p>
         )}
       </article>
+        ) : null}
 
-      <article className="panel-card">
+        {showMedia ? (
+          <article className="panel-card">
         <h3>Media Library</h3>
         <p className="queue-meta">Upload sticker and meme assets for outbound use.</p>
         <div className="stack compact">
@@ -2616,6 +2655,8 @@ export function LiveSettings() {
           </div>
         </div>
       </article>
+        ) : null}
+      </div>
     </section>
   );
 }
