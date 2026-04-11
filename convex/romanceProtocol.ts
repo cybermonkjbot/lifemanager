@@ -3,7 +3,7 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { internalMutation, mutation, query, type MutationCtx } from "./_generated/server";
 import { getConfig } from "./lib/config";
 import { classifyThreadKind } from "./lib/threadEligibility";
-import { deriveOutreachModeFromReason, GOOD_MORNING_OUTREACH_REASON_PREFIX, isConversationStarterReason } from "./lib/outreachModes";
+import { GOOD_MORNING_OUTREACH_REASON_PREFIX, isConversationStarterReason } from "./lib/outreachModes";
 import { estimateHumanTiming } from "./lib/heuristics";
 import { buildRomancePromptFingerprint, isWithinHourWindow, selectRomanceMorningMode, stableHash } from "../shared/romance-morning";
 
@@ -48,12 +48,38 @@ export function hasQueuedMorningDraftToday(
   drafts: Array<Pick<Doc<"replyDrafts">, "reason" | "createdAt">>,
   dayStartMs: number,
 ) {
-  return drafts.some((draft) => {
+  return countQueuedMorningDraftsToday(drafts, dayStartMs) > 0;
+}
+
+export function countQueuedMorningDraftsToday(
+  drafts: Array<Pick<Doc<"replyDrafts">, "reason" | "createdAt">>,
+  dayStartMs: number,
+) {
+  let count = 0;
+  for (const draft of drafts) {
     if (!draft.reason || draft.createdAt < dayStartMs) {
-      return false;
+      continue;
     }
-    return draft.reason.startsWith(GOOD_MORNING_OUTREACH_REASON_PREFIX);
-  });
+    if (draft.reason.startsWith(GOOD_MORNING_OUTREACH_REASON_PREFIX)) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+export function hasReachedMorningDraftLimit(
+  drafts: Array<Pick<Doc<"replyDrafts">, "reason" | "createdAt">>,
+  dayStartMs: number,
+  maxPerThreadPerDay: number,
+) {
+  const max = Math.max(1, Math.round(maxPerThreadPerDay || 1));
+  return countQueuedMorningDraftsToday(drafts, dayStartMs) >= max;
+}
+
+export function hasPendingOrClaimedOutbox(
+  outboxItems: Array<Pick<Doc<"outbox">, "status">>,
+) {
+  return outboxItems.some((item) => item.status === "pending" || item.status === "claimed");
 }
 
 export function hasConversationStarterCollision(
@@ -307,19 +333,17 @@ export const run = internalMutation({
       }
       summary.considered += 1;
 
-      const pending = await ctx.db
-        .query("outbox")
-        .withIndex("by_thread_and_status", (q) => q.eq("threadId", threadId).eq("status", "pending"))
-        .first();
-      if (pending) {
-        summary.skippedPendingOutbox += 1;
-        continue;
-      }
-      const claimed = await ctx.db
-        .query("outbox")
-        .withIndex("by_thread_and_status", (q) => q.eq("threadId", threadId).eq("status", "claimed"))
-        .first();
-      if (claimed) {
+      const [pending, claimed] = await Promise.all([
+        ctx.db
+          .query("outbox")
+          .withIndex("by_thread_and_status", (q) => q.eq("threadId", threadId).eq("status", "pending"))
+          .first(),
+        ctx.db
+          .query("outbox")
+          .withIndex("by_thread_and_status", (q) => q.eq("threadId", threadId).eq("status", "claimed"))
+          .first(),
+      ]);
+      if (hasPendingOrClaimedOutbox([pending, claimed].filter((item): item is Doc<"outbox"> => Boolean(item)))) {
         summary.skippedPendingOutbox += 1;
         continue;
       }
@@ -330,7 +354,13 @@ export const run = internalMutation({
         .order("desc")
         .take(MAX_RECENT_DRAFTS);
 
-      if (hasQueuedMorningDraftToday(recentDrafts, dayStart)) {
+      if (
+        hasReachedMorningDraftLimit(
+          recentDrafts,
+          dayStart,
+          config.romanticMorningMaxPerThreadPerDay,
+        )
+      ) {
         summary.skippedMorningAlreadyQueued += 1;
         continue;
       }

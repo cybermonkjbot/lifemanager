@@ -21,6 +21,7 @@ import {
   resolveLongSilenceReopenWeeks,
 } from "../../convex/lib/outboundGuard";
 import { hasPidginCasualSignal, hasPidginSignal } from "../../shared/pidgin-lexicon";
+import { buildRomancePromptFingerprint, selectRomanceMorningMode } from "../../shared/romance-morning";
 import { convexRefs } from "../lib/convex-refs";
 import { acquireWorkerLock, releaseWorkerLockSync } from "../lib/runtime/worker-lock";
 import {
@@ -75,6 +76,7 @@ import {
   pickLaughReactionEmoji,
   shouldUseLaughReactionOnly,
 } from "./status-policy";
+import { buildOutreachFallbackText, buildOutreachPromptSeed } from "./outreach-hydration";
 import {
   buildPdfAwareInboundText,
   buildPdfReplyPolicyInstruction,
@@ -207,6 +209,16 @@ type ContactMemoryFactSnapshot = {
 
 type ContactFactsSnapshot = {
   facts?: ContactMemoryFactSnapshot[];
+} | null;
+
+type RomanceMorningStateSnapshot = {
+  threadId: string;
+  lastSentAt?: number;
+  lastMode?: "lead" | "warm";
+  lastPromptFingerprint?: string;
+  lastInboundAfterSendAt?: number;
+  noReplyStreak: number;
+  updatedAt: number;
 } | null;
 
 type HistorySearchOverrideSnapshot = {
@@ -6988,6 +7000,48 @@ function resolveTextEmojiAllowlist() {
     const personalitySetting = (await convex.query(convexRefs.personalityGetThreadSetting, {
       threadId: item.threadId,
     })) as PersonalityThreadSetting;
+    const outreachMode = item.outreachMode || "proactive";
+    const contactName = threadContext?.thread?.title?.split(/\s+/)[0] || "there";
+    const memorySummary = threadContext?.memory?.summary ? `Memory summary: ${threadContext.memory.summary}` : "";
+    const romanceMorningState = outreachMode === "good_morning"
+      ? ((await convex.query(convexRefs.romanceMorningGetThreadState, {
+          threadId: item.threadId as Id<"threads">,
+        })) as RomanceMorningStateSnapshot)
+      : null;
+    const dayBucket = new Date().toISOString().slice(0, 10);
+    const romanceMorningMode = outreachMode === "good_morning"
+      ? selectRomanceMorningMode({
+          seed: `${item.threadId}|${item.outboxId}|${dayBucket}`,
+          leadRatio: runtimeSettings?.romanticMorningLeadRatio ?? 0.7,
+          lastMode: romanceMorningState?.lastMode,
+          noReplyStreak: romanceMorningState?.noReplyStreak || 0,
+        })
+      : undefined;
+    let romancePromptVariant = outreachMode === "good_morning" && romanceMorningMode
+      ? stableHash(`${item.threadId}|${dayBucket}|${romanceMorningMode}`) % 3
+      : 0;
+    let romancePromptFingerprint = outreachMode === "good_morning" && romanceMorningMode
+      ? buildRomancePromptFingerprint({
+          threadId: item.threadId,
+          mode: romanceMorningMode,
+          variant: romancePromptVariant,
+          dayBucket,
+        })
+      : undefined;
+    if (
+      outreachMode === "good_morning" &&
+      romanceMorningMode &&
+      romancePromptFingerprint &&
+      romanceMorningState?.lastPromptFingerprint === romancePromptFingerprint
+    ) {
+      romancePromptVariant = (romancePromptVariant + 1) % 3;
+      romancePromptFingerprint = buildRomancePromptFingerprint({
+        threadId: item.threadId,
+        mode: romanceMorningMode,
+        variant: romancePromptVariant,
+        dayBucket,
+      });
+    }
 
     const unansweredOutboundTail = countUnansweredOutboundTail(threadContext?.messages || []);
     const lastInboundAtMs = latestInboundAt(threadContext?.messages || []);
@@ -7011,7 +7065,7 @@ function resolveTextEmojiAllowlist() {
       : "mild";
 
     const ghostReopenInstruction =
-      !longSilenceGhostReopen
+      !longSilenceGhostReopen || outreachMode === "good_morning"
         ? ""
         : ghostReopenTone === "naija_tease"
           ? ghostSeverity === "severe"
@@ -7029,19 +7083,14 @@ function resolveTextEmojiAllowlist() {
                 ? `This is a long-silence re-open (${ghostReopenWeeks} weeks unanswered; threshold ${requiredGhostReopenWeeks} week(s)). Use a clear but calm ghosting callout (example vibe: "You really disappeared on me 😅"), then warm check-in.`
                 : `This is a long-silence re-open (${ghostReopenWeeks} weeks unanswered; threshold ${requiredGhostReopenWeeks} week(s)). Use a gentle ghosting callout (example vibe: "You ghosted me a bit 😅"), then warm check-in.`;
 
-    const memorySummary = threadContext?.memory?.summary ? `Memory summary: ${threadContext.memory.summary}` : "";
-    const contactName = threadContext?.thread?.title?.split(/\s+/)[0] || "there";
-    const promptSeed = [
-      "Proactively start a fresh check-in conversation with this contact now.",
-      "Use previous chat context so the opener feels natural, specific, and warm.",
-      "Keep it to 1-2 short sentences, avoid sounding robotic, and include exactly one gentle question.",
-      "Do not sound needy, accusatory, or passive-aggressive.",
+    const promptSeed = buildOutreachPromptSeed({
+      outreachMode,
+      romanceMorningMode,
+      romancePromptVariant,
       ghostReopenInstruction,
       memorySummary,
-      `Contact first name: ${contactName}`,
-    ]
-      .filter(Boolean)
-      .join("\n");
+      contactName,
+    });
 
     const outreachContextTools = await runWorkerContextToolOrchestration({
       convex,
@@ -7057,13 +7106,21 @@ function resolveTextEmojiAllowlist() {
     });
     const outreachHistoryOverride = outreachContextTools.historySearchOverride;
     const outreachContactFacts = outreachContextTools.contactFacts;
-    const outreachStyleHints =
+    const baseOutreachStyleHints =
       outreachContactFacts.length > 0
         ? [
             ...styleHints,
             ...outreachContactFacts.map((fact) => `Known contact fact (${fact.factType}): ${fact.factValue}`),
           ]
         : styleHints;
+    const outreachStyleHints =
+      outreachMode === "good_morning"
+        ? [
+            ...baseOutreachStyleHints,
+            "romance_morning_protocol",
+            `romance_morning_mode:${romanceMorningMode || "warm"}`,
+          ]
+        : baseOutreachStyleHints;
 
     const ai = await generateReplyWithFallback({
       inboundText: promptSeed,
@@ -7200,23 +7257,13 @@ function resolveTextEmojiAllowlist() {
       throw new Error(ai.guardrailReason || "Azure-only mode blocked outreach fallback.");
     }
 
-    const fallbackText = !longSilenceGhostReopen
-      ? "Hey, just checking in. How is your day going?"
-      : ghostReopenTone === "naija_tease"
-        ? ghostSeverity === "severe"
-          ? "Shey you ghost me finish abi 😭. Hope you dey alright?"
-          : "Shey you ghost me abi 😄. How have you been lately?"
-        : ghostReopenTone === "hard_banter"
-          ? ghostSeverity === "severe"
-            ? "You sly mf, you ghosted me 😭. You good though?"
-            : "You sly one, you ghosted me small 😅. You good?"
-          : ghostReopenTone === "playful"
-            ? ghostSeverity === "severe"
-              ? "Omo, you ghosted me hard 😭. How have you been though?"
-              : "You ghosted me small 😅. How have you been?"
-            : ghostSeverity === "severe"
-              ? "You really disappeared on me 😅. Hope you're doing well?"
-              : "You ghosted me a little 😅. How have you been lately?";
+    const fallbackText = buildOutreachFallbackText({
+      outreachMode,
+      romanceMorningMode,
+      longSilenceGhostReopen,
+      ghostReopenTone,
+      ghostSeverity,
+    });
     const rawSafeText = normalizeOutboundText(ai.guardrailBlocked ? fallbackText : ai.text);
     const emojiAdjusted = applyEmojiCooldownPolicy({
       text: rawSafeText,
@@ -7251,6 +7298,16 @@ function resolveTextEmojiAllowlist() {
       typingMs: timing.typingMs,
       toolRunId,
     });
+
+    if (outreachMode === "good_morning" && romanceMorningMode && romancePromptFingerprint) {
+      await convex
+        .mutation(convexRefs.romanceMorningRecordHydration, {
+          threadId: item.threadId as Id<"threads">,
+          mode: romanceMorningMode,
+          promptFingerprint: romancePromptFingerprint,
+        })
+        .catch(() => undefined);
+    }
 
     if (emojiAdjusted.emojiSuppressed) {
       await convex

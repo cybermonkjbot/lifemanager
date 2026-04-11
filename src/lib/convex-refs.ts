@@ -78,6 +78,8 @@ export const convexRefs = {
   personalityGetThreadSetting: makeFunctionReference<"query">("personality:getThreadSetting"),
   personalitySetThreadSetting: makeFunctionReference<"mutation">("personality:setThreadSetting"),
   personalityUpsertProfile: makeFunctionReference<"mutation">("personality:upsertProfile"),
+  romanceMorningGetThreadState: makeFunctionReference<"query">("romanceProtocol:getThreadState"),
+  romanceMorningRecordHydration: makeFunctionReference<"mutation">("romanceProtocol:recordHydration"),
 
   mediaGenerateUploadUrl: makeFunctionReference<"mutation">("media:generateUploadUrl"),
   mediaRegisterAsset: makeFunctionReference<"mutation">("media:registerAsset"),

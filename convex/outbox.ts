@@ -1250,6 +1250,7 @@ export const markSent = mutation({
     });
 
     const draft = await ctx.db.get(item.draftId);
+    const outreachMode = resolveClaimOutreachMode(draft?.reason);
     const sourceMessage = draft ? await ctx.db.get(draft.sourceMessageId) : null;
     if (draft) {
       await ctx.db.patch(draft._id, {
@@ -1301,6 +1302,50 @@ export const markSent = mutation({
       if (asset) {
         await ctx.db.patch(asset._id, {
           lastUsedAt: now,
+          updatedAt: now,
+        });
+      }
+    }
+
+    if (outreachMode === "good_morning") {
+      const morningState = await ctx.db
+        .query("romanceMorningState")
+        .withIndex("by_threadId", (q) => q.eq("threadId", item.threadId))
+        .first();
+      if (!morningState) {
+        await ctx.db.insert("romanceMorningState", {
+          threadId: item.threadId,
+          lastSentAt: now,
+          lastMode: undefined,
+          lastPromptFingerprint: undefined,
+          lastInboundAfterSendAt: undefined,
+          noReplyStreak: 0,
+          updatedAt: now,
+        });
+      } else {
+        const recentMessages = await ctx.db
+          .query("messages")
+          .withIndex("by_thread_messageAt", (q) => q.eq("threadId", item.threadId))
+          .order("desc")
+          .take(140);
+        const inboundAfterPreviousSend = morningState.lastSentAt
+          ? recentMessages.find(
+              (message) =>
+                message.direction === "inbound" &&
+                !message.isStatus &&
+                message.messageAt > (morningState.lastSentAt || 0),
+            )
+          : undefined;
+        const nextNoReplyStreak = morningState.lastSentAt
+          ? inboundAfterPreviousSend
+            ? 0
+            : Math.max(0, morningState.noReplyStreak) + 1
+          : 0;
+
+        await ctx.db.patch(morningState._id, {
+          lastSentAt: now,
+          lastInboundAfterSendAt: inboundAfterPreviousSend?.messageAt,
+          noReplyStreak: nextNoReplyStreak,
           updatedAt: now,
         });
       }

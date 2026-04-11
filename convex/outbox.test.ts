@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { findNewestStaleInboundMessage, resolveOutboxFreshnessReferenceAt } from "./outbox";
+import { findNewestStaleInboundMessage, resolveClaimOutreachMode, resolveOutboxFreshnessReferenceAt } from "./outbox";
 
 test("resolveOutboxFreshnessReferenceAt prefers latest outbox/draft/source-inbound timestamp", () => {
   const referenceAt = resolveOutboxFreshnessReferenceAt({
@@ -85,4 +85,16 @@ test("findNewestStaleInboundMessage respects freshness grace window", () => {
   });
 
   assert.equal(stale?.messageAt, 25_001);
+});
+
+test("resolveClaimOutreachMode derives mode from draft reason prefix", () => {
+  assert.equal(
+    resolveClaimOutreachMode("Adaptive good morning protocol (AI pending): mode=lead; variant=1"),
+    "good_morning",
+  );
+  assert.equal(
+    resolveClaimOutreachMode("Proactive check-in outreach (AI pending): hey there"),
+    "proactive",
+  );
+  assert.equal(resolveClaimOutreachMode("Some other reason"), undefined);
 });
