@@ -7050,6 +7050,10 @@ function resolveTextEmojiAllowlist() {
       : outreachMode === "compliment"
         ? stableHash(`${item.threadId}|${dayBucket}|compliment`)
         : 0;
+    const complimentPlayfulScenario =
+      outreachMode === "compliment"
+        ? stableHash(`${item.threadId}|${dayBucket}|compliment_playful_scenario`) % 100 < 22
+        : false;
     let romancePromptFingerprint = outreachMode === "good_morning" && romanceMorningMode
       ? buildRomancePromptFingerprint({
           threadId: item.threadId,
@@ -7118,6 +7122,7 @@ function resolveTextEmojiAllowlist() {
       romanceMorningMode,
       romancePromptVariant,
       ignoredBoundaryReopen,
+      complimentPlayfulScenario,
       ghostReopenInstruction,
       memorySummary,
       contactName,
@@ -7153,7 +7158,12 @@ function resolveTextEmojiAllowlist() {
             ...(ignoredBoundaryReopen ? ["romance_morning_boundary_reopen"] : []),
           ]
         : outreachMode === "compliment"
-          ? [...baseOutreachStyleHints, "romance_random_compliment_protocol", "romance_appreciation_style"]
+          ? [
+              ...baseOutreachStyleHints,
+              "romance_random_compliment_protocol",
+              "romance_appreciation_style",
+              ...(complimentPlayfulScenario ? ["romance_playful_fake_scenario"] : []),
+            ]
           : baseOutreachStyleHints;
 
     const ai = await generateReplyWithFallback({
@@ -7296,6 +7306,7 @@ function resolveTextEmojiAllowlist() {
       romanceMorningMode,
       romancePromptVariant,
       ignoredBoundaryReopen,
+      complimentPlayfulScenario,
       longSilenceGhostReopen,
       ghostReopenTone,
       ghostSeverity,

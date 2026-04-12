@@ -51,6 +51,42 @@ export function classifyThreadKind(args: { jid: string; isGroupHint?: boolean; p
   return "direct";
 }
 
+export function directIgnoreRuleCandidates(args: { jid: string; provider?: MessageProvider }) {
+  const provider = args.provider || "whatsapp";
+  const trimmed = args.jid.trim();
+  if (!trimmed) {
+    return [];
+  }
+
+  const normalized = trimmed.toLowerCase();
+  if (provider !== "whatsapp") {
+    return [...new Set([trimmed, normalized])];
+  }
+
+  const [userAndDevice = ""] = normalized.split("@");
+  const [bareUser = ""] = userAndDevice.split(":");
+  if (!bareUser) {
+    return [...new Set([trimmed, normalized])];
+  }
+
+  return [...new Set([trimmed, normalized, `${bareUser}@s.whatsapp.net`, `${bareUser}@lid`])];
+}
+
+export function directIgnoreContactKey(args: { jid: string; provider?: MessageProvider }) {
+  const provider = args.provider || "whatsapp";
+  const normalized = args.jid.trim().toLowerCase();
+  if (!normalized) {
+    return "";
+  }
+  if (provider !== "whatsapp") {
+    return normalized;
+  }
+
+  const [userAndDevice = ""] = normalized.split("@");
+  const [bareUser = ""] = userAndDevice.split(":");
+  return bareUser || normalized;
+}
+
 export function resolveThreadEligibility(args: {
   thread: Pick<Doc<"threads">, "jid" | "isIgnored" | "isArchived" | "threadKind" | "ghostedUntil">;
   ignoreGroupsByDefault: boolean;

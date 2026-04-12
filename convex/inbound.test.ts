@@ -6,7 +6,12 @@ import {
   shouldEnterGhostMode,
   shouldResetRomanceMorningNoReplyState,
 } from "./inbound";
-import { classifyThreadKind, resolveThreadEligibility } from "./lib/threadEligibility";
+import {
+  classifyThreadKind,
+  directIgnoreContactKey,
+  directIgnoreRuleCandidates,
+  resolveThreadEligibility,
+} from "./lib/threadEligibility";
 
 test("extractAliasesFromText finds nickname patterns", () => {
   const aliases = extractAliasesFromText("Hey it's Josh, call me jay.");
@@ -23,6 +28,24 @@ test("classifyThreadKind detects broadcast/system JIDs", () => {
   assert.equal(classifyThreadKind({ jid: "ig:story:broadcast", provider: "instagram" }), "broadcast_or_system");
   assert.equal(classifyThreadKind({ jid: "12345@g.us" }), "group");
   assert.equal(classifyThreadKind({ jid: "5551999999999@s.whatsapp.net" }), "direct");
+});
+
+test("directIgnoreRuleCandidates normalizes direct WhatsApp JID aliases", () => {
+  const candidates = directIgnoreRuleCandidates({
+    jid: "5551234567:12@s.whatsapp.net",
+  });
+  assert.deepEqual(candidates, [
+    "5551234567:12@s.whatsapp.net",
+    "5551234567@s.whatsapp.net",
+    "5551234567@lid",
+  ]);
+});
+
+test("directIgnoreContactKey matches account-level contact key for direct WhatsApp aliases", () => {
+  const phoneNetKey = directIgnoreContactKey({ jid: "5551234567:2@s.whatsapp.net" });
+  const lidKey = directIgnoreContactKey({ jid: "5551234567@lid" });
+  assert.equal(phoneNetKey, "5551234567");
+  assert.equal(lidKey, "5551234567");
 });
 
 test("resolveThreadEligibility gives archived precedence", () => {

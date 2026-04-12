@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { shouldPauseOutreachForQuietHours } from "./outreach";
+import type { Id } from "./_generated/dataModel";
+import { hasRecentComplimentDraft, shouldPauseOutreachForQuietHours, shouldQueueRandomCompliment } from "./outreach";
 
 test("shouldPauseOutreachForQuietHours respects quiet-hours toggle", () => {
   const paused = shouldPauseOutreachForQuietHours({
@@ -36,4 +37,61 @@ test("shouldPauseOutreachForQuietHours handles daytime windows", () => {
     quietHoursEndHour: 17,
   });
   assert.equal(notPaused, false);
+});
+
+test("hasRecentComplimentDraft checks prefix and cooldown", () => {
+  const now = 10 * 24 * 60 * 60 * 1000;
+  const recent = hasRecentComplimentDraft({
+    now,
+    drafts: [
+      {
+        reason: "Random appreciation outreach (AI pending): beautiful soul",
+        createdAt: now - 2 * 24 * 60 * 60 * 1000,
+      },
+    ],
+  });
+  const stale = hasRecentComplimentDraft({
+    now,
+    drafts: [
+      {
+        reason: "Random appreciation outreach (AI pending): beautiful soul",
+        createdAt: now - 7 * 24 * 60 * 60 * 1000,
+      },
+    ],
+  });
+  const wrongPrefix = hasRecentComplimentDraft({
+    now,
+    drafts: [
+      {
+        reason: "Proactive check-in outreach (AI pending): hey there",
+        createdAt: now - 2 * 24 * 60 * 60 * 1000,
+      },
+    ],
+  });
+
+  assert.equal(recent, true);
+  assert.equal(stale, false);
+  assert.equal(wrongPrefix, false);
+});
+
+test("shouldQueueRandomCompliment is deterministic and respects cooldown gate", () => {
+  const threadId = "threads_abc123" as Id<"threads">;
+  const first = shouldQueueRandomCompliment({
+    threadId,
+    cadenceBucket: 456,
+    hasRecentCompliment: false,
+  });
+  const second = shouldQueueRandomCompliment({
+    threadId,
+    cadenceBucket: 456,
+    hasRecentCompliment: false,
+  });
+  const blocked = shouldQueueRandomCompliment({
+    threadId,
+    cadenceBucket: 456,
+    hasRecentCompliment: true,
+  });
+
+  assert.equal(first, second);
+  assert.equal(blocked, false);
 });

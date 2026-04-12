@@ -25,10 +25,17 @@ const COMPLIMENT_MODE_INTENT_LINES = [
   "Send one warm appreciation line that feels natural and specific.",
   "Keep it sweet and confident, with no needy or transactional tone.",
 ];
+const COMPLIMENT_PLAYFUL_SCENARIO_INTENT_LINES = [
+  "Use a playful imaginary scenario as a flirty joke, then land on a warm compliment.",
+  "Make up a tiny absurd story, clearly fictional, and keep it affectionate.",
+  "Use light romantic imagination with obvious joke energy and no emotional pressure.",
+];
 const ROMANCE_ROBOTIC_CUE_PATTERN =
   /\b(assistant|task\s*manager|automation|protocol|scheduled|workflow|ticket|per\s+plan|compliance)\b/i;
 const ROMANCE_PRESSURE_CUE_PATTERN =
   /\b(you\s+never\s+reply|answer\s+me|reply\s+now|if\s+you\s+cared|prove\s+it|owe\s+me|don't\s+ignore\s+me|stop\s+ignoring\s+me|where\s+were\s+you)\b/i;
+const ROMANCE_COERCIVE_FAKE_STAKES_PATTERN =
+  /\b(if\s+you\s+(?:don'?t|do\s+not)|unless\s+you)\b[\s\S]{0,60}\b(die|dead|disappear|survive|make\s+it|won'?t\s+last|rescue|save\s+me)\b/i;
 const ROMANCE_PIDGIN_CUE_PATTERN =
   /\b(shey|abi|abeg|wahala|dey|wetin|how\s+far|no\s+be|make\s+we|omo)\b/i;
 const GOOD_MORNING_SHORT_CUE_PATTERN = /\b(gm|gud\s*morn(?:ing)?|gud\s*mrng)\b/i;
@@ -119,11 +126,20 @@ function resolveComplimentIntentLine(variant: number | undefined) {
   return COMPLIMENT_MODE_INTENT_LINES[index];
 }
 
+function resolveComplimentPlayfulIntentLine(variant: number | undefined) {
+  const resolved = Math.round(variant ?? 0);
+  const index =
+    ((resolved % COMPLIMENT_PLAYFUL_SCENARIO_INTENT_LINES.length) + COMPLIMENT_PLAYFUL_SCENARIO_INTENT_LINES.length) %
+    COMPLIMENT_PLAYFUL_SCENARIO_INTENT_LINES.length;
+  return COMPLIMENT_PLAYFUL_SCENARIO_INTENT_LINES[index];
+}
+
 export function buildOutreachPromptSeed(args: {
   outreachMode: OutreachMode;
   romanceMorningMode?: RomanceMorningMode;
   romancePromptVariant?: number;
   ignoredBoundaryReopen?: boolean;
+  complimentPlayfulScenario?: boolean;
   ghostReopenInstruction?: string;
   memorySummary?: string;
   contactName: string;
@@ -160,13 +176,20 @@ export function buildOutreachPromptSeed(args: {
 
   if (args.outreachMode === "compliment") {
     return [
-      "Write one out-of-the-blue appreciation message for this romantic contact.",
-      resolveComplimentIntentLine(args.romancePromptVariant),
-      "Make it feel like a spontaneous compliment, not a routine check-in.",
+      args.complimentPlayfulScenario
+        ? "Write one playful fake-scenario message for this romantic contact."
+        : "Write one out-of-the-blue appreciation message for this romantic contact.",
+      args.complimentPlayfulScenario
+        ? resolveComplimentPlayfulIntentLine(args.romancePromptVariant)
+        : resolveComplimentIntentLine(args.romancePromptVariant),
+      args.complimentPlayfulScenario
+        ? "Make it clearly fictional and obviously joke-like, then end with real warmth."
+        : "Make it feel like a spontaneous compliment, not a routine check-in.",
       "Keep it to 1-2 short sentences in natural chat language.",
       "Use plain conversational English only; do not use pidgin wording.",
       "No robotic, assistant, task-manager, or sales wording.",
       "Do not ask for validation, commitment, or immediate reply.",
+      "No fake-threat stakes about death, emergencies, or abandonment.",
       "At most one gentle question and at most one emoji.",
       "No guilt, pressure, jealousy cues, or accusatory tone.",
       args.memorySummary,
@@ -194,6 +217,7 @@ export function buildOutreachFallbackText(args: {
   romanceMorningMode?: RomanceMorningMode;
   romancePromptVariant?: number;
   ignoredBoundaryReopen?: boolean;
+  complimentPlayfulScenario?: boolean;
   longSilenceGhostReopen: boolean;
   ghostReopenTone: GhostReopenTone;
   ghostSeverity: GhostSeverity;
@@ -209,6 +233,9 @@ export function buildOutreachFallbackText(args: {
   }
 
   if (args.outreachMode === "compliment") {
+    if (args.complimentPlayfulScenario) {
+      return "Random confession: in my imaginary kingdom, your smile keeps the sun online. You really do brighten my day.";
+    }
     return "You have such a beautiful energy, and I still catch myself smiling when I think of you.";
   }
 
@@ -415,6 +442,12 @@ export function enforceComplimentStyleLint(args: {
     return {
       text: fallback,
       violations: ["pressure_or_guilt_wording"],
+    };
+  }
+  if (ROMANCE_COERCIVE_FAKE_STAKES_PATTERN.test(next)) {
+    return {
+      text: fallback,
+      violations: ["coercive_fake_stakes"],
     };
   }
   if (ROMANCE_PIDGIN_CUE_PATTERN.test(next)) {

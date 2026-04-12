@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildOutreachFallbackText, buildOutreachPromptSeed, enforceGoodMorningStyleLint } from "./outreach-hydration";
+import {
+  buildOutreachFallbackText,
+  buildOutreachPromptSeed,
+  enforceComplimentStyleLint,
+  enforceGoodMorningStyleLint,
+} from "./outreach-hydration";
 
 test("buildOutreachPromptSeed enforces constrained good-morning lead prompt", () => {
   const prompt = buildOutreachPromptSeed({
@@ -71,6 +76,34 @@ test("buildOutreachPromptSeed keeps proactive branch shape unchanged", () => {
   assert.match(prompt, /Contact first name: Tobi/);
 });
 
+test("buildOutreachPromptSeed includes compliment constraints for appreciation mode", () => {
+  const prompt = buildOutreachPromptSeed({
+    outreachMode: "compliment",
+    romancePromptVariant: 2,
+    memorySummary: "Memory summary: she likes thoughtful words.",
+    contactName: "Ada",
+  });
+
+  assert.match(prompt, /out-of-the-blue appreciation message/i);
+  assert.match(prompt, /Make it feel like a spontaneous compliment/i);
+  assert.match(prompt, /Do not ask for validation, commitment, or immediate reply\./);
+  assert.match(prompt, /At most one gentle question and at most one emoji\./);
+  assert.match(prompt, /Contact first name: Ada/);
+});
+
+test("buildOutreachPromptSeed supports playful fake-scenario compliment mode", () => {
+  const prompt = buildOutreachPromptSeed({
+    outreachMode: "compliment",
+    romancePromptVariant: 1,
+    complimentPlayfulScenario: true,
+    contactName: "Ada",
+  });
+
+  assert.match(prompt, /playful fake-scenario message/i);
+  assert.match(prompt, /clearly fictional and obviously joke-like/i);
+  assert.match(prompt, /No fake-threat stakes about death, emergencies, or abandonment\./);
+});
+
 test("buildOutreachFallbackText uses mode-aware good-morning fallback", () => {
   const lead = buildOutreachFallbackText({
     outreachMode: "good_morning",
@@ -89,6 +122,35 @@ test("buildOutreachFallbackText uses mode-aware good-morning fallback", () => {
 
   assert.equal(lead, "Good morning, I want to make today sweet for us. What time works for a quick plan later?");
   assert.equal(warm, "Good morning, sending you warm energy. How are you feeling this morning?");
+});
+
+test("buildOutreachFallbackText returns compliment fallback for compliment mode", () => {
+  const fallback = buildOutreachFallbackText({
+    outreachMode: "compliment",
+    longSilenceGhostReopen: false,
+    ghostReopenTone: "warm",
+    ghostSeverity: "mild",
+  });
+
+  assert.equal(
+    fallback,
+    "You have such a beautiful energy, and I still catch myself smiling when I think of you.",
+  );
+});
+
+test("buildOutreachFallbackText returns playful compliment fallback when selected", () => {
+  const fallback = buildOutreachFallbackText({
+    outreachMode: "compliment",
+    complimentPlayfulScenario: true,
+    longSilenceGhostReopen: false,
+    ghostReopenTone: "warm",
+    ghostSeverity: "mild",
+  });
+
+  assert.equal(
+    fallback,
+    "Random confession: in my imaginary kingdom, your smile keeps the sun online. You really do brighten my day.",
+  );
 });
 
 test("buildOutreachFallbackText uses boundary reopen fallback after ignored pause", () => {
@@ -220,4 +282,46 @@ test("enforceGoodMorningStyleLint blocks pidgin wording", () => {
 
   assert.equal(linted.text, fallback);
   assert.ok(linted.violations.includes("pidgin_wording"));
+});
+
+test("enforceComplimentStyleLint rewrites long/question-heavy/emoji-heavy text", () => {
+  const linted = enforceComplimentStyleLint({
+    text: "You are so stunning 😍😍. I keep thinking about your smile. Are you free now? Can we talk later?",
+    fallbackText: "You have such a beautiful energy, and I still catch myself smiling when I think of you.",
+  });
+
+  assert.equal((linted.text.match(/\?/g) || []).length <= 1, true);
+  assert.equal((linted.text.match(/[\p{Extended_Pictographic}\p{Regional_Indicator}]/gu) || []).length <= 1, true);
+  assert.ok(linted.violations.includes("too_many_sentences"));
+  assert.ok(linted.violations.includes("too_many_questions"));
+  assert.ok(linted.violations.includes("too_many_emojis"));
+});
+
+test("enforceComplimentStyleLint falls back on robotic, pressure, or pidgin cues", () => {
+  const fallback = "You have such a beautiful energy, and I still catch myself smiling when I think of you.";
+  const robotic = enforceComplimentStyleLint({
+    text: "As your assistant workflow, this scheduled compliment is now due.",
+    fallbackText: fallback,
+  });
+  const pressure = enforceComplimentStyleLint({
+    text: "You are beautiful, reply now.",
+    fallbackText: fallback,
+  });
+  const pidgin = enforceComplimentStyleLint({
+    text: "You fine well well, shey you dey okay?",
+    fallbackText: fallback,
+  });
+  const coerciveFakeStake = enforceComplimentStyleLint({
+    text: "If you do not miss me today, I will die before sunset.",
+    fallbackText: fallback,
+  });
+
+  assert.equal(robotic.text, fallback);
+  assert.ok(robotic.violations.includes("robotic_task_wording"));
+  assert.equal(pressure.text, fallback);
+  assert.ok(pressure.violations.includes("pressure_or_guilt_wording"));
+  assert.equal(pidgin.text, fallback);
+  assert.ok(pidgin.violations.includes("pidgin_wording"));
+  assert.equal(coerciveFakeStake.text, fallback);
+  assert.ok(coerciveFakeStake.violations.includes("coercive_fake_stakes"));
 });

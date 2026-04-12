@@ -7,6 +7,8 @@ import { detectFutureCommitment, hasRecentFollowupDuplicate } from "./lib/commit
 import { getConfig } from "./lib/config";
 import {
   classifyThreadKind,
+  directIgnoreContactKey,
+  directIgnoreRuleCandidates,
   eligibilityReasonLabel,
   resolveThreadEligibility,
 } from "./lib/threadEligibility";
@@ -20,6 +22,7 @@ const GHOST_ACTIVITY_MIN_INBOUND_MESSAGES = 3;
 const GHOST_ACTIVITY_MIN_OUTBOUND_MESSAGES = 3;
 const GHOST_ACTIVITY_MIN_TURNS = 4;
 const GHOST_TRIGGER_PROBABILITY = 0.2;
+const IGNORE_CONTACT_FALLBACK_SCAN_LIMIT = 1000;
 type IngestMode = "live" | "history_sync" | "history_fetch";
 type InboundMessageType = "text" | "reaction" | "sticker" | "meme" | "image" | "video" | "audio" | "document";
 type MessageProvider = "whatsapp" | "instagram";
@@ -317,12 +320,43 @@ export const ingest = mutation({
     }
     let callReplyBarrierBlocked = false;
 
-    const explicitIgnore = await ctx.db
-      .query("ignoreRules")
-      .withIndex("by_target", (q) =>
-        q.eq("targetType", threadKind === "group" ? "group" : "contact").eq("targetValue", args.threadJid),
-      )
-      .first();
+    let explicitIgnore =
+      threadKind === "group"
+        ? await ctx.db
+            .query("ignoreRules")
+            .withIndex("by_target", (q) => q.eq("targetType", "group").eq("targetValue", args.threadJid))
+            .first()
+        : null;
+
+    if (!explicitIgnore && threadKind === "direct") {
+      for (const candidateJid of directIgnoreRuleCandidates({ jid: args.threadJid, provider: messageProvider })) {
+        explicitIgnore = await ctx.db
+          .query("ignoreRules")
+          .withIndex("by_target", (q) => q.eq("targetType", "contact").eq("targetValue", candidateJid))
+          .first();
+        if (explicitIgnore) {
+          break;
+        }
+      }
+    }
+
+    if (!explicitIgnore && threadKind === "direct") {
+      const lookupKey = directIgnoreContactKey({ jid: args.threadJid, provider: messageProvider });
+      if (lookupKey) {
+        const contactRules = await ctx.db
+          .query("ignoreRules")
+          .withIndex("by_type", (q) => q.eq("targetType", "contact"))
+          .take(IGNORE_CONTACT_FALLBACK_SCAN_LIMIT);
+        explicitIgnore =
+          contactRules.find(
+            (rule) =>
+              directIgnoreContactKey({
+                jid: rule.targetValue,
+                provider: messageProvider,
+              }) === lookupKey,
+          ) || null;
+      }
+    }
 
     const effectiveMessageId = args.providerMessageId || args.whatsappMessageId;
     if (effectiveMessageId) {

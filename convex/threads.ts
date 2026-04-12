@@ -1,9 +1,12 @@
 import { v } from "convex/values";
 import type { Id } from "./_generated/dataModel";
+import type { QueryCtx } from "./_generated/server";
 import { internalQuery, mutation, query } from "./_generated/server";
 import { getConfig } from "./lib/config";
 import {
   classifyThreadKind,
+  directIgnoreContactKey,
+  directIgnoreRuleCandidates,
   eligibilityReasonLabel,
   resolveThreadEligibility,
 } from "./lib/threadEligibility";
@@ -31,6 +34,60 @@ function safeJsonParse(raw: string | undefined) {
   } catch {
     return null;
   }
+}
+
+const IGNORE_CONTACT_FALLBACK_SCAN_LIMIT = 1000;
+
+async function findExplicitIgnoreRule(args: {
+  ctx: QueryCtx;
+  threadKind: "direct" | "group" | "broadcast_or_system";
+  jid: string;
+  provider?: "whatsapp" | "instagram";
+}) {
+  if (args.threadKind === "group") {
+    return await args.ctx.db
+      .query("ignoreRules")
+      .withIndex("by_target", (q) => q.eq("targetType", "group").eq("targetValue", args.jid))
+      .first();
+  }
+
+  if (args.threadKind !== "direct") {
+    return null;
+  }
+
+  for (const candidateJid of directIgnoreRuleCandidates({ jid: args.jid, provider: args.provider })) {
+    const rule = await args.ctx.db
+      .query("ignoreRules")
+      .withIndex("by_target", (q) => q.eq("targetType", "contact").eq("targetValue", candidateJid))
+      .first();
+    if (rule) {
+      return rule;
+    }
+  }
+
+  const lookupKey = directIgnoreContactKey({
+    jid: args.jid,
+    provider: args.provider,
+  });
+  if (!lookupKey) {
+    return null;
+  }
+
+  const contactRules = await args.ctx.db
+    .query("ignoreRules")
+    .withIndex("by_type", (q) => q.eq("targetType", "contact"))
+    .take(IGNORE_CONTACT_FALLBACK_SCAN_LIMIT);
+  for (const rule of contactRules) {
+    if (
+      directIgnoreContactKey({
+        jid: rule.targetValue,
+        provider: args.provider,
+      }) === lookupKey
+    ) {
+      return rule;
+    }
+  }
+  return null;
 }
 
 export const list = query({
@@ -181,12 +238,12 @@ export const getEligibility = query({
     const config = await getConfig(ctx);
     const threadKind =
       thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup, provider: thread.provider });
-    const explicitIgnore = await ctx.db
-      .query("ignoreRules")
-      .withIndex("by_target", (q) =>
-        q.eq("targetType", threadKind === "group" ? "group" : "contact").eq("targetValue", thread.jid),
-      )
-      .first();
+    const explicitIgnore = await findExplicitIgnoreRule({
+      ctx,
+      threadKind,
+      jid: thread.jid,
+      provider: thread.provider,
+    });
 
     const eligibility = resolveThreadEligibility({
       thread: {
@@ -222,21 +279,10 @@ export const getEligibilityByJid = query({
     const now = Date.now();
     const provider = args.provider || "whatsapp";
     const config = await getConfig(ctx);
-    const directJidCandidates = (() => {
-      const raw = args.threadJid.trim().toLowerCase();
-      const [userAndDevice = "", domain = ""] = raw.split("@");
-      const [bareUser = ""] = userAndDevice.split(":");
-      if (!bareUser) {
-        return [args.threadJid];
-      }
-      if (domain === "s.whatsapp.net") {
-        return [args.threadJid, `${bareUser}@s.whatsapp.net`];
-      }
-      if (domain === "lid") {
-        return [args.threadJid, `${bareUser}@lid`, `${bareUser}@s.whatsapp.net`];
-      }
-      return [args.threadJid, `${bareUser}@s.whatsapp.net`];
-    })();
+    const directJidCandidates = directIgnoreRuleCandidates({
+      jid: args.threadJid,
+      provider,
+    });
 
     let thread = await ctx.db
       .query("threads")
@@ -269,29 +315,12 @@ export const getEligibilityByJid = query({
       }
     }
 
-    let explicitIgnore = await ctx.db
-      .query("ignoreRules")
-      .withIndex("by_target", (q) =>
-        q.eq("targetType", threadKind === "group" ? "group" : "contact").eq("targetValue", args.threadJid),
-      )
-      .first();
-
-    if (!explicitIgnore && threadKind === "direct") {
-      for (const candidateJid of directJidCandidates) {
-        if (candidateJid === args.threadJid) {
-          continue;
-        }
-        explicitIgnore = await ctx.db
-          .query("ignoreRules")
-          .withIndex("by_target", (q) =>
-            q.eq("targetType", "contact").eq("targetValue", candidateJid),
-          )
-          .first();
-        if (explicitIgnore) {
-          break;
-        }
-      }
-    }
+    const explicitIgnore = await findExplicitIgnoreRule({
+      ctx,
+      threadKind,
+      jid: args.threadJid,
+      provider,
+    });
 
     const eligibility = resolveThreadEligibility({
       thread: {
@@ -1025,13 +1054,37 @@ export const getGenerationContext = internalQuery({
       return null;
     }
 
+    const threadKind =
+      thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup, provider: thread.provider });
+    const config = await getConfig(ctx);
+    const explicitIgnore = await findExplicitIgnoreRule({
+      ctx,
+      threadKind,
+      jid: thread.jid,
+      provider: thread.provider,
+    });
+    const eligibility = resolveThreadEligibility({
+      thread: {
+        jid: thread.jid,
+        isIgnored: thread.isIgnored,
+        isArchived: thread.isArchived,
+        threadKind,
+        ghostedUntil: thread.ghostedUntil,
+      },
+      ignoreGroupsByDefault: config.ignoreGroupsByDefault,
+      explicitIgnoreEnabled: Boolean(explicitIgnore?.enabled),
+      groupRuleEnabled: threadKind === "group" ? explicitIgnore?.enabled : undefined,
+      nowMs: Date.now(),
+    });
+    if (!eligibility.allowed && eligibility.reason === "explicit_ignore") {
+      return null;
+    }
+
     const messages = await ctx.db
       .query("messages")
       .withIndex("by_thread_messageAt", (q) => q.eq("threadId", args.threadId))
       .order("desc")
       .take(20);
-    const threadKind =
-      thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup, provider: thread.provider });
     const recentMessages =
       threadKind === "broadcast_or_system" ? messages : messages.filter((message) => !message.isStatus);
 
