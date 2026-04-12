@@ -8,6 +8,7 @@ import {
   detectConversationSteeringMode,
   evaluateJokeGuardrail,
   evaluateCopyRisk,
+  evaluateRecentSelfRepeatRisk,
   generateReplyWithFallback,
   hasAggressiveInsultCue,
   hasBossAddressCue,
@@ -476,6 +477,23 @@ test("evaluateCopyRisk allows paraphrased replies that keep intent but change wo
     replyText: "I can share the Q4 invoice recap before 3pm.",
     inboundText: "Please send the Q4 invoice summary by 3pm today.",
     historyLines: [],
+  });
+  assert.equal(result.blocked, false);
+});
+
+test("evaluateRecentSelfRepeatRisk blocks phrase reuse from immediate previous outbound", () => {
+  const result = evaluateRecentSelfRepeatRisk({
+    replyText: "Better so, devil no get shift for this one.",
+    historyLines: ["Them: U go see no worry", "Me: Better so."],
+  });
+  assert.equal(result.blocked, true);
+  assert.match(result.reason, /last message|previous outbound|repeats phrase/i);
+});
+
+test("evaluateRecentSelfRepeatRisk allows trivial overlap without phrase reuse", () => {
+  const result = evaluateRecentSelfRepeatRisk({
+    replyText: "Sure, I can do it now.",
+    historyLines: ["Them: You fit run am?", "Me: I can share it."],
   });
   assert.equal(result.blocked, false);
 });
@@ -1600,6 +1618,83 @@ test("generateReplyWithFallback reprompts Azure when blocked refusal phrase is r
   }
 });
 
+test("generateReplyWithFallback rewrites drafts that repeat phrases from the last outbound message", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  let callCount = 0;
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      callCount += 1;
+      const body = typeof init?.body === "string" ? init.body : "";
+      const outputText = /Recent self-repeat guardrail/i.test(body)
+        ? "Devil no get shift for this one."
+        : "Better so, devil no get shift for this one.";
+      return new Response(JSON.stringify({ output_text: outputText }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "Me wey wicked pass devil",
+      historyLines: ["Them: U go see no worry", "Me: Better so."],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "log_only",
+      },
+    });
+
+    assert.equal(result.guardrailBlocked, false);
+    assert.doesNotMatch(result.text, /^better so\b/i);
+    assert.match(result.text, /devil no get shift/i);
+    assert.ok(callCount >= 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback blocks when self-repeat rewrite still repeats previous phrase", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async () => {
+      return new Response(JSON.stringify({ output_text: "Better so, devil no get shift for this one." }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "Me wey wicked pass devil",
+      historyLines: ["Them: U go see no worry", "Me: Better so."],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "log_only",
+        guardrailRepromptLimit: 0,
+      },
+    });
+
+    assert.equal(result.guardrailBlocked, true);
+    assert.match(result.guardrailReason || "", /recent self-repeat rewrite still violated guardrail/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
 test("generateReplyWithFallback reprompts with guardrail block reason until draft passes criteria", async () => {
   const snapshot = clearAiEnv();
   const originalFetch = globalThis.fetch;
@@ -1817,6 +1912,8 @@ test("generateReplyWithFallback skips joke similarity matching when AI humor jud
       historyLines: [
         "Them: Can you follow up now?",
         "Me: lol no cap your timing was elite",
+        "Them: Bet.",
+        "Me: I can follow up shortly.",
       ],
       styleHints: [],
       runtime: {

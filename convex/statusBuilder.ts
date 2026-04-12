@@ -6,6 +6,7 @@ import { classifyThreadKind } from "./lib/threadEligibility";
 const STATUS_JID = "status@broadcast";
 const AI_STATUS_PLACEHOLDER = "__SLM_AI_STATUS__";
 const STATUS_OUTREACH_WINDOW_MS = 24 * 60 * 60 * 1000;
+const STATUS_PENDING_REVIEW_BLOCK_MS = 2 * 60 * 60 * 1000;
 const MAX_TREND_THREADS = 36;
 const MAX_KEYWORDS = 8;
 
@@ -87,6 +88,16 @@ export function stableHash(value: string) {
     hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
   }
   return hash;
+}
+
+export function stableUnitRandom(seed: string) {
+  let hash = stableHash(seed) >>> 0;
+  hash ^= hash >>> 16;
+  hash = Math.imul(hash, 0x7feb352d);
+  hash ^= hash >>> 15;
+  hash = Math.imul(hash, 0x846ca68b);
+  hash ^= hash >>> 16;
+  return (hash >>> 0) / 0x100000000;
 }
 
 export function isWithinHourWindow(hour: number, startHour: number, endHour: number) {
@@ -232,6 +243,21 @@ export const run = internalMutation({
       await shouldLogSkip("already_queued_claimed");
       return { queued: false, reason: "already_queued_claimed" as const };
     }
+    const recentStatusDrafts = await ctx.db
+      .query("replyDrafts")
+      .withIndex("by_thread", (q) => q.eq("threadId", statusThreadId))
+      .order("desc")
+      .take(40);
+    const hasPendingReviewStatusDraft = recentStatusDrafts.some(
+      (draft) =>
+        draft.isStatusPost === true &&
+        draft.status === "pending" &&
+        draft.createdAt >= now - STATUS_PENDING_REVIEW_BLOCK_MS,
+    );
+    if (hasPendingReviewStatusDraft) {
+      await shouldLogSkip("awaiting_review_pending_draft");
+      return { queued: false, reason: "awaiting_review_pending_draft" as const };
+    }
 
     const recentStatusMessages = await ctx.db
       .query("messages")
@@ -341,10 +367,12 @@ export const run = internalMutation({
 
     const cadenceBucket = Math.floor(now / cadenceMs);
     const seed = `${trendTheme}|${dominantRelationship}|${audienceJids.length}|${cadenceBucket}`;
-    const useTextPost = (stableHash(seed) % 1000) / 1000 < config.statusBuilderTextPostRatio;
+    const formatRoll = stableUnitRandom(`status-format|${seed}`);
+    const useTextPost = formatRoll < config.statusBuilderTextPostRatio;
     const statusFormat: "text" | "meme" = useTextPost ? "text" : "meme";
     const sendKind: "text" | "meme" = useTextPost ? "text" : "meme";
-    const requiresReview = (stableHash(`${seed}|review`) % 1000) / 1000 < config.statusBuilderReviewRatio;
+    const reviewRoll = stableUnitRandom(`status-review|${seed}`);
+    const requiresReview = reviewRoll < config.statusBuilderReviewRatio;
 
     const sourceMessageId = await ctx.db.insert("messages", {
       threadId: statusThreadId,

@@ -62,7 +62,7 @@ type QueueNeedsReplyItem = {
     label: string;
     url: string | null;
   } | null;
-  thread?: { _id?: string; title?: string; jid?: string } | null;
+  thread?: { _id?: string; title?: string; jid?: string; provider?: "whatsapp" | "instagram" } | null;
 };
 
 type QueuePayload = {
@@ -84,6 +84,19 @@ function statusMessageText(message: ThreadMessage) {
     return "Posted an image status";
   }
   return "Posted a status";
+}
+
+function resolveStatusDraftProvider(item: QueueNeedsReplyItem): "whatsapp" | "instagram" {
+  if (item.messageProvider === "instagram" || item.messageProvider === "whatsapp") {
+    return item.messageProvider;
+  }
+  if (item.thread?.provider === "instagram" || item.thread?.provider === "whatsapp") {
+    return item.thread.provider;
+  }
+  if (item.thread?.jid === STATUS_JID_INSTAGRAM) {
+    return "instagram";
+  }
+  return "whatsapp";
 }
 
 export function LiveStatus() {
@@ -116,13 +129,17 @@ export function LiveStatus() {
   const pendingStatusDrafts = useMemo(
     () =>
       (queue?.needsReply || []).filter((item) => {
+        if (item.isStatusPost !== true) {
+          return false;
+        }
+        const statusProvider = resolveStatusDraftProvider(item);
         if (providerFilter === "instagram") {
-          return item.isStatusPost === true || item.thread?.jid === STATUS_JID_INSTAGRAM;
+          return statusProvider === "instagram";
         }
         if (providerFilter === "whatsapp") {
-          return item.thread?.jid === STATUS_JID_WHATSAPP;
+          return statusProvider === "whatsapp";
         }
-        return item.isStatusPost === true || item.thread?.jid === STATUS_JID_WHATSAPP || item.thread?.jid === STATUS_JID_INSTAGRAM;
+        return true;
       }),
     [providerFilter, queue?.needsReply],
   );
@@ -194,8 +211,8 @@ export function LiveStatus() {
                   <div key={item._id} className="queue-item queue-item-condensed status-draft-row">
                     <div>
                       <p className="queue-title status-draft-title">
-                        <span>{item.thread?.title || "My Status"}</span>
-                        <span className="status-inline-chip">{item.messageProvider || "whatsapp"}</span>
+                        <span>My Status</span>
+                        <span className="status-inline-chip">{resolveStatusDraftProvider(item)}</span>
                       </p>
                       <p className="queue-body">{trim(item.mediaCaption || item.text || "", 180)}</p>
                       <p className="queue-meta">

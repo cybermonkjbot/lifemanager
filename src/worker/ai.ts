@@ -303,6 +303,15 @@ type CopyRiskResult = {
   longestTokenRun: number;
 };
 
+type RecentSelfRepeatResult = {
+  blocked: boolean;
+  reason: string;
+  repeatedPhrase?: string;
+  previousOutbound?: string;
+  lexicalSimilarity: number;
+  longestTokenRun: number;
+};
+
 const HARD_CODED_AZURE_DEFAULTS: {
   endpoint: string;
   apiKey: string;
@@ -532,6 +541,11 @@ const STYLE_MIMICRY_BLOCK_PATTERNS = [
 const COPY_RISK_MIN_CHARS = 26;
 const COPY_RISK_HIGH_SIMILARITY_THRESHOLD = 0.92;
 const COPY_RISK_MEDIUM_SIMILARITY_THRESHOLD = 0.87;
+const RECENT_SELF_REPEAT_MIN_CHARS = 8;
+const RECENT_SELF_REPEAT_MIN_RUN = 2;
+const RECENT_SELF_REPEAT_STRONG_RUN = 3;
+const RECENT_SELF_REPEAT_MIN_PHRASE_CHARS = 7;
+const RECENT_SELF_REPEAT_PREFIX_THRESHOLD = 0.65;
 const STYLE_MAX_PROMPT_PHRASE_WORDS = 6;
 const JOKE_INTENT_PATTERNS = [
   /\b(joke|banter|roast|pun|punchline)\b/i,
@@ -2951,6 +2965,10 @@ function buildPrompt(args: {
   const antiJokeChainInstruction = hasRecentOutboundJokeInCooldown(args.historyLines, JOKE_CHAIN_OUTBOUND_COOLDOWN)
     ? `A joke was already used in the last ${JOKE_CHAIN_OUTBOUND_COOLDOWN} outbound replies. Do not continue the bit; reply directly without humor.`
     : "";
+  const lastOutboundMessage = latestOutboundHistoryText(recentHistory.map((line) => line.line));
+  const antiRecentSelfRepeatInstruction = lastOutboundMessage
+    ? `Do not repeat any phrase from your immediate previous outbound message. Previous outbound: "${lastOutboundMessage.slice(0, 160)}". Use a different opening and different wording.`
+    : "";
   const mimicryInjectionCue = hasMimicryInjectionCue({
     inboundText: args.inboundText,
     historyLines: recentHistory.map((line) => line.line),
@@ -3132,6 +3150,7 @@ function buildPrompt(args: {
       playfulInstruction,
       jokeSafetyInstruction,
       antiJokeChainInstruction,
+      antiRecentSelfRepeatInstruction,
       steeringInstruction,
       steeringPriorityInstruction,
       steeringExecutionInstruction,
@@ -4039,6 +4058,45 @@ function tokenizeForComparison(text: string) {
     .filter(Boolean);
 }
 
+function longestCommonTokenRunWithPhrase(left: string, right: string) {
+  const leftTokens = tokenizeForComparison(left);
+  const rightTokens = tokenizeForComparison(right);
+  if (leftTokens.length === 0 || rightTokens.length === 0) {
+    return {
+      longest: 0,
+      phrase: "",
+    };
+  }
+
+  const row = new Array(rightTokens.length + 1).fill(0);
+  let longest = 0;
+  let endIndex = -1;
+  for (let i = 1; i <= leftTokens.length; i += 1) {
+    for (let j = rightTokens.length; j >= 1; j -= 1) {
+      if (leftTokens[i - 1] === rightTokens[j - 1]) {
+        row[j] = row[j - 1] + 1;
+        if (row[j] > longest) {
+          longest = row[j];
+          endIndex = i - 1;
+        }
+      } else {
+        row[j] = 0;
+      }
+    }
+  }
+
+  if (longest <= 0 || endIndex < 0) {
+    return {
+      longest: 0,
+      phrase: "",
+    };
+  }
+  return {
+    longest,
+    phrase: leftTokens.slice(endIndex - longest + 1, endIndex + 1).join(" "),
+  };
+}
+
 function longestCommonTokenRun(left: string, right: string) {
   const leftTokens = tokenizeForComparison(left);
   const rightTokens = tokenizeForComparison(right);
@@ -4079,6 +4137,26 @@ function commonPrefixRatio(left: string, right: string) {
   return matched / Math.max(Math.min(a.length, b.length), 1);
 }
 
+function latestOutboundHistoryText(historyLines: string[]) {
+  for (let index = historyLines.length - 1; index >= 0; index -= 1) {
+    const parsed = parseHistoryLine(historyLines[index] || "");
+    const body = normalizeOutboundText(parsed.body || "");
+    if (parsed.label === "Me" && body) {
+      return body;
+    }
+  }
+  return "";
+}
+
+function isLowSignalRepeatedPhrase(phrase: string) {
+  const tokens = tokenizeForComparison(phrase);
+  if (tokens.length === 0) {
+    return true;
+  }
+  const contentTokens = tokens.filter((token) => token.length > 2 && !STOPWORDS.has(token));
+  return contentTokens.length === 0;
+}
+
 function collectInboundCopyRiskSources(inboundText: string, historyLines: string[]) {
   const sources: string[] = [];
   const seen = new Set<string>();
@@ -4103,6 +4181,90 @@ function collectInboundCopyRiskSources(inboundText: string, historyLines: string
   }
 
   return sources;
+}
+
+export function evaluateRecentSelfRepeatRisk(args: { replyText: string; historyLines: string[] }): RecentSelfRepeatResult {
+  const candidate = normalizeLineForComparison(args.replyText || "");
+  const previousOutboundRaw = latestOutboundHistoryText(args.historyLines || []);
+  const previousOutbound = normalizeLineForComparison(previousOutboundRaw);
+
+  if (!candidate || !previousOutbound || candidate.length < RECENT_SELF_REPEAT_MIN_CHARS || previousOutbound.length < RECENT_SELF_REPEAT_MIN_CHARS) {
+    return {
+      blocked: false,
+      reason: "",
+      lexicalSimilarity: 0,
+      longestTokenRun: 0,
+    };
+  }
+
+  const lexicalSimilarity = keywordJaccardSimilarity(candidate, previousOutbound);
+  const longestRun = longestCommonTokenRunWithPhrase(candidate, previousOutbound);
+  const phrase = normalizeOutboundText(longestRun.phrase || "");
+  const phraseIsLowSignal = phrase ? isLowSignalRepeatedPhrase(phrase) : true;
+  const prefixRatio = commonPrefixRatio(candidate, previousOutbound);
+  const minLength = Math.min(candidate.length, previousOutbound.length);
+
+  if (candidate === previousOutbound && minLength >= RECENT_SELF_REPEAT_MIN_CHARS) {
+    return {
+      blocked: true,
+      reason: "Reply repeats the previous outbound message.",
+      previousOutbound: previousOutboundRaw,
+      repeatedPhrase: phrase || normalizeOutboundText(previousOutboundRaw).slice(0, 120),
+      lexicalSimilarity: 1,
+      longestTokenRun: longestRun.longest,
+    };
+  }
+
+  if (
+    longestRun.longest >= RECENT_SELF_REPEAT_STRONG_RUN &&
+    phrase &&
+    !phraseIsLowSignal
+  ) {
+    return {
+      blocked: true,
+      reason: `Reply reuses phrase from your last message: "${phrase}".`,
+      previousOutbound: previousOutboundRaw,
+      repeatedPhrase: phrase,
+      lexicalSimilarity,
+      longestTokenRun: longestRun.longest,
+    };
+  }
+
+  if (
+    longestRun.longest >= RECENT_SELF_REPEAT_MIN_RUN &&
+    phrase &&
+    phrase.length >= RECENT_SELF_REPEAT_MIN_PHRASE_CHARS &&
+    !phraseIsLowSignal
+  ) {
+    return {
+      blocked: true,
+      reason: `Reply repeats phrase from your last message: "${phrase}".`,
+      previousOutbound: previousOutboundRaw,
+      repeatedPhrase: phrase,
+      lexicalSimilarity,
+      longestTokenRun: longestRun.longest,
+    };
+  }
+
+  if (prefixRatio >= RECENT_SELF_REPEAT_PREFIX_THRESHOLD && minLength >= 12) {
+    return {
+      blocked: true,
+      reason: "Reply starts too similarly to your previous outbound message.",
+      previousOutbound: previousOutboundRaw,
+      repeatedPhrase: phrase || normalizeOutboundText(previousOutboundRaw).slice(0, 120),
+      lexicalSimilarity,
+      longestTokenRun: longestRun.longest,
+    };
+  }
+
+  return {
+    blocked: false,
+    reason: "",
+    previousOutbound: previousOutboundRaw,
+    repeatedPhrase: phrase || undefined,
+    lexicalSimilarity,
+    longestTokenRun: longestRun.longest,
+  };
 }
 
 export function evaluateCopyRisk(args: { replyText: string; inboundText: string; historyLines: string[] }): CopyRiskResult {
@@ -4841,6 +5003,51 @@ async function rewriteCopyRiskReplyOnce(args: {
     sourceHint ? `Inbound/source phrase to avoid copying: ${sourceHint}` : "",
     "Rewrite with the same meaning but clearly different wording, order, and phrasing.",
     "Do not copy contiguous fragments from inbound text. Keep it concise and natural.",
+    "Return only the revised reply text.",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  const attempts: AiAttempt[] = [];
+  const azure = await runAzure(rewritePrompt, args.inboundText, args.historyLines, args.runtime);
+  attempts.push(...azure.attempts);
+  if (azure.result) {
+    return { result: azure.result, attempts };
+  }
+
+  if (resolveFallbackMode(args.runtime) === "all") {
+    const codex = await runCodex(rewritePrompt, args.inboundText, args.historyLines, args.runtime);
+    attempts.push(...codex.attempts);
+    if (codex.result) {
+      return { result: codex.result, attempts };
+    }
+  }
+
+  return { attempts };
+}
+
+async function rewriteRecentSelfRepeatReplyOnce(args: {
+  candidateText: string;
+  inboundText: string;
+  historyLines: string[];
+  basePrompt: string;
+  runtime?: RuntimeAiTuning;
+  selfRepeatRisk: RecentSelfRepeatResult;
+}) {
+  const previousOutboundHint = args.selfRepeatRisk.previousOutbound
+    ? normalizeOutboundText(args.selfRepeatRisk.previousOutbound).slice(0, 180)
+    : "";
+  const phraseHint = args.selfRepeatRisk.repeatedPhrase
+    ? normalizeOutboundText(args.selfRepeatRisk.repeatedPhrase).slice(0, 80)
+    : "";
+  const rewritePrompt = [
+    args.basePrompt,
+    `Current draft reply: ${args.candidateText}`,
+    `Recent self-repeat guardrail: ${args.selfRepeatRisk.reason}`,
+    previousOutboundHint ? `Most recent outbound message to avoid repeating: ${previousOutboundHint}` : "",
+    phraseHint ? `Phrase to avoid reusing: ${phraseHint}` : "",
+    "Rewrite with a different opening and clearly different phrasing while preserving intent.",
+    "Do not repeat phrases from the previous outbound message.",
     "Return only the revised reply text.",
   ]
     .filter(Boolean)
@@ -7365,6 +7572,43 @@ async function applyQualityGate(args: {
     });
     if (rewrittenCopyRisk.blocked) {
       return manualReviewResult(`Copy-risk rewrite still violated guardrail: ${rewrittenCopyRisk.reason}`);
+    }
+  }
+
+  const recentSelfRepeat = evaluateRecentSelfRepeatRisk({
+    replyText: selected.text,
+    historyLines: args.historyLines,
+  });
+  if (recentSelfRepeat.blocked) {
+    const selfRepeatRewrite = await rewriteRecentSelfRepeatReplyOnce({
+      candidateText: selected.text,
+      inboundText: args.inboundText,
+      historyLines: args.historyLines,
+      basePrompt: args.basePrompt,
+      runtime: args.runtime,
+      selfRepeatRisk: recentSelfRepeat,
+    });
+    selectedAttempts = [...selectedAttempts, ...selfRepeatRewrite.attempts];
+    if (!selfRepeatRewrite.result) {
+      return manualReviewResult(`Recent self-repeat rewrite failed: ${recentSelfRepeat.reason}`);
+    }
+
+    selected = selfRepeatRewrite.result;
+    selectedEvaluation = evaluateReplyQuality({
+      replyText: selfRepeatRewrite.result.text,
+      inboundText: args.inboundText,
+      historyLines: args.historyLines,
+      pack: args.activePersonaPack,
+      threshold,
+    });
+    qualityRewriteApplied = qualityRewriteApplied || normalizeOutboundText(args.candidate.text) !== normalizeOutboundText(selected.text);
+
+    const rewrittenSelfRepeat = evaluateRecentSelfRepeatRisk({
+      replyText: selected.text,
+      historyLines: args.historyLines,
+    });
+    if (rewrittenSelfRepeat.blocked) {
+      return manualReviewResult(`Recent self-repeat rewrite still violated guardrail: ${rewrittenSelfRepeat.reason}`);
     }
   }
 

@@ -1,10 +1,26 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { compactSafeText, extractKeywords, isWithinHourWindow, relationshipLabel, stableHash } from "./statusBuilder";
+import { compactSafeText, extractKeywords, isWithinHourWindow, relationshipLabel, stableHash, stableUnitRandom } from "./statusBuilder";
 
 test("stableHash is deterministic", () => {
   const seed = "trend|social|42|123";
   assert.equal(stableHash(seed), stableHash(seed));
+});
+
+test("stableUnitRandom stays deterministic and bounded", () => {
+  const seed = "status-format|trend|social|80|493318";
+  const first = stableUnitRandom(seed);
+  const second = stableUnitRandom(seed);
+  assert.equal(first, second);
+  assert.equal(first >= 0 && first < 1, true);
+});
+
+test("stableUnitRandom avoids linear drift for sequential cadence buckets", () => {
+  const values = Array.from({ length: 9 }, (_, index) => stableUnitRandom(`status-format|trend|social|80|${493318 + index}`));
+  const monotonicAscending = values.every((value, index) => index === 0 || value >= values[index - 1]);
+  const monotonicDescending = values.every((value, index) => index === 0 || value <= values[index - 1]);
+  assert.equal(monotonicAscending || monotonicDescending, false);
+  assert.equal(new Set(values.map((value) => value.toFixed(6))).size >= 7, true);
 });
 
 test("isWithinHourWindow handles overnight windows", () => {

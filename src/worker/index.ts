@@ -82,6 +82,7 @@ import {
   pickLaughReactionEmoji,
   shouldUseLaughReactionOnly,
 } from "./status-policy";
+import { chooseReactionEmoji } from "./reaction-policy";
 import {
   buildOutreachFallbackText,
   buildOutreachPromptSeed,
@@ -109,6 +110,7 @@ import {
   shouldCaptureMediaAfterIngest,
 } from "./sticker-dedupe";
 import { prepareStickerVisionInput } from "./sticker-vision-frame";
+import { evaluateRollingStickerThreadMode, needsTextReplyInStickerMode } from "./sticker-thread-mode";
 import { parseRuntimeCommand, type RuntimeCommand, type RuntimeCommandTarget } from "./runtime-commands";
 import { parseSelfImproveCommand, type SelfImproveCommand } from "./self-improve-command";
 import { isSelfControlHelpCommand } from "./control-help-command";
@@ -482,19 +484,6 @@ function resolveRuntimeDeterministicModes(modes: string[] | undefined) {
         mode !== "none" && ALLOWED_RUNTIME_DETERMINISTIC_MODE_SET.has(mode as ConversationSteeringMode),
     );
   return parsed.length ? [...new Set(parsed)] : undefined;
-}
-
-function chooseReactionEmoji(text: string) {
-  if (/\b(thanks|thank you|thx)\b/i.test(text)) {
-    return "🙏";
-  }
-  if (/\b(love|great|awesome|perfect)\b/i.test(text)) {
-    return "❤️";
-  }
-  if (/\b(ok|okay|sure|alright|cool|noted|done)\b/i.test(text)) {
-    return "👍";
-  }
-  return "👍";
 }
 
 function escapeRegex(input: string) {
@@ -2616,6 +2605,12 @@ function resolveTextEmojiAllowlist() {
     threadId: string;
     inboundText: string;
     outboundText: string;
+    threadMessages: Array<{
+      direction: "inbound" | "outbound";
+      text: string;
+      messageType?: string;
+      messageAt?: number;
+    }>;
     runtimeSettings: RuntimeSettings | null;
     preReactionActive: boolean;
   }) => {
@@ -2644,11 +2639,14 @@ function resolveTextEmojiAllowlist() {
 
     const funnyKeywords = args.runtimeSettings?.funnyStatusKeywords || [];
     const funnyEmojis = args.runtimeSettings?.funnyStatusEmojis || [];
+    const rollingStickerSignal = evaluateRollingStickerThreadMode({
+      threadMessages: args.threadMessages,
+    });
     const playfulSignal =
       positiveTone(combined, funnyKeywords, funnyEmojis) ||
       looksLikeFunnyStatus(combined, funnyKeywords, funnyEmojis) ||
       hasGenZCasualSignal(combined);
-    if (!playfulSignal) {
+    if (!playfulSignal && !rollingStickerSignal.enabled) {
       return null;
     }
 
@@ -2720,6 +2718,27 @@ function resolveTextEmojiAllowlist() {
     const text = args.inbound.text || "";
     const funnyKeywords = args.runtimeSettings?.funnyStatusKeywords || [];
     const funnyEmojis = args.runtimeSettings?.funnyStatusEmojis || [];
+    const stickersEnabled = args.runtimeSettings?.stickersEnabled ?? true;
+    const memesEnabled = args.runtimeSettings?.memesEnabled ?? true;
+    const seriousConversation = isSeriousConversation(text);
+    const isDirectThread = args.threadKind === "direct";
+    const recordMediaPolicyEvent = async (event: {
+      kind: "sticker" | "meme";
+      result: "selected" | "skipped";
+      detail: string;
+    }) => {
+      if (!isDirectThread) {
+        return;
+      }
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: event.result === "selected" ? "outbound.media_policy.selected" : "outbound.media_policy.skipped",
+          threadId: args.threadId as Id<"threads">,
+          detail: compactLogText(`kind=${event.kind} ${event.detail}`, 300),
+        })
+        .catch(() => undefined);
+    };
     const lowRisk = !/\b(password|otp|bank|wire|social security|medical|lawsuit|refund|contract)\b/i.test(text);
     const personalityPositive = (args.personalityIntensity ?? 0.6) >= 0.55;
     const soulModeEnabled = args.runtimeSettings?.soulModeEnabled ?? true;
@@ -2728,10 +2747,65 @@ function resolveTextEmojiAllowlist() {
       lowRisk &&
       personalityPositive &&
       (positiveTone(text, funnyKeywords, funnyEmojis) || looksLikeFunnyStatus(text, funnyKeywords, funnyEmojis));
+    const rollingStickerSignal = evaluateRollingStickerThreadMode({
+      threadMessages: args.threadMessages,
+    });
+    const rollingStickerModeEnabled =
+      isDirectThread &&
+      stickersEnabled &&
+      rollingStickerSignal.enabled &&
+      !seriousConversation;
+    if (rollingStickerModeEnabled) {
+      const textNeeded = needsTextReplyInStickerMode({
+        inboundText: text,
+        inboundKind: args.inbound.kind,
+      });
+      if (!textNeeded) {
+        const stickerId = await pickBestStickerAsset(text);
+        if (stickerId) {
+          await recordMediaPolicyEvent({
+            kind: "sticker",
+            result: "selected",
+            detail: `source=rolling_mode asset=${stickerId} stickerRatio=${rollingStickerSignal.stickerRatio.toFixed(2)} stickerReactionRatio=${rollingStickerSignal.stickerReactionRatio.toFixed(2)}`,
+          });
+          return {
+            mode: "sticker",
+            mediaAssetId: stickerId,
+          };
+        }
+        await recordMediaPolicyEvent({
+          kind: "sticker",
+          result: "skipped",
+          detail: "reason=no_asset source=rolling_mode",
+        });
+        if ((args.runtimeSettings?.reactionsEnabled ?? true)) {
+          return {
+            mode: "reaction_only",
+            emoji: chooseReactionEmoji(text),
+          };
+        }
+      }
+      if ((args.runtimeSettings?.reactionsEnabled ?? true) && looksLikeAckOnly(text)) {
+        return {
+          mode: "reaction_only",
+          emoji: chooseReactionEmoji(text),
+        };
+      }
+      return {
+        mode: "text",
+      };
+    }
+    if (isDirectThread && !stickersEnabled && (rollingStickerSignal.enabled || args.inbound.kind === "sticker" || hasStickerCue(text))) {
+      await recordMediaPolicyEvent({
+        kind: "sticker",
+        result: "skipped",
+        detail: "reason=disabled toggle=stickersEnabled_false",
+      });
+    }
     const stickerOnlyEligible =
-      args.threadKind === "direct" &&
-      (args.runtimeSettings?.stickersEnabled ?? true) &&
-      !isSeriousConversation(text) &&
+      isDirectThread &&
+      stickersEnabled &&
+      !seriousConversation &&
       (hasStickerCue(text) ||
         (humorAllowed &&
           ((args.inbound.kind === "sticker" && text.trim().length <= 180) ||
@@ -2741,35 +2815,73 @@ function resolveTextEmojiAllowlist() {
     if (stickerOnlyEligible) {
       const stickerId = await pickBestStickerAsset(text);
       if (stickerId) {
+        await recordMediaPolicyEvent({
+          kind: "sticker",
+          result: "selected",
+          detail: `source=cue_or_humor asset=${stickerId}`,
+        });
         return {
           mode: "sticker",
           mediaAssetId: stickerId,
         };
       }
+      await recordMediaPolicyEvent({
+        kind: "sticker",
+        result: "skipped",
+        detail: "reason=no_asset source=cue_or_humor",
+      });
     }
 
     if (
-      args.threadKind === "direct" &&
-      (args.runtimeSettings?.stickersEnabled ?? true) &&
+      isDirectThread &&
+      stickersEnabled &&
       args.inbound.kind === "sticker" &&
       humorAllowed
     ) {
       const stickerId = await pickBestStickerAsset(text);
       if (stickerId) {
+        await recordMediaPolicyEvent({
+          kind: "sticker",
+          result: "selected",
+          detail: `source=inbound_sticker asset=${stickerId}`,
+        });
         return {
           mode: "sticker",
           mediaAssetId: stickerId,
         };
       }
+      await recordMediaPolicyEvent({
+        kind: "sticker",
+        result: "skipped",
+        detail: "reason=no_asset source=inbound_sticker",
+      });
     }
 
     const memeCue = shouldUseMeme(text, funnyKeywords, funnyEmojis);
+    const memeIntentSignal =
+      memeCue ||
+      args.inbound.kind === "sticker" ||
+      hasStickerCue(text) ||
+      hasGenZCasualSignal(text) ||
+      /\b(meme|sticker|funny|banter|lol|lmao|haha|dead)\b/i.test(text);
     const memeEligibleBase =
-      args.threadKind === "direct" &&
-      (args.runtimeSettings?.memesEnabled ?? true) &&
+      isDirectThread &&
+      memesEnabled &&
       memeCue &&
       humorAllowed &&
-      !isSeriousConversation(text);
+      !seriousConversation;
+
+    if (isDirectThread && !memeEligibleBase && (!memesEnabled || memeIntentSignal)) {
+      let skipReason: "disabled" | "no_cue" = "no_cue";
+      if (!memesEnabled) {
+        skipReason = "disabled";
+      }
+      await recordMediaPolicyEvent({
+        kind: "meme",
+        result: "skipped",
+        detail: `reason=${skipReason} cue=${memeCue} humorAllowed=${humorAllowed} serious=${seriousConversation}`,
+      });
+    }
 
     if (memeEligibleBase) {
       const professionalGuard = evaluateProfessionalMemeGuard({
@@ -2792,6 +2904,12 @@ function resolveTextEmojiAllowlist() {
           runtimeSettings: args.runtimeSettings,
           threadTitle: args.threadTitle,
         });
+      } else {
+        await recordMediaPolicyEvent({
+          kind: "meme",
+          result: "skipped",
+          detail: `reason=professional_block guard=${professionalGuard.reason}`,
+        });
       }
 
       const lastMemeSentAt = args.threadMessages
@@ -2805,6 +2923,15 @@ function resolveTextEmojiAllowlist() {
         probability: Math.max(0, Math.min(args.runtimeSettings?.memeSendProbability ?? 0.3, 1)),
         randomValue: Math.random(),
       });
+
+      if (!professionalGuard.blocked && !timingGate.pass) {
+        const timingReason = timingGate.inCooldown ? "cooldown" : "probability_fail";
+        await recordMediaPolicyEvent({
+          kind: "meme",
+          result: "skipped",
+          detail: `reason=${timingReason} probability=${timingGate.probability.toFixed(2)} pass=${timingGate.probabilityPass} cooldown=${timingGate.inCooldown}`,
+        });
+      }
 
       if (!professionalGuard.blocked && timingGate.pass) {
         const asset = await resolveMemeAssetWithFallback({
@@ -2840,12 +2967,22 @@ function resolveTextEmojiAllowlist() {
 
         if (asset.assetId) {
           const assetSource: MemeAssetSource = asset.source;
+          await recordMediaPolicyEvent({
+            kind: "meme",
+            result: "selected",
+            detail: `source=${assetSource} asset=${asset.assetId}`,
+          });
           return {
             mode: "meme",
             mediaAssetId: asset.assetId,
             assetSource: assetSource === "generated_cache" || assetSource === "generated_fresh" ? "generated" : "uploaded",
           };
         }
+        await recordMediaPolicyEvent({
+          kind: "meme",
+          result: "skipped",
+          detail: "reason=no_asset source=fallback_chain_empty",
+        });
       }
     }
 
@@ -6030,12 +6167,19 @@ function resolveTextEmojiAllowlist() {
           visualAnalysis?.description && visualAnalysis.provider === "azure" && !visualAnalysis.error,
         );
         if (!stickerUnderstood) {
+          const detailParts = [
+            "Sticker reply skipped until visual understanding succeeds.",
+            `provider=${visualAnalysis?.provider || "none"}`,
+            `model=${visualAnalysis?.model || "none"}`,
+            visualAnalysis?.description ? "description=present" : "description=missing",
+            visualAnalysis?.error ? `error=${visualAnalysis.error}` : "error=none",
+          ];
           await convex
             .mutation(convexRefs.systemRecordEvent, {
               source: "worker",
               eventType: "inbound.sticker.skipped",
               threadId: ingest.threadId as Id<"threads">,
-              detail: "Sticker reply skipped until visual understanding succeeds.",
+              detail: compactLogText(detailParts.join(" "), 280),
             })
             .catch(() => undefined);
           return;
@@ -7695,29 +7839,71 @@ function resolveTextEmojiAllowlist() {
 
     if (requestedFormat === "meme") {
       mediaCaption = normalizedTextBase;
-      mediaAssetId = await generateAndStoreThreadMeme({
-        threadId: item.threadId,
-        threadJid: "status@broadcast",
-        inboundText: promptSeed,
-        recentHistoryLines: [
-          `Trend: ${blendedTrendTheme || trendTheme}`,
-          `Demographic: ${demographic}`,
-          `Audience: ${audienceCount}`,
-          ...internetTrendLines,
-        ],
-        styleHints: [
-          blendedTrendTheme || trendTheme,
-          demographic,
-          "status update",
-        ],
-        runtimeSettings,
-        threadTitle: "My Status",
-        reason: "on_demand",
+      const generatedMemesEnabled = runtimeSettings?.generatedMemesEnabled ?? true;
+      const memeCooldownMs = Math.max(
+        5 * 60 * 1000,
+        Math.min(runtimeSettings?.memeThreadCooldownMs ?? 3 * 60 * 60 * 1000, 7 * 24 * 60 * 60 * 1000),
+      );
+      const resolvedMemeAsset = await resolveMemeAssetWithFallback({
+        pickGeneratedCached: async () => {
+          if (!generatedMemesEnabled) {
+            return undefined;
+          }
+          return await pickGeneratedMemeForThread(item.threadId, memeCooldownMs);
+        },
+        generateFresh: async () => {
+          if (!generatedMemesEnabled) {
+            return undefined;
+          }
+          return await generateAndStoreThreadMeme({
+            threadId: item.threadId,
+            threadJid: "status@broadcast",
+            inboundText: promptSeed,
+            recentHistoryLines: [
+              `Trend: ${blendedTrendTheme || trendTheme}`,
+              `Demographic: ${demographic}`,
+              `Audience: ${audienceCount}`,
+              ...internetTrendLines,
+            ],
+            styleHints: [
+              blendedTrendTheme || trendTheme,
+              demographic,
+              "status update",
+            ],
+            runtimeSettings,
+            threadTitle: "My Status",
+            reason: "on_demand",
+          });
+        },
+        pickUploadedFallback: async () => {
+          return await pickUploadedMemeFallbackAsset();
+        },
       });
+      mediaAssetId = resolvedMemeAsset.assetId as Id<"mediaAssets"> | undefined;
+      if (resolvedMemeAsset.source === "uploaded_fallback" && mediaAssetId) {
+        await convex
+          .mutation(convexRefs.systemRecordEvent, {
+            source: "ai",
+            eventType: "status_builder.meme.fallback_uploaded",
+            threadId: item.threadId as Id<"threads">,
+            toolRunId,
+            detail: compactLogText(`Using uploaded meme fallback asset ${mediaAssetId}.`, 220),
+          })
+          .catch(() => undefined);
+      }
 
       if (!mediaAssetId) {
         resolvedFormat = "text";
         mediaCaption = undefined;
+        await convex
+          .mutation(convexRefs.systemRecordEvent, {
+            source: "ai",
+            eventType: "status_builder.meme.fallback_text",
+            threadId: item.threadId as Id<"threads">,
+            toolRunId,
+            detail: "Meme asset unavailable after generated/cache/fallback lookup; using text status.",
+          })
+          .catch(() => undefined);
       }
     }
     const normalizedText = resolvedFormat === "text" ? forceDeclarativeStatusText(normalizedTextBase) : normalizedTextBase;
@@ -7874,8 +8060,11 @@ function resolveTextEmojiAllowlist() {
       const tasks = claimed.map((item) =>
         enqueueByThreadLane(outboxThreadLanes, item.threadId, () =>
           runOutboxWithLimit(async () => {
+            let attemptedSendKind: OutboxClaimedItem["sendKind"] | null = null;
+            let attemptedMediaAssetId: string | undefined;
+            let isStatusBroadcastSend = false;
             try {
-              const isStatusBroadcastSend = item.isStatusPost === true && item.jid === "status@broadcast";
+              isStatusBroadcastSend = item.isStatusPost === true && item.jid === "status@broadcast";
               if (!isStatusBroadcastSend) {
                 const eligibility = (await convex.query(convexRefs.threadsGetEligibility, {
                   threadId: item.threadId,
@@ -7945,6 +8134,8 @@ function resolveTextEmojiAllowlist() {
 
               const outreachHydrated = await hydrateAiOutreach(item, runtimeSettings);
               const hydrated = await hydrateAiStatus(outreachHydrated, runtimeSettings);
+              attemptedSendKind = hydrated.sendKind;
+              attemptedMediaAssetId = hydrated.mediaAssetId;
               const postHydrationDisposition = (await convex.query(convexRefs.outboxGetSendDisposition, {
                 outboxId: item.outboxId,
               })) as { canSend: boolean; reason?: string };
@@ -8050,6 +8241,7 @@ function resolveTextEmojiAllowlist() {
                       threadId: item.threadId,
                       inboundText: latestInboundText,
                       outboundText: effectiveMessageText,
+                      threadMessages: threadForEmojiPolicy?.messages || [],
                       runtimeSettings,
                       preReactionActive: Boolean(hydrated.reactionEmoji && hydrated.reactionTargetWhatsAppMessageId),
                     })
@@ -8223,6 +8415,18 @@ function resolveTextEmojiAllowlist() {
                 outboxId: item.outboxId,
                 error: err,
               });
+              await convex
+                .mutation(convexRefs.systemRecordEvent, {
+                  source: "worker",
+                  eventType: "outbox.send.failed",
+                  threadId: item.threadId as Id<"threads">,
+                  outboxId: item.outboxId as Id<"outbox">,
+                  detail: compactLogText(
+                    `kind=${attemptedSendKind || item.sendKind} statusBroadcast=${isStatusBroadcastSend} jid=${item.jid}${attemptedMediaAssetId ? ` asset=${attemptedMediaAssetId}` : ""} error=${err}`,
+                    300,
+                  ),
+                })
+                .catch(() => undefined);
             }
           }),
         ),
