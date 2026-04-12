@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   extractAliasesFromText,
   hasGoodActiveChattingWindow,
+  shouldScheduleDraftGeneration,
   shouldEnterGhostMode,
   shouldResetRomanceMorningNoReplyState,
 } from "./inbound";
@@ -144,6 +145,30 @@ test("resolveThreadEligibility blocks while temporary ghost window is active", (
   assert.deepEqual(allowed, {
     allowed: true,
   });
+});
+
+test("shouldScheduleDraftGeneration allows queueing while temporary ghost is active", () => {
+  const shouldQueue = shouldScheduleDraftGeneration({
+    isHistoryIngest: false,
+    blockedReason: "temporary_ghost",
+    stale: false,
+    isStatusMessage: false,
+    messageType: "text",
+    callReplyBarrierBlocked: false,
+  });
+  assert.equal(shouldQueue, true);
+});
+
+test("shouldScheduleDraftGeneration blocks non-ghost eligibility reasons", () => {
+  const shouldQueue = shouldScheduleDraftGeneration({
+    isHistoryIngest: false,
+    blockedReason: "explicit_ignore",
+    stale: false,
+    isStatusMessage: false,
+    messageType: "text",
+    callReplyBarrierBlocked: false,
+  });
+  assert.equal(shouldQueue, false);
 });
 
 test("hasGoodActiveChattingWindow detects balanced back-and-forth activity", () => {

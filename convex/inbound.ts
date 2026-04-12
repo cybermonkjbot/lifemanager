@@ -12,6 +12,7 @@ import {
   eligibilityReasonLabel,
   resolveThreadEligibility,
 } from "./lib/threadEligibility";
+import type { EligibilityReason } from "./lib/threadEligibility";
 
 const INBOUND_STALE_GRACE_MS = 2 * 60 * 1000;
 const GHOST_MODE_DURATION_MS = 30 * 60 * 1000;
@@ -128,6 +129,30 @@ export function shouldResetRomanceMorningNoReplyState(args: {
     return false;
   }
   if ((args.state.lastInboundAfterSendAt || 0) >= args.inboundMessageAt && args.state.noReplyStreak === 0) {
+    return false;
+  }
+  return true;
+}
+
+export function shouldScheduleDraftGeneration(args: {
+  isHistoryIngest: boolean;
+  blockedReason?: EligibilityReason;
+  stale: boolean;
+  isStatusMessage: boolean;
+  messageType: InboundMessageType;
+  callReplyBarrierBlocked: boolean;
+  skipDraftGeneration?: boolean;
+}) {
+  if (args.isHistoryIngest || args.stale || args.isStatusMessage) {
+    return false;
+  }
+  if (args.messageType === "reaction") {
+    return false;
+  }
+  if (args.callReplyBarrierBlocked || args.skipDraftGeneration) {
+    return false;
+  }
+  if (args.blockedReason && args.blockedReason !== "temporary_ghost") {
     return false;
   }
   return true;
@@ -469,7 +494,8 @@ export const ingest = mutation({
       groupRuleEnabled: threadKind === "group" ? explicitIgnore?.enabled : undefined,
       nowMs: now,
     });
-    const ignored = isHistoryIngest ? false : !eligibility.allowed;
+    const blockedReason = eligibility.allowed ? undefined : eligibility.reason;
+    const ignored = isHistoryIngest ? false : Boolean(blockedReason);
 
     let reactionTargetMessageId: Id<"messages"> | undefined;
     const reactionTargetProviderMessageId = args.reactionTargetWhatsAppMessageId;
@@ -649,13 +675,15 @@ export const ingest = mutation({
     }
 
     if (
-      !isHistoryIngest &&
-      !ignored &&
-      !stale &&
-      !isStatusMessage &&
-      messageType !== "reaction" &&
-      !callReplyBarrierBlocked &&
-      !args.skipDraftGeneration
+      shouldScheduleDraftGeneration({
+        isHistoryIngest,
+        blockedReason,
+        stale,
+        isStatusMessage,
+        messageType,
+        callReplyBarrierBlocked,
+        skipDraftGeneration: args.skipDraftGeneration,
+      })
     ) {
       await ctx.scheduler.runAfter(0, internal.draft.generate, {
         threadId: thread._id,
@@ -679,7 +707,7 @@ export const ingest = mutation({
       threadId: thread._id,
       messageId,
       ignored,
-      blockedReason: eligibility.allowed ? undefined : eligibility.reason,
+      blockedReason,
       duplicate: false,
       stale,
       messageType,

@@ -5596,9 +5596,16 @@ function resolveTextEmojiAllowlist() {
         return;
       }
 
-      if (ingest.ignored) {
+      const ignoredByTemporaryGhost = ingest.ignored && ingest.blockedReason === "temporary_ghost";
+      if (ingest.ignored && !ignoredByTemporaryGhost) {
         logger.info({ threadJid, blockedReason: ingest.blockedReason }, "Inbound ignored by rules");
         return;
+      }
+      if (ignoredByTemporaryGhost) {
+        logger.info(
+          { threadJid, blockedReason: ingest.blockedReason },
+          "Inbound is in temporary ghost mode; drafting reply for deferred send",
+        );
       }
 
       if (!isStatusBroadcast && ingest.callReplyBarrierBlocked) {

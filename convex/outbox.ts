@@ -27,6 +27,8 @@ const CALL_REPLY_BARRIER_RECHECK_MS = 5 * 60 * 1000;
 const UNANSWERED_OUTBOUND_SCAN_LIMIT = 25;
 const OUTBOX_STALE_INBOUND_GRACE_MS = 8_000;
 const OUTBOX_STALE_INBOUND_SCAN_LIMIT = 80;
+const MANUAL_INTERVENTION_GRACE_MS = 5_000;
+const MANUAL_INTERVENTION_SCAN_LIMIT = 48;
 const refStyleLearnFromOutboundEmoji = makeFunctionReference<"mutation">("style:learnFromOutboundEmoji");
 const refChatRebuildThreadStyleProfile = makeFunctionReference<"mutation">("chatTools:rebuildThreadStyleProfile");
 type MessageProvider = "whatsapp" | "instagram";
@@ -140,6 +142,7 @@ function resolveSendRateLimits(config: Awaited<ReturnType<typeof getConfig>>, me
 }
 
 type FreshnessMessage = Pick<Doc<"messages">, "direction" | "messageAt" | "messageType" | "isStatus" | "text">;
+type ManualInterventionMessage = Pick<Doc<"messages">, "direction" | "origin" | "toolRunId" | "messageAt">;
 
 function isFreshnessBlockingInboundMessage(message: FreshnessMessage) {
   if (message.direction !== "inbound") {
@@ -149,6 +152,21 @@ function isFreshnessBlockingInboundMessage(message: FreshnessMessage) {
     return false;
   }
   return message.messageType !== "reaction";
+}
+
+export function isManualInterventionMessage(message: ManualInterventionMessage) {
+  return message.direction === "outbound" && message.origin === "live" && !message.toolRunId;
+}
+
+export function hasRecentManualIntervention(args: {
+  recentMessages: ManualInterventionMessage[];
+  nowMs: number;
+  cooldownMs: number;
+}) {
+  const cutoff = args.nowMs - Math.max(0, args.cooldownMs) - MANUAL_INTERVENTION_GRACE_MS;
+  return args.recentMessages.some((message) => {
+    return isManualInterventionMessage(message) && (message.messageAt || 0) >= cutoff;
+  });
 }
 
 export function resolveOutboxFreshnessReferenceAt(args: {
@@ -267,6 +285,7 @@ export const claimDue = mutation({
         latestInboundAt?: number;
       }
     >();
+    const manualInterventionActiveByThread = new Map<string, boolean>();
 
     for (const item of due) {
       const draft = await ctx.db.get(item.draftId);
@@ -643,6 +662,63 @@ export const claimDue = mutation({
         });
         if (!eligibility.allowed) {
           if (eligibility.reason === "temporary_ghost") {
+            let manualInterventionActive = false;
+            if (threadKind === "direct") {
+              const cached = manualInterventionActiveByThread.get(thread._id);
+              if (cached === undefined) {
+                const lookbackStart = now - Math.max(30_000, config.manualInterventionCooldownMs + MANUAL_INTERVENTION_GRACE_MS);
+                const recentThreadMessages = await ctx.db
+                  .query("messages")
+                  .withIndex("by_thread_messageAt", (q) => q.eq("threadId", thread._id).gte("messageAt", lookbackStart))
+                  .order("desc")
+                  .take(MANUAL_INTERVENTION_SCAN_LIMIT);
+                const resolved = hasRecentManualIntervention({
+                  recentMessages: recentThreadMessages,
+                  nowMs: now,
+                  cooldownMs: config.manualInterventionCooldownMs,
+                });
+                manualInterventionActiveByThread.set(thread._id, resolved);
+                manualInterventionActive = resolved;
+              } else {
+                manualInterventionActive = cached;
+              }
+            }
+
+            if (manualInterventionActive) {
+              const reason = "Suppressed: manual intervention cooldown is active for this thread.";
+              await ctx.db.patch(item._id, {
+                status: "failed",
+                workerId: undefined,
+                leaseExpiresAt: undefined,
+                error: reason,
+                updatedAt: now,
+              });
+              if (draft.status !== "sent" && draft.status !== "rejected") {
+                await ctx.db.patch(draft._id, {
+                  status: "rejected",
+                  updatedAt: now,
+                });
+              }
+              if (item.followUpId) {
+                const followUp = await ctx.db.get(item.followUpId);
+                if (followUp && followUp.status !== "sent" && followUp.status !== "failed" && followUp.status !== "cancelled") {
+                  await ctx.db.patch(followUp._id, {
+                    status: "cancelled",
+                    updatedAt: now,
+                  });
+                }
+              }
+              await ctx.db.insert("systemEvents", {
+                source: "worker",
+                eventType: "outbox.suppressed.manual_cooldown",
+                threadId: item.threadId,
+                outboxId: item._id,
+                detail: reason,
+                createdAt: now,
+              });
+              continue;
+            }
+
             const ghostUntil = Math.max(thread.ghostedUntil ?? now, now + 30_000);
             await ctx.db.patch(item._id, {
               status: "pending",
@@ -1013,10 +1089,6 @@ export const suppressForManualIntervention = mutation({
 
     let suppressedOutbox = 0;
     for (const item of activeOutbox) {
-      if (item.createdAt > messageAt + 5_000) {
-        continue;
-      }
-
       await ctx.db.patch(item._id, {
         status: "failed",
         workerId: undefined,

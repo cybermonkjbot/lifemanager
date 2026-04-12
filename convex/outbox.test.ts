@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { findNewestStaleInboundMessage, resolveClaimOutreachMode, resolveOutboxFreshnessReferenceAt } from "./outbox";
+import {
+  findNewestStaleInboundMessage,
+  hasRecentManualIntervention,
+  isManualInterventionMessage,
+  resolveClaimOutreachMode,
+  resolveOutboxFreshnessReferenceAt,
+} from "./outbox";
 
 test("resolveOutboxFreshnessReferenceAt prefers latest outbox/draft/source-inbound timestamp", () => {
   const referenceAt = resolveOutboxFreshnessReferenceAt({
@@ -101,4 +107,61 @@ test("resolveClaimOutreachMode derives mode from draft reason prefix", () => {
     "compliment",
   );
   assert.equal(resolveClaimOutreachMode("Some other reason"), undefined);
+});
+
+test("isManualInterventionMessage detects live outbound without toolRunId", () => {
+  assert.equal(
+    isManualInterventionMessage({
+      direction: "outbound",
+      origin: "live",
+      toolRunId: undefined,
+      messageAt: 10_000,
+    }),
+    true,
+  );
+});
+
+test("isManualInterventionMessage ignores automated outbound with toolRunId", () => {
+  assert.equal(
+    isManualInterventionMessage({
+      direction: "outbound",
+      origin: "live",
+      toolRunId: "outbox:abc123",
+      messageAt: 10_000,
+    }),
+    false,
+  );
+});
+
+test("hasRecentManualIntervention only returns true inside cooldown window", () => {
+  const nowMs = 50_000;
+  const cooldownMs = 20_000;
+
+  const active = hasRecentManualIntervention({
+    nowMs,
+    cooldownMs,
+    recentMessages: [
+      {
+        direction: "outbound",
+        origin: "live",
+        toolRunId: undefined,
+        messageAt: 33_000,
+      },
+    ],
+  });
+  assert.equal(active, true);
+
+  const expired = hasRecentManualIntervention({
+    nowMs,
+    cooldownMs,
+    recentMessages: [
+      {
+        direction: "outbound",
+        origin: "live",
+        toolRunId: undefined,
+        messageAt: 20_000,
+      },
+    ],
+  });
+  assert.equal(expired, false);
 });
