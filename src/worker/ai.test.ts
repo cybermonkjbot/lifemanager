@@ -263,6 +263,26 @@ test("postProcessReplyText strips awkward catchphrase prefix while keeping core 
   assert.equal(output, "I can send the update now.");
 });
 
+test("postProcessReplyText enforces factual guardrail in self-roast mode for profile claims", () => {
+  const output = postProcessReplyText({
+    text: "No degree here, I dropped out at grade 8 after the famine.",
+    inboundText: "Do you have a degree?",
+    historyLines: [],
+    selfRoastModeEnabled: true,
+  });
+  assert.equal(output, "I can roast myself for fun, but I keep profile facts accurate.");
+});
+
+test("postProcessReplyText does not apply self-roast factual guardrail when mode is disabled", () => {
+  const output = postProcessReplyText({
+    text: "No degree here, I dropped out at grade 8 after the famine.",
+    inboundText: "Do you have a degree?",
+    historyLines: [],
+    selfRoastModeEnabled: false,
+  });
+  assert.equal(output, "No degree here, I dropped out at grade 8 after the famine.");
+});
+
 test("postProcessReplyText applies anti-calculator math tone for plain numeric replies", () => {
   const output = postProcessReplyText({
     text: "42",
@@ -1500,6 +1520,44 @@ test("generateReplyWithFallback injects anti-impersonation instruction for verba
   }
 });
 
+test("generateReplyWithFallback injects self-roast factuality instruction when mode is enabled", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  const requestBodies: string[] = [];
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      requestBodies.push(typeof init?.body === "string" ? init.body : "");
+      return new Response(JSON.stringify({ output_text: "I can roast myself for fun, but I keep profile facts accurate." }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "Do you have a degree?",
+      historyLines: ["Them: Do you have a degree?"],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "log_only",
+        selfRoastModeEnabled: true,
+      },
+    });
+
+    assert.equal(result.provider, "azure");
+    assert.ok(requestBodies.some((body) => /Self-roast mode is ON/i.test(body)));
+    assert.ok(requestBodies.some((body) => /never invent, deny, or distort objective profile facts/i.test(body)));
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
 test("generateReplyWithFallback reprompts Azure when blocked refusal phrase is returned", async () => {
   const snapshot = clearAiEnv();
   const originalFetch = globalThis.fetch;
@@ -1535,6 +1593,56 @@ test("generateReplyWithFallback reprompts Azure when blocked refusal phrase is r
     assert.ok(callCount >= 2);
     assert.ok(
       result.attempts.some((attempt) => attempt.status === "error" && /blocked refusal phrase detected/i.test(attempt.error || "")),
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback reprompts with guardrail block reason until draft passes criteria", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  const requestBodies: string[] = [];
+  let callCount = 0;
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      callCount += 1;
+      const body = typeof init?.body === "string" ? init.body : "";
+      requestBodies.push(body);
+      const outputText =
+        /Block reason:\s*Reply failed quality gate and manual review mode is enabled\.?/i.test(body) ||
+        /Copy-risk guardrail/i.test(body)
+          ? "Yes, I'll handle that and share the summary before 3pm today."
+          : "Sure.";
+      return new Response(JSON.stringify({ output_text: outputText }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "Can you send the Q4 invoice summary by 3pm today?",
+      historyLines: ["Them: Can you send the Q4 invoice summary by 3pm today?"],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "manual_review",
+        qualityGateThreshold: 0.99,
+      },
+    });
+
+    assert.equal(result.guardrailBlocked, false);
+    assert.match(result.text, /\b3pm\b/i);
+    assert.ok(callCount >= 2);
+    assert.ok(requestBodies.some((body) => /Retry 1: Previous draft was blocked by system checks\./i.test(body)));
+    assert.ok(
+      requestBodies.some((body) => /Block reason:\s*Reply failed quality gate and manual review mode is enabled\./i.test(body)),
     );
   } finally {
     globalThis.fetch = originalFetch;

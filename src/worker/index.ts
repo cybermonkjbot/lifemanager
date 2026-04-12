@@ -139,6 +139,7 @@ type RuntimeSettings = {
   memeSendProbability: number;
   soulModeEnabled: boolean;
   humorLearningEnabled: boolean;
+  selfRoastModeEnabled: boolean;
   statusAutoReplyEnabled: boolean;
   statusReplyRequireFunny: boolean;
   funnyStatusKeywords: string[];
@@ -5758,6 +5759,7 @@ function resolveTextEmojiAllowlist() {
         qualityGateMode: runtimeSettings?.qualityGateMode,
         qualityGateThreshold: runtimeSettings?.qualityGateThreshold,
         soulModeEnabled: runtimeSettings?.soulModeEnabled,
+        selfRoastModeEnabled: runtimeSettings?.selfRoastModeEnabled,
         funnyStatusKeywords: runtimeSettings?.funnyStatusKeywords,
         funnyStatusEmojis: runtimeSettings?.funnyStatusEmojis,
         delayMinMs: runtimeSettings?.humanDelayMinMs,
@@ -7208,6 +7210,7 @@ function resolveTextEmojiAllowlist() {
         qualityGateMode: runtimeSettings?.qualityGateMode,
         qualityGateThreshold: runtimeSettings?.qualityGateThreshold,
         soulModeEnabled: runtimeSettings?.soulModeEnabled,
+        selfRoastModeEnabled: runtimeSettings?.selfRoastModeEnabled,
         funnyStatusKeywords: runtimeSettings?.funnyStatusKeywords,
         funnyStatusEmojis: runtimeSettings?.funnyStatusEmojis,
         delayMinMs: runtimeSettings?.humanDelayMinMs,
@@ -7617,6 +7620,7 @@ function resolveTextEmojiAllowlist() {
         qualityGateMode: runtimeSettings?.qualityGateMode,
         qualityGateThreshold: runtimeSettings?.qualityGateThreshold,
         soulModeEnabled: runtimeSettings?.soulModeEnabled,
+        selfRoastModeEnabled: runtimeSettings?.selfRoastModeEnabled,
         funnyStatusKeywords: runtimeSettings?.funnyStatusKeywords,
         funnyStatusEmojis: runtimeSettings?.funnyStatusEmojis,
       },

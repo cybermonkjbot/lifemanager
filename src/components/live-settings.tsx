@@ -20,6 +20,7 @@ type SettingsState = {
   memeSendProbability: number;
   soulModeEnabled: boolean;
   humorLearningEnabled: boolean;
+  selfRoastModeEnabled: boolean;
   statusAutoReplyEnabled: boolean;
   statusReplyRequireFunny: boolean;
   captureGroupMediaEnabled: boolean;
@@ -237,6 +238,7 @@ function toState(source: Partial<SettingsState> | undefined): SettingsState {
     memeSendProbability: source?.memeSendProbability ?? 0.3,
     soulModeEnabled: source?.soulModeEnabled ?? true,
     humorLearningEnabled: source?.humorLearningEnabled ?? true,
+    selfRoastModeEnabled: source?.selfRoastModeEnabled ?? false,
     statusAutoReplyEnabled: source?.statusAutoReplyEnabled ?? true,
     statusReplyRequireFunny: source?.statusReplyRequireFunny ?? true,
     captureGroupMediaEnabled: source?.captureGroupMediaEnabled ?? false,
@@ -336,6 +338,7 @@ function stateEquals(a: SettingsState, b: SettingsState) {
     nearlyEqual(a.memeSendProbability, b.memeSendProbability) &&
     a.soulModeEnabled === b.soulModeEnabled &&
     a.humorLearningEnabled === b.humorLearningEnabled &&
+    a.selfRoastModeEnabled === b.selfRoastModeEnabled &&
     a.statusAutoReplyEnabled === b.statusAutoReplyEnabled &&
     a.statusReplyRequireFunny === b.statusReplyRequireFunny &&
     a.captureGroupMediaEnabled === b.captureGroupMediaEnabled &&
@@ -910,6 +913,7 @@ export function LiveSettings() {
           memeSendProbability: draft.memeSendProbability,
           soulModeEnabled: draft.soulModeEnabled,
           humorLearningEnabled: draft.humorLearningEnabled,
+          selfRoastModeEnabled: draft.selfRoastModeEnabled,
           statusAutoReplyEnabled: draft.statusAutoReplyEnabled,
           statusReplyRequireFunny: draft.statusReplyRequireFunny,
           captureGroupMediaEnabled: draft.captureGroupMediaEnabled,
@@ -1877,6 +1881,24 @@ export function LiveSettings() {
             >
               <option value="true">On (learn from positive funny signals)</option>
               <option value="false">Off</option>
+            </select>
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Self-roast mode (safe)</span>
+            <select
+              value={draft.selfRoastModeEnabled ? "true" : "false"}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  selfRoastModeEnabled: event.target.value === "true",
+                }))
+              }
+              disabled={record.pending}
+              aria-disabled={record.pending}
+            >
+              <option value="false">Off</option>
+              <option value="true">On (allow playful self-roast, keep profile facts accurate)</option>
             </select>
           </label>
 

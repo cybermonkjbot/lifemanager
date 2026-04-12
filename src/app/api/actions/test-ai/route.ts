@@ -7,6 +7,7 @@ export const runtime = "nodejs";
 
 type RuntimeSettings = {
   soulModeEnabled?: boolean;
+  selfRoastModeEnabled?: boolean;
   funnyStatusKeywords?: string[];
   funnyStatusEmojis?: string[];
   aiTemperature?: number;
@@ -197,6 +198,7 @@ export async function POST(request: Request) {
         qualityGateMode: runtimeSettings?.qualityGateMode,
         qualityGateThreshold: runtimeSettings?.qualityGateThreshold,
         soulModeEnabled: runtimeSettings?.soulModeEnabled,
+        selfRoastModeEnabled: runtimeSettings?.selfRoastModeEnabled,
         funnyStatusKeywords: runtimeSettings?.funnyStatusKeywords,
         funnyStatusEmojis: runtimeSettings?.funnyStatusEmojis,
         delayMinMs: runtimeSettings?.humanDelayMinMs,

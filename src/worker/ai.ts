@@ -205,6 +205,7 @@ type RuntimeAiTuning = {
   qualityGateMode?: QualityGateMode;
   qualityGateThreshold?: number;
   soulModeEnabled?: boolean;
+  selfRoastModeEnabled?: boolean;
   funnyStatusKeywords?: string[];
   funnyStatusEmojis?: string[];
   temperature?: number;
@@ -221,6 +222,7 @@ type RuntimeAiTuning = {
   maxToolRounds?: number;
   maxToolCallsPerRound?: number;
   toolTimeoutMs?: number;
+  guardrailRepromptLimit?: number;
   codexTimeoutMs?: number;
   delayMinMs?: number;
   delayMaxMs?: number;
@@ -377,6 +379,22 @@ const AI_IDENTITY_DISCLOSURE_RULE =
   "Identity disclosure protocol: when asked whether this is AI or asked about origin, disclose transparently and professionally. State that you are a conversational intelligence tool designed by Joshua to augment his business and social bandwidth. Mention Joshua uses state-of-the-art AI for timely high-quality communication, remains the primary authority, may be active in this thread or review logs later, and your role is an assistant bridging the gap when he is unavailable. Keep the wording tech-forward, human, and concise.";
 const JADL_DISCLOSURE_RESPONSE_TEMPLATE =
   "Correct - you are speaking with Joshua's digital liaison. I am a conversational intelligence tool designed by Joshua to augment his business and social bandwidth. He uses state-of-the-art AI to keep communication timely and high quality, and he remains the primary authority. He may be active in this thread or review it later. I am here as his assistant to bridge the gap when he is unavailable. How can I help on his behalf?";
+const SELF_ROAST_FACTUALITY_FALLBACK = "I can roast myself for fun, but I keep profile facts accurate.";
+const OBJECTIVE_PROFILE_QUESTION_PATTERNS = [
+  /\b(do you have|did you get|you get|you have|you hold)\s+(?:a\s+)?(?:degree|phd|masters|mba|certificate)\b/i,
+  /\b(?:what|where)\s+(?:did you|you)\s+(?:study|school|go to school)\b/i,
+  /\b(?:what is|what's)\s+your\s+(?:background|experience|qualification|education)\b/i,
+  /\b(?:who are you|tell me about yourself|your bio|your profile)\b/i,
+];
+const OBJECTIVE_PROFILE_CLAIM_PATTERNS = [
+  /\b(?:i\s+(?:have|got)|i(?:'|’)ve)\s+(?:a\s+)?(?:degree|phd|masters|mba|certificate)\b/i,
+  /\b(?:i\s+(?:do\s+not|don't|dont)\s+(?:have|hold)|no)\s+(?:a\s+)?(?:degree|phd|masters|mba|certificate)\b/i,
+  /\b(?:i\s+(?:dropped|drop)\s+out|dropout)\b/i,
+  /\bgrade\s*\d+\b/i,
+  /\bfamine\b/i,
+  /\b(?:born|raised|from)\s+in\b/i,
+  /\b(?:worked|work)\s+as\b/i,
+];
 const MATH_CUE_PATTERNS = [
   /\b(calculate|calc|solve|equation|evaluate|simplify|work out|find)\b/i,
   /\b(sum|difference|total|average|mean|remainder|plus|minus|times|multipl(?:y|ied)|divide|divided|percentage|percent)\b/i,
@@ -455,6 +473,7 @@ const ROYAL_JOKE_TERMS = new Set(["king", "queen"]);
 const BLOCKED_REFUSAL_PATTERNS = [/\bi(?:'|’)m sorry,\s*but\s*i cannot assist with that request\.?\b/i];
 const BLOCKED_REFUSAL_ERROR = "Blocked refusal phrase detected.";
 const BLOCKED_REFUSAL_REPROMPT_LIMIT = 2;
+const NON_FINAL_GUARDRAIL_REPROMPT_LIMIT = 3;
 const MODEL_TOOL_ROUTER_NAME = "tool_router_plan";
 const DEFAULT_MODEL_TOOL_MAX_ROUNDS = 3;
 const DEFAULT_MODEL_TOOL_MAX_CALLS_PER_ROUND = 4;
@@ -2899,6 +2918,7 @@ function buildPrompt(args: {
     historyLines: recentHistory.map((line) => line.line),
   });
   const soulModeEnabled = args.runtime?.soulModeEnabled ?? true;
+  const selfRoastModeEnabled = args.runtime?.selfRoastModeEnabled ?? false;
   const funnyKeywords = (args.runtime?.funnyStatusKeywords || DEFAULT_FUNNY_STATUS_KEYWORDS).slice(0, 30);
   const funnyEmojis = (args.runtime?.funnyStatusEmojis || DEFAULT_FUNNY_STATUS_EMOJIS).slice(0, 30);
   const humorEligibility = evaluateHumorEligibility({
@@ -2917,6 +2937,9 @@ function buildPrompt(args: {
   const soulInstruction = soulModeEnabled
     ? "Let the account owner's identity lead every reply. Keep the tone grounded and emotionally aware, and express their values, boundaries, and voice without sounding scripted."
     : "Use a neutral, practical tone and avoid playful language.";
+  const selfRoastInstruction = selfRoastModeEnabled
+    ? "Self-roast mode is ON: playful self-deprecating jokes are allowed, but never invent, deny, or distort objective profile facts (education, credentials, background, work history, origin, legal/health history). If factual profile details come up, keep them accurate and concise."
+    : "";
   const playfulInstruction =
     humorEligibility.allowHumor
       ? "The latest message is playful. A short, tasteful joke or witty line is allowed if it helps the conversation."
@@ -3104,6 +3127,7 @@ function buildPrompt(args: {
       "Do not imply you sell anything or hold inventory. Never use claims like 'I have stock', 'I get small stock', 'in stock', 'for sale', or order/promo language.",
       "Avoid gendered address terms (for example bro/sis/king/queen/handsome/beautiful) unless the contact explicitly self-identifies gender in this chat context.",
       soulInstruction,
+      selfRoastInstruction,
       humorEligibilityInstruction,
       playfulInstruction,
       jokeSafetyInstruction,
@@ -3400,6 +3424,40 @@ function enforceAiIdentityDisclosure(args: { inboundText: string; replyText: str
   return JADL_DISCLOSURE_RESPONSE_TEMPLATE;
 }
 
+function hasObjectiveProfileQuestion(text: string) {
+  const normalized = normalizeOutboundText(text || "");
+  if (!normalized) {
+    return false;
+  }
+  return OBJECTIVE_PROFILE_QUESTION_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+function hasObjectiveProfileClaim(text: string) {
+  const normalized = normalizeOutboundText(text || "");
+  if (!normalized) {
+    return false;
+  }
+  return OBJECTIVE_PROFILE_CLAIM_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+function enforceSelfRoastFactuality(args: {
+  inboundText: string;
+  replyText: string;
+  selfRoastModeEnabled: boolean;
+}) {
+  const reply = normalizeOutboundText(args.replyText || "");
+  if (!reply || !args.selfRoastModeEnabled) {
+    return reply;
+  }
+  if (!hasObjectiveProfileClaim(reply)) {
+    return reply;
+  }
+  if (!hasObjectiveProfileQuestion(args.inboundText) && !/\b(roast|banter|joke|self[-\s]?deprecat)\b/i.test(args.inboundText)) {
+    return reply;
+  }
+  return SELF_ROAST_FACTUALITY_FALLBACK;
+}
+
 function inferKnownGenderFromContext(args: { inboundText: string; historyLines?: string[] }): "male" | "female" | null {
   const inbound = normalizeOutboundText(args.inboundText || "");
   const themHistory = (args.historyLines || [])
@@ -3657,6 +3715,7 @@ export function postProcessReplyText(args: {
   theirName?: string;
   fallbackText?: string;
   preserveEmojis?: boolean;
+  selfRoastModeEnabled?: boolean;
 }) {
   const fallback = (args.fallbackText || "All good.").trim() || "All good.";
   const normalizedInput = normalizeOutboundText(args.text || "");
@@ -3717,9 +3776,14 @@ export function postProcessReplyText(args: {
     inboundText: args.inboundText,
     replyText: withAntiPuppetTone,
   });
-  const withHealthEmpathyOnly = enforceHealthEmpathyOnlyReply({
+  const withSelfRoastFactuality = enforceSelfRoastFactuality({
     inboundText: args.inboundText,
     replyText: withAntiCalculatorTone,
+    selfRoastModeEnabled: Boolean(args.selfRoastModeEnabled),
+  });
+  const withHealthEmpathyOnly = enforceHealthEmpathyOnlyReply({
+    inboundText: args.inboundText,
+    replyText: withSelfRoastFactuality,
     pidginMode,
   });
   const shouldForceCloseOut =
@@ -7085,23 +7149,66 @@ async function runCodex(
   }
 }
 
-function isBlockedRefusalAttempt(attempt?: AiAttempt) {
+function getRepromptableBlockedAttemptReason(attempt?: AiAttempt) {
   if (!attempt || attempt.status !== "error") {
-    return false;
+    return null;
   }
-  return (attempt.error || "").toLowerCase().includes(BLOCKED_REFUSAL_ERROR.toLowerCase());
+  const error = (attempt.error || "").trim();
+  if (!error) {
+    return null;
+  }
+  if (error.toLowerCase().includes(BLOCKED_REFUSAL_ERROR.toLowerCase())) {
+    return BLOCKED_REFUSAL_ERROR;
+  }
+  if (/low-value canned text/i.test(error)) {
+    return "Low-value canned text detected.";
+  }
+  return null;
 }
 
-function buildBlockedRefusalRepromptPrompt(basePrompt: string, inboundText: string, retryNumber: number) {
+function buildBlockedAttemptRepromptPrompt(basePrompt: string, inboundText: string, reason: string, retryNumber: number) {
+  const normalizedReason = normalizeOutboundText(reason || "Blocked by response checks.");
+  const isBlockedRefusal = normalizedReason.toLowerCase().includes(BLOCKED_REFUSAL_ERROR.toLowerCase());
+  const isLowValue = normalizedReason.toLowerCase().includes("low-value canned text");
   return [
     basePrompt,
-    `Retry ${retryNumber}: The previous draft used a blocked refusal template.`,
+    `Retry ${retryNumber}: Previous draft was blocked by response checks.`,
+    `Block reason: ${normalizedReason}`,
     "Generate a fresh, context-specific WhatsApp reply that directly addresses the latest inbound message.",
-    `Do not output this sentence (or close variants): "I'm sorry, but I cannot assist with that request."`,
+    isBlockedRefusal ? `Do not output this sentence (or close variants): "I'm sorry, but I cannot assist with that request."` : "",
+    isLowValue ? "Avoid generic templates. Address the specific request details in this chat." : "",
     "Do not apologize for inability to help.",
     `Latest inbound message to address: ${inboundText}`,
     "Return only the final reply text.",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function buildGuardrailReasonRepromptPrompt(basePrompt: string, inboundText: string, reason: string, retryNumber: number) {
+  const normalizedReason = normalizeOutboundText(reason || "Blocked by guardrail.");
+  return [
+    basePrompt,
+    `Retry ${retryNumber}: Previous draft was blocked by system checks.`,
+    `Block reason: ${normalizedReason}`,
+    "Generate a fresh, context-specific WhatsApp reply that fixes the block reason and satisfies all quality and safety criteria.",
+    "Do not output refusal templates, apologies for inability, or generic filler.",
+    `Latest inbound message to address: ${inboundText}`,
+    "Return only the final reply text.",
   ].join("\n\n");
+}
+
+function resolveGuardrailRepromptLimit(runtime?: RuntimeAiTuning) {
+  const runtimeLimit = runtime?.guardrailRepromptLimit;
+  if (Number.isFinite(runtimeLimit)) {
+    return Math.round(Math.max(0, Math.min(runtimeLimit as number, 8)));
+  }
+  return parseBoundedNumber(
+    process.env.SLM_AI_GUARDRAIL_REPROMPT_LIMIT,
+    NON_FINAL_GUARDRAIL_REPROMPT_LIMIT,
+    0,
+    8,
+  );
 }
 
 async function runWithBlockedRefusalReprompts(args: {
@@ -7129,10 +7236,11 @@ async function runWithBlockedRefusalReprompts(args: {
     }
 
     const lastAttempt = outcome.attempts[outcome.attempts.length - 1];
-    if (!isBlockedRefusalAttempt(lastAttempt) || retry >= maxReprompts) {
+    const blockedReason = getRepromptableBlockedAttemptReason(lastAttempt);
+    if (!blockedReason || retry >= maxReprompts) {
       break;
     }
-    prompt = buildBlockedRefusalRepromptPrompt(args.basePrompt, args.inboundText, retry + 1);
+    prompt = buildBlockedAttemptRepromptPrompt(args.basePrompt, args.inboundText, blockedReason, retry + 1);
   }
 
   return {
@@ -7367,6 +7475,91 @@ async function applyQualityGate(args: {
     activePersonaPackId: args.activePersonaPack?.id,
     attempts: selectedAttempts,
   } satisfies AiResult;
+}
+
+async function runProviderWithGuardrailReprompts(args: {
+  basePrompt: string;
+  inboundText: string;
+  historyLines: string[];
+  runtime?: RuntimeAiTuning;
+  activePersonaPack: PersonaPack | null;
+  run: (prompt: string) => Promise<AttemptOutcome>;
+  initialAttempts?: AiAttempt[];
+  initialToolCalls?: ContextToolCall[];
+  maxReprompts?: number;
+}) {
+  let prompt = args.basePrompt;
+  let attempts = [...(args.initialAttempts || [])];
+  let toolCalls = [...(args.initialToolCalls || [])];
+  let lastBlockedResult: AiResult | undefined;
+  let promptUsed = prompt;
+  const maxReprompts = Math.round(
+    Math.max(0, Math.min(args.maxReprompts ?? resolveGuardrailRepromptLimit(args.runtime), 8)),
+  );
+
+  for (let retry = 0; retry <= maxReprompts; retry += 1) {
+    const generationOutcome = await runWithBlockedRefusalReprompts({
+      basePrompt: prompt,
+      inboundText: args.inboundText,
+      run: args.run,
+    });
+    promptUsed = generationOutcome.promptUsed;
+    attempts = [...attempts, ...generationOutcome.attempts];
+    toolCalls = [...toolCalls, ...(generationOutcome.toolCalls || [])];
+
+    if (!generationOutcome.result) {
+      return {
+        result: lastBlockedResult,
+        attempts,
+        promptUsed,
+        toolCalls,
+      };
+    }
+
+    const gated = await applyQualityGate({
+      candidate: generationOutcome.result,
+      attempts,
+      inboundText: args.inboundText,
+      historyLines: args.historyLines,
+      basePrompt: generationOutcome.promptUsed,
+      runtime: args.runtime,
+      activePersonaPack: args.activePersonaPack,
+    });
+    attempts = gated.attempts;
+
+    if (!gated.guardrailBlocked) {
+      return {
+        result: gated,
+        attempts,
+        promptUsed,
+        toolCalls,
+      };
+    }
+
+    lastBlockedResult = gated;
+    if (retry >= maxReprompts) {
+      return {
+        result: gated,
+        attempts,
+        promptUsed,
+        toolCalls,
+      };
+    }
+
+    prompt = buildGuardrailReasonRepromptPrompt(
+      args.basePrompt,
+      args.inboundText,
+      gated.guardrailReason || "Blocked by guardrail.",
+      retry + 1,
+    );
+  }
+
+  return {
+    result: lastBlockedResult,
+    attempts,
+    promptUsed,
+    toolCalls,
+  };
 }
 
 type AckRoutingResult = {
@@ -7721,6 +7914,7 @@ export async function generateReplyWithFallback(args: {
         historyLines: args.historyLines,
         theirName: args.grounding?.theirName,
         fallbackText: "All good.",
+        selfRoastModeEnabled: args.runtime?.selfRoastModeEnabled,
       }),
     };
   };
@@ -7783,36 +7977,36 @@ export async function generateReplyWithFallback(args: {
     });
   }
 
-  const attempts: AiAttempt[] = [];
   const fallbackMode = resolveFallbackMode(args.runtime);
 
-  const azureOutcome = await runWithBlockedRefusalReprompts({
+  const azureOutcome = await runProviderWithGuardrailReprompts({
     basePrompt: builtPrompt.prompt,
     inboundText: args.inboundText,
+    historyLines: args.historyLines,
+    runtime: args.runtime,
+    activePersonaPack,
     run: (prompt) => runAzure(prompt, args.inboundText, args.historyLines, args.runtime, args.modelToolContext),
   });
-  const combinedContextToolCalls = [...builtPrompt.contextToolCalls, ...(azureOutcome.toolCalls || [])];
-  attempts.push(...azureOutcome.attempts);
-  if (azureOutcome.result) {
-    const gated = await applyQualityGate({
-      candidate: azureOutcome.result,
-      attempts,
-      inboundText: args.inboundText,
-      historyLines: args.historyLines,
-      basePrompt: azureOutcome.promptUsed,
-      runtime: args.runtime,
-      activePersonaPack,
-    });
+  let combinedContextToolCalls = [...builtPrompt.contextToolCalls, ...(azureOutcome.toolCalls || [])];
+  if (azureOutcome.result && !azureOutcome.result.guardrailBlocked) {
     return finalizeResult({
-      ...gated,
+      ...azureOutcome.result,
       contextToolCalls: combinedContextToolCalls,
       contextWindow: builtPrompt.contextWindow,
     });
   }
 
   if (fallbackMode === "azure_only") {
-    const lastAzureAttempt = attempts.filter((attempt) => attempt.provider === "azure").slice(-1)[0];
-    return {
+    if (azureOutcome.result?.guardrailBlocked) {
+      return finalizeResult({
+        ...azureOutcome.result,
+        contextToolCalls: combinedContextToolCalls,
+        contextWindow: builtPrompt.contextWindow,
+      });
+    }
+
+    const lastAzureAttempt = azureOutcome.attempts.filter((attempt) => attempt.provider === "azure").slice(-1)[0];
+    return finalizeResult({
       text: "Manual review required.",
       provider: "azure",
       model: lastAzureAttempt?.model || "gpt-5.4",
@@ -7823,35 +8017,32 @@ export async function generateReplyWithFallback(args: {
       qualityChecks: [],
       qualityRewriteApplied: false,
       activePersonaPackId: activePersonaPack?.id,
-      attempts,
+      attempts: azureOutcome.attempts,
       contextToolCalls: combinedContextToolCalls,
       contextWindow: builtPrompt.contextWindow,
-    };
+    });
   }
 
-  const codexOutcome = await runWithBlockedRefusalReprompts({
+  const codexOutcome = await runProviderWithGuardrailReprompts({
     basePrompt: builtPrompt.prompt,
     inboundText: args.inboundText,
+    historyLines: args.historyLines,
+    runtime: args.runtime,
+    activePersonaPack,
     run: (prompt) => runCodex(prompt, args.inboundText, args.historyLines, args.runtime),
+    initialAttempts: azureOutcome.attempts,
+    initialToolCalls: combinedContextToolCalls,
   });
-  attempts.push(...codexOutcome.attempts);
-  if (codexOutcome.result) {
-    const gated = await applyQualityGate({
-      candidate: codexOutcome.result,
-      attempts,
-      inboundText: args.inboundText,
-      historyLines: args.historyLines,
-      basePrompt: codexOutcome.promptUsed,
-      runtime: args.runtime,
-      activePersonaPack,
-    });
+  combinedContextToolCalls = codexOutcome.toolCalls;
+  if (codexOutcome.result && !codexOutcome.result.guardrailBlocked) {
     return finalizeResult({
-      ...gated,
+      ...codexOutcome.result,
       contextToolCalls: combinedContextToolCalls,
       contextWindow: builtPrompt.contextWindow,
     });
   }
 
+  const attempts = [...codexOutcome.attempts];
   attempts.push({
     provider: "heuristic",
     stage: "heuristic_fallback",

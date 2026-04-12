@@ -33,6 +33,7 @@ export type AppConfig = {
   memeSendProbability: number;
   soulModeEnabled: boolean;
   humorLearningEnabled: boolean;
+  selfRoastModeEnabled: boolean;
   statusAutoReplyEnabled: boolean;
   statusReplyRequireFunny: boolean;
   captureGroupMediaEnabled: boolean;
@@ -128,6 +129,7 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
   memeSendProbability: 0.3,
   soulModeEnabled: true,
   humorLearningEnabled: true,
+  selfRoastModeEnabled: false,
   statusAutoReplyEnabled: true,
   statusReplyRequireFunny: true,
   captureGroupMediaEnabled: false,
@@ -298,6 +300,7 @@ export async function getConfig(ctx: QueryCtx | MutationCtx): Promise<AppConfig>
     ),
     soulModeEnabled: parseBoolean(map.get("soulModeEnabled"), DEFAULT_APP_CONFIG.soulModeEnabled),
     humorLearningEnabled: parseBoolean(map.get("humorLearningEnabled"), DEFAULT_APP_CONFIG.humorLearningEnabled),
+    selfRoastModeEnabled: parseBoolean(map.get("selfRoastModeEnabled"), DEFAULT_APP_CONFIG.selfRoastModeEnabled),
     statusAutoReplyEnabled: parseBoolean(map.get("statusAutoReplyEnabled"), DEFAULT_APP_CONFIG.statusAutoReplyEnabled),
     statusReplyRequireFunny: parseBoolean(map.get("statusReplyRequireFunny"), DEFAULT_APP_CONFIG.statusReplyRequireFunny),
     captureGroupMediaEnabled: parseBoolean(map.get("captureGroupMediaEnabled"), DEFAULT_APP_CONFIG.captureGroupMediaEnabled),

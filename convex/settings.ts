@@ -150,6 +150,7 @@ export const save = mutation({
     // Compatibility: some clients still send this key in save payloads.
     autonomyPaused: v.optional(v.boolean()),
     humorLearningEnabled: v.boolean(),
+    selfRoastModeEnabled: v.boolean(),
     statusAutoReplyEnabled: v.boolean(),
     statusReplyRequireFunny: v.boolean(),
     captureGroupMediaEnabled: v.optional(v.boolean()),
@@ -260,6 +261,7 @@ export const save = mutation({
       memeSendProbability: clamp(args.memeSendProbability, 0, 1),
       soulModeEnabled: args.soulModeEnabled,
       humorLearningEnabled: args.humorLearningEnabled,
+      selfRoastModeEnabled: args.selfRoastModeEnabled,
       statusAutoReplyEnabled: args.statusAutoReplyEnabled,
       statusReplyRequireFunny: args.statusReplyRequireFunny,
       captureGroupMediaEnabled: args.captureGroupMediaEnabled ?? DEFAULT_APP_CONFIG.captureGroupMediaEnabled,
@@ -483,6 +485,7 @@ export const save = mutation({
     await setConfigValue(ctx, "memeSendProbability", String(normalized.memeSendProbability));
     await setConfigValue(ctx, "soulModeEnabled", normalized.soulModeEnabled ? "true" : "false");
     await setConfigValue(ctx, "humorLearningEnabled", normalized.humorLearningEnabled ? "true" : "false");
+    await setConfigValue(ctx, "selfRoastModeEnabled", normalized.selfRoastModeEnabled ? "true" : "false");
     await setConfigValue(ctx, "statusAutoReplyEnabled", normalized.statusAutoReplyEnabled ? "true" : "false");
     await setConfigValue(ctx, "statusReplyRequireFunny", normalized.statusReplyRequireFunny ? "true" : "false");
     await setConfigValue(ctx, "captureGroupMediaEnabled", normalized.captureGroupMediaEnabled ? "true" : "false");
