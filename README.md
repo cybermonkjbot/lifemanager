@@ -54,6 +54,7 @@ Optional history/context tuning:
 - `SLM_HISTORY_FETCH_ON_DEMAND=true`
 - `SLM_HISTORY_FETCH_MAX_BATCH=50`
 - `SLM_HISTORY_FETCH_MAX_ROUNDS=3`
+- `SLM_CALL_FALLBACK_GRACE_MS=2000` (delay before call fallback text sends, so answered calls can suppress it)
 - `SLM_VISION_FILTER_MODE=smart` (`smart` | `all` | `none`)
 - `SLM_VISION_FILTER_UNCAPTIONED_COOLDOWN_MS=5400000` (used in `smart` mode)
 - `SLM_EMBEDDINGS_MODEL=all-MiniLM-L6-v2`

@@ -158,12 +158,9 @@ class WhatsAppSetupManager {
   private get authPath() {
     const configured = (process.env.WHATSAPP_AUTH_PATH || "").trim();
     if (configured) {
-      if (configured.startsWith("/")) {
-        return configured;
-      }
-      return join(/* turbopackIgnore: true */ process.cwd(), configured);
+      return configured;
     }
-    return join(/* turbopackIgnore: true */ process.cwd(), ".wa_auth");
+    return ".wa_auth";
   }
 
   private async hasRegisteredCreds() {

@@ -125,6 +125,7 @@ import {
   parseSelfControlSmartRouteOutput,
   type SelfControlSmartRoute,
 } from "./self-control-smart-router";
+import { shouldSuppressCallFallbackAfterOffer } from "./call-fallback";
 
 const logger = pino({
   name: "slm-worker",
@@ -355,6 +356,9 @@ const TEXT_EMOJI_NON_ALLOWLIST_WARMUP_MAX_PER_WINDOW = 2;
 const TEXT_EMOJI_WINDOW_MS = 6 * 60 * 60 * 1000;
 const STICKER_COMPANION_COOLDOWN_MS = 45 * 60 * 1000;
 const CALL_FALLBACK_COOLDOWN_MS = 20 * 60 * 1000;
+const CALL_FALLBACK_POST_REJECT_GRACE_MS = Math.round(
+  clamp(Number(process.env.SLM_CALL_FALLBACK_GRACE_MS || 2000), 0, 15_000),
+);
 const CALL_CONTEXT_MIN_DURATION_MS = Math.round(
   clamp(Number(process.env.SLM_CALL_CONTEXT_MIN_DURATION_MS || 2 * 60 * 1000), 30_000, 30 * 60 * 1000),
 );
@@ -3015,6 +3019,15 @@ function resolveTextEmojiAllowlist() {
   const recentEmojiOutboundByThread = new Map<string, number>();
   const recentStickerCompanionByThread = new Map<string, number>();
   const recentCallFallbackByThread = new Map<string, number>();
+  const recentCallStateById = new Map<
+    string,
+    {
+      lastStatus: string;
+      acceptedAt?: number;
+      updatedAt: number;
+    }
+  >();
+  const pendingCallFallbackById = new Map<string, ReturnType<typeof setTimeout>>();
   const recentMarkedReadByMessage = new Map<string, number>();
   const recentPresenceSubscribeByThread = new Map<string, number>();
   const quietHoursMutedByThread = new Map<string, number>();
@@ -3096,6 +3109,117 @@ function resolveTextEmojiAllowlist() {
     pruneRecentCallFallbackByThread();
     const sentAt = recentCallFallbackByThread.get(threadJid);
     return typeof sentAt === "number" && sentAt > 0;
+  };
+  const pruneRecentCallStateById = () => {
+    const cutoff = Date.now() - 90 * 60 * 1000;
+    for (const [callId, snapshot] of recentCallStateById.entries()) {
+      if ((snapshot.updatedAt || 0) < cutoff) {
+        recentCallStateById.delete(callId);
+        const pending = pendingCallFallbackById.get(callId);
+        if (pending) {
+          clearTimeout(pending);
+          pendingCallFallbackById.delete(callId);
+        }
+      }
+    }
+  };
+  const rememberRecentCallState = (callId: string, status: string, eventAt: number) => {
+    if (!callId) {
+      return undefined;
+    }
+    pruneRecentCallStateById();
+    const normalizedStatus = status.trim().toLowerCase();
+    const normalizedEventAt = Number.isFinite(eventAt) && eventAt > 0 ? eventAt : Date.now();
+    const existing = recentCallStateById.get(callId);
+    const nextAcceptedAt =
+      normalizedStatus === "accept"
+        ? existing?.acceptedAt
+          ? Math.min(existing.acceptedAt, normalizedEventAt)
+          : normalizedEventAt
+        : existing?.acceptedAt;
+    const snapshot = {
+      lastStatus: normalizedStatus || status,
+      acceptedAt: nextAcceptedAt,
+      updatedAt: normalizedEventAt,
+    };
+    recentCallStateById.set(callId, snapshot);
+    return snapshot;
+  };
+  const getRecentCallState = (callId: string) => {
+    if (!callId) {
+      return undefined;
+    }
+    pruneRecentCallStateById();
+    return recentCallStateById.get(callId);
+  };
+  const clearPendingCallFallback = (callId: string) => {
+    if (!callId) {
+      return;
+    }
+    const pending = pendingCallFallbackById.get(callId);
+    if (!pending) {
+      return;
+    }
+    clearTimeout(pending);
+    pendingCallFallbackById.delete(callId);
+  };
+  const scheduleCallFallbackMessage = (args: {
+    callId: string;
+    callFrom: string;
+    threadJid: string;
+    fallbackKey: string;
+  }) => {
+    clearPendingCallFallback(args.callId);
+    const timer = setTimeout(() => {
+      pendingCallFallbackById.delete(args.callId);
+      void (async () => {
+        const latest = getRecentCallState(args.callId);
+        if (shouldSuppressCallFallbackAfterOffer(latest)) {
+          await convex
+            .mutation(convexRefs.systemRecordEvent, {
+              source: "worker",
+              eventType: "inbound.call.fallback_suppressed_answered",
+              detail: compactLogText(`jid=${args.threadJid} callId=${args.callId} status=${latest?.lastStatus || "accept"}`, 240),
+            })
+            .catch(() => undefined);
+          return;
+        }
+
+        if (!CALL_AUTO_DECLINE_FALLBACK_TEXT || hasRecentCallFallback(args.fallbackKey)) {
+          return;
+        }
+
+        try {
+          rememberAutomatedThreadSend(args.threadJid);
+          const sent = await sock.sendMessage(args.threadJid, {
+            text: CALL_AUTO_DECLINE_FALLBACK_TEXT,
+          });
+          rememberAutomatedOutboundId(sent?.key?.id || undefined);
+          rememberCallFallbackAt(args.fallbackKey, Date.now());
+          await convex
+            .mutation(convexRefs.systemRecordEvent, {
+              source: "worker",
+              eventType: "inbound.call.rejected_with_fallback",
+              detail: compactLogText(`jid=${args.threadJid} status=offer`, 220),
+            })
+            .catch(() => undefined);
+        } catch (error) {
+          const err = error instanceof Error ? error.message : String(error);
+          logger.warn(
+            { err, callId: args.callId, callFrom: args.callFrom, threadJid: args.threadJid },
+            "Inbound call fallback send failed",
+          );
+          await convex
+            .mutation(convexRefs.systemRecordEvent, {
+              source: "worker",
+              eventType: "inbound.call.fallback_send_error",
+              detail: compactLogText(err, 280),
+            })
+            .catch(() => undefined);
+        }
+      })();
+    }, CALL_FALLBACK_POST_REJECT_GRACE_MS);
+    pendingCallFallbackById.set(args.callId, timer);
   };
   const pruneRecentMarkedReadByMessage = () => {
     const cutoff = Date.now() - READ_RECEIPT_DEDUPE_TTL_MS;
@@ -5461,6 +5585,7 @@ function resolveTextEmojiAllowlist() {
       const isGroupThread = threadKind === "group";
       const fallbackKey = isGroupThread ? threadJid : normalizeAccountJid(threadJid) || threadJid;
       const callEventAt = callEvent.date instanceof Date ? callEvent.date.getTime() : Date.now();
+      const latestCallState = rememberRecentCallState(callId, callStatus, callEventAt);
       const callFromAccount = normalizeAccountJid(callFrom);
       const isFromSelf = Boolean(callFromAccount && getSelfAccountIds().includes(callFromAccount));
 
@@ -5481,6 +5606,9 @@ function resolveTextEmojiAllowlist() {
         .catch(() => undefined);
 
       if (callStatus !== "offer") {
+        if (shouldSuppressCallFallbackAfterOffer(latestCallState)) {
+          clearPendingCallFallback(callId);
+        }
         return;
       }
 
@@ -5549,20 +5677,12 @@ function resolveTextEmojiAllowlist() {
       if (!CALL_AUTO_DECLINE_FALLBACK_TEXT || hasRecentCallFallback(fallbackKey)) {
         return;
       }
-
-      rememberAutomatedThreadSend(threadJid);
-      const sent = await sock.sendMessage(threadJid, {
-        text: CALL_AUTO_DECLINE_FALLBACK_TEXT,
+      scheduleCallFallbackMessage({
+        callId,
+        callFrom,
+        threadJid,
+        fallbackKey,
       });
-      rememberAutomatedOutboundId(sent?.key?.id || undefined);
-      rememberCallFallbackAt(fallbackKey, Date.now());
-      await convex
-        .mutation(convexRefs.systemRecordEvent, {
-          source: "worker",
-          eventType: "inbound.call.rejected_with_fallback",
-          detail: compactLogText(`jid=${threadJid} status=offer`, 220),
-        })
-        .catch(() => undefined);
     } catch (error) {
       const err = error instanceof Error ? error.message : String(error);
       logger.warn({ err, callId: callEvent.id, callFrom: callEvent.from }, "Inbound call handling error");
