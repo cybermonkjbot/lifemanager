@@ -163,7 +163,7 @@ class WhatsAppSetupManager {
       }
       return join(/* turbopackIgnore: true */ process.cwd(), configured);
     }
-    return join(process.cwd(), ".wa_auth");
+    return join(/* turbopackIgnore: true */ process.cwd(), ".wa_auth");
   }
 
   private async hasRegisteredCreds() {
