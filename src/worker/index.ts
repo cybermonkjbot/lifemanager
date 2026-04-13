@@ -58,6 +58,14 @@ import {
   maybeFetchOlderHistoryForThread,
   readHistoryFetchConfigFromEnv,
 } from "./history-context";
+import {
+  buildContextPack,
+  normalizeContextPack,
+  resolveRetrievalLowConfidenceThreshold,
+  shouldTriggerFactExtractionSecondPass,
+  type AdaptiveTuningHintsSnapshot,
+  type ContextPackSnapshot,
+} from "./context-pack";
 import { decideOlderContextUsage } from "./context-recall-policy";
 import {
   isBroadcastOrSystemJid,
@@ -220,6 +228,7 @@ type ContactMemoryFactSnapshot = {
   factValue: string;
   factType: "preference" | "profile" | "schedule" | "relationship" | "promise" | "other";
   confidence: number;
+  updatedAt?: number;
 };
 
 type ContactFactsSnapshot = {
@@ -251,6 +260,7 @@ type OutboxClaimedItem = {
   jid: string;
   messageProvider: "whatsapp" | "instagram";
   outreachMode?: "proactive" | "good_morning" | "compliment";
+  contextPack?: ContextPackSnapshot;
   messageText: string;
   typingMs: number;
   provider: "azure" | "codex" | "heuristic";
@@ -272,6 +282,18 @@ type OutboxClaimedItem = {
   replyTargetSenderJid?: string;
   replyTargetText?: string;
   replyTargetMessageAt?: number;
+};
+
+type ThreadAdaptiveHintsSnapshot = AdaptiveTuningHintsSnapshot & {
+  sampleSize?: number;
+  positiveCount?: number;
+  negativeCount?: number;
+  neutralCount?: number;
+  historyDepthDelta?: number;
+  factRefreshBias?: "low" | "normal" | "high";
+  preferFactRefresh?: boolean;
+  retrievalLowConfidenceThreshold?: number;
+  factStaleThresholdDays?: number;
 };
 
 type ExternalWebTrendSearchPayload = {
@@ -1002,6 +1024,7 @@ type WorkerContextOrchestrationResult = {
   hintApplied: boolean;
   historySearchOverride?: HistorySearchOverrideSnapshot;
   contactFacts: ContactMemoryFactSnapshot[];
+  retrievalDiagnostics: ContextPackSnapshot["retrievalDiagnostics"];
   runs: WorkerContextToolRunResult[];
 };
 
@@ -1255,11 +1278,13 @@ async function runWorkerContextToolOrchestration(args: {
   allowFactExtraction: boolean;
   historySearchLimit: number;
   factsLimit: number;
-}) : Promise<WorkerContextOrchestrationResult> {
+  adaptiveHints?: ThreadAdaptiveHintsSnapshot | null;
+}): Promise<WorkerContextOrchestrationResult> {
   const timeoutMs = parseBoundedInt(process.env.SLM_TOOL_TIMEOUT_MS, 8_000, 500, 30_000);
   const maxToolsPerRun = parseBoundedInt(process.env.SLM_TOOL_MAX_TOOLS_PER_RUN, 4, 1, 8);
   const globalDeadlineMs = parseBoundedInt(process.env.SLM_TOOL_GLOBAL_DEADLINE_MS, 20_000, 2_000, 120_000);
   const deadlineAt = Date.now() + globalDeadlineMs;
+  const retrievalLowConfidenceThreshold = resolveRetrievalLowConfidenceThreshold(args.adaptiveHints);
   const deterministic: WorkerContextToolStep[] = [];
   if (args.allowHistorySearch) {
     deterministic.push({
@@ -1270,20 +1295,11 @@ async function runWorkerContextToolOrchestration(args: {
     });
   }
   if (args.includeContactFacts) {
-    if (args.allowFactExtraction) {
-      deterministic.push({
-        id: "contact_facts_extract",
-        tool: "contact_facts_extract",
-        reason: "Refresh contact memory facts from recent inbound messages.",
-        readOnly: false,
-      });
-    }
     deterministic.push({
       id: "contact_facts_list",
       tool: "contact_facts_list",
       reason: "Load contact memory facts for style/context hints.",
       readOnly: true,
-      requiresTool: args.allowFactExtraction ? "contact_facts_extract" : undefined,
     });
   }
   if (deterministic.length === 0) {
@@ -1293,6 +1309,22 @@ async function runWorkerContextToolOrchestration(args: {
       hintApplied: false,
       historySearchOverride: undefined,
       contactFacts: [],
+      retrievalDiagnostics: {
+        plannerSource: "deterministic",
+        plannerConfidence: 0.5,
+        hintApplied: false,
+        historySearchConfidence: 0,
+        historySearchCandidateCount: 0,
+        historySearchSemanticRerankCount: 0,
+        lowConfidence: false,
+        lowConfidenceThreshold: retrievalLowConfidenceThreshold,
+        firstPassFactCoverageWeak: false,
+        firstPassFactsStale: false,
+        secondPassTriggered: false,
+        adaptiveHistoryDepthDelta: args.adaptiveHints?.historyDepthDelta ?? 0,
+        adaptiveFactRefreshBias: args.adaptiveHints?.factRefreshBias,
+        adaptiveSampleSize: args.adaptiveHints?.sampleSize,
+      },
       runs: [],
     };
   }
@@ -1503,6 +1535,41 @@ async function runWorkerContextToolOrchestration(args: {
     }
   }
 
+  const firstPassDecision = shouldTriggerFactExtractionSecondPass({
+    facts: contactFacts,
+    factsLimit: args.factsLimit,
+    historySearchConfidence: historySearchOverride?.confidence,
+    adaptiveHints: args.adaptiveHints,
+  });
+  let secondPassTriggered = false;
+  let secondPassReason = firstPassDecision.reason;
+
+  if (args.includeContactFacts && args.allowFactExtraction && firstPassDecision.trigger && Date.now() < deadlineAt) {
+    secondPassTriggered = true;
+    const extractStep: WorkerContextToolStep = {
+      id: "contact_facts_extract_second_pass",
+      tool: "contact_facts_extract",
+      reason: `Second pass extraction (${secondPassReason || "weak_context"}).`,
+      readOnly: false,
+    };
+    const extractResult = await executeOne(extractStep);
+    runs.push(extractResult);
+    if (extractResult.status === "success") {
+      completedTools.add("contact_facts_extract");
+      const listStep: WorkerContextToolStep = {
+        id: "contact_facts_list_second_pass",
+        tool: "contact_facts_list",
+        reason: "Reload contact facts after extraction refresh.",
+        readOnly: true,
+      };
+      const listResult = await executeOne(listStep);
+      runs.push(listResult);
+      if (listResult.status === "success") {
+        completedTools.add("contact_facts_list");
+      }
+    }
+  }
+
   if (args.allowHistorySearch && !historySearchOverride) {
     historySearchOverride = fallbackHistoryOverride({
       historyLines: args.historyLines,
@@ -1510,12 +1577,64 @@ async function runWorkerContextToolOrchestration(args: {
     });
   }
 
+  if (
+    args.allowHistorySearch &&
+    historySearchOverride &&
+    (historySearchOverride.confidence || 0) < retrievalLowConfidenceThreshold
+  ) {
+    const fallback = fallbackHistoryOverride({
+      historyLines: args.historyLines,
+      limit: Math.max(args.historySearchLimit, 6),
+    });
+    const mergedLines = [...(historySearchOverride.lines || []), ...fallback.lines]
+      .map((line) => line.replace(/\s+/g, " ").trim().slice(0, 320))
+      .filter(Boolean);
+    const deduped: string[] = [];
+    const seen = new Set<string>();
+    for (const line of mergedLines) {
+      const key = line.toLowerCase();
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      deduped.push(line);
+    }
+    historySearchOverride = {
+      ...historySearchOverride,
+      lines: deduped.slice(0, Math.max(args.historySearchLimit, 6)),
+      candidateCount: Math.max(historySearchOverride.candidateCount || 0, fallback.candidateCount || 0),
+      semanticRerankCount: Math.max(historySearchOverride.semanticRerankCount || 0, fallback.semanticRerankCount || 0),
+      confidence: Math.max(historySearchOverride.confidence || 0, fallback.confidence || 0),
+      retrievalStage: historySearchOverride.retrievalStage || fallback.retrievalStage,
+    };
+  }
+
+  const retrievalDiagnostics: ContextPackSnapshot["retrievalDiagnostics"] = {
+    plannerSource: merged.plannerSource,
+    plannerConfidence,
+    hintApplied: merged.hintApplied,
+    historySearchConfidence: historySearchOverride?.confidence || 0,
+    historySearchCandidateCount: historySearchOverride?.candidateCount || 0,
+    historySearchSemanticRerankCount: historySearchOverride?.semanticRerankCount || 0,
+    historySearchRetrievalStage: historySearchOverride?.retrievalStage,
+    lowConfidence: (historySearchOverride?.confidence || 0) < retrievalLowConfidenceThreshold,
+    lowConfidenceThreshold: retrievalLowConfidenceThreshold,
+    firstPassFactCoverageWeak: firstPassDecision.coverageWeak,
+    firstPassFactsStale: firstPassDecision.staleFacts,
+    secondPassTriggered,
+    secondPassReason: secondPassReason || (secondPassTriggered ? "context_support_upgrade" : undefined),
+    adaptiveHistoryDepthDelta: args.adaptiveHints?.historyDepthDelta ?? 0,
+    adaptiveFactRefreshBias: args.adaptiveHints?.factRefreshBias,
+    adaptiveSampleSize: args.adaptiveHints?.sampleSize,
+  };
+
   return {
     plannerSource: merged.plannerSource,
     plannerConfidence,
     hintApplied: merged.hintApplied,
     historySearchOverride,
     contactFacts,
+    retrievalDiagnostics,
     runs,
   };
 }
@@ -6477,6 +6596,9 @@ function resolveTextEmojiAllowlist() {
       let styleHints: string[] = [];
       let styleProfile: StyleProfileSnapshot = null;
       let contactFacts: ContactMemoryFactSnapshot[] = [];
+      let adaptiveHints: ThreadAdaptiveHintsSnapshot | null = null;
+      let retrievalDiagnostics: ContextPackSnapshot["retrievalDiagnostics"] = {};
+      let contextPack: ContextPackSnapshot | undefined;
       if (shouldGenerateAiText) {
         threadContext =
           threadContextForPolicy ||
@@ -6489,6 +6611,13 @@ function resolveTextEmojiAllowlist() {
         });
         styleHints = threadContext?.memory?.styleNotes || [];
         styleProfile = await getStyleProfileForThread(ingest.threadId);
+        adaptiveHints = (await convex
+          .query(convexRefs.aiFeedbackGetThreadAdaptiveHints, {
+            threadId: ingest.threadId as Id<"threads">,
+            path: "reply",
+            limit: 60,
+          })
+          .catch(() => null)) as ThreadAdaptiveHintsSnapshot | null;
       }
       let historySearchOverride: HistorySearchOverrideSnapshot | undefined;
 
@@ -6538,12 +6667,16 @@ function resolveTextEmojiAllowlist() {
           historyLines = historyLines.slice(-1);
         }
 
-        const historySearchLimit = Math.max(8, Math.min(runtimeSettings?.aiHistoryLineLimit ?? 12, 20));
-        const shouldRefreshFacts =
+        const baseHistorySearchLimit = Math.max(8, Math.min(runtimeSettings?.aiHistoryLineLimit ?? 12, 20));
+        const adaptiveHistoryDepthDelta = Math.round(clamp(adaptiveHints?.historyDepthDelta ?? 0, -4, 8));
+        const historySearchLimit = Math.max(8, Math.min(baseHistorySearchLimit + adaptiveHistoryDepthDelta, 24));
+        const shouldRefreshFactsFromText =
           olderContextDecision.explicitRecallCue ||
           /(birthday|anniversary|prefer|likes|profile|fact|call me|remember|my mom|my dad|my family|plan|schedule|trip|weekend|tomorrow)/i.test(
             inboundTextForAi,
           );
+        const shouldRefreshFacts =
+          shouldRefreshFactsFromText || Boolean(adaptiveHints?.preferFactRefresh) || adaptiveHints?.factRefreshBias === "high";
         const orchestration = await runWorkerContextToolOrchestration({
           convex,
           threadId: ingest.threadId,
@@ -6555,9 +6688,11 @@ function resolveTextEmojiAllowlist() {
           allowFactExtraction: shouldRefreshFacts,
           historySearchLimit,
           factsLimit: 8,
+          adaptiveHints,
         });
         historySearchOverride = orchestration.historySearchOverride;
         contactFacts = orchestration.contactFacts;
+        retrievalDiagnostics = orchestration.retrievalDiagnostics;
         if (contactFacts.length > 0) {
           styleHints = [
             ...styleHints,
@@ -6622,10 +6757,27 @@ function resolveTextEmojiAllowlist() {
               allowFactExtraction: false,
               historySearchLimit,
               factsLimit: 8,
+              adaptiveHints,
             });
             historySearchOverride = refreshedOrchestration.historySearchOverride || historySearchOverride;
           }
         }
+      }
+
+      if (shouldGenerateAiText) {
+        const selectedHistoryLines =
+          historySearchOverride?.lines && historySearchOverride.lines.length > 0
+            ? historySearchOverride.lines
+            : historyLines.slice(-Math.max(1, Math.min(runtimeSettings?.aiHistoryLineLimit ?? 10, 12)));
+        contextPack = buildContextPack({
+          intent: `reply:${outboundPolicy.mode}`,
+          inboundOrSeedText: inboundTextForAi,
+          selectedHistoryLines,
+          selectedContactFacts: contactFacts,
+          styleHints,
+          retrievalDiagnostics,
+          capturedAt: Date.now(),
+        });
       }
 
       let ai = shouldGenerateAiText
@@ -6634,6 +6786,8 @@ function resolveTextEmojiAllowlist() {
             historyLines,
             historySearchOverride,
             contactFacts,
+            contextPack,
+            adaptiveHints: adaptiveHints || undefined,
             styleHints,
             styleProfile: styleProfile || undefined,
             personality: personalitySetting
@@ -6714,6 +6868,8 @@ function resolveTextEmojiAllowlist() {
             historyLines,
             historySearchOverride,
             contactFacts,
+            contextPack,
+            adaptiveHints: adaptiveHints || undefined,
             styleHints: [...styleHints, ...guardrailHints],
             styleProfile: styleProfile || undefined,
             personality: personalitySetting
@@ -6937,6 +7093,7 @@ function resolveTextEmojiAllowlist() {
         delayMs: timing.delayMs,
         typingMs: timing.typingMs,
         reason: "Generated by worker AI pipeline",
+        contextPack,
         sendKind,
         reactionEmoji:
           outboundPolicy.mode === "reaction_only" || outboundPolicy.mode === "reaction_plus_text" ? outboundPolicy.emoji : undefined,
@@ -7274,12 +7431,37 @@ function resolveTextEmojiAllowlist() {
         }
       | null;
 
-    const historyLines = (threadContext?.messages || []).map((m) => {
+    let historyLines = (threadContext?.messages || []).map((m) => {
       return `${m.direction === "inbound" ? "Them" : "Me"}: ${m.text}`;
     });
+    const persistedContextPack = normalizeContextPack(item.contextPack);
+    if (persistedContextPack?.selectedHistoryLines.length) {
+      const merged = [...persistedContextPack.selectedHistoryLines, ...historyLines];
+      const deduped: string[] = [];
+      const seen = new Set<string>();
+      for (const line of merged) {
+        const normalized = line.toLowerCase().trim();
+        if (!normalized || seen.has(normalized)) {
+          continue;
+        }
+        seen.add(normalized);
+        deduped.push(line);
+      }
+      historyLines = deduped.slice(-Math.max(12, historyLines.length));
+    }
 
-    const styleHints = threadContext?.memory?.styleNotes || [];
+    const styleHints = [
+      ...(persistedContextPack?.styleHints || []),
+      ...(threadContext?.memory?.styleNotes || []),
+    ];
     const styleProfile = await getStyleProfileForThread(item.threadId);
+    const adaptiveHints = (await convex
+      .query(convexRefs.aiFeedbackGetThreadAdaptiveHints, {
+        threadId: item.threadId as Id<"threads">,
+        path: "outreach",
+        limit: 60,
+      })
+      .catch(() => null)) as ThreadAdaptiveHintsSnapshot | null;
 
     const personalitySetting = (await convex.query(convexRefs.personalityGetThreadSetting, {
       threadId: item.threadId,
@@ -7401,6 +7583,9 @@ function resolveTextEmojiAllowlist() {
       contactName,
     });
 
+    const baseHistorySearchLimit = Math.max(8, Math.min(runtimeSettings?.aiHistoryLineLimit ?? 12, 20));
+    const adaptiveHistoryDepthDelta = Math.round(clamp(adaptiveHints?.historyDepthDelta ?? 0, -4, 8));
+    const outreachHistorySearchLimit = Math.max(8, Math.min(baseHistorySearchLimit + adaptiveHistoryDepthDelta, 24));
     const outreachContextTools = await runWorkerContextToolOrchestration({
       convex,
       threadId: item.threadId,
@@ -7409,12 +7594,14 @@ function resolveTextEmojiAllowlist() {
       historyLines,
       allowHistorySearch: true,
       includeContactFacts: true,
-      allowFactExtraction: false,
-      historySearchLimit: Math.max(8, Math.min(runtimeSettings?.aiHistoryLineLimit ?? 12, 20)),
+      allowFactExtraction: Boolean(adaptiveHints?.preferFactRefresh) || adaptiveHints?.factRefreshBias !== "low",
+      historySearchLimit: outreachHistorySearchLimit,
       factsLimit: 8,
+      adaptiveHints,
     });
     const outreachHistoryOverride = outreachContextTools.historySearchOverride;
     const outreachContactFacts = outreachContextTools.contactFacts;
+    const outreachRetrievalDiagnostics = outreachContextTools.retrievalDiagnostics;
     const baseOutreachStyleHints =
       outreachContactFacts.length > 0
         ? [
@@ -7438,12 +7625,34 @@ function resolveTextEmojiAllowlist() {
               ...(complimentPlayfulScenario ? ["romance_playful_fake_scenario"] : []),
             ]
           : baseOutreachStyleHints;
+    const outreachContextPack =
+      buildContextPack({
+        intent: `outreach:${outreachMode}`,
+        inboundOrSeedText: promptSeed,
+        selectedHistoryLines:
+          outreachHistoryOverride?.lines && outreachHistoryOverride.lines.length > 0
+            ? outreachHistoryOverride.lines
+            : historyLines.slice(-Math.max(6, Math.min(outreachHistorySearchLimit, 12))),
+        selectedContactFacts:
+          outreachContactFacts.length > 0 ? outreachContactFacts : persistedContextPack?.selectedContactFacts || [],
+        styleHints: outreachStyleHints,
+        retrievalDiagnostics: {
+          ...persistedContextPack?.retrievalDiagnostics,
+          ...outreachRetrievalDiagnostics,
+          adaptiveHistoryDepthDelta: adaptiveHints?.historyDepthDelta ?? 0,
+          adaptiveFactRefreshBias: adaptiveHints?.factRefreshBias,
+          adaptiveSampleSize: adaptiveHints?.sampleSize,
+        },
+        capturedAt: Date.now(),
+      }) || persistedContextPack;
 
     const ai = await generateReplyWithFallback({
       inboundText: promptSeed,
       historyLines,
       historySearchOverride: outreachHistoryOverride,
       contactFacts: outreachContactFacts,
+      contextPack: outreachContextPack,
+      adaptiveHints: adaptiveHints || undefined,
       styleHints: outreachStyleHints,
       styleProfile: styleProfile || undefined,
       personality: personalitySetting
@@ -7656,6 +7865,7 @@ function resolveTextEmojiAllowlist() {
       confidence,
       typingMs: timing.typingMs,
       toolRunId,
+      contextPack: outreachContextPack,
     });
 
     if (outreachMode === "good_morning" && romanceMorningMode && romancePromptFingerprint) {
@@ -7685,6 +7895,7 @@ function resolveTextEmojiAllowlist() {
     return {
       ...item,
       toolRunId,
+      contextPack: outreachContextPack,
       messageText: safeText,
       typingMs: timing.typingMs,
     };
@@ -7702,6 +7913,14 @@ function resolveTextEmojiAllowlist() {
     }
 
     const toolRunId = createToolRunId("status", item.threadId, item.outboxId);
+    const persistedContextPack = normalizeContextPack(item.contextPack);
+    const adaptiveHints = (await convex
+      .query(convexRefs.aiFeedbackGetThreadAdaptiveHints, {
+        threadId: item.threadId as Id<"threads">,
+        path: "status",
+        limit: 60,
+      })
+      .catch(() => null)) as ThreadAdaptiveHintsSnapshot | null;
     const trendTheme = (item.statusTrendTheme || "daily life, motivation, fun").trim();
     const demographic = (item.statusDemographicHint || "mixed").trim();
     const audienceCount = Math.max(0, item.statusAudienceJids?.length || 0);
@@ -7838,6 +8057,27 @@ function resolveTextEmojiAllowlist() {
 
     const blendedTrendTheme = [trendTheme, internetTrendTheme].filter(Boolean).join(", ");
     const interestTheme = trendSearchPlan.interests.length > 0 ? trendSearchPlan.interests.join(", ") : trendTheme;
+    const statusHistoryLines = [
+      ...(persistedContextPack?.selectedHistoryLines || []),
+      `Trend keywords: ${blendedTrendTheme || trendTheme}`,
+      `Interest themes: ${interestTheme}`,
+      `Demographic mix: ${demographic}`,
+      `Audience count: ${audienceCount}`,
+      ...(statusVoiceSamples.length > 0 ? [`Recent self-posted statuses: ${statusVoiceSamples.join(" | ")}`] : []),
+      ...(statusVoicePhrases.length > 0 ? [`Recurring status phrases: ${statusVoicePhrases.join(" | ")}`] : []),
+      ...(statusVoiceNotes.length > 0 ? [`Posting voice notes: ${statusVoiceNotes.join(" | ")}`] : []),
+      ...internetTrendLines,
+    ];
+    const statusStyleHints = [
+      ...(persistedContextPack?.styleHints || []),
+      "status",
+      "engagement",
+      `demographic:${demographic}`,
+      ...trendSearchPlan.interests.slice(0, 3).map((interest) => `interest:${interest}`),
+      ...statusVoicePhrases.map((phrase) => `status_phrase:${phrase}`),
+      ...statusVoiceNotes.map((note) => `status_voice:${note}`),
+      ...(internetTrendTheme ? [`internet:${internetTrendTheme}`] : []),
+    ];
 
     const promptSeed = [
       "Generate one WhatsApp status update as a confident, relatable statement.",
@@ -7854,28 +8094,28 @@ function resolveTextEmojiAllowlist() {
       "Do not ask questions or invite answers.",
       "Keep under 140 characters. Use at most one emoji.",
     ].join("\n");
+    const statusContextPack =
+      buildContextPack({
+        intent: "status:hydrate",
+        inboundOrSeedText: promptSeed,
+        selectedHistoryLines: statusHistoryLines.slice(-14),
+        selectedContactFacts: persistedContextPack?.selectedContactFacts || [],
+        styleHints: statusStyleHints,
+        retrievalDiagnostics: {
+          ...persistedContextPack?.retrievalDiagnostics,
+          adaptiveHistoryDepthDelta: adaptiveHints?.historyDepthDelta ?? 0,
+          adaptiveFactRefreshBias: adaptiveHints?.factRefreshBias,
+          adaptiveSampleSize: adaptiveHints?.sampleSize,
+        },
+        capturedAt: Date.now(),
+      }) || persistedContextPack;
 
     const ai = await generateReplyWithFallback({
       inboundText: promptSeed,
-      historyLines: [
-        `Trend keywords: ${blendedTrendTheme || trendTheme}`,
-        `Interest themes: ${interestTheme}`,
-        `Demographic mix: ${demographic}`,
-        `Audience count: ${audienceCount}`,
-        ...(statusVoiceSamples.length > 0 ? [`Recent self-posted statuses: ${statusVoiceSamples.join(" | ")}`] : []),
-        ...(statusVoicePhrases.length > 0 ? [`Recurring status phrases: ${statusVoicePhrases.join(" | ")}`] : []),
-        ...(statusVoiceNotes.length > 0 ? [`Posting voice notes: ${statusVoiceNotes.join(" | ")}`] : []),
-        ...internetTrendLines,
-      ],
-      styleHints: [
-        "status",
-        "engagement",
-        `demographic:${demographic}`,
-        ...trendSearchPlan.interests.slice(0, 3).map((interest) => `interest:${interest}`),
-        ...statusVoicePhrases.map((phrase) => `status_phrase:${phrase}`),
-        ...statusVoiceNotes.map((note) => `status_voice:${note}`),
-        ...(internetTrendTheme ? [`internet:${internetTrendTheme}`] : []),
-      ],
+      historyLines: statusHistoryLines,
+      contextPack: statusContextPack,
+      adaptiveHints: adaptiveHints || undefined,
+      styleHints: statusStyleHints,
       runtime: {
         temperature: runtimeSettings?.aiTemperature,
         maxOutputTokens: Math.min(runtimeSettings?.aiMaxOutputTokens ?? 120, 120),
@@ -8045,11 +8285,13 @@ function resolveTextEmojiAllowlist() {
       mediaCaption,
       statusTrendTheme: blendedTrendTheme || trendTheme,
       statusDemographicHint: demographic,
+      contextPack: statusContextPack,
     });
 
     return {
       ...item,
       toolRunId,
+      contextPack: statusContextPack,
       sendKind: (resolvedFormat === "meme" ? "meme" : "text") as OutboxClaimedItem["sendKind"],
       statusFormat: resolvedFormat,
       mediaAssetId,

@@ -1,6 +1,6 @@
 import { v } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel";
-import { internalMutation, mutation, query } from "./_generated/server";
+import { internalMutation, internalQuery, mutation, query, type QueryCtx } from "./_generated/server";
 import {
   FACT_STALE_THRESHOLD_DAYS,
   NEUTRAL_EVALUATION_HORIZON_MS,
@@ -73,27 +73,45 @@ export function summarizeAdaptiveHintsFromSignals(signals: FeedbackSignalRow[]) 
   };
 }
 
+async function loadThreadAdaptiveHints(
+  ctx: QueryCtx,
+  args: {
+    threadId: Id<"threads">;
+    path?: "reply" | "outreach" | "status";
+    limit?: number;
+  },
+) {
+  const limit = Math.max(12, Math.min(Math.round(args.limit ?? 60), 180));
+  const rows = await ctx.db
+    .query("aiFeedbackSignals")
+    .withIndex("by_threadId_and_createdAt", (q) => q.eq("threadId", args.threadId))
+    .order("desc")
+    .take(limit * 2);
+  const filtered = args.path ? rows.filter((row) => row.path === args.path).slice(0, limit) : rows.slice(0, limit);
+  const summary = summarizeAdaptiveHintsFromSignals(filtered);
+  return {
+    threadId: args.threadId,
+    path: args.path,
+    ...summary,
+  };
+}
+
+export const getThreadAdaptiveHintsInternal = internalQuery({
+  args: {
+    threadId: v.id("threads"),
+    path: v.optional(aiFeedbackPathValidator),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => await loadThreadAdaptiveHints(ctx, args),
+});
+
 export const getThreadAdaptiveHints = query({
   args: {
     threadId: v.id("threads"),
     path: v.optional(aiFeedbackPathValidator),
     limit: v.optional(v.number()),
   },
-  handler: async (ctx, args) => {
-    const limit = Math.max(12, Math.min(Math.round(args.limit ?? 60), 180));
-    const rows = await ctx.db
-      .query("aiFeedbackSignals")
-      .withIndex("by_threadId_and_createdAt", (q) => q.eq("threadId", args.threadId))
-      .order("desc")
-      .take(limit * 2);
-    const filtered = args.path ? rows.filter((row) => row.path === args.path).slice(0, limit) : rows.slice(0, limit);
-    const summary = summarizeAdaptiveHintsFromSignals(filtered);
-    return {
-      threadId: args.threadId,
-      path: args.path,
-      ...summary,
-    };
-  },
+  handler: async (ctx, args) => await loadThreadAdaptiveHints(ctx, args),
 });
 
 export const recordSignal = mutation({

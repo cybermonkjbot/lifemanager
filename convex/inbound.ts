@@ -4,6 +4,7 @@ import type { MutationCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { mutation } from "./_generated/server";
 import { detectFutureCommitment, hasRecentFollowupDuplicate } from "./lib/commitments";
+import { POSITIVE_ENGAGEMENT_WINDOW_MS, resolveFeedbackPath, resolveOutreachModeWithFallback } from "./lib/aiSmartness";
 import { getConfig } from "./lib/config";
 import {
   classifyThreadKind,
@@ -676,6 +677,57 @@ export const ingest = mutation({
         });
       }
 
+    }
+
+    if (!isHistoryIngest && !isStatusMessage && messageType !== "reaction") {
+      const sentOutbox = await ctx.db
+        .query("outbox")
+        .withIndex("by_thread_and_status", (q) => q.eq("threadId", thread._id).eq("status", "sent"))
+        .order("desc")
+        .take(40);
+      const engagementWindowStart = Math.max(0, messageAt - POSITIVE_ENGAGEMENT_WINDOW_MS);
+      const engagedOutbox = sentOutbox.find((row) => {
+        const sentAt = Math.max(row.updatedAt || 0, row.createdAt || 0, row.sendAt || 0);
+        return sentAt >= engagementWindowStart && sentAt <= messageAt;
+      });
+      if (engagedOutbox) {
+        const priorSignals = await ctx.db
+          .query("aiFeedbackSignals")
+          .withIndex("by_outboxId_and_createdAt", (q) => q.eq("outboxId", engagedOutbox._id))
+          .order("desc")
+          .take(20);
+        const alreadyRecorded = priorSignals.some((signal) => signal.signalType === "engaged_reply");
+        if (!alreadyRecorded) {
+          const engagedDraft = await ctx.db.get(engagedOutbox.draftId);
+          const outreachMode = resolveOutreachModeWithFallback({
+            explicitOutreachMode: engagedOutbox.outreachMode || engagedDraft?.outreachMode,
+            reason: engagedDraft?.reason,
+          });
+          await ctx.db.insert("aiFeedbackSignals", {
+            threadId: thread._id,
+            outboxId: engagedOutbox._id,
+            toolRunId: engagedOutbox.toolRunId,
+            path: resolveFeedbackPath({
+              isStatusPost: engagedOutbox.isStatusPost,
+              explicitOutreachMode: outreachMode,
+              reason: engagedDraft?.reason,
+            }),
+            signalType: "engaged_reply",
+            score: 1,
+            metadata: {
+              reason: "inbound_non_reaction_reply",
+              detail: "Inbound non-reaction reply observed inside engagement window.",
+              signalAt: now,
+              sentAt: Math.max(engagedOutbox.updatedAt || 0, engagedOutbox.createdAt || 0, engagedOutbox.sendAt || 0),
+              engagementWindowMs: POSITIVE_ENGAGEMENT_WINDOW_MS,
+              inboundMessageId: messageId,
+              inboundMessageType: messageType,
+              tags: ["engagement", "positive"],
+            },
+            createdAt: now,
+          });
+        }
+      }
     }
 
     if (

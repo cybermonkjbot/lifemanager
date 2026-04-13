@@ -3180,6 +3180,116 @@ test("generateReplyWithFallback injects selected contact-memory facts and logs s
   }
 });
 
+test("generateReplyWithFallback ranks fresher contact facts above stale facts with similar overlap", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  const requestBodies: string[] = [];
+  const now = Date.now();
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      requestBodies.push(typeof init?.body === "string" ? init.body : "");
+      return new Response(JSON.stringify({ output_text: "Sunday brunch sounds good." }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    await generateReplyWithFallback({
+      inboundText: "Should I suggest brunch this Sunday?",
+      historyLines: ["Them: Should I suggest brunch this Sunday?"],
+      contactFacts: [
+        {
+          factType: "preference",
+          factValue: "She now hates brunch on Sundays.",
+          confidence: 0.99,
+          updatedAt: now - 40 * 24 * 60 * 60 * 1000,
+        },
+        {
+          factType: "preference",
+          factValue: "She prefers brunch on Sundays.",
+          confidence: 0.76,
+          updatedAt: now - 24 * 60 * 60 * 1000,
+        },
+      ],
+      styleHints: [],
+      adaptiveHints: {
+        factRefreshBias: "high",
+      },
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "log_only",
+      },
+    });
+
+    const promptBody = requestBodies.join("\n");
+    const freshIndex = promptBody.indexOf("She prefers brunch on Sundays.");
+    const staleIndex = promptBody.indexOf("She now hates brunch on Sundays.");
+    assert.ok(freshIndex >= 0);
+    assert.ok(staleIndex >= 0);
+    assert.ok(freshIndex < staleIndex);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback consumes persisted contextPack as first-class context", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  const requestBodies: string[] = [];
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      requestBodies.push(typeof init?.body === "string" ? init.body : "");
+      return new Response(JSON.stringify({ output_text: "Noon works, let's lock it." }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "Can we confirm the time?",
+      historyLines: [],
+      contextPack: {
+        intent: "reply:text",
+        inboundOrSeedText: "Can we confirm the time?",
+        selectedHistoryLines: ["Them: Let's meet at noon tomorrow."],
+        selectedContactFacts: [{ factType: "schedule", factValue: "Noon is their preferred meeting window.", confidence: 0.8 }],
+        styleHints: ["be concise"],
+        retrievalDiagnostics: {
+          historySearchConfidence: 0.72,
+          historySearchCandidateCount: 5,
+          historySearchSemanticRerankCount: 2,
+          historySearchRetrievalStage: "semantic",
+        },
+        capturedAt: Date.now(),
+      },
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "log_only",
+      },
+    });
+
+    const promptBody = requestBodies.join("\n");
+    assert.match(promptBody, /Context intent snapshot: reply:text/i);
+    assert.match(promptBody, /Let's meet at noon tomorrow/i);
+    assert.ok(result.contextToolCalls?.some((call) => call.name === "conversation_history_search"));
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
 test("generateReplyWithFallback records external semantic search diagnostics when override is provided", async () => {
   const snapshot = clearAiEnv();
   try {

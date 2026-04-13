@@ -2,6 +2,7 @@ import { v } from "convex/values";
 import { makeFunctionReference } from "convex/server";
 import { internal } from "./_generated/api";
 import { action, internalAction, internalQuery, mutation } from "./_generated/server";
+import { contextPackValidator, outreachModeValidator, resolveFeedbackPath, resolveOutreachModeWithFallback } from "./lib/aiSmartness";
 import { getConfig } from "./lib/config";
 import { estimateHumanTiming, evaluateGuardrail, looksLikeQuestion } from "./lib/heuristics";
 
@@ -130,6 +131,8 @@ export const saveGenerated = mutation({
     confidence: v.number(),
     delayMs: v.number(),
     typingMs: v.number(),
+    outreachMode: v.optional(outreachModeValidator),
+    contextPack: v.optional(contextPackValidator),
     reason: v.optional(v.string()),
     sendKind: v.optional(v.union(v.literal("text"), v.literal("reaction"), v.literal("sticker"), v.literal("meme"))),
     reactionEmoji: v.optional(v.string()),
@@ -164,6 +167,8 @@ export const saveOrReplacePending = mutation({
     confidence: v.number(),
     delayMs: v.number(),
     typingMs: v.number(),
+    outreachMode: v.optional(outreachModeValidator),
+    contextPack: v.optional(contextPackValidator),
     reason: v.optional(v.string()),
     sendKind: v.optional(v.union(v.literal("text"), v.literal("reaction"), v.literal("sticker"), v.literal("meme"))),
     reactionEmoji: v.optional(v.string()),
@@ -230,6 +235,8 @@ export const saveOrReplacePending = mutation({
           provider: args.provider,
           delayMs: args.delayMs,
           typingMs: args.typingMs,
+          outreachMode: args.outreachMode ?? draft.outreachMode,
+          contextPack: args.contextPack ?? draft.contextPack,
           reason: args.reason,
           updatedAt: now,
         });
@@ -251,6 +258,8 @@ export const saveOrReplacePending = mutation({
           leaseExpiresAt: undefined,
           error: undefined,
           provider: args.provider,
+          outreachMode: args.outreachMode ?? primaryPending.outreachMode,
+          contextPack: args.contextPack ?? primaryPending.contextPack,
           updatedAt: now,
         });
 
@@ -312,6 +321,8 @@ export const saveOrReplacePending = mutation({
       attempts: 0,
       idempotencyKey: `${draftId}-${now}`,
       provider: args.provider,
+      outreachMode: args.outreachMode,
+      contextPack: args.contextPack,
       createdAt: now,
       updatedAt: now,
     });
@@ -450,6 +461,8 @@ export const approve = mutation({
         reactionTargetWhatsAppMessageId,
         mediaAssetId: draft.mediaAssetId,
         mediaCaption: draft.mediaCaption,
+        outreachMode: draft.outreachMode ?? pendingOutbox.outreachMode,
+        contextPack: draft.contextPack,
         status: "pending",
         workerId: undefined,
         leaseExpiresAt: undefined,
@@ -487,6 +500,8 @@ export const approve = mutation({
       attempts: 0,
       idempotencyKey: `${draft._id}-${now}`,
       provider: draft.provider,
+      outreachMode: draft.outreachMode,
+      contextPack: draft.contextPack,
       createdAt: now,
       updatedAt: now,
     });
@@ -545,6 +560,34 @@ export const updateDraftContent = mutation({
         workerId: undefined,
         leaseExpiresAt: undefined,
         updatedAt: now,
+      });
+    }
+
+    if (nextText !== draft.text) {
+      const activeOutbox = outboxRows.find((row) => row.status === "pending" || row.status === "claimed");
+      const outreachMode = resolveOutreachModeWithFallback({
+        explicitOutreachMode: draft.outreachMode,
+        reason: draft.reason,
+      });
+      await ctx.db.insert("aiFeedbackSignals", {
+        threadId: draft.threadId,
+        outboxId: activeOutbox?._id,
+        toolRunId: draft.toolRunId,
+        path: resolveFeedbackPath({
+          isStatusPost: draft.isStatusPost,
+          explicitOutreachMode: outreachMode,
+          reason: draft.reason,
+        }),
+        signalType: "manual_rewrite",
+        score: -0.7,
+        metadata: {
+          reason: "draft_content_edited",
+          detail: `Manual rewrite before send (${draft.text.slice(0, 120)} -> ${nextText.slice(0, 120)})`,
+          signalAt: now,
+          draftId: draft._id,
+          tags: ["manual", "rewrite"],
+        },
+        createdAt: now,
       });
     }
 
@@ -659,12 +702,14 @@ export const snooze = mutation({
         reactionTargetWhatsAppMessageId: draft.reactionTargetMessageId
           ? reactionTargetMessage?.whatsappMessageId
           : undefined,
-        mediaAssetId: draft.mediaAssetId,
-        mediaCaption: draft.mediaCaption,
-        sendAt,
-        status: "pending",
-        workerId: undefined,
-        leaseExpiresAt: undefined,
+      mediaAssetId: draft.mediaAssetId,
+      mediaCaption: draft.mediaCaption,
+      outreachMode: draft.outreachMode ?? activeOutbox.outreachMode,
+      contextPack: draft.contextPack,
+      sendAt,
+      status: "pending",
+      workerId: undefined,
+      leaseExpiresAt: undefined,
         error: undefined,
         updatedAt: now,
       });
@@ -694,6 +739,8 @@ export const snooze = mutation({
       attempts: 0,
       idempotencyKey: `${draft._id}-snooze-${now}`,
       provider: draft.provider,
+      outreachMode: draft.outreachMode,
+      contextPack: draft.contextPack,
       createdAt: now,
       updatedAt: now,
     });

@@ -1,12 +1,18 @@
 import { v } from "convex/values";
 import { makeFunctionReference } from "convex/server";
 import { internal } from "./_generated/api";
-import { internalMutation, mutation, query } from "./_generated/server";
+import { internalMutation, mutation, query, type MutationCtx } from "./_generated/server";
 import type { Doc } from "./_generated/dataModel";
 import { detectFutureCommitment, hasRecentFollowupDuplicate } from "./lib/commitments";
 import { DEFAULT_LEASE_MS, DEFAULT_RETRY_LIMIT } from "./lib/constants";
 import { getConfig } from "./lib/config";
 import { detectTodoCandidate } from "./lib/heuristics";
+import {
+  NEUTRAL_EVALUATION_HORIZON_MS,
+  contextPackValidator,
+  resolveFeedbackPath,
+  resolveOutreachModeWithFallback,
+} from "./lib/aiSmartness";
 import {
   countUnansweredOutboundStreak,
   latestInboundMessageAt,
@@ -14,7 +20,7 @@ import {
   resolveLongSilenceReopenWeeks,
   shouldAllowLongSilenceConversationStarter,
 } from "./lib/outboundGuard";
-import { deriveOutreachModeFromReason } from "./lib/outreachModes";
+import type { OutreachMode } from "./lib/outreachModes";
 import {
   classifyThreadKind,
   eligibilityReasonLabel,
@@ -35,8 +41,57 @@ type MessageProvider = "whatsapp" | "instagram";
 const OUTBOUND_DUPLICATE_WINDOW_MS = 6 * 60 * 60 * 1000;
 const OUTBOUND_DUPLICATE_MIN_KEY_LENGTH = 16;
 
-export function resolveClaimOutreachMode(reason?: string) {
-  return deriveOutreachModeFromReason(reason);
+export function resolveClaimOutreachMode(
+  input?:
+    | string
+    | {
+        outreachMode?: OutreachMode | null;
+        reason?: string | null;
+      },
+) {
+  if (typeof input === "string" || input === undefined) {
+    return resolveOutreachModeWithFallback({ reason: input });
+  }
+  return resolveOutreachModeWithFallback({
+    explicitOutreachMode: input.outreachMode,
+    reason: input.reason,
+  });
+}
+
+async function recordAiFeedbackSignal(args: {
+  ctx: MutationCtx;
+  threadId: Doc<"aiFeedbackSignals">["threadId"];
+  outboxId?: Doc<"aiFeedbackSignals">["outboxId"];
+  toolRunId?: string;
+  path: "reply" | "outreach" | "status";
+  signalType: string;
+  score: number;
+  metadata?: {
+    reason?: string;
+    detail?: string;
+    eventType?: string;
+    signalAt?: number;
+    sentAt?: number;
+    engagementWindowMs?: number;
+    evaluationHorizonMs?: number;
+    staleMessageAt?: number;
+    staleMessagePreview?: string;
+    inboundMessageId?: Doc<"messages">["_id"];
+    inboundMessageType?: string;
+    draftId?: Doc<"replyDrafts">["_id"];
+    tags?: string[];
+  };
+}) {
+  await args.ctx.db.insert("aiFeedbackSignals", {
+    threadId: args.threadId,
+    outboxId: args.outboxId,
+    toolRunId: args.toolRunId,
+    path: args.path,
+    signalType: args.signalType,
+    score: args.score,
+    metadata: args.metadata,
+    createdAt: Date.now(),
+  });
 }
 
 function normalizeMessageProvider(provider?: MessageProvider): MessageProvider {
@@ -252,6 +307,7 @@ export const claimDue = mutation({
       draftId: string;
       toolRunId?: string;
       outreachMode?: "proactive" | "good_morning" | "compliment";
+      contextPack?: Doc<"outbox">["contextPack"];
       messageText: string;
       typingMs: number;
       jid: string;
@@ -294,6 +350,15 @@ export const claimDue = mutation({
         continue;
       }
       const sourceMessage = await ctx.db.get(draft.sourceMessageId);
+      const resolvedOutreachMode = resolveClaimOutreachMode({
+        outreachMode: item.outreachMode || draft.outreachMode,
+        reason: draft.reason,
+      });
+      const feedbackPath = resolveFeedbackPath({
+        isStatusPost: item.isStatusPost,
+        explicitOutreachMode: resolvedOutreachMode,
+        reason: draft.reason,
+      });
       const threadKind = thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup });
       if (threadKind === "direct") {
         const romanceState = await ctx.db
@@ -330,6 +395,23 @@ export const claimDue = mutation({
             detail: reason,
             createdAt: now,
           });
+          await recordAiFeedbackSignal({
+            ctx,
+            threadId: item.threadId,
+            outboxId: item._id,
+            toolRunId: item.toolRunId,
+            path: feedbackPath,
+            signalType: "suppressed_manual_intervention",
+            score: -1,
+            metadata: {
+              reason: "ignored_pause",
+              detail: reason,
+              eventType: "outbox.suppressed.ignored_pause",
+              signalAt: now,
+              draftId: draft._id,
+              tags: ["suppression", "manual_intervention"],
+            },
+          }).catch(() => undefined);
           continue;
         }
       }
@@ -402,6 +484,25 @@ export const claimDue = mutation({
             detail: `${staleAtIso} · ${(staleInbound.text || "[Inbound message]").slice(0, 220)}`,
             createdAt: now,
           });
+          await recordAiFeedbackSignal({
+            ctx,
+            threadId: item.threadId,
+            outboxId: item._id,
+            toolRunId: item.toolRunId,
+            path: feedbackPath,
+            signalType: "suppressed_stale",
+            score: -1,
+            metadata: {
+              reason: "stale_inbound",
+              detail: reason,
+              eventType: "outbox.suppressed.stale_inbound",
+              signalAt: now,
+              staleMessageAt: staleInbound.messageAt,
+              staleMessagePreview: (staleInbound.text || "").slice(0, 180),
+              draftId: draft._id,
+              tags: ["suppression", "stale"],
+            },
+          }).catch(() => undefined);
           continue;
         }
       }
@@ -596,7 +697,7 @@ export const claimDue = mutation({
           unansweredStreak: unansweredState.unansweredStreak,
           latestInboundAt: unansweredState.latestInboundAt,
           nowMs: now,
-          isConversationStarter: Boolean(resolveClaimOutreachMode(draft.reason)),
+          isConversationStarter: Boolean(resolvedOutreachMode),
         });
 
         if (unansweredState.unansweredStreak >= MAX_UNANSWERED_OUTBOUND_STREAK && !allowLongSilenceStarter) {
@@ -716,6 +817,23 @@ export const claimDue = mutation({
                 detail: reason,
                 createdAt: now,
               });
+              await recordAiFeedbackSignal({
+                ctx,
+                threadId: item.threadId,
+                outboxId: item._id,
+                toolRunId: item.toolRunId,
+                path: feedbackPath,
+                signalType: "suppressed_manual_cooldown",
+                score: -0.9,
+                metadata: {
+                  reason: "manual_cooldown",
+                  detail: reason,
+                  eventType: "outbox.suppressed.manual_cooldown",
+                  signalAt: now,
+                  draftId: draft._id,
+                  tags: ["suppression", "manual_intervention"],
+                },
+              }).catch(() => undefined);
               continue;
             }
 
@@ -814,7 +932,8 @@ export const claimDue = mutation({
         threadId: item.threadId,
         draftId: item.draftId,
         toolRunId: item.toolRunId,
-        outreachMode: resolveClaimOutreachMode(draft.reason),
+        outreachMode: resolvedOutreachMode,
+        contextPack: item.contextPack || draft.contextPack,
         messageText: item.messageText,
         typingMs: draft.typingMs,
         jid: thread.jid,
@@ -1106,6 +1225,32 @@ export const suppressForManualIntervention = mutation({
         });
       }
 
+      const outreachMode = resolveClaimOutreachMode({
+        outreachMode: item.outreachMode || draft?.outreachMode,
+        reason: draft?.reason,
+      });
+      await recordAiFeedbackSignal({
+        ctx,
+        threadId: item.threadId,
+        outboxId: item._id,
+        toolRunId: item.toolRunId,
+        path: resolveFeedbackPath({
+          isStatusPost: item.isStatusPost,
+          explicitOutreachMode: outreachMode,
+          reason: draft?.reason,
+        }),
+        signalType: "suppressed_manual_intervention",
+        score: -1,
+        metadata: {
+          reason: "manual_reply_preempted_automation",
+          detail: "Automated outbox item suppressed after manual intervention.",
+          eventType: "outbox.suppressed.manual",
+          signalAt: now,
+          draftId: draft?._id,
+          tags: ["suppression", "manual_intervention"],
+        },
+      }).catch(() => undefined);
+
       if (item.followUpId) {
         const followUp = await ctx.db.get(item.followUpId);
         if (followUp && followUp.status !== "sent" && followUp.status !== "failed" && followUp.status !== "cancelled") {
@@ -1148,6 +1293,7 @@ export const hydrateAiOutreach = mutation({
     confidence: v.number(),
     typingMs: v.number(),
     toolRunId: v.optional(v.string()),
+    contextPack: v.optional(contextPackValidator),
   },
   handler: async (ctx, args) => {
     const outbox = await ctx.db.get(args.outboxId);
@@ -1160,6 +1306,7 @@ export const hydrateAiOutreach = mutation({
       messageText: args.text,
       provider: args.provider,
       toolRunId: args.toolRunId,
+      contextPack: args.contextPack ?? outbox.contextPack,
       updatedAt: now,
     });
 
@@ -1171,6 +1318,7 @@ export const hydrateAiOutreach = mutation({
         confidence: args.confidence,
         typingMs: args.typingMs,
         toolRunId: args.toolRunId,
+        contextPack: args.contextPack ?? draft.contextPack,
         updatedAt: now,
       });
     }
@@ -1201,6 +1349,7 @@ export const hydrateAiStatus = mutation({
     mediaCaption: v.optional(v.string()),
     statusTrendTheme: v.optional(v.string()),
     statusDemographicHint: v.optional(v.string()),
+    contextPack: v.optional(contextPackValidator),
   },
   handler: async (ctx, args) => {
     const outbox = await ctx.db.get(args.outboxId);
@@ -1220,6 +1369,7 @@ export const hydrateAiStatus = mutation({
       statusTrendTheme: args.statusTrendTheme ?? outbox.statusTrendTheme,
       statusDemographicHint: args.statusDemographicHint ?? outbox.statusDemographicHint,
       statusFormat: args.statusFormat,
+      contextPack: args.contextPack ?? outbox.contextPack,
       updatedAt: now,
     });
 
@@ -1237,6 +1387,7 @@ export const hydrateAiStatus = mutation({
         statusTrendTheme: args.statusTrendTheme ?? draft.statusTrendTheme,
         statusDemographicHint: args.statusDemographicHint ?? draft.statusDemographicHint,
         statusFormat: args.statusFormat,
+        contextPack: args.contextPack ?? draft.contextPack,
         updatedAt: now,
       });
     }
@@ -1314,6 +1465,7 @@ export const rewriteClaimedMessage = mutation({
     }
 
     const now = Date.now();
+    const previousText = outbox.messageText;
     await ctx.db.patch(outbox._id, {
       messageText: args.messageText,
       mediaCaption: args.mediaCaption,
@@ -1326,6 +1478,33 @@ export const rewriteClaimedMessage = mutation({
         text: args.messageText,
         updatedAt: now,
       });
+    }
+
+    if (args.messageText.trim() && args.messageText.trim() !== previousText.trim()) {
+      const outreachMode = resolveClaimOutreachMode({
+        outreachMode: outbox.outreachMode || draft?.outreachMode,
+        reason: draft?.reason,
+      });
+      await recordAiFeedbackSignal({
+        ctx,
+        threadId: outbox.threadId,
+        outboxId: outbox._id,
+        toolRunId: outbox.toolRunId,
+        path: resolveFeedbackPath({
+          isStatusPost: outbox.isStatusPost,
+          explicitOutreachMode: outreachMode,
+          reason: draft?.reason,
+        }),
+        signalType: "manual_rewrite",
+        score: -0.7,
+        metadata: {
+          reason: "claimed_message_rewrite",
+          detail: `Manual rewrite on claimed outbox (${previousText.slice(0, 120)} -> ${args.messageText.slice(0, 120)})`,
+          signalAt: now,
+          draftId: draft?._id,
+          tags: ["manual", "rewrite"],
+        },
+      }).catch(() => undefined);
     }
 
     return outbox._id;
@@ -1361,7 +1540,10 @@ export const markSent = mutation({
     });
 
     const draft = await ctx.db.get(item.draftId);
-    const outreachMode = resolveClaimOutreachMode(draft?.reason);
+    const outreachMode = resolveClaimOutreachMode({
+      outreachMode: item.outreachMode || draft?.outreachMode,
+      reason: draft?.reason,
+    });
     const sourceMessage = draft ? await ctx.db.get(draft.sourceMessageId) : null;
     if (draft) {
       await ctx.db.patch(draft._id, {
@@ -1604,6 +1786,13 @@ export const markSent = mutation({
       detail: item.messageText.slice(0, 240),
       createdAt: now,
     });
+
+    await ctx.scheduler
+      .runAfter(NEUTRAL_EVALUATION_HORIZON_MS, internal.aiFeedback.evaluateNoReplySignal, {
+        outboxId: item._id,
+        sentAt: now,
+      })
+      .catch(() => undefined);
 
     await ctx.scheduler.runAfter(0, internal.backlog.refreshThread, {
       threadId: item.threadId,

@@ -21,6 +21,13 @@ import {
   normalizePidginFamilyTerms,
 } from "../../shared/pidgin-lexicon";
 import { stripEmojiCharacters } from "./emoji-policy";
+import {
+  isFactStale,
+  resolveFactStaleThresholdMs,
+  resolveRetrievalLowConfidenceThreshold,
+  type AdaptiveTuningHintsSnapshot,
+  type ContextPackSnapshot,
+} from "./context-pack";
 
 const execFileAsync = promisify(execFile);
 
@@ -133,6 +140,7 @@ type ContactMemoryFactContext = {
   factValue: string;
   factType: ContactMemoryFactType;
   confidence?: number;
+  updatedAt?: number;
 };
 
 export type FriendshipGenerationCohort = "boomer" | "gen_z" | "bridge";
@@ -941,6 +949,13 @@ function clamp01(value: number) {
     return 0.72;
   }
   return Math.max(0, Math.min(value, 1));
+}
+
+function clamp01WithFallback(value: number | undefined, fallback: number) {
+  if (!Number.isFinite(value)) {
+    return Math.max(0, Math.min(fallback, 1));
+  }
+  return clamp01(value as number);
 }
 
 function clampQualityThreshold(value: number | undefined, fallback = 0.72) {
@@ -1782,6 +1797,9 @@ type ContactFactSelectionInput = {
   contactFacts: ContactMemoryFactContext[];
   query: string;
   limit: number;
+  staleThresholdMs?: number;
+  nowMs?: number;
+  factRefreshBias?: "low" | "normal" | "high";
 };
 
 type ResponseWorkbenchInput = {
@@ -2561,6 +2579,9 @@ function runContactMemoryFactSelectionTool(args: ContactFactSelectionInput) {
   const startedAt = Date.now();
   const limit = Math.round(Math.max(1, Math.min(args.limit, 8)));
   const queryKeywords = Array.from(new Set(extractKeywords(args.query))).slice(0, 20);
+  const nowMs = Number.isFinite(args.nowMs) ? (args.nowMs as number) : Date.now();
+  const staleThresholdMs = Math.max(60_000, args.staleThresholdMs ?? resolveFactStaleThresholdMs());
+  const factRefreshBias = args.factRefreshBias || "normal";
   const factTypeWeight: Record<ContactMemoryFactType, number> = {
     relationship: 1.1,
     schedule: 1.05,
@@ -2585,13 +2606,19 @@ function runContactMemoryFactSelectionTool(args: ContactFactSelectionInput) {
       }
       const overlapScore = overlap * 2.2;
       const confidenceScore = clamp01(Number(fact.confidence ?? 0.55));
+      const freshnessScore = isFactStale(fact.updatedAt, staleThresholdMs, nowMs)
+        ? 0.08
+        : clamp01WithFallback(1 - Math.max(0, nowMs - (fact.updatedAt || nowMs)) / Math.max(staleThresholdMs * 3, 1), 0.95);
+      const freshnessWeight = factRefreshBias === "high" ? 1.25 : factRefreshBias === "low" ? 0.5 : 0.9;
       const typeWeight = factTypeWeight[fact.factType] ?? 0.8;
-      const score = (overlapScore + confidenceScore) * typeWeight;
+      const score = (overlapScore + confidenceScore * 1.1 + freshnessScore * freshnessWeight) * typeWeight;
       return {
         factType: fact.factType,
         factValue: normalized,
         confidence: confidenceScore,
+        updatedAt: fact.updatedAt,
         overlap,
+        freshnessScore,
         score,
       };
     })
@@ -2617,6 +2644,8 @@ function runContactMemoryFactSelectionTool(args: ContactFactSelectionInput) {
       output: {
         selectedFacts: selectedFacts.length,
         matchedFacts: matchedCount,
+        factRefreshBias,
+        staleThresholdMs,
         selectedTypes: Array.from(new Set(selectedFacts.map((fact) => fact.factType))),
       },
     },
@@ -2666,12 +2695,53 @@ function buildPrompt(args: {
   historyLines: string[];
   historySearchOverride?: HistorySearchOverride;
   contactFacts?: ContactMemoryFactContext[];
+  contextPack?: ContextPackSnapshot;
+  adaptiveHints?: AdaptiveTuningHintsSnapshot;
   styleHints: string[];
   styleProfile?: StyleProfileContext;
   personality?: PersonalityContext;
   grounding?: GroundingContext;
   runtime?: RuntimeAiTuning;
 }): PromptBuildResult {
+  const adaptiveHistoryDepthDelta = Math.round(Math.max(-4, Math.min(args.adaptiveHints?.historyDepthDelta ?? 0, 8)));
+  const adaptiveLowConfidenceThreshold = resolveRetrievalLowConfidenceThreshold(args.adaptiveHints);
+  const contextPackOverride = args.contextPack?.selectedHistoryLines?.length
+    ? {
+        lines: args.contextPack.selectedHistoryLines,
+        candidateCount: Math.max(
+          args.contextPack.selectedHistoryLines.length,
+          Math.round(args.contextPack.retrievalDiagnostics?.historySearchCandidateCount || 0),
+        ),
+        semanticRerankCount: Math.max(0, Math.round(args.contextPack.retrievalDiagnostics?.historySearchSemanticRerankCount || 0)),
+        confidence: clamp01WithFallback(
+          args.contextPack.retrievalDiagnostics?.historySearchConfidence,
+          args.contextPack.retrievalDiagnostics?.lowConfidence ? 0.25 : 0.72,
+        ),
+        retrievalStage: args.contextPack.retrievalDiagnostics?.historySearchRetrievalStage || "semantic",
+      }
+    : undefined;
+  const effectiveHistorySearchOverride: HistorySearchOverride | undefined =
+    args.historySearchOverride || contextPackOverride;
+  const mergedContactFacts = [...(args.contextPack?.selectedContactFacts || []), ...(args.contactFacts || [])];
+  const contactFactsByKey = new Map<string, ContactMemoryFactContext>();
+  for (const fact of mergedContactFacts) {
+    const normalizedValue = normalizeOutboundText(fact.factValue || "");
+    if (!normalizedValue) {
+      continue;
+    }
+    const key = `${fact.factType}:${normalizedValue.toLowerCase()}`;
+    const existing = contactFactsByKey.get(key);
+    if (!existing || Number(fact.confidence ?? 0) > Number(existing.confidence ?? 0)) {
+      contactFactsByKey.set(key, {
+        factType: fact.factType,
+        factValue: normalizedValue,
+        confidence: fact.confidence,
+        updatedAt: fact.updatedAt,
+      });
+    }
+  }
+  const normalizedContactFacts = [...contactFactsByKey.values()];
+  const mergedStyleHints = [...(args.contextPack?.styleHints || []), ...args.styleHints];
   const maxContextTokens = Math.round(
     Math.max(
       512,
@@ -2703,12 +2773,15 @@ function buildPrompt(args: {
     ),
   );
   const largeContextMode = maxContextTokens >= adaptiveContextMinTokens;
-  const historyLineLimit = Math.round(Math.max(4, Math.min(args.runtime?.historyLineLimit ?? 14, 120)));
+  const historyLineLimit = Math.round(
+    Math.max(4, Math.min((args.runtime?.historyLineLimit ?? 14) + adaptiveHistoryDepthDelta, 120)),
+  );
   const contextSearchLineLimit = Math.round(
     Math.max(
       1,
       Math.min(
-        args.runtime?.contextSearchLineLimit ?? suggestContextSearchLineLimit(maxContextTokens),
+        (args.runtime?.contextSearchLineLimit ?? suggestContextSearchLineLimit(maxContextTokens)) +
+          Math.max(-2, Math.min(adaptiveHistoryDepthDelta, 6)),
         24,
       ),
     ),
@@ -2744,9 +2817,9 @@ function buildPrompt(args: {
   toolCalls.push(cleanedHistory.call);
 
   let historySearchHits: IndexedHistoryLine[] = [];
-  if (args.historySearchOverride) {
+  if (effectiveHistorySearchOverride) {
     const externalStart = Date.now();
-    const externalHits = (args.historySearchOverride.lines || [])
+    const externalHits = (effectiveHistorySearchOverride.lines || [])
       .map((raw, index) => {
         const { label, body } = parseHistoryLine(raw);
         const line = `${label}: ${body}`.trim();
@@ -2763,10 +2836,12 @@ function buildPrompt(args: {
       .filter((line): line is IndexedHistoryLine => Boolean(line))
       .slice(0, contextSearchLineLimit);
 
-    const externalConfidence = Math.max(0, Math.min(args.historySearchOverride.confidence || 0, 1));
-    const retrievalStage = args.historySearchOverride.retrievalStage || "semantic";
+    const externalConfidence = Math.max(0, Math.min(effectiveHistorySearchOverride.confidence || 0, 1));
+    const retrievalStage = effectiveHistorySearchOverride.retrievalStage || "semantic";
     const shouldSupplementLocal =
-      externalHits.length < contextSearchLineLimit || externalConfidence < 0.45 || retrievalStage === "semantic_fallback";
+      externalHits.length < contextSearchLineLimit ||
+      externalConfidence < adaptiveLowConfidenceThreshold ||
+      retrievalStage === "semantic_fallback";
 
     historySearchHits = externalHits;
     toolCalls.push({
@@ -2780,8 +2855,8 @@ function buildPrompt(args: {
       },
       output: {
         hits: externalHits.length,
-        candidateCount: Math.max(0, Math.round(args.historySearchOverride.candidateCount || 0)),
-        semanticRerankCount: Math.max(0, Math.round(args.historySearchOverride.semanticRerankCount || 0)),
+        candidateCount: Math.max(0, Math.round(effectiveHistorySearchOverride.candidateCount || 0)),
+        semanticRerankCount: Math.max(0, Math.round(effectiveHistorySearchOverride.semanticRerankCount || 0)),
         confidence: externalConfidence,
         retrievalStage,
         localSupplementUsed: shouldSupplementLocal,
@@ -2842,13 +2917,18 @@ function buildPrompt(args: {
     factType: ContactMemoryFactType;
     factValue: string;
     confidence: number;
+    updatedAt?: number;
     overlap: number;
+    freshnessScore: number;
   }> = [];
-  if (Array.isArray(args.contactFacts) && args.contactFacts.length > 0) {
+  if (normalizedContactFacts.length > 0) {
     const selected = runContactMemoryFactSelectionTool({
-      contactFacts: args.contactFacts,
+      contactFacts: normalizedContactFacts,
       query: args.inboundText,
       limit: 5,
+      staleThresholdMs: resolveFactStaleThresholdMs(args.adaptiveHints),
+      nowMs: Date.now(),
+      factRefreshBias: args.adaptiveHints?.factRefreshBias,
     });
     selectedContactFacts = selected.selectedFacts;
     toolCalls.push(selected.call);
@@ -2868,7 +2948,7 @@ function buildPrompt(args: {
         ? "Use light mirroring of tone and rhythm while keeping wording original and clear."
         : "Use a friendly, clear baseline voice with only minimal mirroring.";
   const hints = sanitizeStyleHintsForPrompt([
-    ...args.styleHints,
+    ...mergedStyleHints,
     ...(args.styleProfile?.humorNotes || []),
     ...(args.styleProfile?.punctuationStyle || []),
     ...(args.styleProfile?.spellingNotes || []),
@@ -3200,6 +3280,10 @@ function buildPrompt(args: {
         : "",
       args.grounding?.autoAliases?.length ? `Known contact aliases: ${args.grounding.autoAliases.slice(0, 8).join(", ")}` : "",
       args.grounding?.vibeNotes ? `Conversation vibe notes: ${args.grounding.vibeNotes}` : "",
+      args.contextPack?.intent ? `Context intent snapshot: ${args.contextPack.intent}` : "",
+      args.contextPack?.retrievalDiagnostics?.lowConfidence
+        ? `Context reliability note: retrieval confidence was low (<${Number(args.contextPack.retrievalDiagnostics.lowConfidenceThreshold || adaptiveLowConfidenceThreshold).toFixed(2)}), so prioritize concrete recency evidence over assumptions.`
+        : "",
       selectedContactFacts.length > 0
         ? `Known personal context about this contact (use naturally only if relevant):\n${selectedContactFacts
             .map((fact) => `- ${fact.factType}: ${fact.factValue}`)
@@ -8138,6 +8222,8 @@ export async function generateReplyWithFallback(args: {
   historyLines: string[];
   historySearchOverride?: HistorySearchOverride;
   contactFacts?: ContactMemoryFactContext[];
+  contextPack?: ContextPackSnapshot;
+  adaptiveHints?: AdaptiveTuningHintsSnapshot;
   styleHints: string[];
   styleProfile?: StyleProfileContext;
   personality?: PersonalityContext;
@@ -8162,7 +8248,11 @@ export async function generateReplyWithFallback(args: {
       }),
     };
   };
-  const builtPrompt = buildPrompt(args);
+  const builtPrompt = buildPrompt({
+    ...args,
+    contextPack: args.contextPack,
+    adaptiveHints: args.adaptiveHints,
+  });
   const blocked = HIGH_RISK_PATTERNS.find((pattern) => pattern.test(args.inboundText));
   if (blocked) {
     return {

@@ -109,6 +109,23 @@ test("resolveClaimOutreachMode derives mode from draft reason prefix", () => {
   assert.equal(resolveClaimOutreachMode("Some other reason"), undefined);
 });
 
+test("resolveClaimOutreachMode prefers explicit outreachMode and falls back to reason parsing", () => {
+  assert.equal(
+    resolveClaimOutreachMode({
+      outreachMode: "compliment",
+      reason: "Proactive check-in outreach (AI pending): hey there",
+    }),
+    "compliment",
+  );
+  assert.equal(
+    resolveClaimOutreachMode({
+      outreachMode: undefined,
+      reason: "Proactive check-in outreach (AI pending): hey there",
+    }),
+    "proactive",
+  );
+});
+
 test("isManualInterventionMessage detects live outbound without toolRunId", () => {
   assert.equal(
     isManualInterventionMessage({
