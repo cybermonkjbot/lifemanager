@@ -20,6 +20,8 @@ type LiveConversationsProps = {
   initialThreadId?: string;
 };
 
+const MAX_THREAD_PROMPT_PROFILE_CHARS = 8000;
+
 type PersonalityProfile = {
   slug: string;
   name: string;
@@ -613,14 +615,18 @@ function PromptProfileForm({
       <label className="setup-input-group">
         <span className="queue-meta">Conversation prompt profile</span>
         <textarea
-          rows={8}
+          rows={12}
           value={promptProfile}
           onChange={(event) => setPromptProfile(event.target.value)}
           placeholder="Example: Keep this chat casual and playful, use short replies, and mirror their emoji style."
+          maxLength={MAX_THREAD_PROMPT_PROFILE_CHARS}
           disabled={pending}
           aria-disabled={pending}
         />
       </label>
+      <p className="queue-meta">
+        {promptProfile.length}/{MAX_THREAD_PROMPT_PROFILE_CHARS} characters
+      </p>
 
       <div className="queue-actions">
         <button

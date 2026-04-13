@@ -50,8 +50,8 @@ const setupWizardScreens: Record<
   }
 > = {
   options: {
-    title: "Setup Wizard",
-    description: "Choose which connection to configure first. You will see one focused screen at a time.",
+    title: "Setup",
+    description: "Choose which connection to configure first. One focused screen is shown at a time.",
   },
   whatsapp: {
     title: "WhatsApp Setup",
@@ -444,7 +444,7 @@ function SetupWizardContent({
       <div className="setup-wizard-stage">
         <header className="setup-flow-header">
           <div className="setup-flow-topline">
-            <p className="queue-meta">Setup Wizard</p>
+            <p className="queue-meta">Setup</p>
             {showBackToOptions ? (
               <button className="btn btn-ghost" type="button" onClick={() => setActiveScreen("options")}>
                 Back to Options

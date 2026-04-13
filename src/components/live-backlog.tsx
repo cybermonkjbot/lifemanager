@@ -433,7 +433,7 @@ function BacklogContent() {
       <header className="backlog-command-header">
         <div className="backlog-command-copy">
           <p className="backlog-kicker">Unread backlog</p>
-          <h2 className="backlog-command-title">Triage stale threads before they cool off.</h2>
+          <h1 className="backlog-command-title">Triage stale threads before they cool off.</h1>
           <p className="queue-meta backlog-command-subtitle">
             Reply Draft answers the latest unresolved message. Reconnect Draft starts with a warm check-in for stale threads.
             Both are queued for review before sending.
@@ -452,11 +452,11 @@ function BacklogContent() {
       </header>
 
       <div className="backlog-operating-grid">
-        <aside className="backlog-side-rail">
+        <section className="backlog-side-rail">
           <div className="backlog-control-deck">
             <div className="backlog-control-topline">
               <ProviderFilter value={providerFilter} onChange={setProviderFilter} label="Backlog provider filter" />
-              <div className="backlog-tabs" role="tablist" aria-label="Backlog scope tabs">
+              <div className="backlog-tabs" role="group" aria-label="Backlog scope tabs">
                 <button type="button" className={`btn ${tab === "all" ? "btn-primary" : "btn-ghost"}`} onClick={() => setTab("all")}>
                   Active ({counts.all - counts.snoozed})
                 </button>
@@ -577,7 +577,7 @@ function BacklogContent() {
               {getRecord("backlog:clear-all").pending ? "Clearing..." : "Clear Entire Backlog"}
             </button>
           </div>
-        </aside>
+        </section>
 
         <section className="backlog-main-rail">
           <div className="backlog-main-head">

@@ -35,6 +35,7 @@ export type SetupState = {
   message: string;
   qrDataUrl?: string;
   pairingCode?: string;
+  accountName?: string;
   listenerActive?: boolean;
   listenerWorkerId?: string;
   listenerMessage?: string;
@@ -184,6 +185,20 @@ class WhatsAppSetupManager {
       return hasDeviceSuffix && !hasPendingPairingCode;
     } catch {
       return false;
+    }
+  }
+
+  private async getAccountNameFromCreds() {
+    try {
+      const raw = await readFile(join(this.authPath, "creds.json"), "utf8");
+      const parsed = JSON.parse(raw) as {
+        me?: { name?: string };
+        creds?: { me?: { name?: string } };
+      };
+      const candidate = (parsed.me?.name || parsed.creds?.me?.name || "").trim();
+      return candidate || undefined;
+    } catch {
+      return undefined;
     }
   }
 
@@ -661,6 +676,13 @@ class WhatsAppSetupManager {
 
   async getState(): Promise<SetupState> {
     const hasAuth = await this.hasRegisteredCreds();
+    const accountName = await this.getAccountNameFromCreds();
+    if (this.state.accountName !== accountName) {
+      this.state = {
+        ...this.state,
+        accountName,
+      };
+    }
     const hasExplicitInvalidation = this.hasExplicitInvalidationMessage(this.state.message);
     const setupSessionActive = Boolean(this.socket) && !this.manuallyStopped;
 

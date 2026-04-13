@@ -5,7 +5,7 @@ export default async function SelfImprovementPage() {
   return (
     <DashboardPage
       title="Self Improvement"
-      subtitle="Review manual and automatic Codex cycles with per-run outcomes, reports, and errors."
+      subtitle="Review manual and scheduled improvement runs with outcomes, reports, and errors."
     >
       <LiveSelfImprovement />
     </DashboardPage>

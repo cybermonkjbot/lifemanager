@@ -1465,7 +1465,7 @@ export function LiveSettings() {
             <input
               type="number"
               min={40}
-              max={1000}
+              max={2000}
               step={1}
               value={draft.aiMaxOutputTokens}
               onChange={(event) => setDraft((prev) => ({ ...prev, aiMaxOutputTokens: parseNumber(event.target.value, prev.aiMaxOutputTokens) }))}
@@ -1479,7 +1479,7 @@ export function LiveSettings() {
             <input
               type="number"
               min={60}
-              max={1200}
+              max={2400}
               step={1}
               value={draft.aiMaxReplyChars}
               onChange={(event) => setDraft((prev) => ({ ...prev, aiMaxReplyChars: parseNumber(event.target.value, prev.aiMaxReplyChars) }))}
@@ -1493,7 +1493,7 @@ export function LiveSettings() {
             <input
               type="number"
               min={4}
-              max={40}
+              max={120}
               step={1}
               value={draft.aiHistoryLineLimit}
               onChange={(event) => setDraft((prev) => ({ ...prev, aiHistoryLineLimit: parseNumber(event.target.value, prev.aiHistoryLineLimit) }))}
@@ -1533,13 +1533,13 @@ export function LiveSettings() {
               disabled={record.pending}
               aria-disabled={record.pending}
             >
-              <option value="false">Disabled (legacy steering bypass)</option>
+              <option value="false">Disabled (use legacy steering flow)</option>
               <option value="true">Enabled (GPT-5.4 first)</option>
             </select>
           </label>
 
           <label className="stack compact">
-            <span className="queue-meta">Ack routing via model</span>
+            <span className="queue-meta">Model acknowledgment routing</span>
             <select
               value={draft.aiAckRoutingEnabled ? "true" : "false"}
               onChange={(event) =>
@@ -1551,13 +1551,13 @@ export function LiveSettings() {
               disabled={record.pending}
               aria-disabled={record.pending}
             >
-              <option value="false">Disabled (reaction-only heuristic)</option>
-              <option value="true">Enabled (reaction vs text by model)</option>
+              <option value="false">Disabled (always use reaction heuristic)</option>
+              <option value="true">Enabled (model picks reaction or text)</option>
             </select>
           </label>
 
           <label className="stack compact">
-            <span className="queue-meta">Deterministic steering modes</span>
+            <span className="queue-meta">Deterministic mode list</span>
             <textarea
               name="aiDeterministicModes"
               value={draft.aiDeterministicModes.join("\n")}
@@ -1571,7 +1571,7 @@ export function LiveSettings() {
               disabled={record.pending}
               aria-disabled={record.pending}
             />
-            <span className="queue-meta">One mode per line (or comma separated).</span>
+            <span className="queue-meta">Enter one mode per line (or comma-separated).</span>
           </label>
 
           <label className="stack compact">
@@ -1849,7 +1849,7 @@ export function LiveSettings() {
           </label>
 
           <label className="stack compact">
-            <span className="queue-meta">Soul mode</span>
+            <span className="queue-meta">Identity-led voice</span>
             <select
               value={draft.soulModeEnabled ? "true" : "false"}
               onChange={(event) =>
@@ -1861,8 +1861,8 @@ export function LiveSettings() {
               disabled={record.pending}
               aria-disabled={record.pending}
             >
-              <option value="true">On (identity-led voice: everything sounds like me)</option>
-              <option value="false">Off (neutral tone)</option>
+              <option value="true">On (prioritize your tone and phrasing)</option>
+              <option value="false">Off (use neutral tone)</option>
             </select>
           </label>
 
@@ -2089,7 +2089,7 @@ export function LiveSettings() {
           </label>
 
           <label className="stack compact">
-            <span className="queue-meta">Aggressive-compaction group JIDs (optional, one per line)</span>
+            <span className="queue-meta">Group IDs for aggressive context cleanup (optional, one per line)</span>
             <textarea
               rows={4}
               placeholder={"1234567890-123456789@g.us\n9876543210-111222333@g.us"}
@@ -2103,7 +2103,7 @@ export function LiveSettings() {
               disabled={record.pending}
               aria-disabled={record.pending}
             />
-            <span className="queue-meta">Leave empty to include all recent groups.</span>
+            <span className="queue-meta">Leave empty to apply to all recent groups.</span>
           </label>
 
           <label className="stack compact">
@@ -2121,7 +2121,7 @@ export function LiveSettings() {
               aria-disabled={record.pending}
             />
             <span className="queue-meta">
-              Used by playful detection; market-interest matching runs separately.
+              Used for funny-status detection only; market-interest matching runs separately.
             </span>
           </label>
 
@@ -2198,7 +2198,7 @@ export function LiveSettings() {
           </label>
 
           <label className="stack compact">
-            <span className="queue-meta">Outbox claim limit</span>
+            <span className="queue-meta">Outbox batch size</span>
             <input
               type="number"
               min={1}
@@ -2446,7 +2446,7 @@ export function LiveSettings() {
           </label>
 
           <label className="stack compact">
-            <span className="queue-meta">About template (optional)</span>
+            <span className="queue-meta">WhatsApp About template (optional)</span>
             <textarea
               rows={2}
               value={draft.aboutAutomationTemplate}
@@ -2464,7 +2464,7 @@ export function LiveSettings() {
           </label>
 
           <label className="stack compact">
-            <span className="queue-meta">Rate window (minutes)</span>
+            <span className="queue-meta">Send rate window (minutes)</span>
             <input
               type="number"
               min={5}
@@ -2480,7 +2480,7 @@ export function LiveSettings() {
           </label>
 
           <label className="stack compact">
-            <span className="queue-meta">Max sends per thread in window</span>
+            <span className="queue-meta">Per-thread send limit in window</span>
             <input
               type="number"
               min={1}
@@ -2496,7 +2496,7 @@ export function LiveSettings() {
           </label>
 
           <label className="stack compact">
-            <span className="queue-meta">Max global sends in window</span>
+            <span className="queue-meta">Global send limit in window</span>
             <input
               type="number"
               min={1}

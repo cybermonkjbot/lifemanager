@@ -60,19 +60,98 @@ function normalizeProvider(provider?: MessageProvider): MessageProvider {
   return provider === "instagram" ? "instagram" : "whatsapp";
 }
 
+const ALIAS_TOKEN_PATTERN = /^[a-z][a-z0-9_-]{1,24}$/i;
+const NON_NAME_ALIAS_TOKENS = new Set([
+  "a",
+  "an",
+  "and",
+  "better",
+  "confused",
+  "easy",
+  "easier",
+  "expected",
+  "fair",
+  "fine",
+  "going",
+  "good",
+  "great",
+  "heading",
+  "hard",
+  "its",
+  "it",
+  "just",
+  "lost",
+  "me",
+  "nothing",
+  "okay",
+  "ok",
+  "perfect",
+  "safe",
+  "the",
+  "this",
+]);
+
+function sanitizeExtractedAliasToken(value: string | undefined) {
+  const trimmed = (value || "").trim();
+  if (!trimmed) {
+    return null;
+  }
+  const normalized = trimmed.toLowerCase();
+  if (!ALIAS_TOKEN_PATTERN.test(trimmed) || NON_NAME_ALIAS_TOKENS.has(normalized)) {
+    return null;
+  }
+  return trimmed;
+}
+
+function normalizeAliasForStorage(value: string | undefined) {
+  const trimmed = (value || "").trim();
+  if (!trimmed) {
+    return null;
+  }
+  const normalized = trimmed.toLowerCase();
+  if (ALIAS_TOKEN_PATTERN.test(trimmed) && NON_NAME_ALIAS_TOKENS.has(normalized)) {
+    return null;
+  }
+  return trimmed.slice(0, 50);
+}
+
+function dedupeAliases(values: Array<string | null | undefined>) {
+  const seen = new Set<string>();
+  const deduped: string[] = [];
+  for (const value of values) {
+    const alias = normalizeAliasForStorage(value || undefined);
+    if (!alias) {
+      continue;
+    }
+    const key = alias.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    deduped.push(alias);
+    if (deduped.length >= 20) {
+      break;
+    }
+  }
+  return deduped;
+}
+
 export function extractAliasesFromText(text: string) {
-  const aliases: string[] = [];
-  const patterns = [/\b(?:call me|i(?:'|’)m|im|it(?:'|’)s|its)\s+([a-z][a-z0-9_-]{1,24})\b/gi];
+  const matchesWithPosition: Array<{ alias: string; index: number }> = [];
+  const patterns = [
+    /\b(?:call me|my name is)\s+([a-z][a-z0-9_-]{1,24})\b/gi,
+    /(?:^|[.!?]\s*|\b(?:hey|hi|hello|yo)\s*[!,]?\s*)(?:i(?:'|’)m|im|i am|this is|it(?:'|’)s|its)\s+([a-z][a-z0-9_-]{1,24})(?=\s*(?:[,.!?]|$))/gi,
+  ];
   for (const pattern of patterns) {
-    const matches = text.matchAll(pattern);
-    for (const match of matches) {
-      const alias = match[1]?.trim();
+    for (const match of text.matchAll(pattern)) {
+      const alias = sanitizeExtractedAliasToken(match[1]);
       if (alias) {
-        aliases.push(alias);
+        matchesWithPosition.push({ alias, index: match.index ?? Number.MAX_SAFE_INTEGER });
       }
     }
   }
-  return aliases;
+  matchesWithPosition.sort((left, right) => left.index - right.index);
+  return dedupeAliases(matchesWithPosition.map((entry) => entry.alias));
 }
 
 export function hasGoodActiveChattingWindow(
@@ -194,9 +273,9 @@ async function updateAutoAliases(args: {
   senderTitle?: string;
   text: string;
 }) {
-  const titleAlias = args.senderTitle?.trim().split(/\s+/).find(Boolean);
+  const titleAlias = sanitizeExtractedAliasToken(args.senderTitle?.trim().split(/\s+/).find(Boolean));
   const extracted = extractAliasesFromText(args.text);
-  const candidates = [...new Set([titleAlias, ...extracted].filter(Boolean).map((item) => (item || "").slice(0, 50)))];
+  const candidates = dedupeAliases([titleAlias, ...extracted]);
 
   if (candidates.length === 0) {
     return;
@@ -207,7 +286,7 @@ async function updateAutoAliases(args: {
     .withIndex("by_threadId", (q) => q.eq("threadId", args.threadId))
     .first();
 
-  const mergedAliases = [...new Set([...(existing?.autoAliases || []), ...candidates])].slice(0, 20);
+  const mergedAliases = dedupeAliases([...(existing?.autoAliases || []), ...candidates]);
   const now = Date.now();
   if (existing) {
     await args.ctx.db.patch(existing._id, {

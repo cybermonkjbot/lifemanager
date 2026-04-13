@@ -50,6 +50,7 @@ type GeneratedMemeResponse = {
   latencyMs: number;
   createdAt: number;
 };
+const MAX_MEME_PROMPT_CHARS = 8000;
 
 async function readApiError(response: Response) {
   try {
@@ -140,9 +141,13 @@ export function LiveMemes() {
               value={prompt}
               onChange={(event) => setPrompt(event.target.value)}
               placeholder="Describe the meme reaction you want..."
+              maxLength={MAX_MEME_PROMPT_CHARS}
               disabled={record.pending}
               aria-disabled={record.pending}
             />
+            <span className="queue-meta">
+              {prompt.length}/{MAX_MEME_PROMPT_CHARS} characters
+            </span>
           </label>
 
           <label className="stack compact">

@@ -163,13 +163,20 @@ a {
   gap: 12px;
   border-bottom: 1px solid var(--line);
   padding-bottom: 8px;
+  min-width: 0;
 }
 
 .shell-tabs-row {
   display: flex;
   gap: 8px;
   overflow-x: auto;
+  overflow-y: hidden;
   padding-bottom: 4px;
+  width: 100%;
+  max-width: 100%;
+  flex: 1 1 auto;
+  min-width: 0;
+  -webkit-overflow-scrolling: touch;
 }
 
 .shell-tab {
@@ -2845,7 +2852,9 @@ textarea {
   display: flex;
   gap: 7px;
   flex-wrap: wrap;
-  margin-top: 12px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
 }
 
 .systems-chip {
@@ -2899,6 +2908,18 @@ textarea {
   50% {
     transform: translateY(-6px);
   }
+}
+
+.sr-only {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .btn:focus-visible,
@@ -3027,6 +3048,10 @@ input:focus-visible,
   .shell-tabbar {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .shell-tabs-row {
+    width: 100%;
   }
 
   .topbar-controls-shell {

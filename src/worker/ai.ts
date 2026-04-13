@@ -2703,7 +2703,7 @@ function buildPrompt(args: {
     ),
   );
   const largeContextMode = maxContextTokens >= adaptiveContextMinTokens;
-  const historyLineLimit = Math.round(Math.max(4, Math.min(args.runtime?.historyLineLimit ?? 14, 40)));
+  const historyLineLimit = Math.round(Math.max(4, Math.min(args.runtime?.historyLineLimit ?? 14, 120)));
   const contextSearchLineLimit = Math.round(
     Math.max(
       1,
@@ -3360,7 +3360,7 @@ function sanitizeReplyText(raw: string, maxChars = 320) {
     .filter(Boolean)
     .join("\n");
 
-  const boundedMaxChars = Math.round(Math.max(60, Math.min(maxChars, 1200)));
+  const boundedMaxChars = Math.round(Math.max(60, Math.min(maxChars, 2400)));
   if (text.length > boundedMaxChars) {
     text = text.slice(0, boundedMaxChars).trim();
   }
@@ -3906,7 +3906,7 @@ function normalizeMaxOutputTokens(value: number | undefined) {
   if (!Number.isFinite(value)) {
     return 140;
   }
-  return Math.round(Math.max(40, Math.min(value as number, 1000)));
+  return Math.round(Math.max(40, Math.min(value as number, 2000)));
 }
 
 function extractKeywords(text: string) {

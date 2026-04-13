@@ -41,7 +41,7 @@ export function DashboardShell({
                 <div className="brand-block">
                   <p className="brand-kicker">Social Life Manager</p>
                   <p className="brand-title">WhatsApp Brain</p>
-                  <p className="brand-note">Operational console for conversations, queueing, and follow-through.</p>
+                  <p className="brand-note">Workspaces for queue, conversations, follow-ups, and system health.</p>
                 </div>
                 <ShellControlsModal realtimeEnabled={realtimeEnabled} fallbackPaused={autonomyPaused} />
               </header>
@@ -50,14 +50,16 @@ export function DashboardShell({
             </>
           ) : null}
 
-          {!hideViewHeader ? (
-            <section className="view-header">
-              <h1 className="panel-title">{title}</h1>
-              <p className="panel-subtitle">{subtitle}</p>
-            </section>
-          ) : null}
-
           <main className="shell-main">
+            {!hideViewHeader ? (
+              <>
+                <header className="view-header">
+                  <h1 className="panel-title">{title}</h1>
+                  <p className="panel-subtitle">{subtitle}</p>
+                </header>
+                <h2 className="sr-only">Workspace sections</h2>
+              </>
+            ) : null}
             {!realtimeEnabled ? <SetupNotice error={null} /> : null}
             {children}
           </main>

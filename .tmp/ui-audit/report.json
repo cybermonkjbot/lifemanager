@@ -1,0 +1,1800 @@
+{
+  "baseUrl": "http://127.0.0.1:3001",
+  "generatedAt": "2026-04-13T00:27:33.410Z",
+  "results": [
+    {
+      "route": "/",
+      "target": "desktop",
+      "url": "http://127.0.0.1:3001/",
+      "navigationError": null,
+      "metrics": {
+        "title": "Social Life Manager",
+        "h1": [
+          "Daily Nixtio"
+        ],
+        "htmlClass": "dm_sans_93c9031e-module__HDfxQG__variable space_grotesk_590fd37e-module__Yn3fQa__variable h-full",
+        "bodyClass": "min-h-full",
+        "scrollWidth": 1440,
+        "clientWidth": 1440,
+        "scrollHeight": 992,
+        "clientHeight": 900,
+        "hasHorizontalOverflow": false,
+        "linkNoLabel": 0,
+        "buttonNoLabel": 0,
+        "imageIssues": [],
+        "hiddenByAria": 4,
+        "interactive": 34
+      },
+      "console": [
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=IaIjf_FNNKaSmCY2WTz8l' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=IaIjf_FNNKaSmCY2WTz8l' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        }
+      ],
+      "pageErrors": [],
+      "requestFailures": [],
+      "badResponses": [],
+      "screenshot": "/Users/joshua/Documents/lifemanager/.tmp/ui-audit/screenshots/desktop-home.png"
+    },
+    {
+      "route": "/",
+      "target": "mobile",
+      "url": "http://127.0.0.1:3001/",
+      "navigationError": null,
+      "metrics": {
+        "title": "Social Life Manager",
+        "h1": [
+          "Daily Nixtio"
+        ],
+        "htmlClass": "dm_sans_93c9031e-module__HDfxQG__variable space_grotesk_590fd37e-module__Yn3fQa__variable h-full",
+        "bodyClass": "min-h-full",
+        "scrollWidth": 390,
+        "clientWidth": 390,
+        "scrollHeight": 2442,
+        "clientHeight": 664,
+        "hasHorizontalOverflow": false,
+        "linkNoLabel": 0,
+        "buttonNoLabel": 0,
+        "imageIssues": [],
+        "hiddenByAria": 4,
+        "interactive": 34
+      },
+      "console": [
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=VRNCuFsxf3Wmlt5E15cCW' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=VRNCuFsxf3Wmlt5E15cCW' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=VRNCuFsxf3Wmlt5E15cCW' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        }
+      ],
+      "pageErrors": [],
+      "requestFailures": [],
+      "badResponses": [],
+      "screenshot": "/Users/joshua/Documents/lifemanager/.tmp/ui-audit/screenshots/mobile-home.png"
+    },
+    {
+      "route": "/activity-core",
+      "target": "desktop",
+      "url": "http://127.0.0.1:3001/activity-core",
+      "navigationError": null,
+      "metrics": {
+        "title": "Social Life Manager",
+        "h1": [
+          "Activity Core"
+        ],
+        "htmlClass": "dm_sans_93c9031e-module__HDfxQG__variable space_grotesk_590fd37e-module__Yn3fQa__variable h-full",
+        "bodyClass": "min-h-full",
+        "scrollWidth": 1440,
+        "clientWidth": 1440,
+        "scrollHeight": 1222,
+        "clientHeight": 900,
+        "hasHorizontalOverflow": false,
+        "linkNoLabel": 0,
+        "buttonNoLabel": 0,
+        "imageIssues": [],
+        "hiddenByAria": 4,
+        "interactive": 25
+      },
+      "console": [
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=groH1iRLoy5jj6Yc9g2de' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=groH1iRLoy5jj6Yc9g2de' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=groH1iRLoy5jj6Yc9g2de' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "warning",
+          "text": "[.WebGL-0x124001d6200]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels",
+          "location": {
+            "url": "https://my.spline.design/interactiveaiassistant-1MceEbo4oJdzWd3AQPZq9CSB/",
+            "lineNumber": 0,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "warning",
+          "text": "[.WebGL-0x124001d6200]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels",
+          "location": {
+            "url": "https://my.spline.design/interactiveaiassistant-1MceEbo4oJdzWd3AQPZq9CSB/",
+            "lineNumber": 0,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "warning",
+          "text": "[.WebGL-0x124001d6200]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels",
+          "location": {
+            "url": "https://my.spline.design/interactiveaiassistant-1MceEbo4oJdzWd3AQPZq9CSB/",
+            "lineNumber": 0,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "warning",
+          "text": "[.WebGL-0x124001d6200]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels (this message will no longer repeat)",
+          "location": {
+            "url": "https://my.spline.design/interactiveaiassistant-1MceEbo4oJdzWd3AQPZq9CSB/",
+            "lineNumber": 0,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=groH1iRLoy5jj6Yc9g2de' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=groH1iRLoy5jj6Yc9g2de' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        }
+      ],
+      "pageErrors": [],
+      "requestFailures": [],
+      "badResponses": [],
+      "screenshot": "/Users/joshua/Documents/lifemanager/.tmp/ui-audit/screenshots/desktop-activity-core.png"
+    },
+    {
+      "route": "/activity-core",
+      "target": "mobile",
+      "url": "http://127.0.0.1:3001/activity-core",
+      "navigationError": null,
+      "metrics": {
+        "title": "Social Life Manager",
+        "h1": [
+          "Activity Core"
+        ],
+        "htmlClass": "dm_sans_93c9031e-module__HDfxQG__variable space_grotesk_590fd37e-module__Yn3fQa__variable h-full",
+        "bodyClass": "min-h-full",
+        "scrollWidth": 390,
+        "clientWidth": 390,
+        "scrollHeight": 1251,
+        "clientHeight": 664,
+        "hasHorizontalOverflow": false,
+        "linkNoLabel": 0,
+        "buttonNoLabel": 0,
+        "imageIssues": [],
+        "hiddenByAria": 4,
+        "interactive": 25
+      },
+      "console": [
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=lnZnO-vZu52BXSFP30Qvx' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=lnZnO-vZu52BXSFP30Qvx' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=lnZnO-vZu52BXSFP30Qvx' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=lnZnO-vZu52BXSFP30Qvx' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=lnZnO-vZu52BXSFP30Qvx' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        }
+      ],
+      "pageErrors": [],
+      "requestFailures": [],
+      "badResponses": [],
+      "screenshot": "/Users/joshua/Documents/lifemanager/.tmp/ui-audit/screenshots/mobile-activity-core.png"
+    },
+    {
+      "route": "/backlog",
+      "target": "desktop",
+      "url": "http://127.0.0.1:3001/backlog",
+      "navigationError": null,
+      "metrics": {
+        "title": "Social Life Manager",
+        "h1": [
+          "Triage stale threads before they cool off."
+        ],
+        "htmlClass": "dm_sans_93c9031e-module__HDfxQG__variable space_grotesk_590fd37e-module__Yn3fQa__variable h-full",
+        "bodyClass": "min-h-full",
+        "scrollWidth": 1440,
+        "clientWidth": 1440,
+        "scrollHeight": 1440,
+        "clientHeight": 900,
+        "hasHorizontalOverflow": false,
+        "linkNoLabel": 0,
+        "buttonNoLabel": 0,
+        "imageIssues": [],
+        "hiddenByAria": 4,
+        "interactive": 31
+      },
+      "console": [
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=LXSe1LQkRZYCaWGpPy4Ui' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=LXSe1LQkRZYCaWGpPy4Ui' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        }
+      ],
+      "pageErrors": [],
+      "requestFailures": [],
+      "badResponses": [],
+      "screenshot": "/Users/joshua/Documents/lifemanager/.tmp/ui-audit/screenshots/desktop-backlog.png"
+    },
+    {
+      "route": "/backlog",
+      "target": "mobile",
+      "url": "http://127.0.0.1:3001/backlog",
+      "navigationError": null,
+      "metrics": {
+        "title": "Social Life Manager",
+        "h1": [
+          "Triage stale threads before they cool off."
+        ],
+        "htmlClass": "dm_sans_93c9031e-module__HDfxQG__variable space_grotesk_590fd37e-module__Yn3fQa__variable h-full",
+        "bodyClass": "min-h-full",
+        "scrollWidth": 390,
+        "clientWidth": 390,
+        "scrollHeight": 2034,
+        "clientHeight": 664,
+        "hasHorizontalOverflow": false,
+        "linkNoLabel": 0,
+        "buttonNoLabel": 0,
+        "imageIssues": [],
+        "hiddenByAria": 4,
+        "interactive": 31
+      },
+      "console": [
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=yPbQJQwflq8ExOz4RbKdX' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=yPbQJQwflq8ExOz4RbKdX' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=yPbQJQwflq8ExOz4RbKdX' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        }
+      ],
+      "pageErrors": [],
+      "requestFailures": [],
+      "badResponses": [],
+      "screenshot": "/Users/joshua/Documents/lifemanager/.tmp/ui-audit/screenshots/mobile-backlog.png"
+    },
+    {
+      "route": "/conversations",
+      "target": "desktop",
+      "url": "http://127.0.0.1:3001/conversations",
+      "navigationError": null,
+      "metrics": {
+        "title": "Social Life Manager",
+        "h1": [
+          "Conversations"
+        ],
+        "htmlClass": "dm_sans_93c9031e-module__HDfxQG__variable space_grotesk_590fd37e-module__Yn3fQa__variable h-full",
+        "bodyClass": "min-h-full",
+        "scrollWidth": 1440,
+        "clientWidth": 1440,
+        "scrollHeight": 900,
+        "clientHeight": 900,
+        "hasHorizontalOverflow": false,
+        "linkNoLabel": 0,
+        "buttonNoLabel": 0,
+        "imageIssues": [],
+        "hiddenByAria": 3,
+        "interactive": 16
+      },
+      "console": [
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=_OxkGFmfeki3yO06QtXbz' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=_OxkGFmfeki3yO06QtXbz' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        }
+      ],
+      "pageErrors": [],
+      "requestFailures": [],
+      "badResponses": [],
+      "screenshot": "/Users/joshua/Documents/lifemanager/.tmp/ui-audit/screenshots/desktop-conversations.png"
+    },
+    {
+      "route": "/conversations",
+      "target": "mobile",
+      "url": "http://127.0.0.1:3001/conversations",
+      "navigationError": null,
+      "metrics": {
+        "title": "Social Life Manager",
+        "h1": [
+          "Conversations"
+        ],
+        "htmlClass": "dm_sans_93c9031e-module__HDfxQG__variable space_grotesk_590fd37e-module__Yn3fQa__variable h-full",
+        "bodyClass": "min-h-full",
+        "scrollWidth": 390,
+        "clientWidth": 390,
+        "scrollHeight": 1178,
+        "clientHeight": 664,
+        "hasHorizontalOverflow": false,
+        "linkNoLabel": 0,
+        "buttonNoLabel": 0,
+        "imageIssues": [],
+        "hiddenByAria": 3,
+        "interactive": 16
+      },
+      "console": [
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=KN_lKTRTGZ0ftkG_SWVfb' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=KN_lKTRTGZ0ftkG_SWVfb' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        }
+      ],
+      "pageErrors": [],
+      "requestFailures": [],
+      "badResponses": [],
+      "screenshot": "/Users/joshua/Documents/lifemanager/.tmp/ui-audit/screenshots/mobile-conversations.png"
+    },
+    {
+      "route": "/followups",
+      "target": "desktop",
+      "url": "http://127.0.0.1:3001/followups",
+      "navigationError": null,
+      "metrics": {
+        "title": "Social Life Manager",
+        "h1": [
+          "Follow-ups"
+        ],
+        "htmlClass": "dm_sans_93c9031e-module__HDfxQG__variable space_grotesk_590fd37e-module__Yn3fQa__variable h-full",
+        "bodyClass": "min-h-full",
+        "scrollWidth": 1440,
+        "clientWidth": 1440,
+        "scrollHeight": 1300,
+        "clientHeight": 900,
+        "hasHorizontalOverflow": false,
+        "linkNoLabel": 0,
+        "buttonNoLabel": 0,
+        "imageIssues": [],
+        "hiddenByAria": 7,
+        "interactive": 21
+      },
+      "console": [
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=bFntfSVbUGitu-vGnMrkh' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=bFntfSVbUGitu-vGnMrkh' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        }
+      ],
+      "pageErrors": [],
+      "requestFailures": [],
+      "badResponses": [],
+      "screenshot": "/Users/joshua/Documents/lifemanager/.tmp/ui-audit/screenshots/desktop-followups.png"
+    },
+    {
+      "route": "/followups",
+      "target": "mobile",
+      "url": "http://127.0.0.1:3001/followups",
+      "navigationError": null,
+      "metrics": {
+        "title": "Social Life Manager",
+        "h1": [
+          "Follow-ups"
+        ],
+        "htmlClass": "dm_sans_93c9031e-module__HDfxQG__variable space_grotesk_590fd37e-module__Yn3fQa__variable h-full",
+        "bodyClass": "min-h-full",
+        "scrollWidth": 390,
+        "clientWidth": 390,
+        "scrollHeight": 1489,
+        "clientHeight": 664,
+        "hasHorizontalOverflow": false,
+        "linkNoLabel": 0,
+        "buttonNoLabel": 0,
+        "imageIssues": [],
+        "hiddenByAria": 7,
+        "interactive": 21
+      },
+      "console": [
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=8AW_-4euAKanGPnrb-_H3' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=8AW_-4euAKanGPnrb-_H3' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        }
+      ],
+      "pageErrors": [],
+      "requestFailures": [],
+      "badResponses": [],
+      "screenshot": "/Users/joshua/Documents/lifemanager/.tmp/ui-audit/screenshots/mobile-followups.png"
+    },
+    {
+      "route": "/media",
+      "target": "desktop",
+      "url": "http://127.0.0.1:3001/media",
+      "navigationError": null,
+      "metrics": {
+        "title": "Social Life Manager",
+        "h1": [
+          "Media"
+        ],
+        "htmlClass": "dm_sans_93c9031e-module__HDfxQG__variable space_grotesk_590fd37e-module__Yn3fQa__variable h-full",
+        "bodyClass": "min-h-full",
+        "scrollWidth": 1440,
+        "clientWidth": 1440,
+        "scrollHeight": 900,
+        "clientHeight": 900,
+        "hasHorizontalOverflow": false,
+        "linkNoLabel": 0,
+        "buttonNoLabel": 0,
+        "imageIssues": [],
+        "hiddenByAria": 2,
+        "interactive": 20
+      },
+      "console": [
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=3ksuzf-4JJrxi-N0TyOHW' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=3ksuzf-4JJrxi-N0TyOHW' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        }
+      ],
+      "pageErrors": [],
+      "requestFailures": [],
+      "badResponses": [],
+      "screenshot": "/Users/joshua/Documents/lifemanager/.tmp/ui-audit/screenshots/desktop-media.png"
+    },
+    {
+      "route": "/media",
+      "target": "mobile",
+      "url": "http://127.0.0.1:3001/media",
+      "navigationError": null,
+      "metrics": {
+        "title": "Social Life Manager",
+        "h1": [
+          "Media"
+        ],
+        "htmlClass": "dm_sans_93c9031e-module__HDfxQG__variable space_grotesk_590fd37e-module__Yn3fQa__variable h-full",
+        "bodyClass": "min-h-full",
+        "scrollWidth": 390,
+        "clientWidth": 390,
+        "scrollHeight": 1082,
+        "clientHeight": 664,
+        "hasHorizontalOverflow": false,
+        "linkNoLabel": 0,
+        "buttonNoLabel": 0,
+        "imageIssues": [],
+        "hiddenByAria": 2,
+        "interactive": 20
+      },
+      "console": [
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=ihdLTNIRnXLezEGI8607c' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=ihdLTNIRnXLezEGI8607c' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        }
+      ],
+      "pageErrors": [],
+      "requestFailures": [],
+      "badResponses": [],
+      "screenshot": "/Users/joshua/Documents/lifemanager/.tmp/ui-audit/screenshots/mobile-media.png"
+    },
+    {
+      "route": "/memes",
+      "target": "desktop",
+      "url": "http://127.0.0.1:3001/memes",
+      "navigationError": null,
+      "metrics": {
+        "title": "Social Life Manager",
+        "h1": [
+          "Memes"
+        ],
+        "htmlClass": "dm_sans_93c9031e-module__HDfxQG__variable space_grotesk_590fd37e-module__Yn3fQa__variable h-full",
+        "bodyClass": "min-h-full",
+        "scrollWidth": 1440,
+        "clientWidth": 1440,
+        "scrollHeight": 900,
+        "clientHeight": 900,
+        "hasHorizontalOverflow": false,
+        "linkNoLabel": 0,
+        "buttonNoLabel": 0,
+        "imageIssues": [],
+        "hiddenByAria": 2,
+        "interactive": 16
+      },
+      "console": [
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=OyF0mixmddUdnbTyvkN_w' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=OyF0mixmddUdnbTyvkN_w' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        }
+      ],
+      "pageErrors": [],
+      "requestFailures": [],
+      "badResponses": [],
+      "screenshot": "/Users/joshua/Documents/lifemanager/.tmp/ui-audit/screenshots/desktop-memes.png"
+    },
+    {
+      "route": "/memes",
+      "target": "mobile",
+      "url": "http://127.0.0.1:3001/memes",
+      "navigationError": null,
+      "metrics": {
+        "title": "Social Life Manager",
+        "h1": [
+          "Memes"
+        ],
+        "htmlClass": "dm_sans_93c9031e-module__HDfxQG__variable space_grotesk_590fd37e-module__Yn3fQa__variable h-full",
+        "bodyClass": "min-h-full",
+        "scrollWidth": 390,
+        "clientWidth": 390,
+        "scrollHeight": 1460,
+        "clientHeight": 664,
+        "hasHorizontalOverflow": false,
+        "linkNoLabel": 0,
+        "buttonNoLabel": 0,
+        "imageIssues": [],
+        "hiddenByAria": 2,
+        "interactive": 16
+      },
+      "console": [
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=nPcqg25QVaj-nEargfU9E' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=nPcqg25QVaj-nEargfU9E' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        }
+      ],
+      "pageErrors": [],
+      "requestFailures": [],
+      "badResponses": [],
+      "screenshot": "/Users/joshua/Documents/lifemanager/.tmp/ui-audit/screenshots/mobile-memes.png"
+    },
+    {
+      "route": "/queue",
+      "target": "desktop",
+      "url": "http://127.0.0.1:3001/queue",
+      "navigationError": null,
+      "metrics": {
+        "title": "Social Life Manager",
+        "h1": [
+          "Action Queue"
+        ],
+        "htmlClass": "dm_sans_93c9031e-module__HDfxQG__variable space_grotesk_590fd37e-module__Yn3fQa__variable h-full",
+        "bodyClass": "min-h-full",
+        "scrollWidth": 1440,
+        "clientWidth": 1440,
+        "scrollHeight": 900,
+        "clientHeight": 900,
+        "hasHorizontalOverflow": false,
+        "linkNoLabel": 0,
+        "buttonNoLabel": 0,
+        "imageIssues": [],
+        "hiddenByAria": 2,
+        "interactive": 21
+      },
+      "console": [
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=nxcBOUJsKuWLTnNY75qGK' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=nxcBOUJsKuWLTnNY75qGK' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        }
+      ],
+      "pageErrors": [],
+      "requestFailures": [],
+      "badResponses": [],
+      "screenshot": "/Users/joshua/Documents/lifemanager/.tmp/ui-audit/screenshots/desktop-queue.png"
+    },
+    {
+      "route": "/queue",
+      "target": "mobile",
+      "url": "http://127.0.0.1:3001/queue",
+      "navigationError": null,
+      "metrics": {
+        "title": "Social Life Manager",
+        "h1": [
+          "Action Queue"
+        ],
+        "htmlClass": "dm_sans_93c9031e-module__HDfxQG__variable space_grotesk_590fd37e-module__Yn3fQa__variable h-full",
+        "bodyClass": "min-h-full",
+        "scrollWidth": 390,
+        "clientWidth": 390,
+        "scrollHeight": 969,
+        "clientHeight": 664,
+        "hasHorizontalOverflow": false,
+        "linkNoLabel": 0,
+        "buttonNoLabel": 0,
+        "imageIssues": [],
+        "hiddenByAria": 2,
+        "interactive": 21
+      },
+      "console": [
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=c1r73ylysQjGVdfI401yF' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=c1r73ylysQjGVdfI401yF' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        }
+      ],
+      "pageErrors": [],
+      "requestFailures": [],
+      "badResponses": [],
+      "screenshot": "/Users/joshua/Documents/lifemanager/.tmp/ui-audit/screenshots/mobile-queue.png"
+    },
+    {
+      "route": "/rules",
+      "target": "desktop",
+      "url": "http://127.0.0.1:3001/rules",
+      "navigationError": null,
+      "metrics": {
+        "title": "Social Life Manager",
+        "h1": [
+          "Rules"
+        ],
+        "htmlClass": "dm_sans_93c9031e-module__HDfxQG__variable space_grotesk_590fd37e-module__Yn3fQa__variable h-full",
+        "bodyClass": "min-h-full",
+        "scrollWidth": 1440,
+        "clientWidth": 1440,
+        "scrollHeight": 900,
+        "clientHeight": 900,
+        "hasHorizontalOverflow": false,
+        "linkNoLabel": 0,
+        "buttonNoLabel": 0,
+        "imageIssues": [],
+        "hiddenByAria": 3,
+        "interactive": 15
+      },
+      "console": [
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=GcJpgaeD7vBBp4yqSlDol' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=GcJpgaeD7vBBp4yqSlDol' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        }
+      ],
+      "pageErrors": [],
+      "requestFailures": [],
+      "badResponses": [],
+      "screenshot": "/Users/joshua/Documents/lifemanager/.tmp/ui-audit/screenshots/desktop-rules.png"
+    },
+    {
+      "route": "/rules",
+      "target": "mobile",
+      "url": "http://127.0.0.1:3001/rules",
+      "navigationError": null,
+      "metrics": {
+        "title": "Social Life Manager",
+        "h1": [
+          "Rules"
+        ],
+        "htmlClass": "dm_sans_93c9031e-module__HDfxQG__variable space_grotesk_590fd37e-module__Yn3fQa__variable h-full",
+        "bodyClass": "min-h-full",
+        "scrollWidth": 390,
+        "clientWidth": 390,
+        "scrollHeight": 1097,
+        "clientHeight": 664,
+        "hasHorizontalOverflow": false,
+        "linkNoLabel": 0,
+        "buttonNoLabel": 0,
+        "imageIssues": [],
+        "hiddenByAria": 3,
+        "interactive": 15
+      },
+      "console": [
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=-YhA28PHzZoTzmX7g7Xdi' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=-YhA28PHzZoTzmX7g7Xdi' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        }
+      ],
+      "pageErrors": [],
+      "requestFailures": [],
+      "badResponses": [],
+      "screenshot": "/Users/joshua/Documents/lifemanager/.tmp/ui-audit/screenshots/mobile-rules.png"
+    },
+    {
+      "route": "/self-improvement",
+      "target": "desktop",
+      "url": "http://127.0.0.1:3001/self-improvement",
+      "navigationError": null,
+      "metrics": {
+        "title": "Social Life Manager",
+        "h1": [
+          "Self Improvement"
+        ],
+        "htmlClass": "dm_sans_93c9031e-module__HDfxQG__variable space_grotesk_590fd37e-module__Yn3fQa__variable h-full",
+        "bodyClass": "min-h-full",
+        "scrollWidth": 1440,
+        "clientWidth": 1440,
+        "scrollHeight": 900,
+        "clientHeight": 900,
+        "hasHorizontalOverflow": false,
+        "linkNoLabel": 0,
+        "buttonNoLabel": 0,
+        "imageIssues": [],
+        "hiddenByAria": 2,
+        "interactive": 12
+      },
+      "console": [
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=nWdxYzhKVfkgRim3HbWiE' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=nWdxYzhKVfkgRim3HbWiE' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        }
+      ],
+      "pageErrors": [],
+      "requestFailures": [],
+      "badResponses": [],
+      "screenshot": "/Users/joshua/Documents/lifemanager/.tmp/ui-audit/screenshots/desktop-self-improvement.png"
+    },
+    {
+      "route": "/self-improvement",
+      "target": "mobile",
+      "url": "http://127.0.0.1:3001/self-improvement",
+      "navigationError": null,
+      "metrics": {
+        "title": "Social Life Manager",
+        "h1": [
+          "Self Improvement"
+        ],
+        "htmlClass": "dm_sans_93c9031e-module__HDfxQG__variable space_grotesk_590fd37e-module__Yn3fQa__variable h-full",
+        "bodyClass": "min-h-full",
+        "scrollWidth": 390,
+        "clientWidth": 390,
+        "scrollHeight": 1024,
+        "clientHeight": 664,
+        "hasHorizontalOverflow": false,
+        "linkNoLabel": 0,
+        "buttonNoLabel": 0,
+        "imageIssues": [],
+        "hiddenByAria": 2,
+        "interactive": 12
+      },
+      "console": [
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=cZliGVmmhs8r6p2Ijevvn' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=cZliGVmmhs8r6p2Ijevvn' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        }
+      ],
+      "pageErrors": [],
+      "requestFailures": [],
+      "badResponses": [],
+      "screenshot": "/Users/joshua/Documents/lifemanager/.tmp/ui-audit/screenshots/mobile-self-improvement.png"
+    },
+    {
+      "route": "/settings",
+      "target": "desktop",
+      "url": "http://127.0.0.1:3001/settings",
+      "navigationError": null,
+      "metrics": {
+        "title": "Social Life Manager",
+        "h1": [
+          "Settings"
+        ],
+        "htmlClass": "dm_sans_93c9031e-module__HDfxQG__variable space_grotesk_590fd37e-module__Yn3fQa__variable h-full",
+        "bodyClass": "min-h-full",
+        "scrollWidth": 1440,
+        "clientWidth": 1440,
+        "scrollHeight": 900,
+        "clientHeight": 900,
+        "hasHorizontalOverflow": false,
+        "linkNoLabel": 0,
+        "buttonNoLabel": 0,
+        "imageIssues": [],
+        "hiddenByAria": 4,
+        "interactive": 12
+      },
+      "console": [
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=uA9j5f7AYzAWap0mHKPHS' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=uA9j5f7AYzAWap0mHKPHS' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        }
+      ],
+      "pageErrors": [],
+      "requestFailures": [],
+      "badResponses": [],
+      "screenshot": "/Users/joshua/Documents/lifemanager/.tmp/ui-audit/screenshots/desktop-settings.png"
+    },
+    {
+      "route": "/settings",
+      "target": "mobile",
+      "url": "http://127.0.0.1:3001/settings",
+      "navigationError": null,
+      "metrics": {
+        "title": "Social Life Manager",
+        "h1": [
+          "Settings"
+        ],
+        "htmlClass": "dm_sans_93c9031e-module__HDfxQG__variable space_grotesk_590fd37e-module__Yn3fQa__variable h-full",
+        "bodyClass": "min-h-full",
+        "scrollWidth": 390,
+        "clientWidth": 390,
+        "scrollHeight": 1135,
+        "clientHeight": 664,
+        "hasHorizontalOverflow": false,
+        "linkNoLabel": 0,
+        "buttonNoLabel": 0,
+        "imageIssues": [],
+        "hiddenByAria": 4,
+        "interactive": 12
+      },
+      "console": [
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=jj25ah_F-Awj1I2q1KnQ2' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=jj25ah_F-Awj1I2q1KnQ2' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        }
+      ],
+      "pageErrors": [],
+      "requestFailures": [],
+      "badResponses": [],
+      "screenshot": "/Users/joshua/Documents/lifemanager/.tmp/ui-audit/screenshots/mobile-settings.png"
+    },
+    {
+      "route": "/setup",
+      "target": "desktop",
+      "url": "http://127.0.0.1:3001/setup",
+      "navigationError": null,
+      "metrics": {
+        "title": "Social Life Manager",
+        "h1": [
+          "Setup Wizard"
+        ],
+        "htmlClass": "dm_sans_93c9031e-module__HDfxQG__variable space_grotesk_590fd37e-module__Yn3fQa__variable h-full",
+        "bodyClass": "min-h-full",
+        "scrollWidth": 1440,
+        "clientWidth": 1440,
+        "scrollHeight": 986,
+        "clientHeight": 900,
+        "hasHorizontalOverflow": false,
+        "linkNoLabel": 0,
+        "buttonNoLabel": 0,
+        "imageIssues": [],
+        "hiddenByAria": 2,
+        "interactive": 31
+      },
+      "console": [
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=Z3CJnMgVElMErd0vHE5FJ' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=Z3CJnMgVElMErd0vHE5FJ' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        }
+      ],
+      "pageErrors": [],
+      "requestFailures": [],
+      "badResponses": [],
+      "screenshot": "/Users/joshua/Documents/lifemanager/.tmp/ui-audit/screenshots/desktop-setup.png"
+    },
+    {
+      "route": "/setup",
+      "target": "mobile",
+      "url": "http://127.0.0.1:3001/setup",
+      "navigationError": null,
+      "metrics": {
+        "title": "Social Life Manager",
+        "h1": [
+          "Setup Wizard"
+        ],
+        "htmlClass": "dm_sans_93c9031e-module__HDfxQG__variable space_grotesk_590fd37e-module__Yn3fQa__variable h-full",
+        "bodyClass": "min-h-full",
+        "scrollWidth": 390,
+        "clientWidth": 390,
+        "scrollHeight": 1005,
+        "clientHeight": 664,
+        "hasHorizontalOverflow": false,
+        "linkNoLabel": 0,
+        "buttonNoLabel": 0,
+        "imageIssues": [],
+        "hiddenByAria": 2,
+        "interactive": 31
+      },
+      "console": [
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=jTCVnG70_TQZOrBeV0iqr' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=jTCVnG70_TQZOrBeV0iqr' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        }
+      ],
+      "pageErrors": [],
+      "requestFailures": [],
+      "badResponses": [],
+      "screenshot": "/Users/joshua/Documents/lifemanager/.tmp/ui-audit/screenshots/mobile-setup.png"
+    },
+    {
+      "route": "/status",
+      "target": "desktop",
+      "url": "http://127.0.0.1:3001/status",
+      "navigationError": null,
+      "metrics": {
+        "title": "Social Life Manager",
+        "h1": [
+          "Status"
+        ],
+        "htmlClass": "dm_sans_93c9031e-module__HDfxQG__variable space_grotesk_590fd37e-module__Yn3fQa__variable h-full",
+        "bodyClass": "min-h-full",
+        "scrollWidth": 1440,
+        "clientWidth": 1440,
+        "scrollHeight": 900,
+        "clientHeight": 900,
+        "hasHorizontalOverflow": false,
+        "linkNoLabel": 0,
+        "buttonNoLabel": 0,
+        "imageIssues": [],
+        "hiddenByAria": 4,
+        "interactive": 15
+      },
+      "console": [
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=OjB5yCOOFoxYcZWnG3nZa' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=OjB5yCOOFoxYcZWnG3nZa' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        }
+      ],
+      "pageErrors": [],
+      "requestFailures": [],
+      "badResponses": [],
+      "screenshot": "/Users/joshua/Documents/lifemanager/.tmp/ui-audit/screenshots/desktop-status.png"
+    },
+    {
+      "route": "/status",
+      "target": "mobile",
+      "url": "http://127.0.0.1:3001/status",
+      "navigationError": null,
+      "metrics": {
+        "title": "Social Life Manager",
+        "h1": [
+          "Status"
+        ],
+        "htmlClass": "dm_sans_93c9031e-module__HDfxQG__variable space_grotesk_590fd37e-module__Yn3fQa__variable h-full",
+        "bodyClass": "min-h-full",
+        "scrollWidth": 390,
+        "clientWidth": 390,
+        "scrollHeight": 1357,
+        "clientHeight": 664,
+        "hasHorizontalOverflow": false,
+        "linkNoLabel": 0,
+        "buttonNoLabel": 0,
+        "imageIssues": [],
+        "hiddenByAria": 4,
+        "interactive": 15
+      },
+      "console": [
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=FTYbvcHBBaD967WfYtZPb' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=FTYbvcHBBaD967WfYtZPb' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        }
+      ],
+      "pageErrors": [],
+      "requestFailures": [],
+      "badResponses": [],
+      "screenshot": "/Users/joshua/Documents/lifemanager/.tmp/ui-audit/screenshots/mobile-status.png"
+    },
+    {
+      "route": "/style-lab",
+      "target": "desktop",
+      "url": "http://127.0.0.1:3001/style-lab",
+      "navigationError": null,
+      "metrics": {
+        "title": "Social Life Manager",
+        "h1": [
+          "Style Lab"
+        ],
+        "htmlClass": "dm_sans_93c9031e-module__HDfxQG__variable space_grotesk_590fd37e-module__Yn3fQa__variable h-full",
+        "bodyClass": "min-h-full",
+        "scrollWidth": 1440,
+        "clientWidth": 1440,
+        "scrollHeight": 1389,
+        "clientHeight": 900,
+        "hasHorizontalOverflow": false,
+        "linkNoLabel": 0,
+        "buttonNoLabel": 0,
+        "imageIssues": [],
+        "hiddenByAria": 7,
+        "interactive": 16
+      },
+      "console": [
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=DP4euYtpC2DQvIV78wtft' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=DP4euYtpC2DQvIV78wtft' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        }
+      ],
+      "pageErrors": [],
+      "requestFailures": [],
+      "badResponses": [],
+      "screenshot": "/Users/joshua/Documents/lifemanager/.tmp/ui-audit/screenshots/desktop-style-lab.png"
+    },
+    {
+      "route": "/style-lab",
+      "target": "mobile",
+      "url": "http://127.0.0.1:3001/style-lab",
+      "navigationError": null,
+      "metrics": {
+        "title": "Social Life Manager",
+        "h1": [
+          "Style Lab"
+        ],
+        "htmlClass": "dm_sans_93c9031e-module__HDfxQG__variable space_grotesk_590fd37e-module__Yn3fQa__variable h-full",
+        "bodyClass": "min-h-full",
+        "scrollWidth": 390,
+        "clientWidth": 390,
+        "scrollHeight": 1973,
+        "clientHeight": 664,
+        "hasHorizontalOverflow": false,
+        "linkNoLabel": 0,
+        "buttonNoLabel": 0,
+        "imageIssues": [],
+        "hiddenByAria": 7,
+        "interactive": 16
+      },
+      "console": [
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=CVisDLEcLTm6uBO_Oa7OK' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=CVisDLEcLTm6uBO_Oa7OK' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=CVisDLEcLTm6uBO_Oa7OK' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        }
+      ],
+      "pageErrors": [],
+      "requestFailures": [],
+      "badResponses": [],
+      "screenshot": "/Users/joshua/Documents/lifemanager/.tmp/ui-audit/screenshots/mobile-style-lab.png"
+    },
+    {
+      "route": "/system",
+      "target": "desktop",
+      "url": "http://127.0.0.1:3001/system",
+      "navigationError": null,
+      "metrics": {
+        "title": "Social Life Manager",
+        "h1": [
+          "System"
+        ],
+        "htmlClass": "dm_sans_93c9031e-module__HDfxQG__variable space_grotesk_590fd37e-module__Yn3fQa__variable h-full",
+        "bodyClass": "min-h-full",
+        "scrollWidth": 1440,
+        "clientWidth": 1440,
+        "scrollHeight": 1081,
+        "clientHeight": 900,
+        "hasHorizontalOverflow": false,
+        "linkNoLabel": 0,
+        "buttonNoLabel": 0,
+        "imageIssues": [],
+        "hiddenByAria": 6,
+        "interactive": 16
+      },
+      "console": [
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=11kiBZkiacLxU-qiOe_Ba' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=11kiBZkiacLxU-qiOe_Ba' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        }
+      ],
+      "pageErrors": [],
+      "requestFailures": [],
+      "badResponses": [],
+      "screenshot": "/Users/joshua/Documents/lifemanager/.tmp/ui-audit/screenshots/desktop-system.png"
+    },
+    {
+      "route": "/system",
+      "target": "mobile",
+      "url": "http://127.0.0.1:3001/system",
+      "navigationError": null,
+      "metrics": {
+        "title": "Social Life Manager",
+        "h1": [
+          "System"
+        ],
+        "htmlClass": "dm_sans_93c9031e-module__HDfxQG__variable space_grotesk_590fd37e-module__Yn3fQa__variable h-full",
+        "bodyClass": "min-h-full",
+        "scrollWidth": 390,
+        "clientWidth": 390,
+        "scrollHeight": 1485,
+        "clientHeight": 664,
+        "hasHorizontalOverflow": false,
+        "linkNoLabel": 0,
+        "buttonNoLabel": 0,
+        "imageIssues": [],
+        "hiddenByAria": 6,
+        "interactive": 16
+      },
+      "console": [
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=4zB42Q5uThmebxskS4N2h' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=4zB42Q5uThmebxskS4N2h' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=4zB42Q5uThmebxskS4N2h' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        }
+      ],
+      "pageErrors": [],
+      "requestFailures": [],
+      "badResponses": [],
+      "screenshot": "/Users/joshua/Documents/lifemanager/.tmp/ui-audit/screenshots/mobile-system.png"
+    },
+    {
+      "route": "/systems-design",
+      "target": "desktop",
+      "url": "http://127.0.0.1:3001/systems-design",
+      "navigationError": null,
+      "metrics": {
+        "title": "Social Life Manager",
+        "h1": [
+          "Systems Design"
+        ],
+        "htmlClass": "dm_sans_93c9031e-module__HDfxQG__variable space_grotesk_590fd37e-module__Yn3fQa__variable h-full",
+        "bodyClass": "min-h-full",
+        "scrollWidth": 1440,
+        "clientWidth": 1440,
+        "scrollHeight": 1409,
+        "clientHeight": 900,
+        "hasHorizontalOverflow": false,
+        "linkNoLabel": 0,
+        "buttonNoLabel": 0,
+        "imageIssues": [],
+        "hiddenByAria": 5,
+        "interactive": 33
+      },
+      "console": [
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=E4TsZYD2MbxgGkr_5ULux' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=E4TsZYD2MbxgGkr_5ULux' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        }
+      ],
+      "pageErrors": [],
+      "requestFailures": [],
+      "badResponses": [],
+      "screenshot": "/Users/joshua/Documents/lifemanager/.tmp/ui-audit/screenshots/desktop-systems-design.png"
+    },
+    {
+      "route": "/systems-design",
+      "target": "mobile",
+      "url": "http://127.0.0.1:3001/systems-design",
+      "navigationError": null,
+      "metrics": {
+        "title": "Social Life Manager",
+        "h1": [
+          "Systems Design"
+        ],
+        "htmlClass": "dm_sans_93c9031e-module__HDfxQG__variable space_grotesk_590fd37e-module__Yn3fQa__variable h-full",
+        "bodyClass": "min-h-full",
+        "scrollWidth": 390,
+        "clientWidth": 390,
+        "scrollHeight": 1883,
+        "clientHeight": 664,
+        "hasHorizontalOverflow": false,
+        "linkNoLabel": 0,
+        "buttonNoLabel": 0,
+        "imageIssues": [],
+        "hiddenByAria": 5,
+        "interactive": 33
+      },
+      "console": [
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=Txc7dtexsAEC4sUnWmj_C' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=Txc7dtexsAEC4sUnWmj_C' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=Txc7dtexsAEC4sUnWmj_C' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        }
+      ],
+      "pageErrors": [],
+      "requestFailures": [],
+      "badResponses": [],
+      "screenshot": "/Users/joshua/Documents/lifemanager/.tmp/ui-audit/screenshots/mobile-systems-design.png"
+    },
+    {
+      "route": "/tools",
+      "target": "desktop",
+      "url": "http://127.0.0.1:3001/tools",
+      "navigationError": null,
+      "metrics": {
+        "title": "Social Life Manager",
+        "h1": [
+          "Daily Nixtio"
+        ],
+        "htmlClass": "dm_sans_93c9031e-module__HDfxQG__variable space_grotesk_590fd37e-module__Yn3fQa__variable h-full",
+        "bodyClass": "min-h-full",
+        "scrollWidth": 1440,
+        "clientWidth": 1440,
+        "scrollHeight": 992,
+        "clientHeight": 900,
+        "hasHorizontalOverflow": false,
+        "linkNoLabel": 0,
+        "buttonNoLabel": 0,
+        "imageIssues": [],
+        "hiddenByAria": 4,
+        "interactive": 34
+      },
+      "console": [
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=-WM3v4klIzcBrbP7QULtO' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=-WM3v4klIzcBrbP7QULtO' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=MgvwnXG3Eu-M59GZ_KnAx' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        }
+      ],
+      "pageErrors": [],
+      "requestFailures": [],
+      "badResponses": [],
+      "screenshot": "/Users/joshua/Documents/lifemanager/.tmp/ui-audit/screenshots/desktop-tools.png"
+    },
+    {
+      "route": "/tools",
+      "target": "mobile",
+      "url": "http://127.0.0.1:3001/tools",
+      "navigationError": null,
+      "metrics": {
+        "title": "Social Life Manager",
+        "h1": [
+          "Daily Nixtio"
+        ],
+        "htmlClass": "dm_sans_93c9031e-module__HDfxQG__variable space_grotesk_590fd37e-module__Yn3fQa__variable h-full",
+        "bodyClass": "min-h-full",
+        "scrollWidth": 390,
+        "clientWidth": 390,
+        "scrollHeight": 2442,
+        "clientHeight": 664,
+        "hasHorizontalOverflow": false,
+        "linkNoLabel": 0,
+        "buttonNoLabel": 0,
+        "imageIssues": [],
+        "hiddenByAria": 4,
+        "interactive": 34
+      },
+      "console": [
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=dtwhBeURDNRfuav9MlTzb' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=dtwhBeURDNRfuav9MlTzb' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=pa2Ptp5eOwxoz47D1ygu_' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        },
+        {
+          "type": "error",
+          "text": "WebSocket connection to 'ws://127.0.0.1:3001/_next/webpack-hmr?id=pa2Ptp5eOwxoz47D1ygu_' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+          "location": {
+            "url": "http://127.0.0.1:3001/_next/static/chunks/node_modules_next_dist_client_0fhqo1d._.js",
+            "lineNumber": 13299,
+            "columnNumber": 0
+          }
+        }
+      ],
+      "pageErrors": [],
+      "requestFailures": [],
+      "badResponses": [],
+      "screenshot": "/Users/joshua/Documents/lifemanager/.tmp/ui-audit/screenshots/mobile-tools.png"
+    }
+  ]
+}

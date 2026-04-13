@@ -68,6 +68,7 @@ const SYSTEM_TABS: Array<{ id: SystemTab; label: string }> = [
   { id: "runs", label: "Runs" },
   { id: "events", label: "Events" },
 ];
+const MAX_TEST_AI_MESSAGE_CHARS = 8000;
 
 async function readApiError(response: Response) {
   try {
@@ -148,9 +149,13 @@ function AiTestBench() {
             value={message}
             onChange={(event) => setMessage(event.target.value)}
             placeholder="Type a message your contact might send..."
+            maxLength={MAX_TEST_AI_MESSAGE_CHARS}
             disabled={record.pending}
             aria-disabled={record.pending}
           />
+          <span className="queue-meta">
+            {message.length}/{MAX_TEST_AI_MESSAGE_CHARS} characters
+          </span>
         </label>
 
         <label className="stack compact">

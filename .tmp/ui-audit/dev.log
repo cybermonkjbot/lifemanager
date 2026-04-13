@@ -1,0 +1,2 @@
+$ bun run dev:next
+$ mkdir -p .slm && sh -lc 'echo $$ > .slm/app.pid; exec next dev'

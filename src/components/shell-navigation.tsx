@@ -29,15 +29,13 @@ export function ShellNavigation({ items }: ShellNavigationProps) {
   return (
     <>
       <div className="shell-tabbar" role="navigation" aria-label="Workspace sections">
-        <div className="shell-tabs-row" role="tablist" aria-label="Primary workspaces">
+        <div className="shell-tabs-row" aria-label="Primary workspaces">
           {primaryItems.map((item) => {
             const active = isActive(pathname, item.href);
             return (
               <Link
                 key={item.href}
                 href={item.href}
-                role="tab"
-                aria-selected={active}
                 className={`shell-tab ${active ? "shell-tab-active" : ""}`}
                 aria-current={active ? "page" : undefined}
               >
@@ -47,15 +45,15 @@ export function ShellNavigation({ items }: ShellNavigationProps) {
           })}
         </div>
         <button type="button" className="btn btn-ghost" onClick={() => setWorkspaceOpen(true)}>
-          More
+          All Sections
         </button>
       </div>
 
       <UIModal
         open={workspaceOpen}
         onClose={() => setWorkspaceOpen(false)}
-        title="All Workspaces"
-        description="Primary tabs stay on top; all sections are listed here."
+        title="All Sections"
+        description="Open any workspace from one list."
       >
         <div className="workspace-modal-list">
           {[...primaryItems, ...secondaryItems].map((item) => {

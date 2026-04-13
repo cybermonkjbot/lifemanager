@@ -5,6 +5,7 @@ import { generateMemeImageWithAzure } from "@/worker/ai";
 import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
+const MAX_MEME_PROMPT_CHARS = 8000;
 
 type ThreadContext = {
   thread?: { title?: string; jid?: string } | null;
@@ -100,8 +101,11 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Prompt is required." }, { status: 400 });
   }
 
-  if (prompt.length > 2400) {
-    return NextResponse.json({ error: "Prompt is too long. Keep it under 2400 characters." }, { status: 400 });
+  if (prompt.length > MAX_MEME_PROMPT_CHARS) {
+    return NextResponse.json(
+      { error: `Prompt is too long. Keep it under ${MAX_MEME_PROMPT_CHARS} characters.` },
+      { status: 400 },
+    );
   }
 
   try {

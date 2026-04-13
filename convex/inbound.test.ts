@@ -24,6 +24,18 @@ test("extractAliasesFromText ignores text without alias cues", () => {
   assert.deepEqual(aliases, []);
 });
 
+test("extractAliasesFromText avoids non-name words from intro phrases", () => {
+  const aliases = extractAliasesFromText(
+    "I'm fine. It's easier. I'm heading. It's okay. I'm lost. It's fair. I'm Juliet.",
+  );
+  assert.deepEqual(aliases, ["Juliet"]);
+});
+
+test("extractAliasesFromText ignores motion/status phrases but keeps explicit nickname cue", () => {
+  const aliases = extractAliasesFromText("I'm going to the store now, call me Tutar.");
+  assert.deepEqual(aliases, ["Tutar"]);
+});
+
 test("classifyThreadKind detects broadcast/system JIDs", () => {
   assert.equal(classifyThreadKind({ jid: "status@broadcast" }), "broadcast_or_system");
   assert.equal(classifyThreadKind({ jid: "ig:story:broadcast", provider: "instagram" }), "broadcast_or_system");

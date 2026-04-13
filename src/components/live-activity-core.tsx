@@ -504,6 +504,7 @@ export function LiveActivityCore({ splineSceneUrl }: LiveActivityCoreProps) {
           >
             <div
               className="activity-core-object"
+              aria-hidden="true"
               style={{
                 width: "min(560px, 96vw)",
                 height: "min(560px, 96vw)",

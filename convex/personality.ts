@@ -27,7 +27,7 @@ type PersonalityProfileView = {
 
 type PromptProfileSource = "manual" | "auto";
 
-const MAX_PROMPT_PROFILE_CHARS = 2400;
+const MAX_PROMPT_PROFILE_CHARS = 8000;
 const EMOJI_REGEX = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu;
 
 const DEFAULT_PERSONALITY_PROFILES: DefaultPersonalityProfile[] = [

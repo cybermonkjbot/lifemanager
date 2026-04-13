@@ -15,14 +15,14 @@ export function ShellControlsModal({ realtimeEnabled, fallbackPaused }: ShellCon
   return (
     <>
       <button type="button" className="btn btn-ghost" onClick={() => setOpen(true)}>
-        Controls
+        Runtime
       </button>
 
       <UIModal
         open={open}
         onClose={() => setOpen(false)}
         title="Runtime Controls"
-        description="Pause or resume autonomy and manage worker actions."
+        description="Pause or resume autonomy and run worker actions."
       >
         <AutonomyControls realtimeEnabled={realtimeEnabled} fallbackPaused={fallbackPaused} />
       </UIModal>

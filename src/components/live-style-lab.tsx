@@ -161,7 +161,11 @@ function StyleLabContent() {
           <p className="queue-meta">Current mimicry: {Math.round(currentLevel * 100)}%</p>
         )}
         <form onSubmit={onSubmit} className="stack compact" aria-busy={record.pending}>
+          <label htmlFor="mimicry-level" className="queue-meta">
+            Mimicry level
+          </label>
           <input
+            id="mimicry-level"
             type="range"
             min="0"
             max="1"

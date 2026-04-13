@@ -1,0 +1,278 @@
+{
+  "generatedAt": "2026-04-13T00:29:03.664Z",
+  "baseUrl": "http://127.0.0.1:3001",
+  "rows": [
+    {
+      "route": "/",
+      "target": "desktop",
+      "url": "http://127.0.0.1:3001/",
+      "error": null,
+      "violationCount": 0,
+      "violations": []
+    },
+    {
+      "route": "/",
+      "target": "mobile",
+      "url": "http://127.0.0.1:3001/",
+      "error": null,
+      "violationCount": 0,
+      "violations": []
+    },
+    {
+      "route": "/activity-core",
+      "target": "desktop",
+      "url": "http://127.0.0.1:3001/activity-core",
+      "error": null,
+      "violationCount": 0,
+      "violations": []
+    },
+    {
+      "route": "/activity-core",
+      "target": "mobile",
+      "url": "http://127.0.0.1:3001/activity-core",
+      "error": null,
+      "violationCount": 0,
+      "violations": []
+    },
+    {
+      "route": "/backlog",
+      "target": "desktop",
+      "url": "http://127.0.0.1:3001/backlog",
+      "error": null,
+      "violationCount": 0,
+      "violations": []
+    },
+    {
+      "route": "/backlog",
+      "target": "mobile",
+      "url": "http://127.0.0.1:3001/backlog",
+      "error": null,
+      "violationCount": 0,
+      "violations": []
+    },
+    {
+      "route": "/conversations",
+      "target": "desktop",
+      "url": "http://127.0.0.1:3001/conversations",
+      "error": null,
+      "violationCount": 0,
+      "violations": []
+    },
+    {
+      "route": "/conversations",
+      "target": "mobile",
+      "url": "http://127.0.0.1:3001/conversations",
+      "error": null,
+      "violationCount": 0,
+      "violations": []
+    },
+    {
+      "route": "/followups",
+      "target": "desktop",
+      "url": "http://127.0.0.1:3001/followups",
+      "error": null,
+      "violationCount": 0,
+      "violations": []
+    },
+    {
+      "route": "/followups",
+      "target": "mobile",
+      "url": "http://127.0.0.1:3001/followups",
+      "error": null,
+      "violationCount": 0,
+      "violations": []
+    },
+    {
+      "route": "/media",
+      "target": "desktop",
+      "url": "http://127.0.0.1:3001/media",
+      "error": null,
+      "violationCount": 0,
+      "violations": []
+    },
+    {
+      "route": "/media",
+      "target": "mobile",
+      "url": "http://127.0.0.1:3001/media",
+      "error": null,
+      "violationCount": 0,
+      "violations": []
+    },
+    {
+      "route": "/memes",
+      "target": "desktop",
+      "url": "http://127.0.0.1:3001/memes",
+      "error": null,
+      "violationCount": 0,
+      "violations": []
+    },
+    {
+      "route": "/memes",
+      "target": "mobile",
+      "url": "http://127.0.0.1:3001/memes",
+      "error": null,
+      "violationCount": 0,
+      "violations": []
+    },
+    {
+      "route": "/queue",
+      "target": "desktop",
+      "url": "http://127.0.0.1:3001/queue",
+      "error": null,
+      "violationCount": 0,
+      "violations": []
+    },
+    {
+      "route": "/queue",
+      "target": "mobile",
+      "url": "http://127.0.0.1:3001/queue",
+      "error": null,
+      "violationCount": 0,
+      "violations": []
+    },
+    {
+      "route": "/rules",
+      "target": "desktop",
+      "url": "http://127.0.0.1:3001/rules",
+      "error": null,
+      "violationCount": 0,
+      "violations": []
+    },
+    {
+      "route": "/rules",
+      "target": "mobile",
+      "url": "http://127.0.0.1:3001/rules",
+      "error": null,
+      "violationCount": 0,
+      "violations": []
+    },
+    {
+      "route": "/self-improvement",
+      "target": "desktop",
+      "url": "http://127.0.0.1:3001/self-improvement",
+      "error": null,
+      "violationCount": 0,
+      "violations": []
+    },
+    {
+      "route": "/self-improvement",
+      "target": "mobile",
+      "url": "http://127.0.0.1:3001/self-improvement",
+      "error": null,
+      "violationCount": 0,
+      "violations": []
+    },
+    {
+      "route": "/settings",
+      "target": "desktop",
+      "url": "http://127.0.0.1:3001/settings",
+      "error": null,
+      "violationCount": 0,
+      "violations": []
+    },
+    {
+      "route": "/settings",
+      "target": "mobile",
+      "url": "http://127.0.0.1:3001/settings",
+      "error": null,
+      "violationCount": 0,
+      "violations": []
+    },
+    {
+      "route": "/setup",
+      "target": "desktop",
+      "url": "http://127.0.0.1:3001/setup",
+      "error": null,
+      "violationCount": 0,
+      "violations": []
+    },
+    {
+      "route": "/setup",
+      "target": "mobile",
+      "url": "http://127.0.0.1:3001/setup",
+      "error": null,
+      "violationCount": 0,
+      "violations": []
+    },
+    {
+      "route": "/status",
+      "target": "desktop",
+      "url": "http://127.0.0.1:3001/status",
+      "error": null,
+      "violationCount": 0,
+      "violations": []
+    },
+    {
+      "route": "/status",
+      "target": "mobile",
+      "url": "http://127.0.0.1:3001/status",
+      "error": null,
+      "violationCount": 0,
+      "violations": []
+    },
+    {
+      "route": "/style-lab",
+      "target": "desktop",
+      "url": "http://127.0.0.1:3001/style-lab",
+      "error": null,
+      "violationCount": 0,
+      "violations": []
+    },
+    {
+      "route": "/style-lab",
+      "target": "mobile",
+      "url": "http://127.0.0.1:3001/style-lab",
+      "error": null,
+      "violationCount": 0,
+      "violations": []
+    },
+    {
+      "route": "/system",
+      "target": "desktop",
+      "url": "http://127.0.0.1:3001/system",
+      "error": null,
+      "violationCount": 0,
+      "violations": []
+    },
+    {
+      "route": "/system",
+      "target": "mobile",
+      "url": "http://127.0.0.1:3001/system",
+      "error": null,
+      "violationCount": 0,
+      "violations": []
+    },
+    {
+      "route": "/systems-design",
+      "target": "desktop",
+      "url": "http://127.0.0.1:3001/systems-design",
+      "error": null,
+      "violationCount": 0,
+      "violations": []
+    },
+    {
+      "route": "/systems-design",
+      "target": "mobile",
+      "url": "http://127.0.0.1:3001/systems-design",
+      "error": null,
+      "violationCount": 0,
+      "violations": []
+    },
+    {
+      "route": "/tools",
+      "target": "desktop",
+      "url": "http://127.0.0.1:3001/tools",
+      "error": null,
+      "violationCount": 0,
+      "violations": []
+    },
+    {
+      "route": "/tools",
+      "target": "mobile",
+      "url": "http://127.0.0.1:3001/tools",
+      "error": null,
+      "violationCount": 0,
+      "violations": []
+    }
+  ]
+}

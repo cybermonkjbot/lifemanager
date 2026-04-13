@@ -4,6 +4,7 @@ import { generateReplyWithFallback } from "@/worker/ai";
 import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
+const MAX_TEST_AI_MESSAGE_CHARS = 8000;
 
 type RuntimeSettings = {
   soulModeEnabled?: boolean;
@@ -91,8 +92,11 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Message is required." }, { status: 400 });
   }
 
-  if (message.length > 2400) {
-    return NextResponse.json({ error: "Message is too long. Keep it under 2400 characters." }, { status: 400 });
+  if (message.length > MAX_TEST_AI_MESSAGE_CHARS) {
+    return NextResponse.json(
+      { error: `Message is too long. Keep it under ${MAX_TEST_AI_MESSAGE_CHARS} characters.` },
+      { status: 400 },
+    );
   }
 
   try {

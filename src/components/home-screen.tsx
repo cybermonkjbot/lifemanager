@@ -3,7 +3,7 @@
 import { dashboardNavItems } from "@/lib/ui/dashboard-nav";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { type FormEvent, useMemo, useState } from "react";
+import { type FormEvent, useEffect, useMemo, useState } from "react";
 
 type HomeFeature = {
   href: string;
@@ -18,26 +18,30 @@ type CommandFeedback = {
   message: string;
 };
 
+type SetupStatusSnapshot = {
+  accountName?: string;
+};
+
 const homeFeatures: HomeFeature[] = [
   {
     href: "/queue",
-    title: "Contribute ideas, offer feedback, and manage tasks all in sync.",
-    description: "Triage pending replies, follow-ups, todos, and guardrails from one queue.",
-    footer: "Fast Start",
+    title: "Process pending work from one queue.",
+    description: "Handle replies, follow-ups, todos, and safety checks in one place.",
+    footer: "Open Queue",
     accentClass: "home-feature-mark-queue",
   },
   {
     href: "/conversations",
-    title: "Stay connected, share ideas, and align goals effortlessly.",
-    description: "Open thread context, tune voice, and approve outreach with clear history.",
-    footer: "Collaborate with Team",
+    title: "Review thread context before sending.",
+    description: "Check history, adjust tone, and approve outreach with full context.",
+    footer: "Open Conversations",
     accentClass: "home-feature-mark-conversations",
   },
   {
     href: "/followups",
-    title: "Organize your time efficiently, set clear priorities, and stay focused.",
-    description: "Track due outreach, commitments, and pending reminders with confidence.",
-    footer: "Planning",
+    title: "Keep commitments and reminders on track.",
+    description: "Track due outreach, snooze items, and confirm completed follow-ups.",
+    footer: "Open Follow-ups",
     accentClass: "home-feature-mark-followups",
   },
 ];
@@ -106,12 +110,39 @@ export function HomeScreen() {
   const router = useRouter();
   const pathname = usePathname() || "/";
   const [commandInput, setCommandInput] = useState("");
+  const [accountName, setAccountName] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<CommandFeedback>({
     kind: "idle",
     message: "Try: go queue, open conversations, setup, /queue",
   });
 
   const primaryNavItems = useMemo(() => dashboardNavItems.filter((item) => item.primary), []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadSetupName = async () => {
+      try {
+        const response = await fetch("/api/setup/whatsapp/status", { cache: "no-store" });
+        if (!response.ok) {
+          return;
+        }
+        const payload = (await response.json()) as SetupStatusSnapshot;
+        const nextName = typeof payload.accountName === "string" ? payload.accountName.trim() : "";
+        if (!cancelled && nextName) {
+          setAccountName(nextName);
+        }
+      } catch {
+        // Keep generic greeting when setup status is unavailable.
+      }
+    };
+
+    void loadSetupName();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const runCommand = (command: string) => {
     const result = getCommandTarget(command);
@@ -152,9 +183,9 @@ export function HomeScreen() {
 
   return (
     <section className="home-shell" aria-label="Home overview">
-      <aside className="home-rail" aria-label="Quick sections">
-        <p className="home-rail-title">Quick Navigation</p>
-        <p className="home-rail-note">Readable links to your main workspaces.</p>
+      <section className="home-rail" aria-label="Quick sections">
+        <p className="home-rail-title">Quick Access</p>
+        <p className="home-rail-note">Jump to your main workspaces.</p>
         <div className="home-rail-list">
           {primaryNavItems.map((item) => {
             const active = pathname === item.href || (item.href !== "/" && pathname.startsWith(`${item.href}/`));
@@ -166,24 +197,21 @@ export function HomeScreen() {
             );
           })}
         </div>
-      </aside>
+      </section>
 
       <div className="home-canvas">
         <div className="home-topline">
           <p className="home-assistant">Assistant v2.6</p>
-          <p className="home-title">Daily Nixtio</p>
-          <button type="button" className="btn home-upgrade">
-            Upgrade
-          </button>
+          <h1 className="home-title">Daily Nixtio</h1>
         </div>
 
         <div className="home-hero">
           <div className="home-hero-copy">
-            <p className="home-hero-kicker">Hi Joshua</p>
-            <h2 className="home-hero-title">Ready to Achieve Great Things?</h2>
+            <p className="home-hero-kicker">{accountName ? `Welcome back, ${accountName}` : "Welcome back"}</p>
+            <h2 className="home-hero-title">What needs attention right now?</h2>
           </div>
           <div className="home-avatar-wrap" aria-hidden>
-            <p className="home-avatar-note">Hey there! Need a boost?</p>
+            <p className="home-avatar-note">Need help picking the next task?</p>
             <div className="home-avatar">
               <div className="home-avatar-face">
                 <span />
@@ -206,8 +234,8 @@ export function HomeScreen() {
 
         <div className="home-console">
           <div className="home-console-meta">
-            <p className="home-console-hint">Command box: type where you want to go.</p>
-            <p className="home-console-hint">Powered by Assistant v2.6</p>
+            <p className="home-console-hint">Command line: type the workspace or route you want.</p>
+            <p className="home-console-hint">Tip: use go &lt;tab&gt;, open &lt;tab&gt;, or /route.</p>
           </div>
           <form className="home-prompt-row" onSubmit={onCommandSubmit}>
             <button type="button" className="home-plus" aria-label="Show command help" onClick={() => runCommand("help")}>

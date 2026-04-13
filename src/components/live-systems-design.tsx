@@ -467,26 +467,23 @@ export function LiveSystemsDesign() {
             <p>{activeService.description}</p>
           </div>
 
-          <div className="systems-chip-row" role="list" aria-label="Connected services">
+          <ul className="systems-chip-row" aria-label="Connected services">
             {connectedServiceIds.length === 0 ? (
-              <span className="systems-chip">No direct links</span>
+              <li className="systems-chip">No direct links</li>
             ) : (
               connectedServiceIds.map((serviceId) => {
                 const linked = SERVICES.find((service) => service.id === serviceId);
                 if (!linked) return null;
                 return (
-                  <button
-                    key={linked.id}
-                    type="button"
-                    className="systems-chip systems-chip-button"
-                    onClick={() => setActiveServiceId(linked.id)}
-                  >
-                    {linked.label}
-                  </button>
+                  <li key={linked.id}>
+                    <button type="button" className="systems-chip systems-chip-button" onClick={() => setActiveServiceId(linked.id)}>
+                      {linked.label}
+                    </button>
+                  </li>
                 );
               })
             )}
-          </div>
+          </ul>
 
           <div className="systems-link-list">
             {relatedLinks.map((link) => (
