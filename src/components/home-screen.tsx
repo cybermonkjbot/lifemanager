@@ -2,8 +2,8 @@
 
 import { dashboardNavItems } from "@/lib/ui/dashboard-nav";
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
-import { type FormEvent, useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
+import { type FormEvent, useEffect, useState } from "react";
 
 type HomeFeature = {
   href: string;
@@ -20,7 +20,52 @@ type CommandFeedback = {
 
 type SetupStatusSnapshot = {
   accountName?: string;
+  status?: "idle" | "starting" | "authenticating" | "qr_ready" | "code_ready" | "syncing" | "connected" | "error";
+  hasAuth?: boolean;
+  listenerActive?: boolean;
+  message?: string;
 };
+
+function summarizeSetupState(snapshot: SetupStatusSnapshot | null) {
+  if (!snapshot) {
+    return "Loading";
+  }
+  if (snapshot.listenerActive || snapshot.status === "connected") {
+    return "Connected";
+  }
+  if (snapshot.hasAuth) {
+    return "Paired";
+  }
+  if (
+    snapshot.status === "starting" ||
+    snapshot.status === "authenticating" ||
+    snapshot.status === "qr_ready" ||
+    snapshot.status === "code_ready" ||
+    snapshot.status === "syncing"
+  ) {
+    return "In progress";
+  }
+  if (snapshot.status === "error") {
+    return "Attention needed";
+  }
+  return "Not connected";
+}
+
+function summarizeNextStep(snapshot: SetupStatusSnapshot | null) {
+  if (!snapshot) {
+    return "Wait for setup state to load, then process queue.";
+  }
+  if (snapshot.listenerActive || snapshot.status === "connected") {
+    return "Runtime is live. Start with queue triage.";
+  }
+  if (snapshot.hasAuth) {
+    return "Start worker from Setup to move from paired to connected.";
+  }
+  if (snapshot.status === "error") {
+    return "Open Setup and restart pairing.";
+  }
+  return "Open Setup to connect WhatsApp first.";
+}
 
 const homeFeatures: HomeFeature[] = [
   {
@@ -108,15 +153,12 @@ function getCommandTarget(command: string) {
 
 export function HomeScreen() {
   const router = useRouter();
-  const pathname = usePathname() || "/";
   const [commandInput, setCommandInput] = useState("");
-  const [accountName, setAccountName] = useState<string | null>(null);
+  const [setupSnapshot, setSetupSnapshot] = useState<SetupStatusSnapshot | null>(null);
   const [feedback, setFeedback] = useState<CommandFeedback>({
     kind: "idle",
     message: "Try: go queue, open conversations, setup, /queue",
   });
-
-  const primaryNavItems = useMemo(() => dashboardNavItems.filter((item) => item.primary), []);
 
   useEffect(() => {
     let cancelled = false;
@@ -128,12 +170,11 @@ export function HomeScreen() {
           return;
         }
         const payload = (await response.json()) as SetupStatusSnapshot;
-        const nextName = typeof payload.accountName === "string" ? payload.accountName.trim() : "";
-        if (!cancelled && nextName) {
-          setAccountName(nextName);
+        if (!cancelled) {
+          setSetupSnapshot(payload);
         }
       } catch {
-        // Keep generic greeting when setup status is unavailable.
+        // Keep generic rail/greeting when setup status is unavailable.
       }
     };
 
@@ -143,6 +184,11 @@ export function HomeScreen() {
       cancelled = true;
     };
   }, []);
+
+  const accountName = setupSnapshot?.accountName?.trim() || null;
+  const setupStateLabel = summarizeSetupState(setupSnapshot);
+  const setupMessage = setupSnapshot?.message?.trim() || "Setup status will appear when runtime responds.";
+  const nextStep = summarizeNextStep(setupSnapshot);
 
   const runCommand = (command: string) => {
     const result = getCommandTarget(command);
@@ -184,18 +230,36 @@ export function HomeScreen() {
   return (
     <section className="home-shell" aria-label="Home overview">
       <section className="home-rail" aria-label="Quick sections">
-        <p className="home-rail-title">Quick Access</p>
-        <p className="home-rail-note">Jump to your main workspaces.</p>
+        <p className="home-rail-title">Desk Brief</p>
+        <p className="home-rail-note">Live setup context and next-step guidance.</p>
         <div className="home-rail-list">
-          {primaryNavItems.map((item) => {
-            const active = pathname === item.href || (item.href !== "/" && pathname.startsWith(`${item.href}/`));
-            return (
-              <Link key={item.href} href={item.href} className={`home-rail-link ${active ? "home-rail-link-active" : ""}`}>
-                <span className="home-rail-link-label">{item.label}</span>
-                <span className="home-rail-link-note">{item.description}</span>
-              </Link>
-            );
-          })}
+          <article className="home-rail-card">
+            <div className="home-rail-card-topline">
+              <span className="home-rail-card-label">Profile Name</span>
+              <span className="home-rail-card-value">{accountName || "Unknown"}</span>
+            </div>
+            <p className="home-rail-card-note">Loaded from WhatsApp setup credentials.</p>
+          </article>
+          <article className="home-rail-card">
+            <div className="home-rail-card-topline">
+              <span className="home-rail-card-label">WhatsApp Setup</span>
+              <span className="home-rail-card-value">{setupStateLabel}</span>
+            </div>
+            <p className="home-rail-card-note">{setupMessage}</p>
+          </article>
+          <article className="home-rail-card">
+            <div className="home-rail-card-topline">
+              <span className="home-rail-card-label">Command Pattern</span>
+              <span className="home-rail-card-value">go &lt;section&gt;</span>
+            </div>
+            <p className="home-rail-card-note">Also supports open &lt;section&gt; and direct /route input.</p>
+          </article>
+          <article className="home-rail-card">
+            <div className="home-rail-card-topline">
+              <span className="home-rail-card-label">Recommended Next Step</span>
+            </div>
+            <p className="home-rail-card-note">{nextStep}</p>
+          </article>
         </div>
       </section>
 

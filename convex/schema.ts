@@ -1,5 +1,11 @@
 import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
+import {
+  aiFeedbackMetadataValidator,
+  aiFeedbackPathValidator,
+  contextPackValidator,
+  outreachModeValidator,
+} from "./lib/aiSmartness";
 
 export default defineSchema({
   appConfig: defineTable({
@@ -182,6 +188,8 @@ export default defineSchema({
     provider: v.union(v.literal("azure"), v.literal("codex"), v.literal("heuristic")),
     delayMs: v.number(),
     typingMs: v.number(),
+    outreachMode: v.optional(outreachModeValidator),
+    contextPack: v.optional(contextPackValidator),
     reason: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
@@ -225,6 +233,8 @@ export default defineSchema({
     attempts: v.number(),
     idempotencyKey: v.string(),
     provider: v.union(v.literal("azure"), v.literal("codex"), v.literal("heuristic")),
+    outreachMode: v.optional(outreachModeValidator),
+    contextPack: v.optional(contextPackValidator),
     error: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
@@ -237,6 +247,22 @@ export default defineSchema({
     .index("by_worker", ["workerId"])
     .index("by_draft", ["draftId"])
     .index("by_mediaAssetId", ["mediaAssetId"]),
+
+  aiFeedbackSignals: defineTable({
+    threadId: v.id("threads"),
+    outboxId: v.optional(v.id("outbox")),
+    toolRunId: v.optional(v.string()),
+    path: aiFeedbackPathValidator,
+    signalType: v.string(),
+    score: v.number(),
+    metadata: aiFeedbackMetadataValidator,
+    createdAt: v.number(),
+  })
+    .index("by_threadId_and_createdAt", ["threadId", "createdAt"])
+    .index("by_outboxId_and_createdAt", ["outboxId", "createdAt"])
+    .index("by_toolRunId_and_createdAt", ["toolRunId", "createdAt"])
+    .index("by_path_and_createdAt", ["path", "createdAt"])
+    .index("by_signalType_and_createdAt", ["signalType", "createdAt"]),
 
   followUps: defineTable({
     threadId: v.id("threads"),

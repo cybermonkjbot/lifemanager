@@ -29,6 +29,8 @@ type PromptProfileSource = "manual" | "auto";
 
 const MAX_PROMPT_PROFILE_CHARS = 8000;
 const EMOJI_REGEX = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu;
+const AUTO_IMPROVEMENT_BLOCK_START = "[auto-improve-history:start]";
+const AUTO_IMPROVEMENT_BLOCK_END = "[auto-improve-history:end]";
 
 const DEFAULT_PERSONALITY_PROFILES: DefaultPersonalityProfile[] = [
   {
@@ -149,6 +151,49 @@ function upsertPersonaPackPromptBlock(existingPrompt: string, packId: string, pr
   return `${withoutExistingBlock}\n\n${nextBlock}`.trim();
 }
 
+function escapeRegex(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function buildAutoImprovementBlock(autoPromptProfile: string) {
+  const body = normalizePromptProfile(autoPromptProfile);
+  return [
+    AUTO_IMPROVEMENT_BLOCK_START,
+    "Auto-improved additions from all conversation history (keeps your manual profile and appends guidance):",
+    body,
+    AUTO_IMPROVEMENT_BLOCK_END,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function appendAutoImprovementToManualPrompt(manualPromptProfile: string, autoPromptProfile: string) {
+  const manual = normalizePromptProfile(manualPromptProfile);
+  if (!manual) {
+    return normalizePromptProfile(autoPromptProfile);
+  }
+
+  const autoBlockPattern = new RegExp(
+    `${escapeRegex(AUTO_IMPROVEMENT_BLOCK_START)}[\\s\\S]*?${escapeRegex(AUTO_IMPROVEMENT_BLOCK_END)}`,
+    "g",
+  );
+  const manualWithoutAutoBlock = manual.replace(autoBlockPattern, "").trim();
+  const autoBlock = buildAutoImprovementBlock(autoPromptProfile);
+
+  if (!manualWithoutAutoBlock) {
+    return normalizePromptProfile(autoBlock);
+  }
+
+  const separator = "\n\n";
+  const maxAutoBlockChars = MAX_PROMPT_PROFILE_CHARS - manualWithoutAutoBlock.length - separator.length;
+  if (maxAutoBlockChars <= 0) {
+    return manualWithoutAutoBlock.slice(0, MAX_PROMPT_PROFILE_CHARS);
+  }
+
+  const clippedAutoBlock = autoBlock.slice(0, maxAutoBlockChars);
+  return `${manualWithoutAutoBlock}${separator}${clippedAutoBlock}`.trim();
+}
+
 function fromStoredProfile(profile: Doc<"personalityProfiles">): PersonalityProfileView {
   const isDefault = DEFAULT_PERSONALITY_PROFILES.some((item) => item.slug === profile.slug);
   return {
@@ -255,7 +300,13 @@ async function ensureThreadSetting(
     threadId,
     profileSlug: fallbackProfile?.slug || "casual",
     intensity: clamp01(fallbackProfile?.defaultIntensity ?? 0.58),
+    customPrompt: undefined,
     memePolicyMode: "auto",
+    threadPromptProfile: undefined,
+    threadPromptProfileSource: undefined,
+    threadPromptProfileLookbackDays: undefined,
+    threadPromptProfileMessageCount: undefined,
+    threadPromptProfileUpdatedAt: undefined,
     createdAt: now,
     updatedAt: now,
   };
@@ -944,6 +995,7 @@ export const autoBuildThreadPromptProfile = mutation({
     lookbackDays: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    const existingSetting = await ensureThreadSetting(ctx, args.threadId);
     const messages: Doc<"messages">[] = [];
     const source = ctx.db
       .query("messages")
@@ -961,16 +1013,24 @@ export const autoBuildThreadPromptProfile = mutation({
     }
 
     const profile = buildAutoPromptProfile(messages, syncedHistoryCount);
+    const existingPromptProfile = normalizePromptProfile(existingSetting.threadPromptProfile);
+    const hasSavedManualPrompt = existingSetting.threadPromptProfileSource === "manual" && Boolean(existingPromptProfile);
+    const nextPromptProfile = hasSavedManualPrompt
+      ? appendAutoImprovementToManualPrompt(existingPromptProfile, profile.promptProfile)
+      : profile.promptProfile;
+    const nextSource: PromptProfileSource = hasSavedManualPrompt ? "manual" : "auto";
     const settingId = await savePromptProfile(ctx, {
       threadId: args.threadId,
-      promptProfile: profile.promptProfile,
-      source: "auto",
+      promptProfile: nextPromptProfile,
+      source: nextSource,
+      lookbackDays: args.lookbackDays,
       messageCount: profile.messageCount,
     });
 
     return {
       settingId,
-      promptProfile: profile.promptProfile,
+      promptProfile: nextPromptProfile,
+      source: nextSource,
       messageCount: profile.messageCount,
       outboundCount: profile.outboundCount,
       inboundCount: profile.inboundCount,

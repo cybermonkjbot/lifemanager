@@ -8,6 +8,7 @@
  * @module
  */
 
+import type * as aiFeedback from "../aiFeedback.js";
 import type * as backlog from "../backlog.js";
 import type * as calls from "../calls.js";
 import type * as chatTools from "../chatTools.js";
@@ -19,6 +20,8 @@ import type * as followupsMarkQueued from "../followupsMarkQueued.js";
 import type * as followupsPromoter from "../followupsPromoter.js";
 import type * as grounding from "../grounding.js";
 import type * as inbound from "../inbound.js";
+import type * as lib_aiSmartness from "../lib/aiSmartness.js";
+import type * as lib_aliasNormalization from "../lib/aliasNormalization.js";
 import type * as lib_commitments from "../lib/commitments.js";
 import type * as lib_config from "../lib/config.js";
 import type * as lib_constants from "../lib/constants.js";
@@ -56,6 +59,7 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  aiFeedback: typeof aiFeedback;
   backlog: typeof backlog;
   calls: typeof calls;
   chatTools: typeof chatTools;
@@ -67,6 +71,8 @@ declare const fullApi: ApiFromModules<{
   followupsPromoter: typeof followupsPromoter;
   grounding: typeof grounding;
   inbound: typeof inbound;
+  "lib/aiSmartness": typeof lib_aiSmartness;
+  "lib/aliasNormalization": typeof lib_aliasNormalization;
   "lib/commitments": typeof lib_commitments;
   "lib/config": typeof lib_config;
   "lib/constants": typeof lib_constants;

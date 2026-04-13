@@ -25,6 +25,7 @@ export const convexRefs = {
   chatContactMemoryFactsList: makeFunctionReference<"query">("chatTools:contactMemoryFactsList"),
   chatPersonalConnectorsInternalSearch: makeFunctionReference<"query">("chatTools:personalConnectorsInternalSearch"),
   chatReplyStyleGuardrailCheck: makeFunctionReference<"query">("chatTools:replyStyleGuardrailCheck"),
+  aiFeedbackGetThreadAdaptiveHints: makeFunctionReference<"query">("aiFeedback:getThreadAdaptiveHints"),
 
   inboundIngest: makeFunctionReference<"mutation">("inbound:ingest"),
   inboundAttachMediaAsset: makeFunctionReference<"mutation">("inbound:attachMediaAsset"),
@@ -69,6 +70,7 @@ export const convexRefs = {
   chatRebuildThreadStyleProfile: makeFunctionReference<"mutation">("chatTools:rebuildThreadStyleProfile"),
   chatUpsertContactMemoryFact: makeFunctionReference<"mutation">("chatTools:upsertContactMemoryFact"),
   chatExtractContactMemoryFacts: makeFunctionReference<"mutation">("chatTools:extractContactMemoryFacts"),
+  aiFeedbackRecordSignal: makeFunctionReference<"mutation">("aiFeedback:recordSignal"),
 
   styleGetProfile: makeFunctionReference<"query">("style:getProfile"),
   styleGetStatusVoice: makeFunctionReference<"query">("style:getStatusVoice"),

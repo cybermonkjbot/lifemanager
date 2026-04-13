@@ -421,6 +421,43 @@ a {
   color: #cad5eb;
 }
 
+.home-rail-card {
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  padding: 9px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.home-rail-card-topline {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.home-rail-card-label {
+  font-size: 0.76rem;
+  color: #cad5eb;
+  letter-spacing: 0.01em;
+}
+
+.home-rail-card-value {
+  font-size: 0.82rem;
+  color: #f4f7ff;
+  font-weight: 600;
+  text-align: right;
+}
+
+.home-rail-card-note {
+  margin: 0;
+  font-size: 0.75rem;
+  line-height: 1.35;
+  color: #dce5f7;
+}
+
 .home-canvas {
   border-radius: 30px;
   border: 1px solid rgba(255, 255, 255, 0.3);

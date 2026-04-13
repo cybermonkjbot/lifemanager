@@ -594,13 +594,19 @@ function PromptProfileForm({
   onSaveManual,
 }: PromptProfileFormProps) {
   const [promptProfile, setPromptProfile] = useState(initialPromptProfile);
+  const hasSavedManualPrompt = source === "manual" && Boolean(initialPromptProfile.trim());
+  const autoActionLabel = hasSavedManualPrompt ? "Auto-Improve And Add To Prompt" : "Auto-Build From All History";
+  const autoActionPendingLabel = hasSavedManualPrompt ? "Improving..." : "Building...";
+  const helperCopy = hasSavedManualPrompt
+    ? "Auto-improve from thread history and append guidance without replacing your saved manual prompt."
+    : "Build a prompt profile from thread history, then edit manually if needed.";
 
   const promptChanged = useMemo(() => promptProfile.trim() !== initialPromptProfile.trim(), [initialPromptProfile, promptProfile]);
 
   return (
     <div className="personality-config-block">
       <h3>Prompt Profile Builder</h3>
-      <p className="queue-meta">Build a prompt profile from thread history, then edit manually if needed.</p>
+      <p className="queue-meta">{helperCopy}</p>
 
       <button
         type="button"
@@ -609,7 +615,7 @@ function PromptProfileForm({
         disabled={pending}
         aria-disabled={pending}
       >
-        {pending ? "Building..." : "Auto-Build From All History"}
+        {pending ? autoActionPendingLabel : autoActionLabel}
       </button>
 
       <label className="setup-input-group">
@@ -908,6 +914,8 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
     if (!selectedThreadId) {
       return;
     }
+    const hasSavedManualPrompt =
+      threadPersonality?.threadPromptProfileSource === "manual" && Boolean((threadPersonality?.threadPromptProfile || "").trim());
 
     void runAction(
       promptProfileKey,
@@ -917,8 +925,12 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
         });
       },
       {
-        pendingLabel: "Building prompt profile from conversation history...",
-        successMessage: "Conversation prompt profile auto-built.",
+        pendingLabel: hasSavedManualPrompt
+          ? "Auto-improving prompt profile from conversation history..."
+          : "Building prompt profile from conversation history...",
+        successMessage: hasSavedManualPrompt
+          ? "Conversation prompt profile improved and appended."
+          : "Conversation prompt profile auto-built.",
       },
     );
   };
