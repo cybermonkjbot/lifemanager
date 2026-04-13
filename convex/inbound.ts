@@ -726,6 +726,11 @@ export const ingest = mutation({
             },
             createdAt: now,
           });
+          await ctx.scheduler
+            .runAfter(0, internal.aiFeedback.rollupOutcomeForOutbox, {
+              outboxId: engagedOutbox._id,
+            })
+            .catch(() => undefined);
         }
       }
     }

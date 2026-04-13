@@ -137,10 +137,45 @@ type GroundingContext = {
 type ContactMemoryFactType = "preference" | "profile" | "schedule" | "relationship" | "promise" | "other";
 
 type ContactMemoryFactContext = {
+  factKey?: string;
   factValue: string;
   factType: ContactMemoryFactType;
   confidence?: number;
   updatedAt?: number;
+};
+
+export type AiCandidateFeatureVector = {
+  contextSupport: number;
+  steeringFit: number;
+  engagementProxy: number;
+  copyRiskPenalty: number;
+  selfRepeatPenalty: number;
+  freshnessSupport: number;
+  qualityScore: number;
+};
+
+export type AiCandidateScoreBreakdown = {
+  weightedTotal: number;
+  contextSupport: number;
+  steeringFit: number;
+  engagementProxy: number;
+  copyRiskPenalty: number;
+  selfRepeatPenalty: number;
+  freshnessSupport: number;
+  qualityScore: number;
+  weightsVersion: number;
+};
+
+export type AiCandidateEvaluation = {
+  candidateId: string;
+  selected: boolean;
+  guardrailBlocked: boolean;
+  provider: "azure" | "codex" | "heuristic";
+  model: string;
+  textHash: string;
+  featureVector: AiCandidateFeatureVector;
+  scoreBreakdown: AiCandidateScoreBreakdown;
+  result: AiResult;
 };
 
 export type FriendshipGenerationCohort = "boomer" | "gen_z" | "bridge";
@@ -1750,6 +1785,15 @@ const QUALITY_FIRST_DELAY_MIN_MS = 20_000;
 const QUALITY_FIRST_DELAY_MAX_MS = 90_000;
 const QUALITY_FIRST_TYPING_MIN_MS = 3_500;
 const QUALITY_FIRST_TYPING_MAX_MS = 14_000;
+const DEFAULT_CANDIDATE_RERANK_WEIGHTS = {
+  contextSupport: 1.1,
+  steeringFit: 1.05,
+  engagementProxy: 0.95,
+  copyRiskPenalty: 1.3,
+  selfRepeatPenalty: 1.2,
+  freshnessSupport: 0.9,
+  qualityScore: 1,
+};
 
 type IndexedHistoryLine = {
   index: number;
@@ -1800,6 +1844,7 @@ type ContactFactSelectionInput = {
   staleThresholdMs?: number;
   nowMs?: number;
   factRefreshBias?: "low" | "normal" | "high";
+  retrievalWeights?: AdaptiveTuningHintsSnapshot["retrievalWeights"];
 };
 
 type ResponseWorkbenchInput = {
@@ -2582,6 +2627,18 @@ function runContactMemoryFactSelectionTool(args: ContactFactSelectionInput) {
   const nowMs = Number.isFinite(args.nowMs) ? (args.nowMs as number) : Date.now();
   const staleThresholdMs = Math.max(60_000, args.staleThresholdMs ?? resolveFactStaleThresholdMs());
   const factRefreshBias = args.factRefreshBias || "normal";
+  const retrievalWeights = args.retrievalWeights;
+  const resolveMultiplier = (value: number | undefined, fallback = 1) => {
+    if (!Number.isFinite(value)) {
+      return Math.max(0.5, Math.min(fallback, 2));
+    }
+    return Math.max(0.5, Math.min(value as number, 2));
+  };
+  const overlapWeight = resolveMultiplier(retrievalWeights?.overlapWeight) * 2.2;
+  const confidenceWeight = resolveMultiplier(retrievalWeights?.confidenceWeight) * 1.1;
+  const freshnessWeightScale = resolveMultiplier(retrievalWeights?.freshnessWeight);
+  const typeWeightScale = resolveMultiplier(retrievalWeights?.typeWeight);
+  const conflictPenaltyWeight = resolveMultiplier(retrievalWeights?.conflictPenaltyWeight);
   const factTypeWeight: Record<ContactMemoryFactType, number> = {
     relationship: 1.1,
     schedule: 1.05,
@@ -2590,6 +2647,29 @@ function runContactMemoryFactSelectionTool(args: ContactFactSelectionInput) {
     promise: 0.9,
     other: 0.8,
   };
+
+  const normalizeConflictKey = (fact: ContactMemoryFactContext) => {
+    const explicit = normalizeOutboundText(fact.factKey || "").toLowerCase().trim();
+    if (explicit) {
+      return explicit;
+    }
+    const fallback = normalizeOutboundText(fact.factValue || "")
+      .toLowerCase()
+      .split(/\s+/)
+      .slice(0, 4)
+      .join(" ");
+    return `${fact.factType}:${fallback}`;
+  };
+
+  const newestByConflictKey = new Map<string, number>();
+  for (const fact of args.contactFacts) {
+    const key = normalizeConflictKey(fact);
+    const updatedAt = Number.isFinite(fact.updatedAt) ? (fact.updatedAt as number) : 0;
+    const prev = newestByConflictKey.get(key) ?? 0;
+    if (updatedAt > prev) {
+      newestByConflictKey.set(key, updatedAt);
+    }
+  }
 
   const scored = args.contactFacts
     .map((fact) => {
@@ -2604,21 +2684,31 @@ function runContactMemoryFactSelectionTool(args: ContactFactSelectionInput) {
           overlap += 1;
         }
       }
-      const overlapScore = overlap * 2.2;
+      const overlapScore = overlap * overlapWeight;
       const confidenceScore = clamp01(Number(fact.confidence ?? 0.55));
       const freshnessScore = isFactStale(fact.updatedAt, staleThresholdMs, nowMs)
         ? 0.08
         : clamp01WithFallback(1 - Math.max(0, nowMs - (fact.updatedAt || nowMs)) / Math.max(staleThresholdMs * 3, 1), 0.95);
-      const freshnessWeight = factRefreshBias === "high" ? 1.25 : factRefreshBias === "low" ? 0.5 : 0.9;
-      const typeWeight = factTypeWeight[fact.factType] ?? 0.8;
-      const score = (overlapScore + confidenceScore * 1.1 + freshnessScore * freshnessWeight) * typeWeight;
+      const freshnessWeight =
+        (factRefreshBias === "high" ? 1.25 : factRefreshBias === "low" ? 0.5 : 0.9) *
+        Math.max(0.5, freshnessWeightScale);
+      const typeWeight = (factTypeWeight[fact.factType] ?? 0.8) * Math.max(0.5, typeWeightScale);
+      const conflictKey = normalizeConflictKey(fact);
+      const newest = newestByConflictKey.get(conflictKey) ?? 0;
+      const conflictPenalty =
+        newest > 0 && Number.isFinite(fact.updatedAt) && (fact.updatedAt as number) > 0 && (fact.updatedAt as number) < newest ? 0.28 : 0;
+      const score =
+        (overlapScore + confidenceScore * confidenceWeight + freshnessScore * freshnessWeight) * typeWeight -
+        conflictPenalty * Math.max(0.5, conflictPenaltyWeight);
       return {
+        factKey: normalizeOutboundText(fact.factKey || "").slice(0, 72) || undefined,
         factType: fact.factType,
         factValue: normalized,
         confidence: confidenceScore,
         updatedAt: fact.updatedAt,
         overlap,
         freshnessScore,
+        conflictPenalty,
         score,
       };
     })
@@ -2646,6 +2736,7 @@ function runContactMemoryFactSelectionTool(args: ContactFactSelectionInput) {
         matchedFacts: matchedCount,
         factRefreshBias,
         staleThresholdMs,
+        conflictDemoted: scored.filter((item) => item.conflictPenalty > 0).length,
         selectedTypes: Array.from(new Set(selectedFacts.map((fact) => fact.factType))),
       },
     },
@@ -2729,10 +2820,17 @@ function buildPrompt(args: {
     if (!normalizedValue) {
       continue;
     }
-    const key = `${fact.factType}:${normalizedValue.toLowerCase()}`;
+    const normalizedFactKey = normalizeOutboundText(fact.factKey || "").toLowerCase().trim();
+    const key = normalizedFactKey || `${fact.factType}:${normalizedValue.toLowerCase()}`;
     const existing = contactFactsByKey.get(key);
-    if (!existing || Number(fact.confidence ?? 0) > Number(existing.confidence ?? 0)) {
+    const shouldReplace =
+      !existing ||
+      Number(fact.confidence ?? 0) > Number(existing.confidence ?? 0) ||
+      (Number(fact.confidence ?? 0) >= Number(existing.confidence ?? 0) &&
+        Number(fact.updatedAt ?? 0) > Number(existing.updatedAt ?? 0));
+    if (shouldReplace) {
       contactFactsByKey.set(key, {
+        factKey: normalizedFactKey || undefined,
         factType: fact.factType,
         factValue: normalizedValue,
         confidence: fact.confidence,
@@ -2914,6 +3012,7 @@ function buildPrompt(args: {
     .filter((hit) => !recentHistory.some((recent) => recent.index === hit.index))
     .slice(-contextSearchLineLimit);
   let selectedContactFacts: Array<{
+    factKey?: string;
     factType: ContactMemoryFactType;
     factValue: string;
     confidence: number;
@@ -2929,6 +3028,7 @@ function buildPrompt(args: {
       staleThresholdMs: resolveFactStaleThresholdMs(args.adaptiveHints),
       nowMs: Date.now(),
       factRefreshBias: args.adaptiveHints?.factRefreshBias,
+      retrievalWeights: args.adaptiveHints?.retrievalWeights,
     });
     selectedContactFacts = selected.selectedFacts;
     toolCalls.push(selected.call);
@@ -2970,9 +3070,11 @@ function buildPrompt(args: {
           recentHistoryLines: recentHistory.map((line) => line.line),
           relevantHistoryLines: relevantHistory.map((line) => line.line),
           contactFacts: selectedContactFacts.map((fact) => ({
+            factKey: fact.factKey,
             factType: fact.factType,
             factValue: fact.factValue,
             confidence: fact.confidence,
+            updatedAt: fact.updatedAt,
           })),
         })
       : undefined;
@@ -8405,6 +8507,248 @@ export async function generateReplyWithFallback(args: {
     contextToolCalls: combinedContextToolCalls,
     contextWindow: builtPrompt.contextWindow,
   });
+}
+
+function scoreCandidateContextSupport(result: AiResult) {
+  const window = result.contextWindow;
+  if (!window) {
+    return 0.5;
+  }
+  const relevantRatio = window.usedHistoryLines > 0 ? window.relevantHistoryLines / Math.max(1, window.usedHistoryLines) : 0;
+  const overflowPenalty = window.overflowTokens > 0 ? 0.15 : 0;
+  return clamp01WithFallback(relevantRatio + 0.35 - overflowPenalty, 0.5);
+}
+
+function scoreCandidateSteeringFit(args: {
+  inboundText: string;
+  historyLines: string[];
+  replyText: string;
+}) {
+  const steeringMode = detectConversationSteeringMode({
+    inboundText: args.inboundText,
+    historyLines: args.historyLines,
+  });
+  const hasQuestion = /[?]$/.test(args.replyText.trim());
+  const wordCount = args.replyText.trim().split(/\s+/).filter(Boolean).length;
+
+  if (steeringMode === "hard_stop" || steeringMode === "pause" || steeringMode === "wrap_up" || steeringMode === "loop") {
+    const questionPenalty = hasQuestion ? 0.35 : 0;
+    const lengthPenalty = wordCount > 14 ? 0.2 : 0;
+    return clamp01WithFallback(0.95 - questionPenalty - lengthPenalty, 0.45);
+  }
+
+  if (steeringMode === "anti_beggi_beggi" || steeringMode === "anti_sales_pitch") {
+    const directiveBoost = wordCount >= 4 && wordCount <= 24 ? 0.08 : 0;
+    return clamp01WithFallback(0.72 + directiveBoost, 0.7);
+  }
+
+  return clamp01WithFallback(wordCount >= 2 && wordCount <= 32 ? 0.82 : 0.66, 0.75);
+}
+
+function scoreCandidateEngagementProxy(replyText: string) {
+  const text = replyText.trim();
+  if (!text) {
+    return 0;
+  }
+  const words = text.split(/\s+/).filter(Boolean).length;
+  const hasQuestion = /[?]$/.test(text);
+  const lengthScore = words < 2 ? 0.35 : words <= 24 ? 0.82 : words <= 40 ? 0.58 : 0.4;
+  const questionAdjustment = hasQuestion ? -0.06 : 0.05;
+  return clamp01WithFallback(lengthScore + questionAdjustment, 0.58);
+}
+
+function scoreCandidateFreshnessSupport(args: {
+  contextPack?: ContextPackSnapshot;
+  adaptiveHints?: AdaptiveTuningHintsSnapshot;
+}) {
+  const facts = args.contextPack?.selectedContactFacts || [];
+  if (facts.length === 0) {
+    return 0.5;
+  }
+  const staleThreshold = resolveFactStaleThresholdMs(args.adaptiveHints);
+  const now = Date.now();
+  const scores = facts.map((fact) => {
+    if (isFactStale(fact.updatedAt, staleThreshold, now)) {
+      return 0.12;
+    }
+    const age = Math.max(0, now - (fact.updatedAt || now));
+    return clamp01WithFallback(1 - age / Math.max(staleThreshold * 3, 1), 0.9);
+  });
+  const average = scores.reduce((sum, value) => sum + value, 0) / Math.max(1, scores.length);
+  return clamp01WithFallback(average, 0.5);
+}
+
+function resolveRerankWeights(hints?: AdaptiveTuningHintsSnapshot) {
+  const resolveWeight = (value: number | undefined, fallback: number) => {
+    if (!Number.isFinite(value)) {
+      return fallback;
+    }
+    return Math.max(0.5, Math.min(value as number, 2));
+  };
+  const tuned = hints?.rerankWeights;
+  return {
+    contextSupport: resolveWeight(tuned?.contextSupport, DEFAULT_CANDIDATE_RERANK_WEIGHTS.contextSupport),
+    steeringFit: resolveWeight(tuned?.steeringFit, DEFAULT_CANDIDATE_RERANK_WEIGHTS.steeringFit),
+    engagementProxy: resolveWeight(tuned?.engagementProxy, DEFAULT_CANDIDATE_RERANK_WEIGHTS.engagementProxy),
+    copyRiskPenalty: resolveWeight(tuned?.copyRiskPenalty, DEFAULT_CANDIDATE_RERANK_WEIGHTS.copyRiskPenalty),
+    selfRepeatPenalty: resolveWeight(tuned?.selfRepeatPenalty, DEFAULT_CANDIDATE_RERANK_WEIGHTS.selfRepeatPenalty),
+    freshnessSupport: resolveWeight(tuned?.freshnessSupport, DEFAULT_CANDIDATE_RERANK_WEIGHTS.freshnessSupport),
+    qualityScore: resolveWeight(tuned?.qualityScore, DEFAULT_CANDIDATE_RERANK_WEIGHTS.qualityScore),
+  };
+}
+
+function toCandidateEvaluation(args: {
+  candidateId: string;
+  result: AiResult;
+  inboundText: string;
+  historyLines: string[];
+  contextPack?: ContextPackSnapshot;
+  adaptiveHints?: AdaptiveTuningHintsSnapshot;
+}): AiCandidateEvaluation {
+  const contextSupport = scoreCandidateContextSupport(args.result);
+  const steeringFit = scoreCandidateSteeringFit({
+    inboundText: args.inboundText,
+    historyLines: args.historyLines,
+    replyText: args.result.text,
+  });
+  const engagementProxy = scoreCandidateEngagementProxy(args.result.text);
+  const copyRiskPenalty = evaluateCopyRisk({
+    replyText: args.result.text,
+    inboundText: args.inboundText,
+    historyLines: args.historyLines,
+  }).blocked
+    ? 1
+    : 0;
+  const selfRepeatPenalty = evaluateRecentSelfRepeatRisk({
+    replyText: args.result.text,
+    historyLines: args.historyLines,
+  }).blocked
+    ? 1
+    : 0;
+  const freshnessSupport = scoreCandidateFreshnessSupport({
+    contextPack: args.contextPack,
+    adaptiveHints: args.adaptiveHints,
+  });
+  const qualityScore = clamp01WithFallback(args.result.qualityScore, 0.62);
+  const featureVector: AiCandidateFeatureVector = {
+    contextSupport,
+    steeringFit,
+    engagementProxy,
+    copyRiskPenalty,
+    selfRepeatPenalty,
+    freshnessSupport,
+    qualityScore,
+  };
+
+  const weights = resolveRerankWeights(args.adaptiveHints);
+  const scoreBreakdown: AiCandidateScoreBreakdown = {
+    weightedTotal:
+      contextSupport * weights.contextSupport +
+      steeringFit * weights.steeringFit +
+      engagementProxy * weights.engagementProxy +
+      freshnessSupport * weights.freshnessSupport +
+      qualityScore * weights.qualityScore -
+      copyRiskPenalty * weights.copyRiskPenalty -
+      selfRepeatPenalty * weights.selfRepeatPenalty -
+      (args.result.guardrailBlocked ? 3 : 0),
+    contextSupport: contextSupport * weights.contextSupport,
+    steeringFit: steeringFit * weights.steeringFit,
+    engagementProxy: engagementProxy * weights.engagementProxy,
+    copyRiskPenalty: copyRiskPenalty * weights.copyRiskPenalty,
+    selfRepeatPenalty: selfRepeatPenalty * weights.selfRepeatPenalty,
+    freshnessSupport: freshnessSupport * weights.freshnessSupport,
+    qualityScore: qualityScore * weights.qualityScore,
+    weightsVersion: Math.max(0, Math.round(args.adaptiveHints?.tuningProfileVersion ?? 0)),
+  };
+
+  return {
+    candidateId: args.candidateId,
+    selected: false,
+    guardrailBlocked: args.result.guardrailBlocked,
+    provider: args.result.provider,
+    model: args.result.model,
+    textHash: createHash("sha256").update(args.result.text || "").digest("hex"),
+    featureVector,
+    scoreBreakdown,
+    result: args.result,
+  };
+}
+
+export function rerankCandidateEvaluations(candidates: AiCandidateEvaluation[]) {
+  const ranked = candidates
+    .slice()
+    .sort((a, b) => b.scoreBreakdown.weightedTotal - a.scoreBreakdown.weightedTotal || a.candidateId.localeCompare(b.candidateId));
+  const selectedId = ranked[0]?.candidateId || candidates[0]?.candidateId || "c1";
+  return candidates.map((candidate) => ({
+    ...candidate,
+    selected: candidate.candidateId === selectedId,
+  }));
+}
+
+export async function generateReplyCandidatesWithRerank(args: {
+  path: "reply" | "outreach" | "status";
+  inboundText: string;
+  historyLines: string[];
+  historySearchOverride?: HistorySearchOverride;
+  contactFacts?: ContactMemoryFactContext[];
+  contextPack?: ContextPackSnapshot;
+  adaptiveHints?: AdaptiveTuningHintsSnapshot;
+  styleHints: string[];
+  styleProfile?: StyleProfileContext;
+  personality?: PersonalityContext;
+  grounding?: GroundingContext;
+  runtime?: RuntimeAiTuning;
+  modelToolContext?: ModelToolContext;
+}): Promise<{ result: AiResult; candidates: AiCandidateEvaluation[] }> {
+  const runCandidate = async (candidateId: string, variantHint: string, runtimeDelta?: Partial<RuntimeAiTuning>) => {
+    const runtime = runtimeDelta ? { ...(args.runtime || {}), ...runtimeDelta } : args.runtime;
+    const result = await generateReplyWithFallback({
+      inboundText: args.inboundText,
+      historyLines: args.historyLines,
+      historySearchOverride: args.historySearchOverride,
+      contactFacts: args.contactFacts,
+      contextPack: args.contextPack,
+      adaptiveHints: args.adaptiveHints,
+      styleHints: [...args.styleHints, variantHint],
+      styleProfile: args.styleProfile,
+      personality: args.personality,
+      grounding: args.grounding,
+      runtime,
+      modelToolContext: args.modelToolContext,
+    });
+    return toCandidateEvaluation({
+      candidateId,
+      result,
+      inboundText: args.inboundText,
+      historyLines: args.historyLines,
+      contextPack: args.contextPack,
+      adaptiveHints: args.adaptiveHints,
+    });
+  };
+
+  const primary = await runCandidate("c1", `candidate_variant:${args.path}:primary`);
+  const modelPathUsed = primary.result.attempts.some((attempt) => attempt.provider === "azure" || attempt.provider === "codex");
+  const deterministicBypass = primary.result.attempts.some(
+    (attempt) => attempt.provider === "heuristic" && attempt.stage === "heuristic_fallback" && /^heuristic-local-/.test(attempt.model),
+  );
+
+  const candidates: AiCandidateEvaluation[] = [primary];
+  if (modelPathUsed && !deterministicBypass) {
+    const currentTemperature = Number(args.runtime?.temperature ?? 0.6);
+    const secondaryTemperature = Math.max(0.1, Math.min(currentTemperature + 0.08, 1.2));
+    const secondary = await runCandidate("c2", `candidate_variant:${args.path}:secondary`, {
+      temperature: secondaryTemperature,
+    });
+    candidates.push(secondary);
+  }
+
+  const finalized = rerankCandidateEvaluations(candidates);
+  const selected = finalized.find((candidate) => candidate.selected) || finalized[0];
+
+  return {
+    result: selected.result,
+    candidates: finalized,
+  };
 }
 
 export function estimateDelayAndTyping(text: string, runtime?: RuntimeAiTuning) {

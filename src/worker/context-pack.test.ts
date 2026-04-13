@@ -76,3 +76,29 @@ test("shouldTriggerFactExtractionSecondPass triggers for weak, stale, or low-con
   });
   assert.equal(healthy.trigger, false);
 });
+
+test("shouldTriggerFactExtractionSecondPass honors adaptive minimum fact coverage", () => {
+  const now = Date.now();
+  const strictCoverage = shouldTriggerFactExtractionSecondPass({
+    facts: [{ updatedAt: now }, { updatedAt: now - 5_000 }],
+    factsLimit: 8,
+    historySearchConfidence: 0.88,
+    adaptiveHints: {
+      secondPassCoverageMinFacts: 3,
+    },
+    nowMs: now,
+  });
+  assert.equal(strictCoverage.trigger, true);
+  assert.equal(strictCoverage.reason, "coverage_weak");
+
+  const relaxedCoverage = shouldTriggerFactExtractionSecondPass({
+    facts: [{ updatedAt: now }, { updatedAt: now - 5_000 }],
+    factsLimit: 8,
+    historySearchConfidence: 0.88,
+    adaptiveHints: {
+      secondPassCoverageMinFacts: 2,
+    },
+    nowMs: now,
+  });
+  assert.equal(relaxedCoverage.trigger, false);
+});

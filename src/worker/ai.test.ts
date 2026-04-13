@@ -17,6 +17,7 @@ import {
   generateMemeImageWithAzure,
   normalizeOutboundText,
   postProcessReplyText,
+  rerankCandidateEvaluations,
   routeAckResponseChannel,
   sanitizeCommonPhrasesForPrompt,
 } from "./ai";
@@ -65,6 +66,70 @@ function restoreAiEnv(snapshot: Partial<Record<(typeof ENV_KEYS)[number], string
     }
   }
 }
+
+function makeRerankCandidate(args: { candidateId: string; weightedTotal: number }) {
+  return {
+    candidateId: args.candidateId,
+    selected: false,
+    guardrailBlocked: false,
+    provider: "heuristic" as const,
+    model: "heuristic-local-test",
+    textHash: `${args.candidateId}-hash`,
+    featureVector: {
+      contextSupport: 0.5,
+      steeringFit: 0.5,
+      engagementProxy: 0.5,
+      copyRiskPenalty: 0,
+      selfRepeatPenalty: 0,
+      freshnessSupport: 0.5,
+      qualityScore: 0.5,
+    },
+    scoreBreakdown: {
+      weightedTotal: args.weightedTotal,
+      contextSupport: 0.5,
+      steeringFit: 0.5,
+      engagementProxy: 0.5,
+      copyRiskPenalty: 0,
+      selfRepeatPenalty: 0,
+      freshnessSupport: 0.5,
+      qualityScore: 0.5,
+      weightsVersion: 1,
+    },
+    result: {
+      text: `${args.candidateId} reply`,
+      provider: "heuristic" as const,
+      model: "heuristic-local-test",
+      latencyMs: 1,
+      guardrailBlocked: false,
+      attempts: [],
+    },
+  };
+}
+
+test("rerankCandidateEvaluations is deterministic and tie-breaks by candidateId", () => {
+  const inputs = [
+    makeRerankCandidate({ candidateId: "c2", weightedTotal: 1.2 }),
+    makeRerankCandidate({ candidateId: "c1", weightedTotal: 1.2 }),
+  ];
+
+  const first = rerankCandidateEvaluations(inputs);
+  const second = rerankCandidateEvaluations(inputs);
+  const firstSelected = first.find((candidate) => candidate.selected)?.candidateId;
+  const secondSelected = second.find((candidate) => candidate.selected)?.candidateId;
+
+  assert.equal(firstSelected, "c1");
+  assert.equal(secondSelected, "c1");
+});
+
+test("rerankCandidateEvaluations prefers higher weighted totals", () => {
+  const inputs = [
+    makeRerankCandidate({ candidateId: "c1", weightedTotal: 0.9 }),
+    makeRerankCandidate({ candidateId: "c2", weightedTotal: 1.4 }),
+  ];
+  const ranked = rerankCandidateEvaluations(inputs);
+  const selected = ranked.find((candidate) => candidate.selected)?.candidateId;
+  assert.equal(selected, "c2");
+});
 
 test("normalizeOutboundText removes em dashes and normalizes punctuation spacing", () => {
   const input = "Hey — are you free – later…   ";

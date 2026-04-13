@@ -421,6 +421,13 @@ export const approve = mutation({
         status: "sent",
         updatedAt: now,
       });
+      await ctx.scheduler
+        .runAfter(0, internal.aiFeedback.linkCandidateEvalsToOutbox, {
+          threadId: draft.threadId,
+          outboxId: sentOutbox._id,
+          toolRunId: draft.toolRunId,
+        })
+        .catch(() => undefined);
       await ctx.scheduler.runAfter(0, internal.backlog.refreshThread, {
         threadId: draft.threadId,
       });
@@ -435,6 +442,13 @@ export const approve = mutation({
         typingMs: nextTypingMs,
         updatedAt: now,
       });
+      await ctx.scheduler
+        .runAfter(0, internal.aiFeedback.linkCandidateEvalsToOutbox, {
+          threadId: draft.threadId,
+          outboxId: claimedOutbox._id,
+          toolRunId: draft.toolRunId,
+        })
+        .catch(() => undefined);
       await ctx.scheduler.runAfter(0, internal.backlog.refreshThread, {
         threadId: draft.threadId,
       });
@@ -469,6 +483,13 @@ export const approve = mutation({
         error: undefined,
         updatedAt: now,
       });
+      await ctx.scheduler
+        .runAfter(0, internal.aiFeedback.linkCandidateEvalsToOutbox, {
+          threadId: draft.threadId,
+          outboxId: pendingOutbox._id,
+          toolRunId: draft.toolRunId,
+        })
+        .catch(() => undefined);
 
       await ctx.scheduler.runAfter(0, internal.backlog.refreshThread, {
         threadId: draft.threadId,
@@ -505,6 +526,13 @@ export const approve = mutation({
       createdAt: now,
       updatedAt: now,
     });
+    await ctx.scheduler
+      .runAfter(0, internal.aiFeedback.linkCandidateEvalsToOutbox, {
+        threadId: draft.threadId,
+        outboxId,
+        toolRunId: draft.toolRunId,
+      })
+      .catch(() => undefined);
 
     await ctx.db.insert("systemEvents", {
       source: "dashboard",
@@ -589,6 +617,13 @@ export const updateDraftContent = mutation({
         },
         createdAt: now,
       });
+      if (activeOutbox?._id) {
+        await ctx.scheduler
+          .runAfter(0, internal.aiFeedback.rollupOutcomeForOutbox, {
+            outboxId: activeOutbox._id,
+          })
+          .catch(() => undefined);
+      }
     }
 
     await ctx.scheduler.runAfter(0, internal.backlog.refreshThread, {

@@ -6,6 +6,17 @@ export const FACT_STALE_THRESHOLD_MS = FACT_STALE_THRESHOLD_DAYS * 24 * 60 * 60 
 export const RETRIEVAL_LOW_CONFIDENCE_THRESHOLD = 0.45;
 export const POSITIVE_ENGAGEMENT_WINDOW_MS = 6 * 60 * 60 * 1000;
 export const NEUTRAL_EVALUATION_HORIZON_MS = 24 * 60 * 60 * 1000;
+export const OUTCOME_BACKFILL_WINDOW_DAYS = 30;
+export const TUNING_TRAINING_WINDOW_DAYS = 30;
+export const TUNING_DAILY_DELTA_CAP = 0.1;
+export const TUNING_MODERATE_RETRIEVAL_LOW_CONFIDENCE_MIN = 0.35;
+export const TUNING_MODERATE_RETRIEVAL_LOW_CONFIDENCE_MAX = 0.65;
+export const TUNING_MODERATE_FACT_STALE_DAYS_MIN = 7;
+export const TUNING_MODERATE_FACT_STALE_DAYS_MAX = 30;
+export const TUNING_MODERATE_WEIGHT_MULTIPLIER_MIN = 0.5;
+export const TUNING_MODERATE_WEIGHT_MULTIPLIER_MAX = 2.0;
+export const TUNING_FREEZE_GUARDRAIL_REGRESSION = 0.25;
+export const TUNING_FREEZE_MANUAL_REGRESSION = 0.2;
 
 export const outreachModeValidator = v.union(
   v.literal("proactive"),
@@ -23,6 +34,7 @@ export const contextPackFactTypeValidator = v.union(
 );
 
 export const contextPackFactValidator = v.object({
+  factKey: v.optional(v.string()),
   factType: contextPackFactTypeValidator,
   factValue: v.string(),
   confidence: v.optional(v.number()),
@@ -59,6 +71,170 @@ export const contextPackValidator = v.object({
 });
 
 export const aiFeedbackPathValidator = v.union(v.literal("reply"), v.literal("outreach"), v.literal("status"));
+
+export const aiOutcomeLabelValidator = v.union(
+  v.literal("positive"),
+  v.literal("neutral"),
+  v.literal("negative"),
+  v.literal("mixed"),
+);
+
+export const aiOutcomeSignalCountsValidator = v.object({
+  engagedReply: v.number(),
+  noReplyHorizon: v.number(),
+  suppressedStale: v.number(),
+  suppressedManual: v.number(),
+  manualRewrite: v.number(),
+  totalSignals: v.number(),
+});
+
+export const aiCandidateFeatureVectorValidator = v.object({
+  contextSupport: v.number(),
+  steeringFit: v.number(),
+  engagementProxy: v.number(),
+  copyRiskPenalty: v.number(),
+  selfRepeatPenalty: v.number(),
+  freshnessSupport: v.number(),
+  qualityScore: v.number(),
+});
+
+export const aiCandidateScoreBreakdownValidator = v.object({
+  weightedTotal: v.number(),
+  contextSupport: v.number(),
+  steeringFit: v.number(),
+  engagementProxy: v.number(),
+  copyRiskPenalty: v.number(),
+  selfRepeatPenalty: v.number(),
+  freshnessSupport: v.number(),
+  qualityScore: v.number(),
+  weightsVersion: v.number(),
+});
+
+export const aiTuningBoundsProfileValidator = v.union(v.literal("moderate"));
+
+export const aiTuningRetrievalWeightsValidator = v.object({
+  overlapWeight: v.number(),
+  confidenceWeight: v.number(),
+  freshnessWeight: v.number(),
+  typeWeight: v.number(),
+  conflictPenaltyWeight: v.number(),
+});
+
+export const aiTuningRerankWeightsValidator = v.object({
+  contextSupport: v.number(),
+  steeringFit: v.number(),
+  engagementProxy: v.number(),
+  copyRiskPenalty: v.number(),
+  selfRepeatPenalty: v.number(),
+  freshnessSupport: v.number(),
+  qualityScore: v.number(),
+});
+
+export const aiTuningThresholdsValidator = v.object({
+  retrievalLowConfidenceThreshold: v.number(),
+  factStaleThresholdDays: v.number(),
+  secondPassCoverageMinFacts: v.number(),
+});
+
+export type AiTuningRetrievalWeights = {
+  overlapWeight: number;
+  confidenceWeight: number;
+  freshnessWeight: number;
+  typeWeight: number;
+  conflictPenaltyWeight: number;
+};
+
+export type AiTuningRerankWeights = {
+  contextSupport: number;
+  steeringFit: number;
+  engagementProxy: number;
+  copyRiskPenalty: number;
+  selfRepeatPenalty: number;
+  freshnessSupport: number;
+  qualityScore: number;
+};
+
+export type AiTuningThresholds = {
+  retrievalLowConfidenceThreshold: number;
+  factStaleThresholdDays: number;
+  secondPassCoverageMinFacts: number;
+};
+
+export const DEFAULT_AI_RETRIEVAL_WEIGHTS: AiTuningRetrievalWeights = {
+  overlapWeight: 2.2,
+  confidenceWeight: 1.1,
+  freshnessWeight: 0.9,
+  typeWeight: 1,
+  conflictPenaltyWeight: 0.9,
+};
+
+export const DEFAULT_AI_RERANK_WEIGHTS: AiTuningRerankWeights = {
+  contextSupport: 1.1,
+  steeringFit: 1.05,
+  engagementProxy: 0.95,
+  copyRiskPenalty: 1.3,
+  selfRepeatPenalty: 1.2,
+  freshnessSupport: 0.9,
+  qualityScore: 1,
+};
+
+export const DEFAULT_AI_TUNING_THRESHOLDS: AiTuningThresholds = {
+  retrievalLowConfidenceThreshold: RETRIEVAL_LOW_CONFIDENCE_THRESHOLD,
+  factStaleThresholdDays: FACT_STALE_THRESHOLD_DAYS,
+  secondPassCoverageMinFacts: 2,
+};
+
+function clamp(value: number, min: number, max: number) {
+  if (!Number.isFinite(value)) {
+    return min;
+  }
+  return Math.max(min, Math.min(value, max));
+}
+
+export function clamp01(value: number, fallback = 0.5) {
+  if (!Number.isFinite(value)) {
+    return clamp(fallback, 0, 1);
+  }
+  return clamp(value, 0, 1);
+}
+
+export function clampDailyDelta(nextValue: number, previousValue: number, deltaCap = TUNING_DAILY_DELTA_CAP) {
+  const safePrev = Number.isFinite(previousValue) ? previousValue : nextValue;
+  const maxDelta = Math.abs(safePrev) * clamp(deltaCap, 0, 1);
+  if (!Number.isFinite(nextValue) || !Number.isFinite(safePrev)) {
+    return safePrev;
+  }
+  if (maxDelta <= 0) {
+    return safePrev;
+  }
+  return clamp(nextValue, safePrev - maxDelta, safePrev + maxDelta);
+}
+
+export function clampWeightMultiplierModerate(value: number) {
+  return clamp(
+    value,
+    TUNING_MODERATE_WEIGHT_MULTIPLIER_MIN,
+    TUNING_MODERATE_WEIGHT_MULTIPLIER_MAX,
+  );
+}
+
+export function clampRetrievalLowConfidenceThresholdModerate(value: number) {
+  return clamp(
+    value,
+    TUNING_MODERATE_RETRIEVAL_LOW_CONFIDENCE_MIN,
+    TUNING_MODERATE_RETRIEVAL_LOW_CONFIDENCE_MAX,
+  );
+}
+
+export function clampFactStaleThresholdDaysModerate(value: number) {
+  return Math.round(
+    clamp(
+      value,
+      TUNING_MODERATE_FACT_STALE_DAYS_MIN,
+      TUNING_MODERATE_FACT_STALE_DAYS_MAX,
+    ),
+  );
+}
 
 export const aiFeedbackMetadataValidator = v.optional(
   v.object({

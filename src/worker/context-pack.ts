@@ -2,11 +2,14 @@ import {
   FACT_STALE_THRESHOLD_DAYS,
   FACT_STALE_THRESHOLD_MS,
   RETRIEVAL_LOW_CONFIDENCE_THRESHOLD,
+  type AiTuningRerankWeights,
+  type AiTuningRetrievalWeights,
 } from "../../convex/lib/aiSmartness";
 
 export type ContextPackFactType = "preference" | "profile" | "schedule" | "relationship" | "promise" | "other";
 
 export type ContextPackFact = {
+  factKey?: string;
   factType: ContextPackFactType;
   factValue: string;
   confidence?: number;
@@ -49,6 +52,11 @@ export type AdaptiveTuningHintsSnapshot = {
   sampleSize?: number;
   retrievalLowConfidenceThreshold?: number;
   factStaleThresholdDays?: number;
+  secondPassCoverageMinFacts?: number;
+  retrievalWeights?: AiTuningRetrievalWeights;
+  rerankWeights?: AiTuningRerankWeights;
+  tuningProfileVersion?: number;
+  anomalyFreezeActive?: boolean;
 };
 
 const MAX_INTENT_CHARS = 84;
@@ -56,6 +64,7 @@ const MAX_SEED_CHARS = 720;
 const MAX_HISTORY_LINES = 12;
 const MAX_HISTORY_LINE_CHARS = 320;
 const MAX_FACTS = 8;
+const MAX_FACT_KEY_CHARS = 72;
 const MAX_FACT_VALUE_CHARS = 220;
 const MAX_STYLE_HINTS = 16;
 const MAX_STYLE_HINT_CHARS = 140;
@@ -131,7 +140,8 @@ export function shouldTriggerFactExtractionSecondPass(args: {
   const staleThresholdMs = resolveFactStaleThresholdMs(args.adaptiveHints);
   const lowConfidenceThreshold = resolveRetrievalLowConfidenceThreshold(args.adaptiveHints);
   const lowConfidence = (args.historySearchConfidence ?? 0) < lowConfidenceThreshold;
-  const coverageWeak = args.facts.length < Math.min(2, Math.max(1, args.factsLimit));
+  const minCoverage = Math.max(1, Math.min(Math.round(args.adaptiveHints?.secondPassCoverageMinFacts ?? 2), Math.max(1, args.factsLimit)));
+  const coverageWeak = args.facts.length < minCoverage;
   const staleFacts = args.facts.length > 0 && args.facts.every((fact) => isFactStale(fact.updatedAt, staleThresholdMs, nowMs));
   const trigger = coverageWeak || staleFacts || lowConfidence;
   const reason = coverageWeak ? "coverage_weak" : staleFacts ? "facts_stale" : lowConfidence ? "low_retrieval_confidence" : undefined;
@@ -167,8 +177,10 @@ export function normalizeContextPack(pack?: Partial<ContextPackSnapshot> | null)
       if (!factValue) {
         return null;
       }
+      const factKey = compactText(fact.factKey || "", MAX_FACT_KEY_CHARS);
       const updatedAt = Number.isFinite(fact.updatedAt) && (fact.updatedAt ?? 0) > 0 ? Math.round(fact.updatedAt as number) : undefined;
       return {
+        factKey: factKey || undefined,
         factType: normalizeFactType(fact.factType),
         factValue,
         confidence: clamp01(fact.confidence, 0.55),

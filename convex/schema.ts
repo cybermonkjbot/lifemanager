@@ -1,8 +1,16 @@
 import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
 import {
+  aiCandidateFeatureVectorValidator,
+  aiCandidateScoreBreakdownValidator,
   aiFeedbackMetadataValidator,
   aiFeedbackPathValidator,
+  aiOutcomeLabelValidator,
+  aiOutcomeSignalCountsValidator,
+  aiTuningBoundsProfileValidator,
+  aiTuningRerankWeightsValidator,
+  aiTuningRetrievalWeightsValidator,
+  aiTuningThresholdsValidator,
   contextPackValidator,
   outreachModeValidator,
 } from "./lib/aiSmartness";
@@ -263,6 +271,77 @@ export default defineSchema({
     .index("by_toolRunId_and_createdAt", ["toolRunId", "createdAt"])
     .index("by_path_and_createdAt", ["path", "createdAt"])
     .index("by_signalType_and_createdAt", ["signalType", "createdAt"]),
+
+  aiOutcomes: defineTable({
+    threadId: v.id("threads"),
+    outboxId: v.optional(v.id("outbox")),
+    toolRunId: v.optional(v.string()),
+    path: aiFeedbackPathValidator,
+    windowStartAt: v.number(),
+    windowEndAt: v.number(),
+    signalCounts: aiOutcomeSignalCountsValidator,
+    engagementScore: v.number(),
+    frictionScore: v.number(),
+    qualityScore: v.number(),
+    label: aiOutcomeLabelValidator,
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_threadId_and_updatedAt", ["threadId", "updatedAt"])
+    .index("by_outboxId_and_updatedAt", ["outboxId", "updatedAt"])
+    .index("by_toolRunId_and_updatedAt", ["toolRunId", "updatedAt"])
+    .index("by_path_and_updatedAt", ["path", "updatedAt"])
+    .index("by_label_and_updatedAt", ["label", "updatedAt"]),
+
+  aiCandidateEvals: defineTable({
+    threadId: v.id("threads"),
+    outboxId: v.optional(v.id("outbox")),
+    toolRunId: v.optional(v.string()),
+    path: aiFeedbackPathValidator,
+    candidateId: v.string(),
+    selected: v.boolean(),
+    guardrailBlocked: v.boolean(),
+    featureVector: aiCandidateFeatureVectorValidator,
+    scoreBreakdown: aiCandidateScoreBreakdownValidator,
+    provider: v.union(v.literal("azure"), v.literal("codex"), v.literal("heuristic")),
+    model: v.string(),
+    textHash: v.string(),
+    createdAt: v.number(),
+  })
+    .index("by_threadId_and_createdAt", ["threadId", "createdAt"])
+    .index("by_outboxId_and_createdAt", ["outboxId", "createdAt"])
+    .index("by_toolRunId_and_createdAt", ["toolRunId", "createdAt"])
+    .index("by_path_and_createdAt", ["path", "createdAt"]),
+
+  aiTuningProfiles: defineTable({
+    path: aiFeedbackPathValidator,
+    version: v.number(),
+    sampleSize: v.number(),
+    trainingWindowDays: v.number(),
+    retrievalWeights: aiTuningRetrievalWeightsValidator,
+    rerankWeights: aiTuningRerankWeightsValidator,
+    thresholds: aiTuningThresholdsValidator,
+    boundsProfile: aiTuningBoundsProfileValidator,
+    anomalyFreezeActive: v.boolean(),
+    anomalyReason: v.optional(v.string()),
+    learnedAt: v.number(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_path_and_learnedAt", ["path", "learnedAt"])
+    .index("by_path_and_createdAt", ["path", "createdAt"])
+    .index("by_createdAt", ["createdAt"]),
+
+  aiBackfillJobs: defineTable({
+    jobKey: v.string(),
+    status: v.union(v.literal("running"), v.literal("completed"), v.literal("failed")),
+    cursor: v.optional(v.union(v.string(), v.null())),
+    processedCount: v.number(),
+    error: v.optional(v.string()),
+    completedAt: v.optional(v.number()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  }).index("by_jobKey", ["jobKey"]),
 
   followUps: defineTable({
     threadId: v.id("threads"),

@@ -92,6 +92,14 @@ async function recordAiFeedbackSignal(args: {
     metadata: args.metadata,
     createdAt: Date.now(),
   });
+
+  if (args.outboxId) {
+    await args.ctx.scheduler
+      .runAfter(0, internal.aiFeedback.rollupOutcomeForOutbox, {
+        outboxId: args.outboxId,
+      })
+      .catch(() => undefined);
+  }
 }
 
 function normalizeMessageProvider(provider?: MessageProvider): MessageProvider {

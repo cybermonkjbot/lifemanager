@@ -40,10 +40,12 @@ import {
 import {
   describeInboundImageWithFallback,
   generateMemeImageWithAzure,
+  generateReplyCandidatesWithRerank,
   generateReplyWithFallback,
   estimateDelayAndTyping,
   normalizeOutboundText,
   routeAckResponseChannel,
+  type AiCandidateEvaluation,
   type AiAttempt,
   type ConversationSteeringMode,
   type ModelToolContext,
@@ -58,6 +60,11 @@ import {
   maybeFetchOlderHistoryForThread,
   readHistoryFetchConfigFromEnv,
 } from "./history-context";
+import {
+  buildHistorySearchRewriteQuery,
+  isHistoryContextWeak,
+  mergeHistorySearchOverrides,
+} from "./context-orchestration-utils";
 import {
   buildContextPack,
   normalizeContextPack,
@@ -294,6 +301,9 @@ type ThreadAdaptiveHintsSnapshot = AdaptiveTuningHintsSnapshot & {
   preferFactRefresh?: boolean;
   retrievalLowConfidenceThreshold?: number;
   factStaleThresholdDays?: number;
+  secondPassCoverageMinFacts?: number;
+  tuningProfileVersion?: number;
+  anomalyFreezeActive?: boolean;
 };
 
 type ExternalWebTrendSearchPayload = {
@@ -1008,6 +1018,8 @@ type WorkerContextToolStep = {
   reason: string;
   readOnly: boolean;
   requiresTool?: WorkerContextToolName;
+  queryText?: string;
+  limitOverride?: number;
 };
 type WorkerContextToolRunResult = {
   stepId: string;
@@ -1401,27 +1413,34 @@ async function runWorkerContextToolOrchestration(args: {
       let output: unknown = null;
       let input: unknown = {};
       if (step.tool === "history_search") {
+        const queryText = (step.queryText || args.inboundText).replace(/\s+/g, " ").trim();
+        const searchLimit = Math.round(Math.max(2, Math.min(step.limitOverride ?? args.historySearchLimit, 24)));
         input = {
           threadId: args.threadId,
-          query: args.inboundText,
-          limit: args.historySearchLimit,
+          query: queryText,
+          limit: searchLimit,
         };
         output = await runWithTimeout(
           buildHistorySearchOverride({
             convex: args.convex,
             threadId: args.threadId,
-            query: args.inboundText,
-            limit: args.historySearchLimit,
+            query: queryText,
+            limit: searchLimit,
             fallbackHistoryLines: args.historyLines,
           }),
           stepTimeoutMs,
         );
         const override = (output as { override?: HistorySearchOverrideSnapshot }).override;
         if (override) {
-          historySearchOverride = {
+          const normalizedOverride: HistorySearchOverrideSnapshot = {
             ...override,
-            lines: (override.lines || []).map((line) => line.replace(/\s+/g, " ").trim().slice(0, 320)).slice(0, args.historySearchLimit),
+            lines: (override.lines || []).map((line) => line.replace(/\s+/g, " ").trim().slice(0, 320)).slice(0, searchLimit),
           };
+          historySearchOverride = mergeHistorySearchOverrides({
+            base: historySearchOverride,
+            incoming: normalizedOverride,
+            limit: Math.max(args.historySearchLimit, searchLimit),
+          }) as HistorySearchOverrideSnapshot;
         }
       } else if (step.tool === "contact_facts_extract") {
         input = {
@@ -1535,37 +1554,41 @@ async function runWorkerContextToolOrchestration(args: {
     }
   }
 
-  const firstPassDecision = shouldTriggerFactExtractionSecondPass({
-    facts: contactFacts,
-    factsLimit: args.factsLimit,
-    historySearchConfidence: historySearchOverride?.confidence,
-    adaptiveHints: args.adaptiveHints,
-  });
-  let secondPassTriggered = false;
-  let secondPassReason = firstPassDecision.reason;
+  let historySecondPassTriggered = false;
+  let historySecondPassReason: string | undefined;
 
-  if (args.includeContactFacts && args.allowFactExtraction && firstPassDecision.trigger && Date.now() < deadlineAt) {
-    secondPassTriggered = true;
-    const extractStep: WorkerContextToolStep = {
-      id: "contact_facts_extract_second_pass",
-      tool: "contact_facts_extract",
-      reason: `Second pass extraction (${secondPassReason || "weak_context"}).`,
-      readOnly: false,
-    };
-    const extractResult = await executeOne(extractStep);
-    runs.push(extractResult);
-    if (extractResult.status === "success") {
-      completedTools.add("contact_facts_extract");
-      const listStep: WorkerContextToolStep = {
-        id: "contact_facts_list_second_pass",
-        tool: "contact_facts_list",
-        reason: "Reload contact facts after extraction refresh.",
-        readOnly: true,
-      };
-      const listResult = await executeOne(listStep);
-      runs.push(listResult);
-      if (listResult.status === "success") {
-        completedTools.add("contact_facts_list");
+  if (args.allowHistorySearch && Date.now() < deadlineAt) {
+    const minStrongHistoryLines = Math.max(
+      2,
+      Math.min(5, Math.round((args.adaptiveHints?.secondPassCoverageMinFacts ?? 2) + 1)),
+    );
+    const weakHistoryContext = isHistoryContextWeak({
+      override: historySearchOverride,
+      lowConfidenceThreshold: retrievalLowConfidenceThreshold,
+      minStrongLines: minStrongHistoryLines,
+    });
+
+    if (weakHistoryContext) {
+      const rewriteQuery = buildHistorySearchRewriteQuery({
+        inboundText: args.inboundText,
+        historyLines: args.historyLines,
+      });
+      if (rewriteQuery) {
+        const rewriteStep: WorkerContextToolStep = {
+          id: "history_search_second_pass",
+          tool: "history_search",
+          reason: "Second pass history retrieval using rewritten query for weak context.",
+          readOnly: true,
+          queryText: rewriteQuery,
+          limitOverride: Math.max(args.historySearchLimit, 8),
+        };
+        const rewriteResult = await executeOne(rewriteStep);
+        runs.push(rewriteResult);
+        if (rewriteResult.status === "success") {
+          completedTools.add("history_search");
+          historySecondPassTriggered = true;
+          historySecondPassReason = "history_query_rewrite";
+        }
       }
     }
   }
@@ -1586,28 +1609,50 @@ async function runWorkerContextToolOrchestration(args: {
       historyLines: args.historyLines,
       limit: Math.max(args.historySearchLimit, 6),
     });
-    const mergedLines = [...(historySearchOverride.lines || []), ...fallback.lines]
-      .map((line) => line.replace(/\s+/g, " ").trim().slice(0, 320))
-      .filter(Boolean);
-    const deduped: string[] = [];
-    const seen = new Set<string>();
-    for (const line of mergedLines) {
-      const key = line.toLowerCase();
-      if (seen.has(key)) {
-        continue;
-      }
-      seen.add(key);
-      deduped.push(line);
-    }
-    historySearchOverride = {
-      ...historySearchOverride,
-      lines: deduped.slice(0, Math.max(args.historySearchLimit, 6)),
-      candidateCount: Math.max(historySearchOverride.candidateCount || 0, fallback.candidateCount || 0),
-      semanticRerankCount: Math.max(historySearchOverride.semanticRerankCount || 0, fallback.semanticRerankCount || 0),
-      confidence: Math.max(historySearchOverride.confidence || 0, fallback.confidence || 0),
-      retrievalStage: historySearchOverride.retrievalStage || fallback.retrievalStage,
-    };
+    historySearchOverride = mergeHistorySearchOverrides({
+      base: historySearchOverride,
+      incoming: fallback,
+      limit: Math.max(args.historySearchLimit, 6),
+    }) as HistorySearchOverrideSnapshot;
   }
+
+  const firstPassDecision = shouldTriggerFactExtractionSecondPass({
+    facts: contactFacts,
+    factsLimit: args.factsLimit,
+    historySearchConfidence: historySearchOverride?.confidence,
+    adaptiveHints: args.adaptiveHints,
+  });
+  let factSecondPassTriggered = false;
+  const factSecondPassReason = firstPassDecision.reason;
+
+  if (args.includeContactFacts && args.allowFactExtraction && firstPassDecision.trigger && Date.now() < deadlineAt) {
+    factSecondPassTriggered = true;
+    const extractStep: WorkerContextToolStep = {
+      id: "contact_facts_extract_second_pass",
+      tool: "contact_facts_extract",
+      reason: `Second pass extraction (${factSecondPassReason || "weak_context"}).`,
+      readOnly: false,
+    };
+    const extractResult = await executeOne(extractStep);
+    runs.push(extractResult);
+    if (extractResult.status === "success") {
+      completedTools.add("contact_facts_extract");
+      const listStep: WorkerContextToolStep = {
+        id: "contact_facts_list_second_pass",
+        tool: "contact_facts_list",
+        reason: "Reload contact facts after extraction refresh.",
+        readOnly: true,
+      };
+      const listResult = await executeOne(listStep);
+      runs.push(listResult);
+      if (listResult.status === "success") {
+        completedTools.add("contact_facts_list");
+      }
+    }
+  }
+
+  const secondPassTriggered = historySecondPassTriggered || factSecondPassTriggered;
+  const secondPassReason = factSecondPassReason || historySecondPassReason;
 
   const retrievalDiagnostics: ContextPackSnapshot["retrievalDiagnostics"] = {
     plannerSource: merged.plannerSource,
@@ -1810,6 +1855,11 @@ async function run() {
   const buildStatusSendOptions = (audienceJids: string[] | undefined) => {
     const statusAudience = new Set<string>();
 
+    const selfAccount = normalizeAccountJid(getSelfJid());
+    if (selfAccount) {
+      statusAudience.add(`${selfAccount}@s.whatsapp.net`);
+    }
+
     for (const rawJid of audienceJids || []) {
       const trimmed = rawJid.trim().toLowerCase();
       if (!trimmed) {
@@ -1828,18 +1878,11 @@ async function run() {
       }
     }
 
-    const statusJidList = [...statusAudience];
-    if (statusJidList.length === 0) {
+    if (statusAudience.size === 0) {
       return { broadcast: true } as Parameters<typeof sock.sendMessage>[2];
     }
 
-    const selfAccount = normalizeAccountJid(getSelfJid());
-    if (selfAccount) {
-      statusAudience.add(`${selfAccount}@s.whatsapp.net`);
-    }
-
-    const statusJidListWithSelf = [...statusAudience];
-    return { broadcast: true, statusJidList: statusJidListWithSelf } as Parameters<typeof sock.sendMessage>[2];
+    return { broadcast: true, statusJidList: [...statusAudience] } as Parameters<typeof sock.sendMessage>[2];
   };
 
   const reconnectDelay = (attempt: number) => {
@@ -2267,6 +2310,62 @@ function resolveTextEmojiAllowlist() {
       }
       return await getStyleProfile();
     });
+  };
+
+  const getAdaptiveHintsForPath = async (args: {
+    threadId: string;
+    path: "reply" | "outreach" | "status";
+    limit?: number;
+  }): Promise<ThreadAdaptiveHintsSnapshot | null> => {
+    const [threadHints, tuningProfile] = (await Promise.all([
+      convex
+        .query(convexRefs.aiFeedbackGetThreadAdaptiveHints, {
+          threadId: args.threadId as Id<"threads">,
+          path: args.path,
+          limit: args.limit ?? 60,
+        })
+        .catch(() => null),
+      convex
+        .query(convexRefs.aiFeedbackGetActiveTuningProfile, {
+          path: args.path,
+        })
+        .catch(() => null),
+    ])) as [
+      ThreadAdaptiveHintsSnapshot | null,
+      | (ThreadAdaptiveHintsSnapshot & {
+          version?: number;
+          anomalyFreezeActive?: boolean;
+          retrievalWeights?: AdaptiveTuningHintsSnapshot["retrievalWeights"];
+          rerankWeights?: AdaptiveTuningHintsSnapshot["rerankWeights"];
+          thresholds?: {
+            retrievalLowConfidenceThreshold?: number;
+            factStaleThresholdDays?: number;
+            secondPassCoverageMinFacts?: number;
+          };
+        })
+      | null,
+    ];
+
+    if (!threadHints && !tuningProfile) {
+      return null;
+    }
+
+    return {
+      ...(threadHints || {}),
+      ...(tuningProfile?.retrievalWeights ? { retrievalWeights: tuningProfile.retrievalWeights } : {}),
+      ...(tuningProfile?.rerankWeights ? { rerankWeights: tuningProfile.rerankWeights } : {}),
+      ...(tuningProfile?.thresholds?.retrievalLowConfidenceThreshold === undefined
+        ? {}
+        : { retrievalLowConfidenceThreshold: tuningProfile.thresholds.retrievalLowConfidenceThreshold }),
+      ...(tuningProfile?.thresholds?.factStaleThresholdDays === undefined
+        ? {}
+        : { factStaleThresholdDays: tuningProfile.thresholds.factStaleThresholdDays }),
+      ...(tuningProfile?.thresholds?.secondPassCoverageMinFacts === undefined
+        ? {}
+        : { secondPassCoverageMinFacts: tuningProfile.thresholds.secondPassCoverageMinFacts }),
+      ...(tuningProfile?.version === undefined ? {} : { tuningProfileVersion: tuningProfile.version }),
+      ...(tuningProfile?.anomalyFreezeActive === undefined ? {} : { anomalyFreezeActive: tuningProfile.anomalyFreezeActive }),
+    };
   };
 
   const getSystemHealth = async () => {
@@ -6611,13 +6710,11 @@ function resolveTextEmojiAllowlist() {
         });
         styleHints = threadContext?.memory?.styleNotes || [];
         styleProfile = await getStyleProfileForThread(ingest.threadId);
-        adaptiveHints = (await convex
-          .query(convexRefs.aiFeedbackGetThreadAdaptiveHints, {
-            threadId: ingest.threadId as Id<"threads">,
-            path: "reply",
-            limit: 60,
-          })
-          .catch(() => null)) as ThreadAdaptiveHintsSnapshot | null;
+        adaptiveHints = await getAdaptiveHintsForPath({
+          threadId: ingest.threadId,
+          path: "reply",
+          limit: 60,
+        });
       }
       let historySearchOverride: HistorySearchOverrideSnapshot | undefined;
 
@@ -6780,8 +6877,10 @@ function resolveTextEmojiAllowlist() {
         });
       }
 
-      let ai = shouldGenerateAiText
-        ? await generateReplyWithFallback({
+      let ai: Awaited<ReturnType<typeof generateReplyWithFallback>> | null = null;
+      let aiCandidateEvals: AiCandidateEvaluation[] = [];
+      const replyGenerationBaseArgs = shouldGenerateAiText
+        ? {
             inboundText: inboundTextForAi,
             historyLines,
             historySearchOverride,
@@ -6816,8 +6915,17 @@ function resolveTextEmojiAllowlist() {
               threadId: String(ingest.threadId),
               contactJid: threadJid,
             }),
-          })
+          }
         : null;
+
+      if (replyGenerationBaseArgs) {
+        const generated = await generateReplyCandidatesWithRerank({
+          path: "reply",
+          ...replyGenerationBaseArgs,
+        });
+        ai = generated.result;
+        aiCandidateEvals = generated.candidates;
+      }
 
       if (ai && shouldGenerateAiText && !ai.guardrailBlocked) {
         type ReplyStyleGuardrailResult = {
@@ -6863,48 +6971,22 @@ function resolveTextEmojiAllowlist() {
 
         if (styleGuardrail && !styleGuardrail.passed && Array.isArray(styleGuardrail.rewriteHints) && styleGuardrail.rewriteHints.length > 0) {
           const guardrailHints = styleGuardrail.rewriteHints.slice(0, 4);
-          const rewritten = await generateReplyWithFallback({
-            inboundText: inboundTextForAi,
-            historyLines,
-            historySearchOverride,
-            contactFacts,
-            contextPack,
-            adaptiveHints: adaptiveHints || undefined,
-            styleHints: [...styleHints, ...guardrailHints],
-            styleProfile: styleProfile || undefined,
-            personality: personalitySetting
-              ? {
-                  profileSlug: personalitySetting.profileSlug || personalitySetting.profile?.slug,
-                  profileName: personalitySetting.profile?.name,
-                  profileDescription: personalitySetting.profile?.description,
-                  profilePrompt: personalitySetting.profile?.prompt,
-                  intensity: personalitySetting.intensity,
-                  customPrompt: personalitySetting.customPrompt || "",
-                  threadPromptProfile: personalitySetting.threadPromptProfile || "",
-                  threadPromptProfileSource: personalitySetting.threadPromptProfileSource,
-                }
-              : undefined,
-            grounding: threadContext?.grounding
-              ? {
-                  myName: threadContext.grounding.myName,
-                  theirName: threadContext.grounding.theirName,
-                  autoAliases: threadContext.grounding.autoAliases || [],
-                  vibeNotes: threadContext.grounding.vibeNotes || "",
-                }
-              : undefined,
-            runtime: runtimeAiConfigForReply,
-            modelToolContext: buildModelToolContext({
-              convex,
-              threadId: String(ingest.threadId),
-              contactJid: threadJid,
+          const rewritten = await generateReplyCandidatesWithRerank({
+            path: "reply",
+            ...(replyGenerationBaseArgs || {
+              inboundText: inboundTextForAi,
+              historyLines,
+              styleHints,
             }),
+            styleHints: [...styleHints, ...guardrailHints],
           });
+          aiCandidateEvals = [...aiCandidateEvals, ...rewritten.candidates];
 
-          if (!rewritten.guardrailBlocked) {
+          if (!rewritten.result.guardrailBlocked) {
             const rewrittenGuardrail = (await convex
               .query(convexRefs.chatReplyStyleGuardrailCheck, {
                 threadId: ingest.threadId,
-                candidateReply: rewritten.text,
+                candidateReply: rewritten.result.text,
                 inboundText: inboundTextForAi,
                 strictness: "balanced",
               })
@@ -6916,7 +6998,7 @@ function resolveTextEmojiAllowlist() {
             const rewriteScore = Number(rewrittenGuardrail?.score || 0);
             const rewriteImproved = rewrittenGuardrail ? rewrittenGuardrail.passed || rewriteScore >= initialScore : true;
             if (rewriteImproved) {
-              ai = rewritten;
+              ai = rewritten.result;
             }
           }
         }
@@ -7154,7 +7236,67 @@ function resolveTextEmojiAllowlist() {
       } else if (health?.config?.autonomyPaused) {
         await convex.mutation(convexRefs.draftSaveGenerated, draftPayload);
       } else {
-        await convex.mutation(convexRefs.draftSaveOrReplacePending, draftPayload);
+        const saveResult = (await convex.mutation(convexRefs.draftSaveOrReplacePending, draftPayload)) as
+          | { draftId: string; outboxId: string; replaced: boolean }
+          | null;
+        if (saveResult?.outboxId && aiCandidateEvals.length > 0) {
+          await convex
+            .mutation(convexRefs.aiFeedbackRecordCandidateEvals, {
+              threadId: ingest.threadId as Id<"threads">,
+              outboxId: saveResult.outboxId as Id<"outbox">,
+              toolRunId,
+              path: "reply",
+              rows: aiCandidateEvals.map((candidate) => ({
+                candidateId: candidate.candidateId,
+                selected: candidate.selected,
+                guardrailBlocked: candidate.guardrailBlocked,
+                featureVector: candidate.featureVector,
+                scoreBreakdown: candidate.scoreBreakdown,
+                provider: candidate.provider,
+                model: candidate.model,
+                textHash: candidate.textHash,
+              })),
+            })
+            .catch(() => undefined);
+        } else if (aiCandidateEvals.length > 0) {
+          await convex
+            .mutation(convexRefs.aiFeedbackRecordCandidateEvals, {
+              threadId: ingest.threadId as Id<"threads">,
+              toolRunId,
+              path: "reply",
+              rows: aiCandidateEvals.map((candidate) => ({
+                candidateId: candidate.candidateId,
+                selected: candidate.selected,
+                guardrailBlocked: candidate.guardrailBlocked,
+                featureVector: candidate.featureVector,
+                scoreBreakdown: candidate.scoreBreakdown,
+                provider: candidate.provider,
+                model: candidate.model,
+                textHash: candidate.textHash,
+              })),
+            })
+            .catch(() => undefined);
+        }
+      }
+
+      if ((stageGeneratedMemeForManualReview || health?.config?.autonomyPaused) && aiCandidateEvals.length > 0) {
+        await convex
+          .mutation(convexRefs.aiFeedbackRecordCandidateEvals, {
+            threadId: ingest.threadId as Id<"threads">,
+            toolRunId,
+            path: "reply",
+            rows: aiCandidateEvals.map((candidate) => ({
+              candidateId: candidate.candidateId,
+              selected: candidate.selected,
+              guardrailBlocked: candidate.guardrailBlocked,
+              featureVector: candidate.featureVector,
+              scoreBreakdown: candidate.scoreBreakdown,
+              provider: candidate.provider,
+              model: candidate.model,
+              textHash: candidate.textHash,
+            })),
+          })
+          .catch(() => undefined);
       }
 
       if (nightWindDownUntil) {
@@ -7455,13 +7597,11 @@ function resolveTextEmojiAllowlist() {
       ...(threadContext?.memory?.styleNotes || []),
     ];
     const styleProfile = await getStyleProfileForThread(item.threadId);
-    const adaptiveHints = (await convex
-      .query(convexRefs.aiFeedbackGetThreadAdaptiveHints, {
-        threadId: item.threadId as Id<"threads">,
-        path: "outreach",
-        limit: 60,
-      })
-      .catch(() => null)) as ThreadAdaptiveHintsSnapshot | null;
+    const adaptiveHints = await getAdaptiveHintsForPath({
+      threadId: item.threadId,
+      path: "outreach",
+      limit: 60,
+    });
 
     const personalitySetting = (await convex.query(convexRefs.personalityGetThreadSetting, {
       threadId: item.threadId,
@@ -7646,7 +7786,8 @@ function resolveTextEmojiAllowlist() {
         capturedAt: Date.now(),
       }) || persistedContextPack;
 
-    const ai = await generateReplyWithFallback({
+    const outreachGenerated = await generateReplyCandidatesWithRerank({
+      path: "outreach",
       inboundText: promptSeed,
       historyLines,
       historySearchOverride: outreachHistoryOverride,
@@ -7704,6 +7845,8 @@ function resolveTextEmojiAllowlist() {
         contactJid: threadContext?.thread?.jid,
       }),
     });
+    const ai = outreachGenerated.result;
+    const outreachCandidateEvals = outreachGenerated.candidates;
 
     for (let index = 0; index < ai.attempts.length; index += 1) {
       const attempt = ai.attempts[index];
@@ -7867,6 +8010,26 @@ function resolveTextEmojiAllowlist() {
       toolRunId,
       contextPack: outreachContextPack,
     });
+    if (outreachCandidateEvals.length > 0) {
+      await convex
+        .mutation(convexRefs.aiFeedbackRecordCandidateEvals, {
+          threadId: item.threadId as Id<"threads">,
+          outboxId: item.outboxId as Id<"outbox">,
+          toolRunId,
+          path: "outreach",
+          rows: outreachCandidateEvals.map((candidate) => ({
+            candidateId: candidate.candidateId,
+            selected: candidate.selected,
+            guardrailBlocked: candidate.guardrailBlocked,
+            featureVector: candidate.featureVector,
+            scoreBreakdown: candidate.scoreBreakdown,
+            provider: candidate.provider,
+            model: candidate.model,
+            textHash: candidate.textHash,
+          })),
+        })
+        .catch(() => undefined);
+    }
 
     if (outreachMode === "good_morning" && romanceMorningMode && romancePromptFingerprint) {
       await convex
@@ -7914,13 +8077,11 @@ function resolveTextEmojiAllowlist() {
 
     const toolRunId = createToolRunId("status", item.threadId, item.outboxId);
     const persistedContextPack = normalizeContextPack(item.contextPack);
-    const adaptiveHints = (await convex
-      .query(convexRefs.aiFeedbackGetThreadAdaptiveHints, {
-        threadId: item.threadId as Id<"threads">,
-        path: "status",
-        limit: 60,
-      })
-      .catch(() => null)) as ThreadAdaptiveHintsSnapshot | null;
+    const adaptiveHints = await getAdaptiveHintsForPath({
+      threadId: item.threadId,
+      path: "status",
+      limit: 60,
+    });
     const trendTheme = (item.statusTrendTheme || "daily life, motivation, fun").trim();
     const demographic = (item.statusDemographicHint || "mixed").trim();
     const audienceCount = Math.max(0, item.statusAudienceJids?.length || 0);
@@ -8110,7 +8271,8 @@ function resolveTextEmojiAllowlist() {
         capturedAt: Date.now(),
       }) || persistedContextPack;
 
-    const ai = await generateReplyWithFallback({
+    const statusGenerated = await generateReplyCandidatesWithRerank({
+      path: "status",
       inboundText: promptSeed,
       historyLines: statusHistoryLines,
       contextPack: statusContextPack,
@@ -8140,6 +8302,8 @@ function resolveTextEmojiAllowlist() {
         threadId: item.threadId,
       }),
     });
+    const ai = statusGenerated.result;
+    const statusCandidateEvals = statusGenerated.candidates;
 
     for (let index = 0; index < ai.attempts.length; index += 1) {
       const attempt = ai.attempts[index];
@@ -8287,6 +8451,26 @@ function resolveTextEmojiAllowlist() {
       statusDemographicHint: demographic,
       contextPack: statusContextPack,
     });
+    if (statusCandidateEvals.length > 0) {
+      await convex
+        .mutation(convexRefs.aiFeedbackRecordCandidateEvals, {
+          threadId: item.threadId as Id<"threads">,
+          outboxId: item.outboxId as Id<"outbox">,
+          toolRunId,
+          path: "status",
+          rows: statusCandidateEvals.map((candidate) => ({
+            candidateId: candidate.candidateId,
+            selected: candidate.selected,
+            guardrailBlocked: candidate.guardrailBlocked,
+            featureVector: candidate.featureVector,
+            scoreBreakdown: candidate.scoreBreakdown,
+            provider: candidate.provider,
+            model: candidate.model,
+            textHash: candidate.textHash,
+          })),
+        })
+        .catch(() => undefined);
+    }
 
     return {
       ...item,
@@ -8644,7 +8828,7 @@ function resolveTextEmojiAllowlist() {
               let sent: { key?: { id?: string | null } } | undefined;
               const destinationJid = isStatusBroadcastSend ? "status@broadcast" : item.jid;
               if (isStatusBroadcastSend) {
-                const statusSendOptions = buildStatusSendOptions(undefined);
+                const statusSendOptions = buildStatusSendOptions(hydrated.statusAudienceJids);
                 if (hydrated.sendKind === "meme") {
                   if (!hydrated.mediaAssetId) {
                     throw new Error("Status meme outbox item missing media asset id.");

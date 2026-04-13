@@ -62,7 +62,7 @@ export function SharedMediaPreview({
   }
 
   if (mimeType.startsWith("video/") || preview.kind === "video") {
-    return <video src={preview.url} controls preload="metadata" className="message-media-video" />;
+    return <video src={preview.url} controls preload="metadata" playsInline className="message-media-video" />;
   }
 
   if (mimeType.startsWith("audio/") || preview.kind === "audio") {

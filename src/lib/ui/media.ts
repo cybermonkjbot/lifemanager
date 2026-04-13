@@ -38,6 +38,9 @@ export type UnifiedMediaItem = {
 };
 
 export function isImageLikeMedia(kind: MediaKind, mimeType: string) {
-  const normalizedMime = mimeType.toLowerCase();
-  return normalizedMime.startsWith("image/") || kind === "sticker" || kind === "meme" || kind === "image";
+  const normalizedMime = (mimeType || "").trim().toLowerCase();
+  if (normalizedMime) {
+    return normalizedMime.startsWith("image/");
+  }
+  return kind === "sticker" || kind === "meme" || kind === "image";
 }
