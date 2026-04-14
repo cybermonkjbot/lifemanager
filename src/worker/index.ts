@@ -414,6 +414,7 @@ const CONTEXT_COMPACTION_MAX_DELETES = 260;
 const BLOCKLIST_CACHE_TTL_MS = 90 * 1000;
 const BLOCKLIST_FORCE_REFRESH_INTERVAL_MS = 8 * 60 * 1000;
 const PRIVACY_PREFLIGHT_MIN_INTERVAL_MS = 30 * 60 * 1000;
+const CONNECTION_OPEN_MAINTENANCE_FORCE_MIN_INTERVAL_MS = 10 * 60 * 1000;
 const DEFAULT_AUTO_MARK_READ_ENABLED = readEnvBoolean("SLM_AUTO_MARK_READ_ENABLED", true);
 const DEFAULT_AUTO_MARK_READ_GROUPS_ENABLED = readEnvBoolean("SLM_AUTO_MARK_READ_GROUPS", false);
 const DEFAULT_AUTO_MARK_READ_STATUS_ENABLED = readEnvBoolean("SLM_AUTO_MARK_READ_STATUS", false);
@@ -1808,6 +1809,7 @@ async function run() {
   let lastBlocklistForceRefreshAt = 0;
   let lastPrivacyPreflightAt = 0;
   let lastAboutAutomationAt = 0;
+  let lastConnectionOpenMaintenanceForcedAt = 0;
   let lastAutomatedAboutText = "";
 
   const normalizeAccountJid = (jid: string | null | undefined) => {
@@ -7357,6 +7359,8 @@ function resolveTextEmojiAllowlist() {
   };
 
   const attachListeners = (socket: typeof sock) => {
+    let hasOpenTransitionBeenHandled = false;
+
     const runSocketTask = (eventType: string, task: () => Promise<void>) => {
       void task().catch((error) => {
         const err = error instanceof Error ? error.message : String(error);
@@ -7384,6 +7388,7 @@ function resolveTextEmojiAllowlist() {
         }
 
         if (update.connection === "close") {
+          hasOpenTransitionBeenHandled = false;
           const statusCode = getStatusCode(update.lastDisconnect?.error);
           const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
           logger.warn({ statusCode, shouldReconnect }, "WhatsApp connection closed");
@@ -7405,14 +7410,24 @@ function resolveTextEmojiAllowlist() {
         }
 
         if (update.connection === "open") {
+          if (hasOpenTransitionBeenHandled) {
+            return;
+          }
+          hasOpenTransitionBeenHandled = true;
           clearReconnectTimer();
           reconnectAttempts = 0;
           logger.info("WhatsApp connection established");
           await reportListener(true, "Worker listener is active. AI reply automation is running.");
           const runtimeSettings = await getRuntimeSettings();
-          await refreshBlocklist("connection_open", true);
-          await runPrivacyPreflight("connection_open", true);
-          await maybeRunAboutAutomation("connection_open", runtimeSettings, true);
+          const now = Date.now();
+          const forceOpenMaintenance =
+            now - lastConnectionOpenMaintenanceForcedAt >= CONNECTION_OPEN_MAINTENANCE_FORCE_MIN_INTERVAL_MS;
+          if (forceOpenMaintenance) {
+            lastConnectionOpenMaintenanceForcedAt = now;
+          }
+          await refreshBlocklist("connection_open", forceOpenMaintenance);
+          await runPrivacyPreflight("connection_open", forceOpenMaintenance);
+          await maybeRunAboutAutomation("connection_open", runtimeSettings, forceOpenMaintenance);
         }
       });
     });

@@ -420,6 +420,16 @@ export const run = internalMutation({
       romanticProfileThreadIds,
     ]).slice(0, MAX_TARGET_THREADS);
 
+    if (candidateThreadIds.length === 0) {
+      await ctx.db.insert("systemEvents", {
+        source: "convex",
+        eventType: "romance_morning.no_candidates",
+        detail: `No eligible romantic morning targets. configured_jids=${romanticPartnerJids.length}; backlog_candidates=${romanticBacklogThreadIds.length}; profile_candidates=${romanticProfileThreadIds.length}.`,
+        createdAt: now,
+      });
+      return { queued: 0, considered: 0, reason: "no_candidates" as const };
+    }
+
     const summary = {
       queued: 0,
       considered: 0,

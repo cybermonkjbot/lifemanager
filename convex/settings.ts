@@ -254,7 +254,13 @@ export const save = mutation({
       0,
       300,
     );
-    const outreachContactJids = [...new Set(args.outreachContactJids.map((item) => item.trim()).filter(Boolean))];
+    const outreachContactJids = [
+      ...new Set(
+        args.outreachContactJids
+          .map((item) => item.trim().toLowerCase())
+          .filter(Boolean),
+      ),
+    ];
     const statusBuilderAudienceJids = [
       ...new Set((args.statusBuilderAudienceJids || []).map((item) => item.trim()).filter(Boolean)),
     ];

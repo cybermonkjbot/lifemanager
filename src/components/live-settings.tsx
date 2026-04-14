@@ -427,7 +427,14 @@ function parseNumber(value: string, fallback: number) {
 }
 
 function parseContactJids(value: string) {
-  return [...new Set(value.split("\n").map((item) => item.trim()).filter(Boolean))];
+  return [
+    ...new Set(
+      value
+        .split(/[\n,]/)
+        .map((item) => item.trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  ];
 }
 
 function parseSimpleList(value: string, lowercase = false) {
@@ -1012,7 +1019,7 @@ export function LiveSettings() {
   };
 
   const addRomanticPartner = (jid: string) => {
-    const normalized = jid.trim();
+    const normalized = jid.trim().toLowerCase();
     if (!normalized) {
       return;
     }
@@ -1036,7 +1043,7 @@ export function LiveSettings() {
   };
 
   const addOutreachContact = (jid: string) => {
-    const normalized = jid.trim();
+    const normalized = jid.trim().toLowerCase();
     if (!normalized) {
       return;
     }
@@ -2734,6 +2741,12 @@ export function LiveSettings() {
               aria-disabled={record.pending}
             />
             <span className="queue-meta">Select from contacts or paste one WhatsApp JID per line.</span>
+            {draft.romanticMorningEnabled && draft.romanticPartnerJids.length === 0 ? (
+              <p className="queue-meta">
+                Good-morning automation is enabled, but no romantic partner JIDs are configured. Add at least one
+                target so the protocol can queue messages.
+              </p>
+            ) : null}
             <label className="stack compact">
               <span className="queue-meta">Enable adaptive good-morning protocol</span>
               <select
@@ -2931,7 +2944,7 @@ export function LiveSettings() {
           </label>
 
           <label className="stack compact">
-            <span className="queue-meta">Fixed contacts (one WhatsApp JID per line)</span>
+            <span className="queue-meta">Fixed contacts (one WhatsApp JID per line or comma-separated)</span>
             <select
               value=""
               onChange={(event) => {
@@ -2963,6 +2976,12 @@ export function LiveSettings() {
               disabled={record.pending}
               aria-disabled={record.pending}
             />
+            {draft.outreachEnabled && draft.outreachContactJids.length === 0 ? (
+              <p className="queue-meta">
+                Proactive outreach is enabled, but no fixed contacts are configured. Add at least one JID to activate
+                scheduled outreach.
+              </p>
+            ) : null}
             {draft.outreachContactJids.length > 0 ? (
               <div className="stack compact">
                 {draft.outreachContactJids.map((jid) => (
