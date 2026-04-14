@@ -5,6 +5,7 @@ export const convexRefs = {
   threadsList: makeFunctionReference<"query">("threads:list"),
   threadGet: makeFunctionReference<"query">("threads:get"),
   callsListByThread: makeFunctionReference<"query">("calls:listByThread"),
+  callsHasRecentFallbackSend: makeFunctionReference<"query">("calls:hasRecentFallbackSend"),
   threadsGetEligibility: makeFunctionReference<"query">("threads:getEligibility"),
   threadsGetEligibilityByJid: makeFunctionReference<"query">("threads:getEligibilityByJid"),
   followupsList: makeFunctionReference<"query">("followups:list"),

@@ -140,7 +140,11 @@ import {
   parseSelfControlSmartRouteOutput,
   type SelfControlSmartRoute,
 } from "./self-control-smart-router";
-import { shouldSuppressCallFallbackAfterOffer } from "./call-fallback";
+import {
+  resolveCallFallbackVariants,
+  selectCallFallbackVariant,
+  shouldSuppressCallFallbackAfterOffer,
+} from "./call-fallback";
 
 const logger = pino({
   name: "slm-worker",
@@ -387,16 +391,17 @@ const TEXT_EMOJI_MAX_PER_WINDOW = 2;
 const TEXT_EMOJI_NON_ALLOWLIST_WARMUP_MAX_PER_WINDOW = 2;
 const TEXT_EMOJI_WINDOW_MS = 6 * 60 * 60 * 1000;
 const STICKER_COMPANION_COOLDOWN_MS = 45 * 60 * 1000;
-const CALL_FALLBACK_COOLDOWN_MS = 20 * 60 * 1000;
+const CALL_FALLBACK_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 const CALL_FALLBACK_POST_REJECT_GRACE_MS = Math.round(
   clamp(Number(process.env.SLM_CALL_FALLBACK_GRACE_MS || 2000), 0, 15_000),
 );
 const CALL_CONTEXT_MIN_DURATION_MS = Math.round(
   clamp(Number(process.env.SLM_CALL_CONTEXT_MIN_DURATION_MS || 2 * 60 * 1000), 30_000, 30 * 60 * 1000),
 );
-const CALL_AUTO_DECLINE_FALLBACK_TEXT =
-  process.env.SLM_CALL_FALLBACK_TEXT?.trim() ||
-  "I can't take WhatsApp calls here right now. Please send a message and I'll reply here.";
+const CALL_AUTO_DECLINE_FALLBACK_VARIANTS = resolveCallFallbackVariants({
+  overrideText: process.env.SLM_CALL_FALLBACK_TEXT,
+  overrideVariants: process.env.SLM_CALL_FALLBACK_TEXT_VARIANTS,
+});
 const STATUS_RETENTION_MS = 40 * 60 * 1000;
 const STATUS_CLEANUP_INTERVAL_MS = 40 * 60 * 1000;
 const STATUS_CLEANUP_BATCH_LIMIT = 160;
@@ -1814,11 +1819,6 @@ async function run() {
     return bare;
   };
 
-  const getSelfJid = () => {
-    const [primary = ""] = getSelfIdentityJids();
-    return primary;
-  };
-
   const normalizeJidForLookup = (jid: string | null | undefined) => {
     return (jid || "").trim().toLowerCase();
   };
@@ -1852,37 +1852,9 @@ async function run() {
     return [...ids];
   };
 
-  const buildStatusSendOptions = (audienceJids: string[] | undefined) => {
-    const statusAudience = new Set<string>();
-
-    const selfAccount = normalizeAccountJid(getSelfJid());
-    if (selfAccount) {
-      statusAudience.add(`${selfAccount}@s.whatsapp.net`);
-    }
-
-    for (const rawJid of audienceJids || []) {
-      const trimmed = rawJid.trim().toLowerCase();
-      if (!trimmed) {
-        continue;
-      }
-      const [userAndDevice = "", domain = ""] = trimmed.split("@");
-      const [bareUser = ""] = userAndDevice.split(":");
-      if (!bareUser) {
-        continue;
-      }
-
-      if (domain === "s.whatsapp.net" || domain === "lid") {
-        statusAudience.add(`${bareUser}@${domain}`);
-      } else if (!domain) {
-        statusAudience.add(`${bareUser}@s.whatsapp.net`);
-      }
-    }
-
-    if (statusAudience.size === 0) {
-      return { broadcast: true } as Parameters<typeof sock.sendMessage>[2];
-    }
-
-    return { broadcast: true, statusJidList: [...statusAudience] } as Parameters<typeof sock.sendMessage>[2];
+  const buildStatusSendOptions = () => {
+    // Respect WhatsApp's current status privacy configuration by default.
+    return { broadcast: true } as Parameters<typeof sock.sendMessage>[2];
   };
 
   const reconnectDelay = (attempt: number) => {
@@ -3386,6 +3358,7 @@ function resolveTextEmojiAllowlist() {
     callFrom: string;
     threadJid: string;
     fallbackKey: string;
+    threadId?: Id<"threads">;
   }) => {
     clearPendingCallFallback(args.callId);
     const timer = setTimeout(() => {
@@ -3403,14 +3376,40 @@ function resolveTextEmojiAllowlist() {
           return;
         }
 
-        if (!CALL_AUTO_DECLINE_FALLBACK_TEXT || hasRecentCallFallback(args.fallbackKey)) {
+        if (hasRecentCallFallback(args.fallbackKey)) {
+          return;
+        }
+
+        if (args.threadId) {
+          const recentFallback = (await convex
+            .query(convexRefs.callsHasRecentFallbackSend, {
+              threadId: args.threadId,
+              withinMs: CALL_FALLBACK_COOLDOWN_MS,
+            })
+            .catch(() => null)) as
+            | {
+                hasRecent?: boolean;
+                lastSentAt?: number;
+              }
+            | null;
+          if (recentFallback?.hasRecent) {
+            rememberCallFallbackAt(args.fallbackKey, recentFallback.lastSentAt || Date.now());
+            return;
+          }
+        }
+
+        const fallbackText = selectCallFallbackVariant({
+          variants: CALL_AUTO_DECLINE_FALLBACK_VARIANTS,
+          seed: `${args.fallbackKey}|${Math.floor(Date.now() / CALL_FALLBACK_COOLDOWN_MS)}`,
+        });
+        if (!fallbackText) {
           return;
         }
 
         try {
           rememberAutomatedThreadSend(args.threadJid);
           const sent = await sock.sendMessage(args.threadJid, {
-            text: CALL_AUTO_DECLINE_FALLBACK_TEXT,
+            text: fallbackText,
           });
           rememberAutomatedOutboundId(sent?.key?.id || undefined);
           rememberCallFallbackAt(args.fallbackKey, Date.now());
@@ -3418,7 +3417,11 @@ function resolveTextEmojiAllowlist() {
             .mutation(convexRefs.systemRecordEvent, {
               source: "worker",
               eventType: "inbound.call.rejected_with_fallback",
-              detail: compactLogText(`jid=${args.threadJid} status=offer`, 220),
+              threadId: args.threadId,
+              detail: compactLogText(
+                `jid=${args.threadJid} status=offer variant=${stableHash(fallbackText).toString(16)}`,
+                220,
+              ),
             })
             .catch(() => undefined);
         } catch (error) {
@@ -3431,6 +3434,7 @@ function resolveTextEmojiAllowlist() {
             .mutation(convexRefs.systemRecordEvent, {
               source: "worker",
               eventType: "inbound.call.fallback_send_error",
+              threadId: args.threadId,
               detail: compactLogText(err, 280),
             })
             .catch(() => undefined);
@@ -5807,7 +5811,7 @@ function resolveTextEmojiAllowlist() {
       const callFromAccount = normalizeAccountJid(callFrom);
       const isFromSelf = Boolean(callFromAccount && getSelfAccountIds().includes(callFromAccount));
 
-      await convex
+      const callRecord = (await convex
         .mutation(convexRefs.callsRecordEvent, {
           provider: "whatsapp",
           callId,
@@ -5821,7 +5825,13 @@ function resolveTextEmojiAllowlist() {
           isFromSelf,
           minDurationMs: CALL_CONTEXT_MIN_DURATION_MS,
         })
-        .catch(() => undefined);
+        .catch(() => null)) as
+        | {
+            stored?: boolean;
+            threadId?: Id<"threads">;
+          }
+        | null;
+      const recordedThreadId = callRecord?.stored ? callRecord.threadId : undefined;
 
       if (callStatus !== "offer") {
         if (shouldSuppressCallFallbackAfterOffer(latestCallState)) {
@@ -5892,14 +5902,34 @@ function resolveTextEmojiAllowlist() {
         return;
       }
 
-      if (!CALL_AUTO_DECLINE_FALLBACK_TEXT || hasRecentCallFallback(fallbackKey)) {
+      if (CALL_AUTO_DECLINE_FALLBACK_VARIANTS.length === 0 || hasRecentCallFallback(fallbackKey)) {
         return;
       }
+
+      if (recordedThreadId) {
+        const recentFallback = (await convex
+          .query(convexRefs.callsHasRecentFallbackSend, {
+            threadId: recordedThreadId,
+            withinMs: CALL_FALLBACK_COOLDOWN_MS,
+          })
+          .catch(() => null)) as
+          | {
+              hasRecent?: boolean;
+              lastSentAt?: number;
+            }
+          | null;
+        if (recentFallback?.hasRecent) {
+          rememberCallFallbackAt(fallbackKey, recentFallback.lastSentAt || Date.now());
+          return;
+        }
+      }
+
       scheduleCallFallbackMessage({
         callId,
         callFrom,
         threadJid,
         fallbackKey,
+        threadId: recordedThreadId,
       });
     } catch (error) {
       const err = error instanceof Error ? error.message : String(error);
@@ -8828,7 +8858,7 @@ function resolveTextEmojiAllowlist() {
               let sent: { key?: { id?: string | null } } | undefined;
               const destinationJid = isStatusBroadcastSend ? "status@broadcast" : item.jid;
               if (isStatusBroadcastSend) {
-                const statusSendOptions = buildStatusSendOptions(hydrated.statusAudienceJids);
+                const statusSendOptions = buildStatusSendOptions();
                 if (hydrated.sendKind === "meme") {
                   if (!hydrated.mediaAssetId) {
                     throw new Error("Status meme outbox item missing media asset id.");

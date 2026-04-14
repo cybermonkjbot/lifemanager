@@ -136,6 +136,22 @@ export const get = query({
   },
 });
 
+export const setStatusBuilderEnabled = mutation({
+  args: {
+    enabled: v.boolean(),
+  },
+  handler: async (ctx, args) => {
+    await setConfigValue(ctx, "statusBuilderEnabled", args.enabled ? "true" : "false");
+    await ctx.db.insert("systemEvents", {
+      source: "dashboard",
+      eventType: args.enabled ? "status_builder.enabled" : "status_builder.disabled",
+      detail: `Auto status posting ${args.enabled ? "enabled" : "disabled"} from Status page.`,
+      createdAt: Date.now(),
+    });
+    return args.enabled;
+  },
+});
+
 export const save = mutation({
   args: {
     ignoreGroupsByDefault: v.boolean(),

@@ -1,0 +1,589 @@
+convex/aiFeedback.ts	80	fallback_keyword	function safeNumber(value: unknown, fallback = 0) {
+convex/aiFeedback.ts	81	fallback_keyword	  return Number.isFinite(value) ? (value as number) : fallback;
+convex/backlog.ts	326	fallback_keyword,literal_default	    const fallbackImportance = existing?.importanceOverride || "low";
+convex/backlog.ts	330	fallback_keyword	      importance: fallbackImportance,
+convex/calls.ts	10	fallback_keyword	const CALL_FALLBACK_SEND_EVENT_TYPE = "inbound.call.rejected_with_fallback";
+convex/calls.ts	11	fallback_keyword	const DEFAULT_CALL_FALLBACK_LOOKBACK_MS = 24 * 60 * 60 * 1000;
+convex/calls.ts	12	fallback_keyword	const MAX_CALL_FALLBACK_LOOKBACK_MS = 14 * 24 * 60 * 60 * 1000;
+convex/calls.ts	14	fallback_keyword	function normalizeTimestampMs(raw: number | undefined, fallbackMs: number) {
+convex/calls.ts	16	fallback_keyword	    return fallbackMs;
+convex/calls.ts	30	fallback_keyword	  const fallback = 2 * 60 * 1000;
+convex/calls.ts	32	fallback_keyword	    return fallback;
+convex/calls.ts	268	fallback_keyword	export const hasRecentFallbackSend = query({
+convex/calls.ts	276	fallback_keyword	      Math.max(60_000, Math.min(args.withinMs ?? DEFAULT_CALL_FALLBACK_LOOKBACK_MS, MAX_CALL_FALLBACK_LOOKBACK_MS)),
+convex/calls.ts	279	fallback_keyword	    const [fallbackEvent] = await ctx.db
+convex/calls.ts	282	fallback_keyword	        q.eq("threadId", args.threadId).eq("eventType", CALL_FALLBACK_SEND_EVENT_TYPE).gte("createdAt", cutoff),
+convex/calls.ts	287	fallback_keyword	      hasRecent: Boolean(fallbackEvent),
+convex/calls.ts	288	fallback_keyword	      lastSentAt: fallbackEvent?.createdAt,
+convex/chatTools.ts	176	fallback_keyword	function clampRound(value: number | undefined, fallback: number, min: number, max: number) {
+convex/chatTools.ts	178	fallback_keyword	    return fallback;
+convex/chatTools.ts	474	fallback_keyword	function slugify(input: string, fallback = "item") {
+convex/chatTools.ts	480	fallback_keyword	  return normalized || fallback;
+convex/chatTools.ts	783	fallback_keyword	    fallbackToGlobal?: boolean;
+convex/chatTools.ts	786	fallback_keyword	  const fallbackToGlobal = args.fallbackToGlobal ?? true;
+convex/chatTools.ts	815	fallback_keyword	  if (globalProfile && fallbackToGlobal) {
+convex/chatTools.ts	1167	fallback_keyword	    provider: serpApiKey ? "serpapi+fallback" : "public_fallback",
+convex/chatTools.ts	1320	fallback_keyword	    fallbackToGlobal: v.optional(v.boolean()),
+convex/chatTools.ts	1824	env_default,literal_default	    const endpointEnv = process.env.PERSONAL_CONNECTOR_ENDPOINTS || "";
+convex/chatTools.ts	1888	fallback_keyword	      fallbackToGlobal: true,
+convex/chatTools.ts	2160	fallback_keyword	              fallbackToGlobal: true,
+convex/draft.ts	5	fallback_keyword	import { contextPackValidator, outreachModeValidator, resolveFeedbackPath, resolveOutreachModeWithFallback } from "./lib/aiSmartness";
+convex/draft.ts	63	fallback_keyword	    if (config.aiFallbackMode === "azure_only") {
+convex/draft.ts	92	fallback_keyword	      reason: "Heuristic fallback draft",
+convex/draft.ts	596	fallback_keyword	      const outreachMode = resolveOutreachModeWithFallback({
+convex/inbound.ts	7	fallback_keyword	import { POSITIVE_ENGAGEMENT_WINDOW_MS, resolveFeedbackPath, resolveOutreachModeWithFallback } from "./lib/aiSmartness";
+convex/inbound.ts	28	fallback_keyword	const IGNORE_CONTACT_FALLBACK_SCAN_LIMIT = 1000;
+convex/inbound.ts	50	fallback_keyword	function normalizeTimestampMs(raw: number | undefined, fallbackMs: number) {
+convex/inbound.ts	52	fallback_keyword	    return fallbackMs;
+convex/inbound.ts	379	fallback_keyword	          .take(IGNORE_CONTACT_FALLBACK_SCAN_LIMIT);
+convex/inbound.ts	702	fallback_keyword	          const outreachMode = resolveOutreachModeWithFallback({
+convex/lib/aiSmartness.ts	51	fallback_keyword	  historySearchRetrievalStage: v.optional(v.union(v.literal("lexical"), v.literal("semantic"), v.literal("semantic_fallback"))),
+convex/lib/aiSmartness.ts	194	fallback_keyword	export function clamp01(value: number, fallback = 0.5) {
+convex/lib/aiSmartness.ts	196	fallback_keyword	    return clamp(fallback, 0, 1);
+convex/lib/aiSmartness.ts	257	fallback_keyword	export function resolveOutreachModeWithFallback(args: {
+convex/lib/aiSmartness.ts	272	fallback_keyword	  const outreachMode = resolveOutreachModeWithFallback({
+convex/lib/config.ts	42	fallback_keyword	  aiFallbackMode: "all" | "azure_only";
+convex/lib/config.ts	51	fallback_keyword	  aiFallbackConfidence: number;
+convex/lib/config.ts	138	fallback_keyword	  aiFallbackMode: "all",
+convex/lib/config.ts	147	fallback_keyword	  aiFallbackConfidence: 0.58,
+convex/lib/config.ts	216	fallback_keyword	function parseBoolean(value: string | undefined, fallback: boolean) {
+convex/lib/config.ts	223	fallback_keyword	  return fallback;
+convex/lib/config.ts	226	fallback_keyword	function parseNumber(value: string | undefined, fallback: number) {
+convex/lib/config.ts	228	fallback_keyword	    return fallback;
+convex/lib/config.ts	231	fallback_keyword	  return Number.isFinite(parsed) ? parsed : fallback;
+convex/lib/config.ts	253	fallback_keyword	function parseFallbackMode(value: string | undefined, fallback: AppConfig["aiFallbackMode"]): AppConfig["aiFallbackMode"] {
+convex/lib/config.ts	257	fallback_keyword	  return fallback;
+convex/lib/config.ts	260	fallback_keyword	function parseQualityGateMode(value: string | undefined, fallback: QualityGateMode): QualityGateMode {
+convex/lib/config.ts	264	fallback_keyword	  return fallback;
+convex/lib/config.ts	267	fallback_keyword	function parseAiDeterministicModes(value: string | undefined, fallback: AiDeterministicMode[]) {
+convex/lib/config.ts	273	fallback_keyword	    return [...fallback];
+convex/lib/config.ts	313	fallback_keyword	    aiFallbackMode: parseFallbackMode(map.get("aiFallbackMode"), DEFAULT_APP_CONFIG.aiFallbackMode),
+convex/lib/config.ts	322	fallback_keyword	    aiFallbackConfidence: clamp(parseNumber(map.get("aiFallbackConfidence"), DEFAULT_APP_CONFIG.aiFallbackConfidence), 0.01, 1),
+convex/media.ts	27	fallback_keyword	function clampInt(value: number | undefined, fallback: number, min: number, max: number) {
+convex/media.ts	29	fallback_keyword	    return fallback;
+convex/media.ts	84	fallback_keyword	function normalizeLabel(value: string, fallback: string) {
+convex/media.ts	86	fallback_keyword	  return normalized || fallback;
+convex/media.ts	857	fallback_keyword	export const getBestUploadedMemeFallback = query({
+convex/outbox.ts	14	fallback_keyword	  resolveOutreachModeWithFallback,
+convex/outbox.ts	53	fallback_keyword	    return resolveOutreachModeWithFallback({ reason: input });
+convex/outbox.ts	55	fallback_keyword	  return resolveOutreachModeWithFallback({
+convex/outbox.ts	174	fallback_keyword	function normalizeTimestampMs(raw: number | undefined, fallbackMs: number) {
+convex/outbox.ts	176	fallback_keyword	    return fallbackMs;
+convex/outreach.ts	317	fallback_keyword	        confidence: config.aiFallbackConfidence,
+convex/personality.ts	240	fallback_keyword	function getFallbackProfile(profiles: PersonalityProfileView[]) {
+convex/personality.ts	286	fallback_keyword	  const fallbackProfile = getFallbackProfile(profiles);
+convex/personality.ts	290	fallback_keyword,literal_default	    profileSlug: fallbackProfile?.slug || "casual",
+convex/personality.ts	291	fallback_keyword,literal_default	    intensity: clamp01(fallbackProfile?.defaultIntensity ?? 0.58),
+convex/personality.ts	301	fallback_keyword,literal_default	    profileSlug: fallbackProfile?.slug || "casual",
+convex/personality.ts	302	fallback_keyword,literal_default	    intensity: clamp01(fallbackProfile?.defaultIntensity ?? 0.58),
+convex/personality.ts	433	fallback_keyword	    const fallback = [
+convex/personality.ts	444	fallback_keyword	      promptProfile: fallback,
+convex/personality.ts	703	fallback_keyword	    const fallback = getFallbackProfile(await getMergedProfiles(ctx));
+convex/personality.ts	711	fallback_keyword,literal_default	        profileSlug: fallback?.slug || "casual",
+convex/personality.ts	712	fallback_keyword,literal_default	        intensity: clamp01(fallback?.defaultIntensity ?? 0.58),
+convex/personality.ts	854	fallback_keyword	    const fallbackProfile = getFallbackProfile(profiles);
+convex/personality.ts	862	fallback_keyword	      const fallback = fallbackProfile;
+convex/personality.ts	879	fallback_keyword,literal_default	        profileSlug: fallback?.slug || "casual",
+convex/personality.ts	880	fallback_keyword,literal_default	        intensity: clamp01(fallback?.defaultIntensity ?? 0.58),
+convex/personality.ts	891	fallback_keyword	        profile: fallback,
+convex/personality.ts	895	fallback_keyword	    const selectedProfile = profileBySlug.get(setting.profileSlug) || fallbackProfile;
+convex/romanceProtocol.ts	612	fallback_keyword	        confidence: config.aiFallbackConfidence,
+convex/settings.ts	159	fallback_keyword	    aiFallbackMode: v.union(v.literal("all"), v.literal("azure_only")),
+convex/settings.ts	168	fallback_keyword	    aiFallbackConfidence: v.number(),
+convex/settings.ts	270	fallback_keyword	      aiFallbackMode: args.aiFallbackMode,
+convex/settings.ts	279	fallback_keyword	      aiFallbackConfidence: clamp(args.aiFallbackConfidence, 0.01, 1),
+convex/settings.ts	494	fallback_keyword	    await setConfigValue(ctx, "aiFallbackMode", normalized.aiFallbackMode);
+convex/settings.ts	503	fallback_keyword	    await setConfigValue(ctx, "aiFallbackConfidence", String(normalized.aiFallbackConfidence));
+convex/statusBuilder.ts	290	fallback_keyword	      const fallbackScan = await ctx.db
+convex/statusBuilder.ts	296	fallback_keyword	      for (const thread of fallbackScan) {
+convex/statusBuilder.ts	400	fallback_keyword	      confidence: config.aiFallbackConfidence,
+convex/system.ts	36	fallback_keyword	    const fallbackCount = providerWindow.filter((row) => row.status === "success" && row.provider !== "azure").length;
+convex/system.ts	38	fallback_keyword	    const fallbackRate = successCount > 0 ? fallbackCount / successCount : 0;
+convex/system.ts	97	fallback_keyword	    if (fallbackRate > 0.45 && successCount >= 20) {
+convex/system.ts	98	fallback_keyword	      alerts.push(`Fallback dependency elevated: ${(fallbackRate * 100).toFixed(1)}% of successful runs are non-Azure.`);
+convex/system.ts	120	fallback_keyword	        providerFallbackRate: fallbackRate,
+convex/system.ts	151	fallback_keyword	            "Switch to broader fallback mode, validate test reply in System tab, and monitor provider error rate until stable.",
+convex/threads.ts	14	fallback_keyword	function clampInt(value: number | undefined, fallback: number, min: number, max: number) {
+convex/threads.ts	16	fallback_keyword	    return fallback;
+convex/threads.ts	39	fallback_keyword	const IGNORE_CONTACT_FALLBACK_SCAN_LIMIT = 1000;
+convex/threads.ts	79	fallback_keyword	    .take(IGNORE_CONTACT_FALLBACK_SCAN_LIMIT);
+scripts/self-improvement-cycle.ts	70	env_default,literal_default	  codexPath: process.env.CODEX_CLI_PATH || "codex",
+scripts/self-improvement-cycle.ts	71	env_default,fallback_keyword,literal_default	  codexModel: process.env.CODEX_SELF_IMPROVE_MODEL || process.env.CODEX_FALLBACK_MODEL || "gpt-5.4",
+shared/romance-morning.ts	23	fallback_keyword	export function normalizeLeadRatio(value: number | undefined, fallback = 0.7) {
+shared/romance-morning.ts	25	fallback_keyword	    return fallback;
+src/app/activity-core/page.tsx	7	env_default	  const splineSceneUrl = process.env.NEXT_PUBLIC_SPLINE_ACTIVITY_SCENE_URL || defaultSplineScene;
+src/app/api/actions/generate-meme/route.ts	180	fallback_keyword	    const fallbackLabel = threadTitle ? `Manual meme ${nowIso} ${threadTitle.slice(0, 24)}` : `Manual meme ${nowIso}`;
+src/app/api/actions/generate-meme/route.ts	190	fallback_keyword	      label: label || fallbackLabel,
+src/app/api/actions/generate-meme/route.ts	217	fallback_keyword	      label: download?.label || label || fallbackLabel,
+src/app/api/actions/test-ai/route.ts	3	fallback_keyword	import { generateReplyWithFallback } from "@/worker/ai";
+src/app/api/actions/test-ai/route.ts	18	fallback_keyword	  aiFallbackMode?: "all" | "azure_only";
+src/app/api/actions/test-ai/route.ts	178	fallback_keyword	            fallbackToGlobal: true,
+src/app/api/actions/test-ai/route.ts	183	fallback_keyword	    const aiResult = await generateReplyWithFallback({
+src/app/api/actions/test-ai/route.ts	195	fallback_keyword	        fallbackMode: runtimeSettings?.aiFallbackMode,
+src/components/autonomy-controls.tsx	10	fallback_keyword	  fallbackPaused?: boolean;
+src/components/autonomy-controls.tsx	23	fallback_keyword	  showFormFallback = false,
+src/components/autonomy-controls.tsx	35	fallback_keyword	  showFormFallback?: boolean;
+src/components/autonomy-controls.tsx	54	fallback_keyword	      ) : showFormFallback ? (
+src/components/autonomy-controls.tsx	87	fallback_keyword	function ControlsRealtime({ fallbackPaused }: { fallbackPaused?: boolean }) {
+src/components/autonomy-controls.tsx	105	fallback_keyword	  const autonomyPaused = health?.config?.autonomyPaused ?? fallbackPaused ?? false;
+src/components/autonomy-controls.tsx	169	fallback_keyword	export function AutonomyControls({ realtimeEnabled, fallbackPaused }: AutonomyControlsProps) {
+src/components/autonomy-controls.tsx	173	fallback_keyword	        <ControlsView autonomyPaused={fallbackPaused ?? false} pending={false} showFormFallback />
+src/components/autonomy-controls.tsx	178	fallback_keyword	  return <ControlsRealtime fallbackPaused={fallbackPaused} />;
+src/components/dashboard-shell.tsx	46	fallback_keyword	                <ShellControlsModal realtimeEnabled={realtimeEnabled} fallbackPaused={autonomyPaused} />
+src/components/live-settings.tsx	29	fallback_keyword	  aiFallbackMode: "all" | "azure_only";
+src/components/live-settings.tsx	38	fallback_keyword	  aiFallbackConfidence: number;
+src/components/live-settings.tsx	248	fallback_keyword,literal_default	    aiFallbackMode: source?.aiFallbackMode ?? "all",
+src/components/live-settings.tsx	257	fallback_keyword,literal_default	    aiFallbackConfidence: source?.aiFallbackConfidence ?? 0.58,
+src/components/live-settings.tsx	347	fallback_keyword	    a.aiFallbackMode === b.aiFallbackMode &&
+src/components/live-settings.tsx	356	fallback_keyword	    nearlyEqual(a.aiFallbackConfidence, b.aiFallbackConfidence) &&
+src/components/live-settings.tsx	424	fallback_keyword	function parseNumber(value: string, fallback: number) {
+src/components/live-settings.tsx	426	fallback_keyword	  return Number.isFinite(parsed) ? parsed : fallback;
+src/components/live-settings.tsx	922	fallback_keyword	          aiFallbackMode: draft.aiFallbackMode,
+src/components/live-settings.tsx	931	fallback_keyword	          aiFallbackConfidence: draft.aiFallbackConfidence,
+src/components/live-settings.tsx	1506	fallback_keyword	            <span className="queue-meta">Fallback mode</span>
+src/components/live-settings.tsx	1508	fallback_keyword	              value={draft.aiFallbackMode}
+src/components/live-settings.tsx	1512	fallback_keyword	                  aiFallbackMode: event.target.value === "azure_only" ? "azure_only" : "all",
+src/components/live-settings.tsx	1518	fallback_keyword	              <option value="all">Allow Codex + heuristic fallback</option>
+src/components/live-settings.tsx	1519	fallback_keyword	              <option value="azure_only">Azure only (disable all fallback providers)</option>
+src/components/live-settings.tsx	1592	fallback_keyword	            <span className="queue-meta">Heuristic fallback confidence</span>
+src/components/live-settings.tsx	1598	fallback_keyword	              value={draft.aiFallbackConfidence}
+src/components/live-settings.tsx	1599	fallback_keyword	              onChange={(event) => setDraft((prev) => ({ ...prev, aiFallbackConfidence: parseNumber(event.target.value, prev.aiFallbackConfidence) }))}
+src/components/live-settings.tsx	1600	fallback_keyword	              disabled={record.pending || draft.aiFallbackMode === "azure_only"}
+src/components/live-settings.tsx	1601	fallback_keyword	              aria-disabled={record.pending || draft.aiFallbackMode === "azure_only"}
+src/components/live-settings.tsx	1603	fallback_keyword	            {draft.aiFallbackMode === "azure_only" ? (
+src/components/live-system.tsx	19	fallback_keyword	    | "heuristic_fallback"
+src/components/live-system.tsx	255	fallback_keyword	          providerFallbackRate: number;
+src/components/live-system.tsx	355	fallback_keyword	                <p className="queue-meta">Fallback rate: {(metrics.providerFallbackRate * 100).toFixed(1)}%</p>
+src/components/live-systems-design.tsx	28	fallback_keyword	  sourceFallback?: boolean;
+src/components/live-systems-design.tsx	47	fallback_keyword	    sourceFallback: false,
+src/components/live-systems-design.tsx	59	fallback_keyword	    sourceFallback: true,
+src/components/live-systems-design.tsx	71	fallback_keyword	    sourceFallback: true,
+src/components/live-systems-design.tsx	83	fallback_keyword	    sourceFallback: true,
+src/components/live-systems-design.tsx	95	fallback_keyword	    sourceFallback: false,
+src/components/live-systems-design.tsx	107	fallback_keyword	    sourceFallback: false,
+src/components/live-systems-design.tsx	119	fallback_keyword	    sourceFallback: false,
+src/components/live-systems-design.tsx	131	fallback_keyword	    sourceFallback: false,
+src/components/live-systems-design.tsx	143	fallback_keyword	    sourceFallback: false,
+src/components/live-systems-design.tsx	155	fallback_keyword	    sourceFallback: false,
+src/components/live-systems-design.tsx	162	fallback_keyword	    description: "Runs model inference with Azure/Codex/heuristic fallback and provider telemetry.",
+src/components/live-systems-design.tsx	167	fallback_keyword	    sourceFallback: true,
+src/components/live-systems-design.tsx	179	fallback_keyword	    sourceFallback: false,
+src/components/live-systems-design.tsx	191	fallback_keyword	    sourceFallback: true,
+src/components/live-systems-design.tsx	203	fallback_keyword	    sourceFallback: false,
+src/components/live-systems-design.tsx	215	fallback_keyword	    sourceFallback: false,
+src/components/live-systems-design.tsx	227	fallback_keyword	    sourceFallback: false,
+src/components/live-systems-design.tsx	239	fallback_keyword	    sourceFallback: false,
+src/components/live-systems-design.tsx	251	fallback_keyword	    sourceFallback: false,
+src/components/live-systems-design.tsx	263	fallback_keyword	    sourceFallback: false,
+src/components/live-systems-design.tsx	275	fallback_keyword	    sourceFallback: true,
+src/components/live-systems-design.tsx	336	fallback_keyword	  return Boolean(service.sourceFallback);
+src/components/live-tools.tsx	17	fallback_keyword	function toInt(value: string, fallback: number, min: number, max: number) {
+src/components/live-tools.tsx	20	fallback_keyword	    return fallback;
+src/components/live-tools.tsx	25	fallback_keyword	function toFloat(value: string, fallback: number, min: number, max: number) {
+src/components/live-tools.tsx	28	fallback_keyword	    return fallback;
+src/components/live-tools.tsx	143	fallback_keyword	          fallbackToGlobal: true,
+src/components/setup-wizard.tsx	193	fallback_keyword	    // fallback handled below
+src/components/setup-wizard.tsx	405	fallback_keyword	    // only on mount/fallback mode change
+src/components/setup-wizard.tsx	817	fallback_keyword	    // only on mount/fallback mode change
+src/components/shell-controls-modal.tsx	9	fallback_keyword	  fallbackPaused?: boolean;
+src/components/shell-controls-modal.tsx	12	fallback_keyword	export function ShellControlsModal({ realtimeEnabled, fallbackPaused }: ShellControlsModalProps) {
+src/components/shell-controls-modal.tsx	27	fallback_keyword	        <AutonomyControls realtimeEnabled={realtimeEnabled} fallbackPaused={fallbackPaused} />
+src/lib/convex-refs.ts	8	fallback_keyword	  callsHasRecentFallbackSend: makeFunctionReference<"query">("calls:hasRecentFallbackSend"),
+src/lib/convex-refs.ts	101	fallback_keyword	  mediaGetBestUploadedMemeFallback: makeFunctionReference<"query">("media:getBestUploadedMemeFallback"),
+src/lib/convex-server.ts	5	env_default,literal_default	  return process.env.CONVEX_URL || process.env.NEXT_PUBLIC_CONVEX_URL || "";
+src/lib/instagram-setup/session.ts	77	env_default,literal_default	    const configured = (process.env.INSTAGRAM_AUTH_PATH || "").trim();
+src/lib/instagram-setup/session.ts	107	env_default	    const url = process.env.CONVEX_URL || process.env.NEXT_PUBLIC_CONVEX_URL;
+src/lib/instagram-setup/session.ts	380	env_default,literal_default	        const bunBin = process.env.BUN_BIN || "bun";
+src/lib/runtime-env.ts	2	env_default,literal_default	  return process.env.NEXT_PUBLIC_CONVEX_URL || process.env.CONVEX_URL || "";
+src/lib/runtime/app-runtime.ts	159	env_default,literal_default	  const shell = process.env.SHELL || "sh";
+src/lib/runtime/app-runtime.ts	160	env_default,literal_default	  const startCommand = (process.env.SLM_APP_START_CMD || "bun run dev:next").trim();
+src/lib/whatsapp-setup/session.ts	117	env_default,literal_default	        const bunBin = process.env.BUN_BIN || "bun";
+src/lib/whatsapp-setup/session.ts	160	env_default,literal_default	    const configured = (process.env.WHATSAPP_AUTH_PATH || "").trim();
+src/lib/whatsapp-setup/session.ts	222	env_default	    const url = process.env.CONVEX_URL || process.env.NEXT_PUBLIC_CONVEX_URL;
+src/lib/whatsapp-setup/session.ts	455	env_default,literal_default	      const raw = (process.env.SLM_HISTORY_SYNC_ENABLED || "true").trim().toLowerCase();
+src/worker/ai.ts	60	fallback_keyword	    | "heuristic_fallback"
+src/worker/ai.ts	188	fallback_keyword	  usedBridgeFallback: boolean;
+src/worker/ai.ts	199	fallback_keyword	type FallbackMode = "all" | "azure_only";
+src/worker/ai.ts	241	fallback_keyword	  fallbackMode?: FallbackMode;
+src/worker/ai.ts	434	fallback_keyword	const SELF_ROAST_FACTUALITY_FALLBACK = "I can roast myself for fun, but I keep profile facts accurate.";
+src/worker/ai.ts	989	fallback_keyword	function clamp01WithFallback(value: number | undefined, fallback: number) {
+src/worker/ai.ts	991	fallback_keyword	    return Math.max(0, Math.min(fallback, 1));
+src/worker/ai.ts	996	fallback_keyword	function clampQualityThreshold(value: number | undefined, fallback = 0.72) {
+src/worker/ai.ts	998	fallback_keyword	    return fallback;
+src/worker/ai.ts	1816	fallback_keyword	  retrievalStage?: "lexical" | "semantic" | "semantic_fallback";
+src/worker/ai.ts	1876	fallback_keyword	  friendshipBridgeFallback?: boolean;
+src/worker/ai.ts	1891	fallback_keyword	function parseBoundedNumber(value: string | undefined, fallback: number, min: number, max: number) {
+src/worker/ai.ts	1894	fallback_keyword	    return fallback;
+src/worker/ai.ts	1899	fallback_keyword	function parseBoundedFloat(value: string | undefined, fallback: number, min: number, max: number) {
+src/worker/ai.ts	1902	fallback_keyword	    return fallback;
+src/worker/ai.ts	2096	fallback_keyword	      usedBridgeFallback: true,
+src/worker/ai.ts	2106	fallback_keyword	    usedBridgeFallback: false,
+src/worker/ai.ts	2376	fallback_keyword	    friendshipBridgeFallback: args.friendshipInference?.usedBridgeFallback,
+src/worker/ai.ts	2408	fallback_keyword	        friendshipBridgeFallback: workbench.friendshipBridgeFallback,
+src/worker/ai.ts	2631	fallback_keyword	  const resolveMultiplier = (value: number | undefined, fallback = 1) => {
+src/worker/ai.ts	2633	fallback_keyword	      return Math.max(0.5, Math.min(fallback, 2));
+src/worker/ai.ts	2656	fallback_keyword,literal_default	    const fallback = normalizeOutboundText(fact.factValue || "")
+src/worker/ai.ts	2661	fallback_keyword	    return `${fact.factType}:${fallback}`;
+src/worker/ai.ts	2691	fallback_keyword	        : clamp01WithFallback(1 - Math.max(0, nowMs - (fact.updatedAt || nowMs)) / Math.max(staleThresholdMs * 3, 1), 0.95);
+src/worker/ai.ts	2807	fallback_keyword	        confidence: clamp01WithFallback(
+src/worker/ai.ts	2942	fallback_keyword	      retrievalStage === "semantic_fallback";
+src/worker/ai.ts	3086	fallback_keyword	        : "Friendship cohort route: BRIDGE fallback. Use a neutral cross-generational tone with warm, plain wording."
+src/worker/ai.ts	3109	env_default	    process.env.SLM_AI_REPLY_POLICY ||
+src/worker/ai.ts	3280	fallback_keyword	    responseWorkbench.workbench.friendshipBridgeFallback ? "Friendship bridge fallback: yes" : "Friendship bridge fallback: no",
+src/worker/ai.ts	3663	fallback_keyword	  return SELF_ROAST_FACTUALITY_FALLBACK;
+src/worker/ai.ts	3921	fallback_keyword	  fallbackText?: string;
+src/worker/ai.ts	3925	fallback_keyword,literal_default	  const fallback = (args.fallbackText || "All good.").trim() || "All good.";
+src/worker/ai.ts	3999	fallback_keyword	  const finalText = withoutFollowUpQuestion || fallback;
+src/worker/ai.ts	4000	fallback_keyword	  return hasAwkwardCatchphrase(finalText) ? fallback : finalText;
+src/worker/ai.ts	4074	env_default	    pickConfigValue(process.env.AZURE_AI_SYSTEM_INSTRUCTION, HARD_CODED_AZURE_DEFAULTS.systemInstruction) ||
+src/worker/ai.ts	4079	fallback_keyword	function resolveFallbackMode(runtime?: RuntimeAiTuning): FallbackMode {
+src/worker/ai.ts	4080	fallback_keyword	  const configured = runtime?.fallbackMode || process.env.SLM_AI_FALLBACK_MODE;
+src/worker/ai.ts	5035	env_default,literal_default	  const codexPath = process.env.CODEX_CLI_PATH || "codex";
+src/worker/ai.ts	5036	env_default,fallback_keyword,literal_default	  const model = process.env.CODEX_FALLBACK_MODEL || "gpt-5.2";
+src/worker/ai.ts	5115	fallback_keyword	  if (resolveFallbackMode(args.runtime) === "all") {
+src/worker/ai.ts	5165	fallback_keyword	  if (resolveFallbackMode(args.runtime) === "all") {
+src/worker/ai.ts	5204	fallback_keyword	  if (resolveFallbackMode(args.runtime) === "all") {
+src/worker/ai.ts	5249	fallback_keyword	  if (resolveFallbackMode(args.runtime) === "all") {
+src/worker/ai.ts	5287	fallback_keyword	  if (resolveFallbackMode(args.runtime) === "all") {
+src/worker/ai.ts	5389	env_default	    pickConfigValue(runtime?.model, process.env.AZURE_AI_MODEL, process.env.AZURE_OPENAI_MODEL, HARD_CODED_AZURE_DEFAULTS.model) ||
+src/worker/ai.ts	5392	env_default	    runtime?.apiStyle || process.env.AZURE_AI_API_STYLE || HARD_CODED_AZURE_DEFAULTS.apiStyle,
+src/worker/ai.ts	5428	fallback_keyword,literal_default	  const fallbackTotal = (inputTokens ?? 0) + (outputTokens ?? 0);
+src/worker/ai.ts	5429	fallback_keyword,literal_default	  const totalTokens = toTokenCount(args.totalTokens) ?? (fallbackTotal > 0 ? fallbackTotal : undefined);
+src/worker/ai.ts	5549	env_default,literal_default	          pricingVersion: (process.env.SLM_AI_PRICING_VERSION || "").trim() || "env-config",
+src/worker/ai.ts	5562	fallback_keyword	function normalizeRuntimeInt(value: number | undefined, fallback: number, min: number, max: number) {
+src/worker/ai.ts	5564	fallback_keyword	    return fallback;
+src/worker/ai.ts	6495	fallback_keyword	  // Fallback for environments where endpoint is a full REST URL instead of model client base URL.
+src/worker/ai.ts	6609	fallback_keyword	export async function describeInboundImageWithFallback(args: {
+src/worker/ai.ts	6619	fallback_keyword	    model: "heuristic-image-fallback",
+src/worker/ai.ts	6968	fallback_keyword	  fallbackMimeType: string;
+src/worker/ai.ts	6998	fallback_keyword	          mimeType: recordMimeType || args.fallbackMimeType,
+src/worker/ai.ts	7074	fallback_keyword	          mimeType: extracted.mimeType || args.fallbackMimeType,
+src/worker/ai.ts	7088	fallback_keyword	      mimeType: mimeType.split(";")[0]?.trim() || args.fallbackMimeType,
+src/worker/ai.ts	7253	fallback_keyword	                fallbackMimeType: "video/mp4",
+src/worker/ai.ts	7394	fallback_keyword	              fallbackMimeType: "image/png",
+src/worker/ai.ts	7479	env_default,literal_default	  const codexPath = process.env.CODEX_CLI_PATH || "codex";
+src/worker/ai.ts	7480	env_default,fallback_keyword,literal_default	  const model = process.env.CODEX_FALLBACK_MODEL || "gpt-5.2";
+src/worker/ai.ts	7493	fallback_keyword	      throw new Error("Codex fallback returned empty output.");
+src/worker/ai.ts	7499	fallback_keyword	      throw new Error("Codex fallback returned low-value canned text.");
+src/worker/ai.ts	8220	env_default,literal_default	  const codexPath = process.env.CODEX_CLI_PATH || "codex";
+src/worker/ai.ts	8221	env_default,fallback_keyword,literal_default	  const model = process.env.CODEX_FALLBACK_MODEL || "gpt-5.2";
+src/worker/ai.ts	8302	fallback_keyword	  if (resolveFallbackMode(args.runtime) === "all") {
+src/worker/ai.ts	8322	fallback_keyword	export async function generateReplyWithFallback(args: {
+src/worker/ai.ts	8348	fallback_keyword	        fallbackText: "All good.",
+src/worker/ai.ts	8407	fallback_keyword	          stage: "heuristic_fallback",
+src/worker/ai.ts	8416	fallback_keyword	  const fallbackMode = resolveFallbackMode(args.runtime);
+src/worker/ai.ts	8435	fallback_keyword	  if (fallbackMode === "azure_only") {
+src/worker/ai.ts	8484	fallback_keyword	    stage: "heuristic_fallback",
+src/worker/ai.ts	8485	fallback_keyword	    model: "heuristic-fallback",
+src/worker/ai.ts	8492	fallback_keyword	    model: "heuristic-fallback",
+src/worker/ai.ts	8519	fallback_keyword	  return clamp01WithFallback(relevantRatio + 0.35 - overflowPenalty, 0.5);
+src/worker/ai.ts	8537	fallback_keyword	    return clamp01WithFallback(0.95 - questionPenalty - lengthPenalty, 0.45);
+src/worker/ai.ts	8542	fallback_keyword	    return clamp01WithFallback(0.72 + directiveBoost, 0.7);
+src/worker/ai.ts	8545	fallback_keyword	  return clamp01WithFallback(wordCount >= 2 && wordCount <= 32 ? 0.82 : 0.66, 0.75);
+src/worker/ai.ts	8557	fallback_keyword	  return clamp01WithFallback(lengthScore + questionAdjustment, 0.58);
+src/worker/ai.ts	8575	fallback_keyword	    return clamp01WithFallback(1 - age / Math.max(staleThreshold * 3, 1), 0.9);
+src/worker/ai.ts	8578	fallback_keyword	  return clamp01WithFallback(average, 0.5);
+src/worker/ai.ts	8582	fallback_keyword	  const resolveWeight = (value: number | undefined, fallback: number) => {
+src/worker/ai.ts	8584	fallback_keyword	      return fallback;
+src/worker/ai.ts	8632	fallback_keyword	  const qualityScore = clamp01WithFallback(args.result.qualityScore, 0.62);
+src/worker/ai.ts	8705	fallback_keyword	    const result = await generateReplyWithFallback({
+src/worker/ai.ts	8732	fallback_keyword	    (attempt) => attempt.provider === "heuristic" && attempt.stage === "heuristic_fallback" && /^heuristic-local-/.test(attempt.model),
+src/worker/ai.ts	8756	env_default	  const requestedMinDelay = Number(runtime?.delayMinMs ?? process.env.SLM_DELAY_MIN_MS ?? QUALITY_FIRST_DELAY_MIN_MS);
+src/worker/ai.ts	8757	env_default	  const requestedMaxDelay = Number(runtime?.delayMaxMs ?? process.env.SLM_DELAY_MAX_MS ?? QUALITY_FIRST_DELAY_MAX_MS);
+src/worker/ai.ts	8758	env_default	  const requestedMinTyping = Number(runtime?.typingMinMs ?? process.env.SLM_TYPING_MIN_MS ?? QUALITY_FIRST_TYPING_MIN_MS);
+src/worker/ai.ts	8759	env_default	  const requestedMaxTyping = Number(runtime?.typingMaxMs ?? process.env.SLM_TYPING_MAX_MS ?? QUALITY_FIRST_TYPING_MAX_MS);
+src/worker/call-fallback.ts	1	fallback_keyword	export type CallFallbackSessionSnapshot = {
+src/worker/call-fallback.ts	6	fallback_keyword	export const DEFAULT_CALL_AUTO_DECLINE_FALLBACK_VARIANTS = [
+src/worker/call-fallback.ts	38	fallback_keyword	export function resolveCallFallbackVariants(args?: {
+src/worker/call-fallback.ts	59	fallback_keyword	  return [...DEFAULT_CALL_AUTO_DECLINE_FALLBACK_VARIANTS];
+src/worker/call-fallback.ts	62	fallback_keyword	export function selectCallFallbackVariant(args: {
+src/worker/call-fallback.ts	77	fallback_keyword	export function shouldSuppressCallFallbackAfterOffer(
+src/worker/call-fallback.ts	78	fallback_keyword	  snapshot: CallFallbackSessionSnapshot | null | undefined,
+src/worker/context-orchestration-utils.ts	1	fallback_keyword	type HistoryRetrievalStage = "lexical" | "semantic" | "semantic_fallback";
+src/worker/context-orchestration-utils.ts	84	fallback_keyword	  return "semantic_fallback";
+src/worker/context-pack.ts	26	fallback_keyword	  historySearchRetrievalStage?: "lexical" | "semantic" | "semantic_fallback";
+src/worker/context-pack.ts	80	fallback_keyword	function clamp01(value: number | undefined, fallback = 0.5) {
+src/worker/context-pack.ts	82	fallback_keyword	    return clamp(fallback, 0, 1);
+src/worker/context-pack.ts	211	fallback_keyword	      pack.retrievalDiagnostics?.historySearchRetrievalStage === "semantic_fallback"
+src/worker/emoji-policy.ts	121	fallback_keyword	  fallbackText?: string;
+src/worker/emoji-policy.ts	179	fallback_keyword	    const allowByFallbackCooldown = !hasRecentMessages && !cooldownActive;
+src/worker/emoji-policy.ts	180	fallback_keyword	    if (belowWindowLimit || allowByFallbackCooldown) {
+src/worker/emoji-policy.ts	206	fallback_keyword,literal_default	  const fallback = (args.fallbackText || "All good.").trim() || "All good.";
+src/worker/emoji-policy.ts	210	fallback_keyword	    text: stripped || fallback,
+src/worker/history-context.ts	62	fallback_keyword	function parseBoundedNumber(value: string | undefined, fallback: number, min: number, max: number) {
+src/worker/history-context.ts	65	fallback_keyword	    return fallback;
+src/worker/history-context.ts	78	fallback_keyword	function fallbackLinesFromCandidates(candidates: LexicalHit[], limit: number) {
+src/worker/history-context.ts	198	fallback_keyword	  fallbackHistoryLines?: string[];
+src/worker/history-context.ts	201	fallback_keyword,literal_default	  const fallbackRecent = (args.fallbackHistoryLines || [])
+src/worker/history-context.ts	219	fallback_keyword	          lines: fallbackRecent,
+src/worker/history-context.ts	228	fallback_keyword	          degraded: fallbackRecent.length > 0,
+src/worker/history-context.ts	229	fallback_keyword	          reason: fallbackRecent.length > 0 ? "Using recent context fallback." : "",
+src/worker/history-context.ts	276	fallback_keyword	      const lines = fallbackLinesFromCandidates(lexicalCandidates, limit);
+src/worker/history-context.ts	284	fallback_keyword	          retrievalStage: "semantic_fallback" as const,
+src/worker/history-context.ts	338	fallback_keyword	        lines: fallbackRecent,
+src/worker/history-context.ts	342	fallback_keyword	        retrievalStage: "semantic_fallback" as const,
+src/worker/history-context.ts	355	env_default,literal_default	  const enabled = (process.env.SLM_HISTORY_FETCH_ON_DEMAND || "true").trim().toLowerCase();
+src/worker/index.ts	41	fallback_keyword	  describeInboundImageWithFallback,
+src/worker/index.ts	44	fallback_keyword	  generateReplyWithFallback,
+src/worker/index.ts	102	fallback_keyword	  buildOutreachFallbackText,
+src/worker/index.ts	119	fallback_keyword	  resolveMemeAssetWithFallback,
+src/worker/index.ts	139	fallback_keyword	  fallbackSelfControlSmartRoute,
+src/worker/index.ts	144	fallback_keyword	  resolveCallFallbackVariants,
+src/worker/index.ts	145	fallback_keyword	  selectCallFallbackVariant,
+src/worker/index.ts	146	fallback_keyword	  shouldSuppressCallFallbackAfterOffer,
+src/worker/index.ts	147	fallback_keyword	} from "./call-fallback";
+src/worker/index.ts	151	env_default,literal_default	  level: process.env.LOG_LEVEL || "info",
+src/worker/index.ts	173	fallback_keyword	  aiFallbackMode: "all" | "azure_only";
+src/worker/index.ts	178	fallback_keyword	  aiFallbackConfidence: number;
+src/worker/index.ts	264	fallback_keyword	  retrievalStage?: "lexical" | "semantic" | "semantic_fallback";
+src/worker/index.ts	394	fallback_keyword	const CALL_FALLBACK_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+src/worker/index.ts	395	fallback_keyword	const CALL_FALLBACK_POST_REJECT_GRACE_MS = Math.round(
+src/worker/index.ts	396	env_default,fallback_keyword,literal_default	  clamp(Number(process.env.SLM_CALL_FALLBACK_GRACE_MS || 2000), 0, 15_000),
+src/worker/index.ts	399	env_default,literal_default	  clamp(Number(process.env.SLM_CALL_CONTEXT_MIN_DURATION_MS || 2 * 60 * 1000), 30_000, 30 * 60 * 1000),
+src/worker/index.ts	401	fallback_keyword	const CALL_AUTO_DECLINE_FALLBACK_VARIANTS = resolveCallFallbackVariants({
+src/worker/index.ts	402	fallback_keyword	  overrideText: process.env.SLM_CALL_FALLBACK_TEXT,
+src/worker/index.ts	403	fallback_keyword	  overrideVariants: process.env.SLM_CALL_FALLBACK_TEXT_VARIANTS,
+src/worker/index.ts	428	env_default,literal_default	  Math.min(Number(process.env.SLM_ABOUT_AUTOMATION_INTERVAL_MINUTES || 360), 7 * 24 * 60),
+src/worker/index.ts	430	env_default,literal_default	const DEFAULT_ABOUT_AUTOMATION_TEMPLATE = (process.env.SLM_ABOUT_AUTOMATION_TEMPLATE || "").trim();
+src/worker/index.ts	801	fallback_keyword	function normalizeHour(raw: number | undefined, fallback: number) {
+src/worker/index.ts	803	fallback_keyword	    return fallback;
+src/worker/index.ts	858	env_default,literal_default	  const raw = (process.env.SLM_HISTORY_SYNC_ENABLED || "true").trim().toLowerCase();
+src/worker/index.ts	895	fallback_keyword	function normalizeIncomingMessageTimestamp(rawTimestamp: unknown, fallbackMs: number) {
+src/worker/index.ts	898	fallback_keyword	    return fallbackMs;
+src/worker/index.ts	913	fallback_keyword	      return "Azure HTTP fallback";
+src/worker/index.ts	915	fallback_keyword	      return "Codex CLI fallback";
+src/worker/index.ts	926	fallback_keyword	    case "heuristic_fallback":
+src/worker/index.ts	927	fallback_keyword	      return "Heuristic fallback";
+src/worker/index.ts	937	fallback_keyword	  if (attempt.stage === "heuristic_fallback") {
+src/worker/index.ts	938	fallback_keyword	    return "ai.fallback.heuristic.used";
+src/worker/index.ts	941	fallback_keyword	    return attempt.status === "success" ? "ai.fallback.codex.success" : "ai.fallback.codex.error";
+src/worker/index.ts	987	fallback_keyword	      attempt.stage === "heuristic_fallback" &&
+src/worker/index.ts	990	fallback_keyword	  const fallbackUsed = args.attempts.some(
+src/worker/index.ts	993	fallback_keyword,literal_default	      (attempt.stage === "codex_cli" || (attempt.stage === "heuristic_fallback" && attempt.model === "heuristic-fallback")),
+src/worker/index.ts	998	fallback_keyword	    fallbackUsed,
+src/worker/index.ts	1051	fallback_keyword	function parseBoundedInt(raw: string | undefined, fallback: number, min: number, max: number) {
+src/worker/index.ts	1054	fallback_keyword	    return fallback;
+src/worker/index.ts	1273	fallback_keyword	function fallbackHistoryOverride(args: { historyLines: string[]; limit: number }): HistorySearchOverrideSnapshot {
+src/worker/index.ts	1283	fallback_keyword	    retrievalStage: "semantic_fallback",
+src/worker/index.ts	1434	fallback_keyword	            fallbackHistoryLines: args.historyLines,
+src/worker/index.ts	1602	fallback_keyword	    historySearchOverride = fallbackHistoryOverride({
+src/worker/index.ts	1613	fallback_keyword	    const fallback = fallbackHistoryOverride({
+src/worker/index.ts	1619	fallback_keyword	      incoming: fallback,
+src/worker/index.ts	1693	env_default	  const url = process.env.CONVEX_URL || process.env.NEXT_PUBLIC_CONVEX_URL;
+src/worker/index.ts	1740	env_default	  const workerId = process.env.SLM_WORKER_ID || `worker-${process.pid}`;
+src/worker/index.ts	1741	env_default,literal_default	  const authPath = process.env.WHATSAPP_AUTH_PATH || ".wa_auth";
+src/worker/index.ts	2007	fallback_keyword	  const uploadedMemeFallbackCache: CacheState<string | undefined> = {
+src/worker/index.ts	2213	fallback_keyword	      `pipeline=${args.pipeline} model_utilized=${metrics.modelUtilized ? 1 : 0} deterministic_bypass=${metrics.deterministicBypass ? 1 : 0} fallback=${metrics.fallbackUsed ? 1 : 0} manual_review=${metrics.manualReview ? 1 : 0} latency_ms=${metrics.latencyMs}${args.detailSuffix ? ` ${args.detailSuffix}` : ""}`,
+src/worker/index.ts	2248	fallback_keyword	    if (metrics.fallbackUsed) {
+src/worker/index.ts	2252	fallback_keyword	          eventType: `ai.metrics.${args.pipeline}.fallback`,
+src/worker/index.ts	2309	fallback_keyword	          fallbackToGlobal: true,
+src/worker/index.ts	2382	fallback_keyword	  const pickUploadedMemeFallbackAsset = async () => {
+src/worker/index.ts	2383	fallback_keyword	    return await resolveTtlCache(uploadedMemeFallbackCache, ENABLED_ASSET_CACHE_TTL_MS, async () => {
+src/worker/index.ts	2384	fallback_keyword	      const row = (await convex.query(convexRefs.mediaGetBestUploadedMemeFallback, {}).catch(() => null)) as
+src/worker/index.ts	2515	fallback_keyword	    uploadedMemeFallbackCache.hasValue = false;
+src/worker/index.ts	2516	fallback_keyword	    uploadedMemeFallbackCache.expiresAt = 0;
+src/worker/index.ts	2724	fallback_keyword	      const visual = await describeInboundImageWithFallback({
+src/worker/index.ts	2732	fallback_keyword	          fallbackMode: runtimeSettings?.aiFallbackMode,
+src/worker/index.ts	3164	fallback_keyword	        const asset = await resolveMemeAssetWithFallback({
+src/worker/index.ts	3190	fallback_keyword	          pickUploadedFallback: async () => {
+src/worker/index.ts	3191	fallback_keyword	            return await pickUploadedMemeFallbackAsset();
+src/worker/index.ts	3211	fallback_keyword	          detail: "reason=no_asset source=fallback_chain_empty",
+src/worker/index.ts	3244	fallback_keyword	  const recentCallFallbackByThread = new Map<string, number>();
+src/worker/index.ts	3253	fallback_keyword	  const pendingCallFallbackById = new Map<string, ReturnType<typeof setTimeout>>();
+src/worker/index.ts	3260	env_default,literal_default	  let inboundConcurrency = Math.round(clamp(Number(process.env.SLM_INBOUND_CONCURRENCY || 4), 1, 16));
+src/worker/index.ts	3261	env_default,literal_default	  let outboxSendConcurrency = Math.round(clamp(Number(process.env.SLM_OUTBOX_CONCURRENCY || 4), 1, 16));
+src/worker/index.ts	3309	fallback_keyword	  const pruneRecentCallFallbackByThread = () => {
+src/worker/index.ts	3310	fallback_keyword	    const cutoff = Date.now() - CALL_FALLBACK_COOLDOWN_MS;
+src/worker/index.ts	3311	fallback_keyword	    for (const [threadJid, sentAt] of recentCallFallbackByThread.entries()) {
+src/worker/index.ts	3313	fallback_keyword	        recentCallFallbackByThread.delete(threadJid);
+src/worker/index.ts	3317	fallback_keyword	  const rememberCallFallbackAt = (threadJid: string, sentAtMs: number) => {
+src/worker/index.ts	3321	fallback_keyword	    pruneRecentCallFallbackByThread();
+src/worker/index.ts	3323	fallback_keyword	    const existing = recentCallFallbackByThread.get(threadJid);
+src/worker/index.ts	3325	fallback_keyword	      recentCallFallbackByThread.set(threadJid, nextAt);
+src/worker/index.ts	3328	fallback_keyword	  const hasRecentCallFallback = (threadJid: string) => {
+src/worker/index.ts	3332	fallback_keyword	    pruneRecentCallFallbackByThread();
+src/worker/index.ts	3333	fallback_keyword	    const sentAt = recentCallFallbackByThread.get(threadJid);
+src/worker/index.ts	3341	fallback_keyword	        const pending = pendingCallFallbackById.get(callId);
+src/worker/index.ts	3344	fallback_keyword	          pendingCallFallbackById.delete(callId);
+src/worker/index.ts	3378	fallback_keyword	  const clearPendingCallFallback = (callId: string) => {
+src/worker/index.ts	3382	fallback_keyword	    const pending = pendingCallFallbackById.get(callId);
+src/worker/index.ts	3387	fallback_keyword	    pendingCallFallbackById.delete(callId);
+src/worker/index.ts	3389	fallback_keyword	  const scheduleCallFallbackMessage = (args: {
+src/worker/index.ts	3393	fallback_keyword	    fallbackKey: string;
+src/worker/index.ts	3396	fallback_keyword	    clearPendingCallFallback(args.callId);
+src/worker/index.ts	3398	fallback_keyword	      pendingCallFallbackById.delete(args.callId);
+src/worker/index.ts	3401	fallback_keyword	        if (shouldSuppressCallFallbackAfterOffer(latest)) {
+src/worker/index.ts	3405	fallback_keyword	              eventType: "inbound.call.fallback_suppressed_answered",
+src/worker/index.ts	3412	fallback_keyword	        if (hasRecentCallFallback(args.fallbackKey)) {
+src/worker/index.ts	3417	fallback_keyword	          const recentFallback = (await convex
+src/worker/index.ts	3418	fallback_keyword	            .query(convexRefs.callsHasRecentFallbackSend, {
+src/worker/index.ts	3420	fallback_keyword	              withinMs: CALL_FALLBACK_COOLDOWN_MS,
+src/worker/index.ts	3428	fallback_keyword	          if (recentFallback?.hasRecent) {
+src/worker/index.ts	3429	fallback_keyword	            rememberCallFallbackAt(args.fallbackKey, recentFallback.lastSentAt || Date.now());
+src/worker/index.ts	3434	fallback_keyword	        const fallbackText = selectCallFallbackVariant({
+src/worker/index.ts	3435	fallback_keyword	          variants: CALL_AUTO_DECLINE_FALLBACK_VARIANTS,
+src/worker/index.ts	3436	fallback_keyword	          seed: `${args.fallbackKey}|${Math.floor(Date.now() / CALL_FALLBACK_COOLDOWN_MS)}`,
+src/worker/index.ts	3438	fallback_keyword	        if (!fallbackText) {
+src/worker/index.ts	3445	fallback_keyword	            text: fallbackText,
+src/worker/index.ts	3448	fallback_keyword	          rememberCallFallbackAt(args.fallbackKey, Date.now());
+src/worker/index.ts	3452	fallback_keyword	              eventType: "inbound.call.rejected_with_fallback",
+src/worker/index.ts	3455	fallback_keyword	                `jid=${args.threadJid} status=offer variant=${stableHash(fallbackText).toString(16)}`,
+src/worker/index.ts	3464	fallback_keyword	            "Inbound call fallback send failed",
+src/worker/index.ts	3469	fallback_keyword	              eventType: "inbound.call.fallback_send_error",
+src/worker/index.ts	3476	fallback_keyword	    }, CALL_FALLBACK_POST_REJECT_GRACE_MS);
+src/worker/index.ts	3477	fallback_keyword	    pendingCallFallbackById.set(args.callId, timer);
+src/worker/index.ts	4093	fallback_keyword	      const fallbackMimeType =
+src/worker/index.ts	4107	fallback_keyword	          "Content-Type": args.mimeType || fallbackMimeType,
+src/worker/index.ts	4133	fallback_keyword	        mimeType: args.mimeType || fallbackMimeType,
+src/worker/index.ts	4165	env_default,literal_default	    const bunBin = process.env.BUN_BIN || "bun";
+src/worker/index.ts	4166	env_default,literal_default	    const shell = process.env.SHELL || "sh";
+src/worker/index.ts	4200	env_default,literal_default	  const SELF_CONTROL_MESSAGE_PREFIX = (process.env.SLM_SELF_CONTROL_MESSAGE_PREFIX || "").trim();
+src/worker/index.ts	4201	env_default,literal_default	  const CODEX_CLI_PATH = (process.env.CODEX_CLI_PATH || "codex").trim() || "codex";
+src/worker/index.ts	4203	env_default,literal_default	    (process.env.SLM_SELF_CONTROL_SMART_ROUTING_ENABLED || "1").trim().toLowerCase(),
+src/worker/index.ts	4206	env_default,fallback_keyword,literal_default	    (process.env.SLM_SELF_CONTROL_ROUTER_MODEL || process.env.CODEX_FALLBACK_MODEL || "gpt-5.2").trim() || "gpt-5.2";
+src/worker/index.ts	4208	env_default,literal_default	    const raw = Number(process.env.SLM_SELF_CONTROL_ROUTER_TIMEOUT_MS || 45_000);
+src/worker/index.ts	4214	env_default,literal_default	  const OPENCLAW_CLI_PATH = (process.env.SLM_OPENCLAW_CLI_PATH || "openclaw").trim() || "openclaw";
+src/worker/index.ts	4215	env_default,literal_default	  const OPENCLAW_AGENT_ID = (process.env.SLM_OPENCLAW_AGENT_ID || "main").trim() || "main";
+src/worker/index.ts	4217	env_default,literal_default	    const raw = Number(process.env.SLM_OPENCLAW_AGENT_TIMEOUT_MS || 6 * 60 * 60 * 1000);
+src/worker/index.ts	4299	fallback_keyword	    const fallbackError =
+src/worker/index.ts	4301	fallback_keyword	    throw new Error(`self-control reply send failed: ${fallbackError}`);
+src/worker/index.ts	4332	fallback_keyword	    const fallbackError =
+src/worker/index.ts	4334	fallback_keyword	    throw new Error(`self-control document send failed: ${fallbackError}`);
+src/worker/index.ts	4373	fallback_keyword	  const sanitizeOpenClawFileName = (fileName: string | undefined, fallback: string) => {
+src/worker/index.ts	4376	fallback_keyword	      return fallback;
+src/worker/index.ts	4417	fallback_keyword	    const fallbackName = inferredName || `openclaw-${Date.now().toString(36)}.bin`;
+src/worker/index.ts	4418	fallback_keyword	    const fileName = sanitizeOpenClawFileName(candidate.fileName || inferredName, fallbackName);
+src/worker/index.ts	4581	env_default,literal_default	    const bunBin = process.env.BUN_BIN || "bun";
+src/worker/index.ts	4993	fallback_keyword	  ): Promise<{ route: SelfControlSmartRoute; source: "model" | "fallback"; detail?: string }> => {
+src/worker/index.ts	4994	fallback_keyword	    const fallbackRoute = fallbackSelfControlSmartRoute(commandText);
+src/worker/index.ts	4997	fallback_keyword	        route: fallbackRoute,
+src/worker/index.ts	4998	fallback_keyword	        source: "fallback",
+src/worker/index.ts	5089	fallback_keyword	      route: fallbackRoute,
+src/worker/index.ts	5090	fallback_keyword	      source: "fallback",
+src/worker/index.ts	5841	fallback_keyword	      const fallbackKey = isGroupThread ? threadJid : normalizeAccountJid(threadJid) || threadJid;
+src/worker/index.ts	5870	fallback_keyword	        if (shouldSuppressCallFallbackAfterOffer(latestCallState)) {
+src/worker/index.ts	5871	fallback_keyword	          clearPendingCallFallback(callId);
+src/worker/index.ts	5938	fallback_keyword	      if (CALL_AUTO_DECLINE_FALLBACK_VARIANTS.length === 0 || hasRecentCallFallback(fallbackKey)) {
+src/worker/index.ts	5943	fallback_keyword	        const recentFallback = (await convex
+src/worker/index.ts	5944	fallback_keyword	          .query(convexRefs.callsHasRecentFallbackSend, {
+src/worker/index.ts	5946	fallback_keyword	            withinMs: CALL_FALLBACK_COOLDOWN_MS,
+src/worker/index.ts	5954	fallback_keyword	        if (recentFallback?.hasRecent) {
+src/worker/index.ts	5955	fallback_keyword	          rememberCallFallbackAt(fallbackKey, recentFallback.lastSentAt || Date.now());
+src/worker/index.ts	5960	fallback_keyword	      scheduleCallFallbackMessage({
+src/worker/index.ts	5964	fallback_keyword	        fallbackKey,
+src/worker/index.ts	6297	fallback_keyword	        fallbackMode: runtimeSettings?.aiFallbackMode,
+src/worker/index.ts	6324	fallback_keyword	      let visualAnalysisPromise: Promise<Awaited<ReturnType<typeof describeInboundImageWithFallback>> | null> | null = null;
+src/worker/index.ts	6376	fallback_keyword	              const visualAnalysis = await describeInboundImageWithFallback({
+src/worker/index.ts	6385	fallback_keyword	                  eventType: visualAnalysis.provider === "azure" ? "ai.vision.success" : "ai.vision.fallback",
+src/worker/index.ts	6636	fallback_keyword	              fallbackMode: runtimeSettings?.aiFallbackMode,
+src/worker/index.ts	6688	fallback_keyword,literal_default	            detailSuffix: `route=${ackRoute.channel || "fallback_reaction_only"}`,
+src/worker/index.ts	6801	fallback_keyword	          fallbackInboundText: inboundTextForAi,
+src/worker/index.ts	6943	fallback_keyword	      let ai: Awaited<ReturnType<typeof generateReplyWithFallback>> | null = null;
+src/worker/index.ts	7205	fallback_keyword	              fallbackText: "All good.",
+src/worker/index.ts	7221	fallback_keyword,literal_default	      const fallbackConfidence = clamp(runtimeSettings?.aiFallbackConfidence ?? 0.58, 0.01, 1);
+src/worker/index.ts	7237	fallback_keyword	        confidence: ai ? (ai.provider === "heuristic" ? fallbackConfidence : primaryConfidence) : fallbackConfidence,
+src/worker/index.ts	7887	fallback_keyword	        fallbackMode: runtimeSettings?.aiFallbackMode,
+src/worker/index.ts	7989	fallback_keyword	    if (ai.guardrailBlocked && runtimeSettings?.aiFallbackMode === "azure_only") {
+src/worker/index.ts	7990	fallback_keyword,literal_default	      throw new Error(ai.guardrailReason || "Azure-only mode blocked outreach fallback.");
+src/worker/index.ts	7993	fallback_keyword	    const fallbackText = buildOutreachFallbackText({
+src/worker/index.ts	8003	fallback_keyword	    const normalizedCandidateText = normalizeOutboundText(ai.guardrailBlocked ? fallbackText : ai.text);
+src/worker/index.ts	8008	fallback_keyword	            fallbackText,
+src/worker/index.ts	8013	fallback_keyword	              fallbackText,
+src/worker/index.ts	8047	fallback_keyword	      fallbackText,
+src/worker/index.ts	8063	fallback_keyword,literal_default	    const fallbackConfidence = clamp(runtimeSettings?.aiFallbackConfidence ?? 0.58, 0.01, 1);
+src/worker/index.ts	8065	fallback_keyword	    const confidence = provider === "heuristic" ? fallbackConfidence : primaryConfidence;
+src/worker/index.ts	8349	fallback_keyword	        fallbackMode: runtimeSettings?.aiFallbackMode,
+src/worker/index.ts	8417	fallback_keyword	    const fallbackText =
+src/worker/index.ts	8421	fallback_keyword	    const aiText = normalizeOutboundText(ai.guardrailBlocked ? fallbackText : ai.text);
+src/worker/index.ts	8422	fallback_keyword	    const normalizedTextBase = aiText.slice(0, 220).trim() || fallbackText;
+src/worker/index.ts	8434	fallback_keyword	      const resolvedMemeAsset = await resolveMemeAssetWithFallback({
+src/worker/index.ts	8465	fallback_keyword	        pickUploadedFallback: async () => {
+src/worker/index.ts	8466	fallback_keyword	          return await pickUploadedMemeFallbackAsset();
+src/worker/index.ts	8470	fallback_keyword	      if (resolvedMemeAsset.source === "uploaded_fallback" && mediaAssetId) {
+src/worker/index.ts	8474	fallback_keyword	            eventType: "status_builder.meme.fallback_uploaded",
+src/worker/index.ts	8477	fallback_keyword	            detail: compactLogText(`Using uploaded meme fallback asset ${mediaAssetId}.`, 220),
+src/worker/index.ts	8488	fallback_keyword	            eventType: "status_builder.meme.fallback_text",
+src/worker/index.ts	8491	fallback_keyword	            detail: "Meme asset unavailable after generated/cache/fallback lookup; using text status.",
+src/worker/index.ts	8499	fallback_keyword,literal_default	    const fallbackConfidence = clamp(runtimeSettings?.aiFallbackConfidence ?? 0.58, 0.01, 1);
+src/worker/index.ts	8501	fallback_keyword	    const confidence = provider === "heuristic" ? fallbackConfidence : primaryConfidence;
+src/worker/index.ts	8723	fallback_keyword	                runtimeSettings?.aiFallbackMode === "azure_only" &&
+src/worker/index.ts	8803	fallback_keyword	                  fallbackText: hydrated.sendKind === "meme" ? "Checking in with you." : "All good.",
+src/worker/index.ts	9285	env_default,literal_default	    clamp(startupSettings?.outboxPollMs ?? Number(process.env.SLM_OUTBOX_POLL_MS || 3000), 500, 60_000),
+src/worker/instagram.ts	73	env_default,literal_default	  level: process.env.LOG_LEVEL || "info",
+src/worker/instagram.ts	95	env_default,literal_default	  const configured = (process.env.INSTAGRAM_AUTH_PATH || "").trim();
+src/worker/instagram.ts	117	fallback_keyword	export function parseInstagramTimestampMs(raw: unknown, fallback: number) {
+src/worker/instagram.ts	119	fallback_keyword	    return fallback;
+src/worker/instagram.ts	123	fallback_keyword	    return fallback;
+src/worker/instagram.ts	127	fallback_keyword	    return fallback;
+src/worker/instagram.ts	214	env_default	  const url = process.env.CONVEX_URL || process.env.NEXT_PUBLIC_CONVEX_URL;
+src/worker/instagram.ts	291	env_default,literal_default	  const ffmpegPath = process.env.SLM_FFMPEG_PATH || "ffmpeg";
+src/worker/instagram.ts	319	env_default	  const workerId = process.env.SLM_INSTAGRAM_WORKER_ID || process.env.SLM_WORKER_ID || `instagram-worker-${process.pid}`;
+src/worker/instagram.ts	467	fallback_keyword	        const senderTitleFallback = (thread.thread_title || titleFromUsers || undefined)?.trim();
+src/worker/instagram.ts	490	fallback_keyword	          const senderTitle = (senderProfile?.full_name || senderProfile?.username || senderTitleFallback || undefined)?.trim();
+src/worker/instagram.ts	665	fallback_keyword	          detail: `Sent reaction as text fallback (${emoji}).`,
+src/worker/instagram.ts	738	env_default,literal_default	      Number(process.env.SLM_INSTAGRAM_OUTBOX_POLL_MS || runtime.outboxPollMs || 4_000),
+src/worker/instagram.ts	745	env_default,literal_default	      Number(process.env.SLM_INSTAGRAM_INBOX_POLL_MS || 8_000),
+src/worker/local-embeddings.ts	17	env_default,literal_default	  const value = (process.env.SLM_EMBEDDINGS_LOCAL_ENABLED || "true").trim().toLowerCase();
+src/worker/local-embeddings.ts	22	env_default	  return (process.env.SLM_EMBEDDINGS_MODEL || DEFAULT_MODEL_VERSION).trim() || DEFAULT_MODEL_VERSION;
+src/worker/local-embeddings.ts	76	env_default	    const model = (process.env.SLM_EMBEDDINGS_MODEL || DEFAULT_MODEL).trim() || DEFAULT_MODEL;
+src/worker/local-embeddings.ts	77	env_default	    const cacheDir = process.env.SLM_EMBEDDINGS_CACHE_DIR || join(homedir(), ".cache", "slm", "transformers");
+src/worker/meme-policy.ts	3	fallback_keyword	export type MemeAssetSource = "generated_cache" | "generated_fresh" | "uploaded_fallback" | "none";
+src/worker/meme-policy.ts	63	fallback_keyword	export async function resolveMemeAssetWithFallback(args: {
+src/worker/meme-policy.ts	66	fallback_keyword	  pickUploadedFallback: () => Promise<string | undefined>;
+src/worker/meme-policy.ts	84	fallback_keyword	  const fallback = await args.pickUploadedFallback();
+src/worker/meme-policy.ts	85	fallback_keyword	  if (fallback) {
+src/worker/meme-policy.ts	87	fallback_keyword	      assetId: fallback,
+src/worker/meme-policy.ts	88	fallback_keyword	      source: "uploaded_fallback" as MemeAssetSource,
+src/worker/outreach-hydration.ts	68	fallback_keyword	const BOUNDARY_REOPEN_FALLBACK_VARIATIONS = [
+src/worker/outreach-hydration.ts	118	fallback_keyword	function resolveBoundaryReopenFallback(variant: number | undefined) {
+src/worker/outreach-hydration.ts	119	fallback_keyword	  return BOUNDARY_REOPEN_FALLBACK_VARIATIONS[normalizeBoundaryVariant(variant)];
+src/worker/outreach-hydration.ts	215	fallback_keyword	export function buildOutreachFallbackText(args: {
+src/worker/outreach-hydration.ts	227	fallback_keyword	      return resolveBoundaryReopenFallback(args.romancePromptVariant);
+src/worker/outreach-hydration.ts	345	fallback_keyword	  fallbackText: string;
+src/worker/outreach-hydration.ts	349	fallback_keyword,literal_default	  const fallback = normalizeSingleLine(args.fallbackText || "Good morning, hope you slept well.");
+src/worker/outreach-hydration.ts	352	fallback_keyword	      text: fallback,
+src/worker/outreach-hydration.ts	359	fallback_keyword	      text: fallback,
+src/worker/outreach-hydration.ts	365	fallback_keyword	      text: fallback,
+src/worker/outreach-hydration.ts	371	fallback_keyword	      text: fallback,
+src/worker/outreach-hydration.ts	409	fallback_keyword	      text: fallback,
+src/worker/outreach-hydration.ts	421	fallback_keyword	  fallbackText: string;
+src/worker/outreach-hydration.ts	425	fallback_keyword	  const fallback = normalizeSingleLine(
+src/worker/outreach-hydration.ts	426	fallback_keyword,literal_default	    args.fallbackText || "You have such a beautiful energy, and I still catch myself smiling when I think of you.",
+src/worker/outreach-hydration.ts	430	fallback_keyword	      text: fallback,
+src/worker/outreach-hydration.ts	437	fallback_keyword	      text: fallback,
+src/worker/outreach-hydration.ts	443	fallback_keyword	      text: fallback,
+src/worker/outreach-hydration.ts	449	fallback_keyword	      text: fallback,
+src/worker/outreach-hydration.ts	455	fallback_keyword	      text: fallback,
+src/worker/outreach-hydration.ts	487	fallback_keyword	      text: fallback,
+src/worker/pdf.ts	7	fallback_keyword	const PDF_ACK_FALLBACK_TEXT = "I'll check it out and get back to you.";
+src/worker/pdf.ts	186	fallback_keyword	  fallbackInboundText: string;
+src/worker/pdf.ts	191	fallback_keyword,literal_default	    `Latest inbound message: ${args.fallbackInboundText || "[Document]"}`,
+src/worker/pdf.ts	248	fallback_keyword	function buildFallbackPdfQuestion(excerpt: string) {
+src/worker/pdf.ts	262	fallback_keyword	    return buildFallbackPdfQuestion(pdfContext.excerpt);
+src/worker/pdf.ts	271	fallback_keyword	  return PDF_ACK_FALLBACK_TEXT;
+src/worker/self-control-smart-router.ts	159	fallback_keyword	export function parseSelfControlSmartRouteOutput(raw: string, fallbackInput: string): SelfControlSmartRoute | null {
+src/worker/self-control-smart-router.ts	188	fallback_keyword	    const input = action === "forward" ? candidateInput || fallbackInput : undefined;
+src/worker/self-control-smart-router.ts	199	fallback_keyword	  const input = action === "run" ? candidateInput || fallbackInput : undefined;
+src/worker/self-control-smart-router.ts	227	fallback_keyword	export function fallbackSelfControlSmartRoute(inputText: string): SelfControlSmartRoute {
+src/worker/status-policy.ts	28	fallback_keyword	const DECLARATIVE_STATUS_FALLBACKS = [
+src/worker/status-policy.ts	96	fallback_keyword	function clampRound(value: number | undefined, fallback: number, min: number, max: number) {
+src/worker/status-policy.ts	98	fallback_keyword	    return fallback;
+src/worker/status-policy.ts	196	fallback_keyword	    return DECLARATIVE_STATUS_FALLBACKS[0];
+src/worker/status-policy.ts	210	fallback_keyword	  const index = computeStableHash(normalized) % DECLARATIVE_STATUS_FALLBACKS.length;
+src/worker/status-policy.ts	211	fallback_keyword	  return DECLARATIVE_STATUS_FALLBACKS[index];
+src/worker/sticker-vision-frame.ts	130	env_default,literal_default	  const ffmpegPath = (args.ffmpegPath || process.env.SLM_FFMPEG_PATH || "ffmpeg").trim() || "ffmpeg";
+src/worker/sticker-vision-frame.ts	131	env_default,literal_default	  const ffprobePath = (args.ffprobePath || process.env.SLM_FFPROBE_PATH || "ffprobe").trim() || "ffprobe";
+src/worker/stt.ts	30	fallback_keyword	function parseBoolean(raw: string | undefined, fallback: boolean) {
+src/worker/stt.ts	32	fallback_keyword	    return fallback;
+src/worker/stt.ts	36	fallback_keyword	    return fallback;
+src/worker/stt.ts	44	fallback_keyword	  return fallback;
+src/worker/stt.ts	47	fallback_keyword	function parsePositiveInt(raw: string | undefined, fallback: number) {
+src/worker/stt.ts	50	fallback_keyword	    return fallback;
+src/worker/stt.ts	129	env_default,literal_default	  const modelPath = (process.env.SLM_WHISPER_MODEL_PATH || "").trim();
+src/worker/stt.ts	138	env_default,literal_default	  const cliPath = (process.env.SLM_WHISPER_CLI_PATH || "whisper-cli").trim() || "whisper-cli";
+src/worker/stt.ts	139	env_default,literal_default	  const ffmpegPath = (process.env.SLM_FFMPEG_PATH || "ffmpeg").trim() || "ffmpeg";
+src/worker/stt.ts	140	env_default,literal_default	  const language = (process.env.SLM_WHISPER_LANGUAGE || "auto").trim().toLowerCase();
+src/worker/supervisor.ts	13	env_default,literal_default	  level: process.env.LOG_LEVEL || "info",
+src/worker/supervisor.ts	94	env_default,literal_default	    const bunBin = process.env.BUN_BIN || "bun";
+src/worker/vision-filter.ts	38	fallback_keyword	function parsePositiveInt(raw: string | undefined, fallback: number, min: number, max: number) {
+src/worker/vision-filter.ts	41	fallback_keyword	    return fallback;

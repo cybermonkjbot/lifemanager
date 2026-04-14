@@ -543,6 +543,7 @@ export default defineSchema({
     .index("by_createdAt", ["createdAt"])
     .index("by_type", ["eventType"])
     .index("by_threadId_and_createdAt", ["threadId", "createdAt"])
+    .index("by_threadId_and_eventType_and_createdAt", ["threadId", "eventType", "createdAt"])
     .index("by_threadId_and_toolRunId", ["threadId", "toolRunId"]),
 
   setupRuntime: defineTable({

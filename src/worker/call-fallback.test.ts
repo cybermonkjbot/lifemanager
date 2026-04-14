@@ -1,32 +1,26 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { shouldSuppressCallFallbackAfterOffer } from "./call-fallback";
+import {
+  DEFAULT_CALL_AUTO_DECLINE_FALLBACK_VARIANTS,
+  resolveCallFallbackVariants,
+  selectCallFallbackVariant,
+  shouldSuppressCallFallbackAfterOffer,
+} from "./call-fallback";
 
-test("shouldSuppressCallFallbackAfterOffer suppresses when call was accepted", () => {
+test("shouldSuppressCallFallbackAfterOffer blocks fallback when call was accepted", () => {
+  assert.equal(shouldSuppressCallFallbackAfterOffer(null), false);
   assert.equal(
     shouldSuppressCallFallbackAfterOffer({
       lastStatus: "accept",
     }),
     true,
   );
-});
-
-test("shouldSuppressCallFallbackAfterOffer suppresses when accept timestamp exists", () => {
   assert.equal(
     shouldSuppressCallFallbackAfterOffer({
-      lastStatus: "terminate",
-      acceptedAt: Date.now(),
+      lastStatus: "reject",
+      acceptedAt: 1_000,
     }),
     true,
-  );
-});
-
-test("shouldSuppressCallFallbackAfterOffer keeps fallback for unanswered sessions", () => {
-  assert.equal(
-    shouldSuppressCallFallbackAfterOffer({
-      lastStatus: "offer",
-    }),
-    false,
   );
   assert.equal(
     shouldSuppressCallFallbackAfterOffer({
@@ -34,5 +28,37 @@ test("shouldSuppressCallFallbackAfterOffer keeps fallback for unanswered session
     }),
     false,
   );
-  assert.equal(shouldSuppressCallFallbackAfterOffer(null), false);
+});
+
+test("resolveCallFallbackVariants returns defaults when no overrides are set", () => {
+  const resolved = resolveCallFallbackVariants();
+  assert.deepEqual(resolved, DEFAULT_CALL_AUTO_DECLINE_FALLBACK_VARIANTS);
+});
+
+test("resolveCallFallbackVariants uses multiline or || separated env override variants", () => {
+  const resolved = resolveCallFallbackVariants({
+    overrideVariants: "First line\nSecond line||Third line||Second line",
+  });
+  assert.deepEqual(resolved, ["First line", "Second line", "Third line"]);
+});
+
+test("resolveCallFallbackVariants falls back to single override text when provided", () => {
+  const resolved = resolveCallFallbackVariants({
+    overrideText: "Custom fallback message",
+  });
+  assert.deepEqual(resolved, ["Custom fallback message"]);
+});
+
+test("selectCallFallbackVariant is deterministic and only returns configured variants", () => {
+  const variants = ["one", "two", "three"];
+  const first = selectCallFallbackVariant({
+    variants,
+    seed: "threadA|day1",
+  });
+  const second = selectCallFallbackVariant({
+    variants,
+    seed: "threadA|day1",
+  });
+  assert.equal(first, second);
+  assert.equal(variants.includes(first), true);
 });

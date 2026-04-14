@@ -7,6 +7,9 @@ type CallStatus = "offer" | "ringing" | "timeout" | "reject" | "accept" | "termi
 type MessageProvider = "whatsapp" | "instagram";
 
 const CALL_ENDED_STATUSES = new Set<CallStatus>(["timeout", "reject", "terminate"]);
+const CALL_FALLBACK_SEND_EVENT_TYPE = "inbound.call.rejected_with_fallback";
+const DEFAULT_CALL_FALLBACK_LOOKBACK_MS = 24 * 60 * 60 * 1000;
+const MAX_CALL_FALLBACK_LOOKBACK_MS = 14 * 24 * 60 * 60 * 1000;
 
 function normalizeTimestampMs(raw: number | undefined, fallbackMs: number) {
   if (!Number.isFinite(raw) || (raw ?? 0) <= 0) {
@@ -258,6 +261,32 @@ export const recordEvent = mutation({
       barrierApplied,
       callReplyBarrierAt,
       durationMs,
+    };
+  },
+});
+
+export const hasRecentFallbackSend = query({
+  args: {
+    threadId: v.id("threads"),
+    withinMs: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    const withinMs = Math.round(
+      Math.max(60_000, Math.min(args.withinMs ?? DEFAULT_CALL_FALLBACK_LOOKBACK_MS, MAX_CALL_FALLBACK_LOOKBACK_MS)),
+    );
+    const cutoff = now - withinMs;
+    const [fallbackEvent] = await ctx.db
+      .query("systemEvents")
+      .withIndex("by_threadId_and_eventType_and_createdAt", (q) =>
+        q.eq("threadId", args.threadId).eq("eventType", CALL_FALLBACK_SEND_EVENT_TYPE).gte("createdAt", cutoff),
+      )
+      .order("desc")
+      .take(1);
+    return {
+      hasRecent: Boolean(fallbackEvent),
+      lastSentAt: fallbackEvent?.createdAt,
+      withinMs,
     };
   },
 });

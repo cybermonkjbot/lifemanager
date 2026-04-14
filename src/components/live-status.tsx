@@ -6,7 +6,7 @@ import { ProviderFilter, type ProviderFilterValue } from "@/components/provider-
 import { formatDateTime, trim } from "@/lib/format";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
-import { useQuery } from "convex/react";
+import { useMutation, useQuery } from "convex/react";
 import Link from "next/link";
 import { useMemo, useState } from "react";
 
@@ -69,6 +69,10 @@ type QueuePayload = {
   needsReply: QueueNeedsReplyItem[];
 };
 
+type StatusSettingsPayload = {
+  statusBuilderEnabled: boolean;
+};
+
 function statusMessageText(message: ThreadMessage) {
   const normalizedText = message.text.trim();
   if (normalizedText) {
@@ -101,6 +105,11 @@ function resolveStatusDraftProvider(item: QueueNeedsReplyItem): "whatsapp" | "in
 
 export function LiveStatus() {
   const [providerFilter, setProviderFilter] = useState<ProviderFilterValue>("all");
+  const [statusPostingPending, setStatusPostingPending] = useState(false);
+  const [statusPostingError, setStatusPostingError] = useState<string | null>(null);
+  const setStatusPostingEnabled = useMutation(api.settings.setStatusBuilderEnabled);
+  const statusSettings = useQuery(api.settings.get, {}) as StatusSettingsPayload | undefined;
+
   const threads = useQuery(api.threads.list, { limit: 260, provider: providerFilter }) as ThreadSummary[] | undefined;
   const statusThread = useMemo(() => {
     const rows = threads || [];
@@ -126,6 +135,31 @@ export function LiveStatus() {
     draftLimit: 120,
     provider: providerFilter,
   }) as QueuePayload | undefined;
+
+  const statusPostingEnabled = statusSettings?.statusBuilderEnabled ?? true;
+  const statusPostingLabel = statusSettings === undefined
+    ? "Loading…"
+    : statusPostingPending
+      ? "Saving…"
+      : statusPostingEnabled
+        ? "Enabled"
+        : "Disabled";
+
+  const onStatusPostingToggle = async (enabled: boolean) => {
+    if (statusPostingPending || statusSettings === undefined || enabled === statusPostingEnabled) {
+      return;
+    }
+    setStatusPostingPending(true);
+    setStatusPostingError(null);
+    try {
+      await setStatusPostingEnabled({ enabled });
+    } catch (error) {
+      setStatusPostingError(error instanceof Error ? error.message : "Failed to update auto status posting.");
+    } finally {
+      setStatusPostingPending(false);
+    }
+  };
+
   const pendingStatusDrafts = useMemo(
     () =>
       (queue?.needsReply || []).filter((item) => {
@@ -177,6 +211,35 @@ export function LiveStatus() {
           <strong>{lastPostedAt || "—"}</strong>
         </p>
       </div>
+
+      <article className="panel-card">
+        <div className="status-section-heading">
+          <h3>Auto Status Posting</h3>
+          <span className={`status-pill ${statusPostingEnabled ? "status-active" : "status-paused"}`}>
+            {statusPostingLabel}
+          </span>
+        </div>
+        <div className="stack compact">
+          <label className="stack compact">
+            <span className="queue-meta">Enable auto status posting</span>
+            <select
+              value={statusPostingEnabled ? "true" : "false"}
+              onChange={(event) => void onStatusPostingToggle(event.target.value === "true")}
+              disabled={statusPostingPending || statusSettings === undefined}
+              aria-disabled={statusPostingPending || statusSettings === undefined}
+            >
+              <option value="true">Yes</option>
+              <option value="false">No</option>
+            </select>
+          </label>
+          <p className="queue-meta">Auto status posts follow your WhatsApp status privacy setting by default.</p>
+          {statusPostingError ? (
+            <p className="queue-meta" role="alert">
+              {trim(statusPostingError, 220)}
+            </p>
+          ) : null}
+        </div>
+      </article>
 
       <div className="panel-grid split-view status-split-view">
         <article className="panel-card">
