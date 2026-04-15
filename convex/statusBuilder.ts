@@ -56,6 +56,14 @@ function normalizeSpace(value: string) {
   return value.replace(/\s+/g, " ").trim();
 }
 
+function normalizeStatusAudienceJid(value: string) {
+  return value.trim().toLowerCase();
+}
+
+function isValidStatusAudienceJid(jid: string) {
+  return jid.endsWith("@s.whatsapp.net") || jid.endsWith("@lid");
+}
+
 export function compactSafeText(value: string, maxChars: number) {
   if (maxChars <= 0) {
     return "";
@@ -279,7 +287,13 @@ export const run = internalMutation({
       return { queued: false, reason: "too_soon" as const, waitMs: cadenceMs - (now - lastStatusAt) };
     }
 
-    let audienceJids = [] as string[];
+    const configuredAudienceJids = [...new Set(
+      config.statusBuilderAudienceJids
+        .map((jid) => normalizeStatusAudienceJid(jid))
+        .filter((jid) => jid.length > 0 && isValidStatusAudienceJid(jid)),
+    )];
+    const manualAllowlistAudienceJids = configuredAudienceJids.slice(0, config.statusBuilderAudienceSampleSize);
+    let trendAudienceJids = manualAllowlistAudienceJids;
     const indexedDirectThreads = await ctx.db
       .query("threads")
       .withIndex("by_provider_and_threadKind_and_lastMessageAt", (q) => q.eq("provider", "whatsapp").eq("threadKind", "direct"))
@@ -309,14 +323,22 @@ export const run = internalMutation({
       }
     }
 
-    if (audienceJids.length === 0) {
-      audienceJids = directThreads
-        .filter((thread) => !thread.isIgnored && !thread.isArchived && thread.jid.endsWith("@s.whatsapp.net"))
-        .map((thread) => thread.jid)
+    if (trendAudienceJids.length === 0) {
+      trendAudienceJids = directThreads
+        .filter((thread) => !thread.isIgnored && !thread.isArchived && isValidStatusAudienceJid(thread.jid))
+        .map((thread) => normalizeStatusAudienceJid(thread.jid))
         .slice(0, config.statusBuilderAudienceSampleSize);
     }
 
-    audienceJids = [...new Set(audienceJids)].slice(0, config.statusBuilderAudienceSampleSize);
+    trendAudienceJids = [...new Set(trendAudienceJids)].slice(0, config.statusBuilderAudienceSampleSize);
+    const statusDeliveryAudienceJids =
+      config.statusPostAudienceMode === "manual_allowlist" && manualAllowlistAudienceJids.length > 0
+        ? manualAllowlistAudienceJids
+        : undefined;
+    const statusAudienceModeLabel =
+      config.statusPostAudienceMode === "manual_allowlist" && manualAllowlistAudienceJids.length === 0
+        ? "whatsapp_privacy_fallback"
+        : (statusDeliveryAudienceJids ? "manual_allowlist" : "whatsapp_privacy");
     const relationshipRows = await ctx.db
       .query("backlogThreadState")
       .withIndex("by_updatedAt")
@@ -366,7 +388,7 @@ export const run = internalMutation({
     const trendSnippet = compactSafeText(sampleLines.slice(0, 5).join(" | "), 120);
 
     const cadenceBucket = Math.floor(now / cadenceMs);
-    const seed = `${trendTheme}|${dominantRelationship}|${audienceJids.length}|${cadenceBucket}`;
+    const seed = `${trendTheme}|${dominantRelationship}|${trendAudienceJids.length}|${cadenceBucket}`;
     const formatRoll = stableUnitRandom(`status-format|${seed}`);
     const useTextPost = formatRoll < config.statusBuilderTextPostRatio;
     const statusFormat: "text" | "meme" = useTextPost ? "text" : "meme";
@@ -392,7 +414,7 @@ export const run = internalMutation({
       text: AI_STATUS_PLACEHOLDER,
       sendKind,
       isStatusPost: true,
-      statusAudienceJids: audienceJids.length > 0 ? audienceJids : undefined,
+      statusAudienceJids: statusDeliveryAudienceJids,
       statusTrendTheme: trendTheme,
       statusDemographicHint: dominantRelationship,
       statusFormat,
@@ -413,7 +435,7 @@ export const run = internalMutation({
       messageText: AI_STATUS_PLACEHOLDER,
       sendKind,
       isStatusPost: true,
-      statusAudienceJids: audienceJids.length > 0 ? audienceJids : undefined,
+      statusAudienceJids: statusDeliveryAudienceJids,
       statusTrendTheme: trendTheme,
       statusDemographicHint: dominantRelationship,
       statusFormat,
@@ -432,7 +454,7 @@ export const run = internalMutation({
       eventType: "status_builder.queued",
       threadId: statusThreadId,
       outboxId,
-      detail: `Queued ${statusFormat} status for default status privacy audience. review=${requiresReview ? "sampled" : "auto"}. trend=${trendTheme}. demographic=${dominantRelationship}. context=${trendSnippet}`,
+      detail: `Queued ${statusFormat} status (audience_mode=${statusAudienceModeLabel}). review=${requiresReview ? "sampled" : "auto"}. trend=${trendTheme}. demographic=${dominantRelationship}. context=${trendSnippet}`,
       createdAt: now,
     });
 
@@ -441,7 +463,7 @@ export const run = internalMutation({
       statusFormat,
       requiresReview,
       outboxId,
-      audienceCount: audienceJids.length,
+      audienceCount: trendAudienceJids.length,
       trendTheme,
       demographic: dominantRelationship,
       sampleKeywords: topKeywords,

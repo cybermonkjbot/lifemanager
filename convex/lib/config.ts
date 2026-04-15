@@ -104,6 +104,7 @@ export type AppConfig = {
   statusBuilderDailyMaxPosts: number;
   statusBuilderTextPostRatio: number;
   statusBuilderReviewRatio: number;
+  statusPostAudienceMode: "whatsapp_privacy" | "manual_allowlist";
   statusBuilderAudienceJids: string[];
   statusBuilderAudienceSampleSize: number;
   instagramDmDelayMinMs: number;
@@ -200,6 +201,7 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
   statusBuilderDailyMaxPosts: 10,
   statusBuilderTextPostRatio: 0.25,
   statusBuilderReviewRatio: 0.35,
+  statusPostAudienceMode: "whatsapp_privacy",
   statusBuilderAudienceJids: [],
   statusBuilderAudienceSampleSize: 80,
   instagramDmDelayMinMs: 16_000,
@@ -259,6 +261,16 @@ function parseFallbackMode(value: string | undefined, fallback: AppConfig["aiFal
 
 function parseQualityGateMode(value: string | undefined, fallback: QualityGateMode): QualityGateMode {
   if (value === "auto_rewrite_once" || value === "manual_review" || value === "log_only") {
+    return value;
+  }
+  return fallback;
+}
+
+function parseStatusPostAudienceMode(
+  value: string | undefined,
+  fallback: AppConfig["statusPostAudienceMode"],
+): AppConfig["statusPostAudienceMode"] {
+  if (value === "whatsapp_privacy" || value === "manual_allowlist") {
     return value;
   }
   return fallback;
@@ -480,6 +492,10 @@ export async function getConfig(ctx: QueryCtx | MutationCtx): Promise<AppConfig>
       parseNumber(map.get("statusBuilderReviewRatio"), DEFAULT_APP_CONFIG.statusBuilderReviewRatio),
       0,
       1,
+    ),
+    statusPostAudienceMode: parseStatusPostAudienceMode(
+      map.get("statusPostAudienceMode"),
+      DEFAULT_APP_CONFIG.statusPostAudienceMode,
     ),
     statusBuilderAudienceJids: parseList(map.get("statusBuilderAudienceJids")),
     statusBuilderAudienceSampleSize: Math.round(

@@ -98,6 +98,7 @@ type SettingsState = {
   statusBuilderDailyMaxPosts: number;
   statusBuilderTextPostRatio: number;
   statusBuilderReviewRatio: number;
+  statusPostAudienceMode: "whatsapp_privacy" | "manual_allowlist";
   statusBuilderAudienceJids: string[];
   statusBuilderAudienceSampleSize: number;
 };
@@ -317,6 +318,7 @@ function toState(source: Partial<SettingsState> | undefined): SettingsState {
     statusBuilderDailyMaxPosts: source?.statusBuilderDailyMaxPosts ?? 10,
     statusBuilderTextPostRatio: Math.min(source?.statusBuilderTextPostRatio ?? 0.25, STATUS_BUILDER_MAX_TEXT_POST_RATIO),
     statusBuilderReviewRatio: source?.statusBuilderReviewRatio ?? 0.35,
+    statusPostAudienceMode: source?.statusPostAudienceMode === "manual_allowlist" ? "manual_allowlist" : "whatsapp_privacy",
     statusBuilderAudienceJids: source?.statusBuilderAudienceJids ?? [],
     statusBuilderAudienceSampleSize: source?.statusBuilderAudienceSampleSize ?? 80,
   };
@@ -416,6 +418,7 @@ function stateEquals(a: SettingsState, b: SettingsState) {
     nearlyEqual(a.statusBuilderDailyMaxPosts, b.statusBuilderDailyMaxPosts) &&
     nearlyEqual(a.statusBuilderTextPostRatio, b.statusBuilderTextPostRatio) &&
     nearlyEqual(a.statusBuilderReviewRatio, b.statusBuilderReviewRatio) &&
+    a.statusPostAudienceMode === b.statusPostAudienceMode &&
     a.statusBuilderAudienceJids.join("\n") === b.statusBuilderAudienceJids.join("\n") &&
     nearlyEqual(a.statusBuilderAudienceSampleSize, b.statusBuilderAudienceSampleSize)
   );
@@ -998,6 +1001,7 @@ export function LiveSettings() {
           statusBuilderDailyMaxPosts: Math.round(draft.statusBuilderDailyMaxPosts),
           statusBuilderTextPostRatio: draft.statusBuilderTextPostRatio,
           statusBuilderReviewRatio: draft.statusBuilderReviewRatio,
+          statusPostAudienceMode: draft.statusPostAudienceMode,
           statusBuilderAudienceJids: draft.statusBuilderAudienceJids,
           statusBuilderAudienceSampleSize: Math.round(draft.statusBuilderAudienceSampleSize),
         });
@@ -3127,6 +3131,27 @@ export function LiveSettings() {
           </label>
 
           <label className="stack compact">
+            <span className="queue-meta">Status audience mode</span>
+            <select
+              value={draft.statusPostAudienceMode}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  statusPostAudienceMode: event.target.value === "manual_allowlist" ? "manual_allowlist" : "whatsapp_privacy",
+                }))
+              }
+              disabled={record.pending || !draft.statusBuilderEnabled}
+              aria-disabled={record.pending || !draft.statusBuilderEnabled}
+            >
+              <option value="whatsapp_privacy">Respect WhatsApp privacy settings</option>
+              <option value="manual_allowlist">Manual allowlist (configured audience JIDs)</option>
+            </select>
+            <span className="queue-meta">
+              Privacy mode posts to My Status using your WhatsApp privacy setting. Manual allowlist mode sends only to configured JIDs, and falls back to WhatsApp privacy when the allowlist is empty.
+            </span>
+          </label>
+
+          <label className="stack compact">
             <span className="queue-meta">Trend sampling audience cap</span>
             <input
               type="number"
@@ -3143,11 +3168,19 @@ export function LiveSettings() {
               disabled={record.pending || !draft.statusBuilderEnabled}
               aria-disabled={record.pending || !draft.statusBuilderEnabled}
             />
-            <span className="queue-meta">Used for trend sampling only. Auto status posts always use WhatsApp default status privacy audience.</span>
+            <span className="queue-meta">
+              {draft.statusPostAudienceMode === "manual_allowlist"
+                ? "Used for trend sampling and status allowlist delivery."
+                : "Used for trend sampling only. Delivery follows your WhatsApp status privacy setting."}
+            </span>
           </label>
 
           <label className="stack compact">
-            <span className="queue-meta">Audience JIDs for trend sampling (optional)</span>
+            <span className="queue-meta">
+              {draft.statusPostAudienceMode === "manual_allowlist"
+                ? "Audience JIDs (trend sampling + status allowlist)"
+                : "Audience JIDs for trend sampling (optional)"}
+            </span>
             <select
               value=""
               onChange={(event) => {

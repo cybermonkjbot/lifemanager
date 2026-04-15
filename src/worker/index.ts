@@ -204,6 +204,7 @@ type RuntimeSettings = {
   statusBuilderDailyMaxPosts: number;
   statusBuilderTextPostRatio: number;
   statusBuilderReviewRatio: number;
+  statusPostAudienceMode: "whatsapp_privacy" | "manual_allowlist";
   statusBuilderAudienceJids: string[];
   statusBuilderAudienceSampleSize: number;
   quietHoursStartHour: number;
@@ -1854,7 +1855,23 @@ async function run() {
     return [...ids];
   };
 
-  const buildStatusSendOptions = () => {
+  const buildStatusSendOptions = (args: {
+    runtimeSettings: RuntimeSettings | null;
+    statusAudienceJids?: string[];
+  }) => {
+    const mode = args.runtimeSettings?.statusPostAudienceMode ?? "whatsapp_privacy";
+    const normalizedAudience = [...new Set(
+      (args.statusAudienceJids || [])
+        .map((jid) => jid.trim().toLowerCase())
+        .filter((jid) => jid.endsWith("@s.whatsapp.net") || jid.endsWith("@lid")),
+    )];
+    if (mode === "manual_allowlist" && normalizedAudience.length > 0) {
+      return {
+        broadcast: true,
+        statusJidList: normalizedAudience,
+      } as Parameters<typeof sock.sendMessage>[2];
+    }
+
     // Respect WhatsApp's current status privacy configuration by default.
     return { broadcast: true } as Parameters<typeof sock.sendMessage>[2];
   };
@@ -8873,7 +8890,10 @@ function resolveTextEmojiAllowlist() {
               let sent: { key?: { id?: string | null } } | undefined;
               const destinationJid = isStatusBroadcastSend ? "status@broadcast" : item.jid;
               if (isStatusBroadcastSend) {
-                const statusSendOptions = buildStatusSendOptions();
+                const statusSendOptions = buildStatusSendOptions({
+                  runtimeSettings,
+                  statusAudienceJids: hydrated.statusAudienceJids,
+                });
                 if (hydrated.sendKind === "meme") {
                   if (!hydrated.mediaAssetId) {
                     throw new Error("Status meme outbox item missing media asset id.");

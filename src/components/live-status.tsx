@@ -71,6 +71,7 @@ type QueuePayload = {
 
 type StatusSettingsPayload = {
   statusBuilderEnabled: boolean;
+  statusPostAudienceMode?: "whatsapp_privacy" | "manual_allowlist";
 };
 
 function statusMessageText(message: ThreadMessage) {
@@ -137,6 +138,7 @@ export function LiveStatus() {
   }) as QueuePayload | undefined;
 
   const statusPostingEnabled = statusSettings?.statusBuilderEnabled ?? true;
+  const statusAudienceMode = statusSettings?.statusPostAudienceMode || "whatsapp_privacy";
   const statusPostingLabel = statusSettings === undefined
     ? "Loading…"
     : statusPostingPending
@@ -232,7 +234,11 @@ export function LiveStatus() {
               <option value="false">No</option>
             </select>
           </label>
-          <p className="queue-meta">Auto status posts follow your WhatsApp status privacy setting by default.</p>
+          <p className="queue-meta">
+            {statusAudienceMode === "manual_allowlist"
+              ? "Auto status posts are currently in manual allowlist mode."
+              : "Auto status posts currently follow your WhatsApp status privacy setting."}
+          </p>
           {statusPostingError ? (
             <p className="queue-meta" role="alert">
               {trim(statusPostingError, 220)}

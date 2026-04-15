@@ -237,6 +237,7 @@ export const save = mutation({
     statusBuilderDailyMaxPosts: v.number(),
     statusBuilderTextPostRatio: v.number(),
     statusBuilderReviewRatio: v.optional(v.number()),
+    statusPostAudienceMode: v.optional(v.union(v.literal("whatsapp_privacy"), v.literal("manual_allowlist"))),
     statusBuilderAudienceJids: v.optional(v.array(v.string())),
     statusBuilderAudienceSampleSize: v.optional(v.number()),
     instagramDmDelayMinMs: v.optional(v.number()),
@@ -420,6 +421,7 @@ export const save = mutation({
         0,
         1,
       ),
+      statusPostAudienceMode: args.statusPostAudienceMode ?? DEFAULT_APP_CONFIG.statusPostAudienceMode,
       statusBuilderAudienceJids,
       statusBuilderAudienceSampleSize: clampInt(
         args.statusBuilderAudienceSampleSize ?? DEFAULT_APP_CONFIG.statusBuilderAudienceSampleSize,
@@ -586,6 +588,7 @@ export const save = mutation({
     await setConfigValue(ctx, "statusBuilderDailyMaxPosts", String(normalized.statusBuilderDailyMaxPosts));
     await setConfigValue(ctx, "statusBuilderTextPostRatio", String(normalized.statusBuilderTextPostRatio));
     await setConfigValue(ctx, "statusBuilderReviewRatio", String(normalized.statusBuilderReviewRatio));
+    await setConfigValue(ctx, "statusPostAudienceMode", normalized.statusPostAudienceMode);
     await setConfigValue(ctx, "statusBuilderAudienceJids", normalized.statusBuilderAudienceJids.join("\n"));
     await setConfigValue(ctx, "statusBuilderAudienceSampleSize", String(normalized.statusBuilderAudienceSampleSize));
     await setConfigValue(ctx, "instagramDmDelayMinMs", String(normalized.instagramDmDelayMinMs));
