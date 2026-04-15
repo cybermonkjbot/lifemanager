@@ -293,6 +293,10 @@ export const run = internalMutation({
         .filter((jid) => jid.length > 0 && isValidStatusAudienceJid(jid)),
     )];
     const manualAllowlistAudienceJids = configuredAudienceJids.slice(0, config.statusBuilderAudienceSampleSize);
+    if (config.statusPostAudienceMode === "manual_allowlist" && manualAllowlistAudienceJids.length === 0) {
+      await shouldLogSkip("manual_allowlist_empty");
+      return { queued: false, reason: "manual_allowlist_empty" as const };
+    }
     let trendAudienceJids = manualAllowlistAudienceJids;
     const indexedDirectThreads = await ctx.db
       .query("threads")
@@ -332,13 +336,10 @@ export const run = internalMutation({
 
     trendAudienceJids = [...new Set(trendAudienceJids)].slice(0, config.statusBuilderAudienceSampleSize);
     const statusDeliveryAudienceJids =
-      config.statusPostAudienceMode === "manual_allowlist" && manualAllowlistAudienceJids.length > 0
+      config.statusPostAudienceMode === "manual_allowlist"
         ? manualAllowlistAudienceJids
         : undefined;
-    const statusAudienceModeLabel =
-      config.statusPostAudienceMode === "manual_allowlist" && manualAllowlistAudienceJids.length === 0
-        ? "whatsapp_privacy_fallback"
-        : (statusDeliveryAudienceJids ? "manual_allowlist" : "whatsapp_privacy");
+    const statusAudienceModeLabel = statusDeliveryAudienceJids ? "manual_allowlist" : "whatsapp_privacy";
     const relationshipRows = await ctx.db
       .query("backlogThreadState")
       .withIndex("by_updatedAt")

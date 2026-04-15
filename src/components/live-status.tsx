@@ -236,7 +236,7 @@ export function LiveStatus() {
           </label>
           <p className="queue-meta">
             {statusAudienceMode === "manual_allowlist"
-              ? "Auto status posts are currently in manual allowlist mode."
+              ? "Auto status posts are currently in manual allowlist mode (empty allowlist skips posting)."
               : "Auto status posts currently follow your WhatsApp status privacy setting."}
           </p>
           {statusPostingError ? (

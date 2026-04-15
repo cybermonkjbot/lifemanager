@@ -3147,7 +3147,7 @@ export function LiveSettings() {
               <option value="manual_allowlist">Manual allowlist (configured audience JIDs)</option>
             </select>
             <span className="queue-meta">
-              Privacy mode posts to My Status using your WhatsApp privacy setting. Manual allowlist mode sends only to configured JIDs, and falls back to WhatsApp privacy when the allowlist is empty.
+              Privacy mode posts to My Status using your WhatsApp privacy setting. Manual allowlist mode sends only to configured JIDs, and skips posting when the allowlist is empty.
             </span>
           </label>
 

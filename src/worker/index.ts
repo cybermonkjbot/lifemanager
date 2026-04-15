@@ -1865,15 +1865,28 @@ async function run() {
         .map((jid) => jid.trim().toLowerCase())
         .filter((jid) => jid.endsWith("@s.whatsapp.net") || jid.endsWith("@lid")),
     )];
-    if (mode === "manual_allowlist" && normalizedAudience.length > 0) {
+    if (mode === "manual_allowlist") {
+      if (normalizedAudience.length === 0) {
+        return {
+          skip: true as const,
+          reason: "manual_allowlist_empty" as const,
+        };
+      }
+
       return {
-        broadcast: true,
-        statusJidList: normalizedAudience,
-      } as Parameters<typeof sock.sendMessage>[2];
+        skip: false as const,
+        options: {
+          broadcast: true,
+          statusJidList: normalizedAudience,
+        } as Parameters<typeof sock.sendMessage>[2],
+      };
     }
 
     // Respect WhatsApp's current status privacy configuration by default.
-    return { broadcast: true } as Parameters<typeof sock.sendMessage>[2];
+    return {
+      skip: false as const,
+      options: { broadcast: true } as Parameters<typeof sock.sendMessage>[2],
+    };
   };
 
   const reconnectDelay = (attempt: number) => {
@@ -8890,10 +8903,28 @@ function resolveTextEmojiAllowlist() {
               let sent: { key?: { id?: string | null } } | undefined;
               const destinationJid = isStatusBroadcastSend ? "status@broadcast" : item.jid;
               if (isStatusBroadcastSend) {
-                const statusSendOptions = buildStatusSendOptions({
+                const statusSendDecision = buildStatusSendOptions({
                   runtimeSettings,
                   statusAudienceJids: hydrated.statusAudienceJids,
                 });
+                if (statusSendDecision.skip) {
+                  await convex.mutation(convexRefs.outboxMarkFailed, {
+                    outboxId: item.outboxId as Id<"outbox">,
+                    error: "Skipped status post: manual allowlist mode requires at least one audience JID.",
+                    forceFinal: true,
+                  });
+                  await convex
+                    .mutation(convexRefs.systemRecordEvent, {
+                      source: "worker",
+                      eventType: "status.send.skipped",
+                      threadId: item.threadId as Id<"threads">,
+                      outboxId: item.outboxId as Id<"outbox">,
+                      detail: `reason=${statusSendDecision.reason}`,
+                    })
+                    .catch(() => undefined);
+                  return;
+                }
+                const statusSendOptions = statusSendDecision.options;
                 if (hydrated.sendKind === "meme") {
                   if (!hydrated.mediaAssetId) {
                     throw new Error("Status meme outbox item missing media asset id.");
