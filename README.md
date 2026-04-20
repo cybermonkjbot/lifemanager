@@ -45,6 +45,12 @@ cp .env.example .env.local
 
 If you use an Azure AI Foundry `.../responses` URI, set `AZURE_AI_API_STYLE=responses` (or keep `auto` and it will be inferred).
 
+Optional instance gate override:
+- the default flow is to create the instance PIN during the full-screen `/setup` onboarding
+- `SLM_INSTANCE_PIN=2468` overrides the setup-managed PIN and forces a fixed env-managed PIN for this instance
+- `SLM_INSTANCE_PIN_TTL_DAYS=30` controls how long the local unlock cookie stays valid
+- `SLM_INSTANCE_COOKIE_SECRET=...` lets you sign the cookie with a secret separate from the PIN
+
 Optional meme-image generation config:
 - `AZURE_AI_IMAGE_ENDPOINT` (dedicated image endpoint; if omitted, derived from `AZURE_AI_ENDPOINT`)
 - `AZURE_AI_IMAGE_API_KEY` (if image endpoint uses a different key)
@@ -71,13 +77,18 @@ This runs:
 - `convex dev`
 - `bun run worker`
 
-## WhatsApp Setup Wizard
+On first run, the app now redirects into a full-screen `/setup` onboarding flow where you set the per-instance PIN, choose runtime defaults, and connect channels. After setup completes, PIN-protected instances redirect to `/unlock` until the local PIN is entered.
 
-1. Open the dashboard at `http://localhost:3000/setup`.
-2. Click `Start QR Session`.
-3. Scan the QR code with WhatsApp on your phone.
-4. Wait for `Connected` status.
-5. Start the worker (`bun run worker`) if it is not already running.
+## Setup Onboarding
+
+1. Open `http://localhost:3000/setup` on first run, or just visit the app root and let it redirect there.
+2. Move through the onboarding stages:
+   - create the local instance PIN
+   - choose behavior defaults like autonomy mode, reply pace, mimicry, memes, and quiet hours
+   - connect WhatsApp and optionally Instagram
+3. Finish setup and keep the unlock session for immediate access to the dashboard.
+
+The onboarding flow persists its local state in `.slm/instance-config.json`. This is intentional: it keeps the gate per-instance and local-first instead of introducing SaaS-style multi-user auth.
 
 If QR pairing keeps disconnecting, use `Get Pairing Code` in the wizard and enter your phone number in international format (for example `2348012345678`).
 
@@ -86,6 +97,40 @@ The setup wizard uses API routes:
 - `GET /api/setup/whatsapp/status`
 - `POST /api/setup/whatsapp/stop`
 - `POST /api/setup/whatsapp/reset`
+
+## OpenAI-Compatible API Gateway
+
+This app now exposes an OpenAI-style chat endpoint for external tools:
+
+- `POST /api/gateway/v1/chat/completions`
+
+It routes requests through the same `generateReplyWithFallback` pipeline used by the product, so runtime settings, guardrails, persona/style logic, and tool-routing behavior are preserved.
+
+### Auth
+
+- If `SLM_API_GATEWAY_KEY` is set, send `Authorization: Bearer <SLM_API_GATEWAY_KEY>` (or `X-API-Key`).
+- If no gateway key is set, the existing instance PIN/unlock gate still applies.
+
+### Request compatibility
+
+- Accepts OpenAI-style `messages`, `model`, `temperature`, and `max_tokens`/`max_completion_tokens`.
+- `stream: true` is currently rejected (set `stream: false` or omit it).
+- Optional thread scoping can be passed via `threadId`, `thread_id`, or `metadata.threadId`.
+
+### Example
+
+```bash
+curl -sS http://localhost:3000/api/gateway/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $SLM_API_GATEWAY_KEY" \
+  -d '{
+    "model": "slm-gateway",
+    "messages": [
+      { "role": "system", "content": "Respect all house rules." },
+      { "role": "user", "content": "Write a short reply to: hey, are you free this evening?" }
+    ]
+  }'
+```
 
 ## WhatsApp Runtime Commands (Self Chat)
 

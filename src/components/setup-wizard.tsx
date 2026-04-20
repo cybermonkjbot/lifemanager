@@ -38,6 +38,8 @@ type SetupState = {
 
 type SetupWizardProps = {
   realtimeEnabled: boolean;
+  embedded?: boolean;
+  initialScreen?: SetupWizardScreen;
 };
 
 type SetupWizardScreen = "options" | "whatsapp" | "pairing" | "instagram";
@@ -209,14 +211,18 @@ function SetupWizardContent({
   liveState,
   instagramLiveState,
   realtimeEnabled,
+  initialScreen = "options",
+  embedded = false,
 }: {
   liveState: SetupState | null | undefined;
   instagramLiveState: SetupState | null | undefined;
   realtimeEnabled: boolean;
+  initialScreen?: SetupWizardScreen;
+  embedded?: boolean;
 }) {
   const [localState, setLocalState] = useState<SetupState | null>(null);
   const [phoneNumber, setPhoneNumber] = useState("");
-  const [activeScreen, setActiveScreen] = useState<SetupWizardScreen>("options");
+  const [activeScreen, setActiveScreen] = useState<SetupWizardScreen>(initialScreen);
 
   const { runAction, isPending, anyPending, notices, dismissNotice } = useActionStateRegistry();
 
@@ -440,7 +446,7 @@ function SetupWizardContent({
   }, [realtimeEnabled, state?.listenerActive, state?.pairingCode, state?.qrDataUrl, status]);
 
   return (
-    <section className="setup-wizard setup-wizard-fullscreen" aria-busy={anyPending}>
+    <section className={`setup-wizard ${embedded ? "" : "setup-wizard-fullscreen"}`.trim()} aria-busy={anyPending}>
       <div className="setup-wizard-stage">
         <header className="setup-flow-header">
           <div className="setup-flow-topline">
@@ -994,16 +1000,32 @@ function InstagramSetupPanel({
   );
 }
 
-function SetupWizardRealtime() {
+function SetupWizardRealtimeWrapper({ embedded, initialScreen }: { embedded?: boolean; initialScreen?: SetupWizardScreen }) {
   const liveState = useQuery(api.system.setupStatus, { provider: "whatsapp" }) as SetupState | null | undefined;
   const instagramLiveState = useQuery(api.system.setupStatus, { provider: "instagram" }) as SetupState | null | undefined;
-  return <SetupWizardContent liveState={liveState} instagramLiveState={instagramLiveState} realtimeEnabled />;
+  return (
+    <SetupWizardContent
+      liveState={liveState}
+      instagramLiveState={instagramLiveState}
+      realtimeEnabled={true}
+      embedded={embedded}
+      initialScreen={initialScreen}
+    />
+  );
 }
 
-export function SetupWizard({ realtimeEnabled }: SetupWizardProps) {
+export function SetupWizard({ realtimeEnabled, embedded = false, initialScreen = "options" }: SetupWizardProps) {
   if (!realtimeEnabled) {
-    return <SetupWizardContent liveState={null} instagramLiveState={null} realtimeEnabled={false} />;
+    return (
+      <SetupWizardContent
+        liveState={null}
+        instagramLiveState={null}
+        realtimeEnabled={false}
+        embedded={embedded}
+        initialScreen={initialScreen}
+      />
+    );
   }
 
-  return <SetupWizardRealtime />;
+  return <SetupWizardRealtimeWrapper embedded={embedded} initialScreen={initialScreen} />;
 }

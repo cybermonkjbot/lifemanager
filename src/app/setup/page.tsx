@@ -1,13 +1,17 @@
-import { DashboardPage } from "@/components/dashboard-page";
+import { SetupOnboarding } from "@/components/setup-onboarding";
+import { resolveInstanceSetupState } from "@/lib/instance-config";
 import { getConvexUrl } from "@/lib/runtime-env";
-import { SetupWizard } from "@/components/setup-wizard";
+
+export const dynamic = "force-dynamic";
 
 export default async function SetupPage() {
   const convexUrl = getConvexUrl();
+  const initialInstanceState = await resolveInstanceSetupState();
 
   return (
-    <DashboardPage title="Setup" subtitle="Connect WhatsApp and Instagram, then verify worker status.">
-      <SetupWizard realtimeEnabled={Boolean(convexUrl)} />
-    </DashboardPage>
+    <SetupOnboarding
+      realtimeEnabled={Boolean(convexUrl)}
+      initialInstanceState={initialInstanceState}
+    />
   );
 }

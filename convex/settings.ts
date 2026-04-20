@@ -11,6 +11,33 @@ function clampInt(value: number, min: number, max: number) {
   return Math.round(clamp(value, min, max));
 }
 
+function resolveOnboardingReplyPacePreset(preset: "measured" | "deliberate" | "unhurried") {
+  if (preset === "measured") {
+    return {
+      humanDelayMinMs: 12_000,
+      humanDelayMaxMs: 45_000,
+      humanTypingMinMs: 2_000,
+      humanTypingMaxMs: 6_000,
+    };
+  }
+
+  if (preset === "unhurried") {
+    return {
+      humanDelayMinMs: 45_000,
+      humanDelayMaxMs: 150_000,
+      humanTypingMinMs: 6_000,
+      humanTypingMaxMs: 18_000,
+    };
+  }
+
+  return {
+    humanDelayMinMs: 22_000,
+    humanDelayMaxMs: 95_000,
+    humanTypingMinMs: 4_000,
+    humanTypingMaxMs: 14_000,
+  };
+}
+
 const ALLOWED_AI_DETERMINISTIC_MODE_SET = new Set<AiDeterministicMode>([
   "hard_stop",
   "anti_beggi_beggi",
@@ -132,6 +159,40 @@ async function upsertRomanticPartnerMappings(ctx: MutationCtx, romanticPartnerJi
 export const get = query({
   args: {},
   handler: async (ctx) => {
+    return await getConfig(ctx);
+  },
+});
+
+export const saveOnboardingPreset = mutation({
+  args: {
+    autonomyMode: v.union(v.literal("review_first"), v.literal("autopilot")),
+    replyPace: v.union(v.literal("measured"), v.literal("deliberate"), v.literal("unhurried")),
+    quietHoursEnabled: v.boolean(),
+    quietHoursStartHour: v.number(),
+    quietHoursEndHour: v.number(),
+    memesEnabled: v.boolean(),
+  },
+  handler: async (ctx, args) => {
+    const pace = resolveOnboardingReplyPacePreset(args.replyPace);
+    const quietHoursStartHour = clampInt(args.quietHoursStartHour, 0, 23);
+    const quietHoursEndHour = clampInt(args.quietHoursEndHour, 0, 23);
+
+    await setConfigValue(ctx, "autonomyPaused", args.autonomyMode === "review_first" ? "true" : "false");
+    await setConfigValue(ctx, "humanDelayMinMs", String(pace.humanDelayMinMs));
+    await setConfigValue(ctx, "humanDelayMaxMs", String(pace.humanDelayMaxMs));
+    await setConfigValue(ctx, "humanTypingMinMs", String(pace.humanTypingMinMs));
+    await setConfigValue(ctx, "humanTypingMaxMs", String(pace.humanTypingMaxMs));
+    await setConfigValue(ctx, "quietHoursEnabled", args.quietHoursEnabled ? "true" : "false");
+    await setConfigValue(ctx, "quietHoursStartHour", String(quietHoursStartHour));
+    await setConfigValue(ctx, "quietHoursEndHour", String(quietHoursEndHour));
+    await setConfigValue(ctx, "memesEnabled", args.memesEnabled ? "true" : "false");
+    await ctx.db.insert("systemEvents", {
+      source: "dashboard",
+      eventType: "setup.onboarding_preferences.saved",
+      detail: `mode=${args.autonomyMode} pace=${args.replyPace} quiet_hours=${args.quietHoursEnabled ? `${quietHoursStartHour}-${quietHoursEndHour}` : "off"} memes=${args.memesEnabled ? "on" : "off"}`,
+      createdAt: Date.now(),
+    });
+
     return await getConfig(ctx);
   },
 });

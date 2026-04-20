@@ -11,7 +11,7 @@ type DashboardPageProps = {
   hideShellChrome?: boolean;
 };
 
-export function DashboardPage({
+export async function DashboardPage({
   title,
   subtitle,
   children,

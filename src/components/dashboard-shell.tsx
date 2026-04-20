@@ -3,6 +3,7 @@ import { LogWatcher } from "@/components/log-watcher";
 import { RuntimeStateOverlay } from "@/components/runtime-state-overlay";
 import { ShellControlsModal } from "@/components/shell-controls-modal";
 import { ShellNavigation } from "@/components/shell-navigation";
+import { isInstancePinEnabled } from "@/lib/instance-pin";
 import { SetupNotice } from "@/components/setup-notice";
 import { dashboardNavItems } from "@/lib/ui/dashboard-nav";
 import { ReactNode } from "react";
@@ -18,7 +19,7 @@ type DashboardShellProps = {
   hideShellChrome?: boolean;
 };
 
-export function DashboardShell({
+export async function DashboardShell({
   title,
   subtitle,
   children,
@@ -29,6 +30,7 @@ export function DashboardShell({
   hideShellChrome = false,
 }: DashboardShellProps) {
   const realtimeEnabled = Boolean(convexUrl);
+  const pinEnabled = await isInstancePinEnabled();
 
   return (
     <div className="shell-root">
@@ -43,7 +45,16 @@ export function DashboardShell({
                   <p className="brand-title">WhatsApp Brain</p>
                   <p className="brand-note">Workspaces for queue, conversations, follow-ups, and system health.</p>
                 </div>
-                <ShellControlsModal realtimeEnabled={realtimeEnabled} fallbackPaused={autonomyPaused} />
+                <div className="shell-topbar-actions">
+                  {pinEnabled ? (
+                    <form action="/api/auth/pin/logout" method="post">
+                      <button type="submit" className="btn btn-ghost">
+                        Lock
+                      </button>
+                    </form>
+                  ) : null}
+                  <ShellControlsModal realtimeEnabled={realtimeEnabled} fallbackPaused={autonomyPaused} />
+                </div>
               </header>
 
               <ShellNavigation items={dashboardNavItems} />

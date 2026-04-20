@@ -13,6 +13,7 @@ export const convexRefs = {
   todosList: makeFunctionReference<"query">("todos:list"),
   rulesList: makeFunctionReference<"query">("rules:list"),
   settingsGet: makeFunctionReference<"query">("settings:get"),
+  settingsSaveOnboardingPreset: makeFunctionReference<"mutation">("settings:saveOnboardingPreset"),
   systemHealth: makeFunctionReference<"query">("system:health"),
   systemSetupStatus: makeFunctionReference<"query">("system:setupStatus"),
   contextConversationHistorySearch: makeFunctionReference<"query">("contextTools:conversationHistorySearch"),
