@@ -80,13 +80,12 @@ export const cleanupAutoAliases = mutation({
   },
   handler: async (ctx, args) => {
     const dryRun = args.dryRun ?? false;
-    const rows = await ctx.db.query("threadGrounding").collect();
     const now = Date.now();
     let scanned = 0;
     let updated = 0;
     let removed = 0;
 
-    for (const row of rows) {
+    for await (const row of ctx.db.query("threadGrounding")) {
       scanned += 1;
       const currentAliases = row.autoAliases || [];
       const cleanedAliases = normalizeAliases(currentAliases);

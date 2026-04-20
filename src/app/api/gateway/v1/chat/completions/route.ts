@@ -1,6 +1,7 @@
 import { createConvexClient } from "@/lib/convex-server";
 import { convexRefs } from "@/lib/convex-refs";
 import { gatewayApiKeyConfigured, requestHasGatewayApiKey } from "@/lib/api-gateway-auth";
+import { requireInstanceApiAccess } from "@/lib/instance-guard";
 import {
   MAX_GATEWAY_INBOUND_CHARS,
   buildOpenAiChatCompletion,
@@ -171,14 +172,21 @@ export async function OPTIONS() {
 }
 
 export async function POST(request: Request) {
-  if (gatewayApiKeyConfigured() && !requestHasGatewayApiKey(request.headers)) {
-    return openAiErrorResponse(
-      401,
-      "Invalid or missing API key.",
-      "authentication_error",
-      "invalid_api_key",
-      { "WWW-Authenticate": 'Bearer realm="slm-api-gateway"' },
-    );
+  if (gatewayApiKeyConfigured()) {
+    if (!requestHasGatewayApiKey(request.headers)) {
+      return openAiErrorResponse(
+        401,
+        "Invalid or missing API key.",
+        "authentication_error",
+        "invalid_api_key",
+        { "WWW-Authenticate": 'Bearer realm="slm-api-gateway"' },
+      );
+    }
+  } else {
+    const unauthorized = await requireInstanceApiAccess(request);
+    if (unauthorized) {
+      return unauthorized;
+    }
   }
 
   let payload: OpenAiGatewayPayload;

@@ -1,5 +1,6 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { requireInstanceApiAccess } from "@/lib/instance-guard";
 import { NextResponse } from "next/server";
 
 const ROOT_DIR = resolve(process.cwd(), ".slm", "self-improvement");
@@ -189,6 +190,11 @@ async function readLockSummary() {
 }
 
 export async function GET(request: Request) {
+  const unauthorized = await requireInstanceApiAccess(request);
+  if (unauthorized) {
+    return unauthorized;
+  }
+
   const url = new URL(request.url);
   const selectedRunId = toTrimmedString(url.searchParams.get("runId"));
   const requestedLimit = Number(url.searchParams.get("limit"));

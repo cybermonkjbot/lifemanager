@@ -944,13 +944,12 @@ export const cleanupCommonPhrases = mutation({
   },
   handler: async (ctx, args) => {
     const dryRun = args.dryRun ?? false;
-    const profiles = await ctx.db.query("styleProfiles").collect();
     const now = Date.now();
     let scannedProfiles = 0;
     let updatedProfiles = 0;
     let removedPhraseCount = 0;
 
-    for (const profile of profiles) {
+    for await (const profile of ctx.db.query("styleProfiles")) {
       scannedProfiles += 1;
       const currentPhrases = normalizeTraitList(profile.commonPhrases || [], LEARNED_TRAIT_LIMITS.commonPhrases);
       const nextPhrases = normalizeCommonPhraseList(currentPhrases, LEARNED_TRAIT_LIMITS.commonPhrases, { strict: true });
