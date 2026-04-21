@@ -2,6 +2,7 @@
 
 import { ActionNotices } from "@/components/action-notices";
 import { LoadingIndicator } from "@/components/loading-state";
+import { getSetupBootstrapHeaderName } from "@/lib/setup-bootstrap-auth";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
 import { api } from "../../convex/_generated/api";
 import { useQuery } from "convex/react";
@@ -40,6 +41,7 @@ type SetupWizardProps = {
   realtimeEnabled: boolean;
   embedded?: boolean;
   initialScreen?: SetupWizardScreen;
+  setupSecret?: string;
 };
 
 type SetupWizardScreen = "options" | "whatsapp" | "pairing" | "instagram";
@@ -213,12 +215,14 @@ function SetupWizardContent({
   realtimeEnabled,
   initialScreen = "options",
   embedded = false,
+  setupSecret,
 }: {
   liveState: SetupState | null | undefined;
   instagramLiveState: SetupState | null | undefined;
   realtimeEnabled: boolean;
   initialScreen?: SetupWizardScreen;
   embedded?: boolean;
+  setupSecret?: string;
 }) {
   const [localState, setLocalState] = useState<SetupState | null>(null);
   const [phoneNumber, setPhoneNumber] = useState("");
@@ -258,6 +262,15 @@ function SetupWizardContent({
   const instagramStatusText = instagramLiveState?.listenerActive ? "Connected" : statusLabel(instagramStatus);
   const whatsappStatusText = state?.listenerActive ? "Connected" : statusLabel(status);
   const activeScreenMeta = setupWizardScreens[activeScreen];
+  const setupHeaders = useMemo(
+    () =>
+      setupSecret
+        ? {
+            [getSetupBootstrapHeaderName()]: setupSecret,
+          }
+        : undefined,
+    [setupSecret],
+  );
   const showBackToOptions = activeScreen !== "options";
 
   const controls = useMemo(() => {
@@ -315,7 +328,7 @@ function SetupWizardContent({
     void runAction(
       "setup:refresh",
       async () => {
-        const response = await fetch("/api/setup/whatsapp/status", { cache: "no-store" });
+        const response = await fetch("/api/setup/whatsapp/status", { cache: "no-store", headers: setupHeaders });
         const next = await readSetupResponse(response);
         setLocalState(next);
       },
@@ -336,6 +349,7 @@ function SetupWizardContent({
           method: "POST",
           headers: {
             "content-type": "application/json",
+            ...(setupHeaders || {}),
           },
           body: JSON.stringify({
             mode,
@@ -359,6 +373,7 @@ function SetupWizardContent({
       async () => {
         const response = await fetch("/api/setup/whatsapp/stop", {
           method: "POST",
+          headers: setupHeaders,
         });
 
         const next = await readSetupResponse(response);
@@ -376,6 +391,7 @@ function SetupWizardContent({
       async () => {
         const response = await fetch("/api/setup/whatsapp/restart-worker", {
           method: "POST",
+          headers: setupHeaders,
         });
 
         const next = await readSetupResponse(response);
@@ -393,6 +409,7 @@ function SetupWizardContent({
       async () => {
         const response = await fetch("/api/setup/whatsapp/reset", {
           method: "POST",
+          headers: setupHeaders,
         });
 
         const next = await readSetupResponse(response);
@@ -429,7 +446,7 @@ function SetupWizardContent({
     let cancelled = false;
     const interval = setInterval(async () => {
       try {
-        const response = await fetch("/api/setup/whatsapp/status", { cache: "no-store" });
+        const response = await fetch("/api/setup/whatsapp/status", { cache: "no-store", headers: setupHeaders });
         const next = await readSetupResponse(response);
         if (!cancelled) {
           setLocalState(next);
@@ -443,7 +460,7 @@ function SetupWizardContent({
       cancelled = true;
       clearInterval(interval);
     };
-  }, [realtimeEnabled, state?.listenerActive, state?.pairingCode, state?.qrDataUrl, status]);
+  }, [realtimeEnabled, setupHeaders, state?.listenerActive, state?.pairingCode, state?.qrDataUrl, status]);
 
   return (
     <section className={`setup-wizard ${embedded ? "" : "setup-wizard-fullscreen"}`.trim()} aria-busy={anyPending}>
@@ -653,7 +670,7 @@ function SetupWizardContent({
           </section>
 
           <section id="setup-panel-instagram" className="setup-flow-panel" hidden={activeScreen !== "instagram"}>
-            <InstagramSetupPanel liveState={instagramLiveState} realtimeEnabled={realtimeEnabled} />
+            <InstagramSetupPanel liveState={instagramLiveState} realtimeEnabled={realtimeEnabled} setupSecret={setupSecret} />
           </section>
         </div>
       </div>
@@ -664,9 +681,11 @@ function SetupWizardContent({
 function InstagramSetupPanel({
   liveState,
   realtimeEnabled,
+  setupSecret,
 }: {
   liveState: SetupState | null | undefined;
   realtimeEnabled: boolean;
+  setupSecret?: string;
 }) {
   const [localState, setLocalState] = useState<SetupState | null>(null);
   const [username, setUsername] = useState("");
@@ -703,12 +722,21 @@ function InstagramSetupPanel({
   const canRestart = !anyPending && !liveStateLoading && Boolean(state?.hasAuth) && status !== "starting" && status !== "authenticating";
   const canReset = !anyPending && (status === "idle" || status === "error" || status === "connected");
   const uiStatusMessage = simplifySetupMessage(state?.message);
+  const setupHeaders = useMemo(
+    () =>
+      setupSecret
+        ? {
+            [getSetupBootstrapHeaderName()]: setupSecret,
+          }
+        : undefined,
+    [setupSecret],
+  );
 
   const refresh = () => {
     void runAction(
       "setup:instagram:refresh",
       async () => {
-        const response = await fetch("/api/setup/instagram/status", { cache: "no-store" });
+        const response = await fetch("/api/setup/instagram/status", { cache: "no-store", headers: setupHeaders });
         const next = await readSetupResponse(response);
         setLocalState(next);
       },
@@ -731,6 +759,7 @@ function InstagramSetupPanel({
           method: "POST",
           headers: {
             "content-type": "application/json",
+            ...(setupHeaders || {}),
           },
           body: JSON.stringify({
             username: username.trim(),
@@ -754,6 +783,7 @@ function InstagramSetupPanel({
           method: "POST",
           headers: {
             "content-type": "application/json",
+            ...(setupHeaders || {}),
           },
           body: JSON.stringify({
             code: challengeCode.trim(),
@@ -774,6 +804,7 @@ function InstagramSetupPanel({
       async () => {
         const response = await fetch("/api/setup/instagram/stop", {
           method: "POST",
+          headers: setupHeaders,
         });
         const next = await readSetupResponse(response);
         setLocalState(next);
@@ -790,6 +821,7 @@ function InstagramSetupPanel({
       async () => {
         const response = await fetch("/api/setup/instagram/restart-worker", {
           method: "POST",
+          headers: setupHeaders,
         });
         const next = await readSetupResponse(response);
         setLocalState(next);
@@ -806,6 +838,7 @@ function InstagramSetupPanel({
       async () => {
         const response = await fetch("/api/setup/instagram/reset", {
           method: "POST",
+          headers: setupHeaders,
         });
         const next = await readSetupResponse(response);
         setLocalState(next);
@@ -839,7 +872,7 @@ function InstagramSetupPanel({
     let cancelled = false;
     const interval = setInterval(async () => {
       try {
-        const response = await fetch("/api/setup/instagram/status", { cache: "no-store" });
+        const response = await fetch("/api/setup/instagram/status", { cache: "no-store", headers: setupHeaders });
         const next = await readSetupResponse(response);
         if (!cancelled) {
           setLocalState(next);
@@ -853,7 +886,7 @@ function InstagramSetupPanel({
       cancelled = true;
       clearInterval(interval);
     };
-  }, [state?.listenerActive, status]);
+  }, [setupHeaders, state?.listenerActive, status]);
 
   return (
     <div className="setup-wizard-card" aria-busy={anyPending}>
@@ -1000,7 +1033,15 @@ function InstagramSetupPanel({
   );
 }
 
-function SetupWizardRealtimeWrapper({ embedded, initialScreen }: { embedded?: boolean; initialScreen?: SetupWizardScreen }) {
+function SetupWizardRealtimeWrapper({
+  embedded,
+  initialScreen,
+  setupSecret,
+}: {
+  embedded?: boolean;
+  initialScreen?: SetupWizardScreen;
+  setupSecret?: string;
+}) {
   const liveState = useQuery(api.system.setupStatus, { provider: "whatsapp" }) as SetupState | null | undefined;
   const instagramLiveState = useQuery(api.system.setupStatus, { provider: "instagram" }) as SetupState | null | undefined;
   return (
@@ -1010,11 +1051,12 @@ function SetupWizardRealtimeWrapper({ embedded, initialScreen }: { embedded?: bo
       realtimeEnabled={true}
       embedded={embedded}
       initialScreen={initialScreen}
+      setupSecret={setupSecret}
     />
   );
 }
 
-export function SetupWizard({ realtimeEnabled, embedded = false, initialScreen = "options" }: SetupWizardProps) {
+export function SetupWizard({ realtimeEnabled, embedded = false, initialScreen = "options", setupSecret }: SetupWizardProps) {
   if (!realtimeEnabled) {
     return (
       <SetupWizardContent
@@ -1023,9 +1065,10 @@ export function SetupWizard({ realtimeEnabled, embedded = false, initialScreen =
         realtimeEnabled={false}
         embedded={embedded}
         initialScreen={initialScreen}
+        setupSecret={setupSecret}
       />
     );
   }
 
-  return <SetupWizardRealtimeWrapper embedded={embedded} initialScreen={initialScreen} />;
+  return <SetupWizardRealtimeWrapper embedded={embedded} initialScreen={initialScreen} setupSecret={setupSecret} />;
 }

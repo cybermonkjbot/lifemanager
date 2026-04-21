@@ -1,5 +1,6 @@
 import { v } from "convex/values";
 import { makeFunctionReference } from "convex/server";
+import { internal } from "./_generated/api";
 import type { Doc } from "./_generated/dataModel";
 import { action, internalMutation, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { DEFAULT_MIMICRY_LEVEL } from "./lib/constants";
@@ -34,6 +35,7 @@ const STYLE_SENSITIVE_PHRASE_PATTERNS = [
 ];
 const STYLE_MAX_COMMON_PHRASE_WORDS = 6;
 const MAX_SAFE_MIMICRY_LEVEL = 0.82;
+const CLEANUP_COMMON_PHRASES_BATCH_SIZE = 50;
 const LOW_VALUE_STYLE_PHRASE_PATTERNS = [
   /\b(?:please|kindly|abeg)\s+(?:just\s+)?(?:allow|pardon)\s+me(?:\s+small)?\b/i,
   /\b(?:allow|pardon)\s+me\s+small\b/i,
@@ -943,13 +945,42 @@ export const cleanupCommonPhrases = mutation({
     dryRun: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
-    const dryRun = args.dryRun ?? false;
-    const now = Date.now();
-    let scannedProfiles = 0;
-    let updatedProfiles = 0;
-    let removedPhraseCount = 0;
+    const result: {
+      dryRun: boolean;
+      scannedProfiles: number;
+      updatedProfiles: number;
+      removedPhraseCount: number;
+      isDone: boolean;
+    } = await ctx.runMutation(internal.style.cleanupCommonPhrasesBatch, {
+      dryRun: args.dryRun ?? false,
+      cursor: null,
+      scannedProfiles: 0,
+      updatedProfiles: 0,
+      removedPhraseCount: 0,
+    });
+    return result;
+  },
+});
 
-    for await (const profile of ctx.db.query("styleProfiles")) {
+export const cleanupCommonPhrasesBatch = internalMutation({
+  args: {
+    dryRun: v.boolean(),
+    cursor: v.union(v.string(), v.null()),
+    scannedProfiles: v.number(),
+    updatedProfiles: v.number(),
+    removedPhraseCount: v.number(),
+  },
+  handler: async (ctx, args) => {
+    const page = await ctx.db
+      .query("styleProfiles")
+      .order("asc")
+      .paginate({ numItems: CLEANUP_COMMON_PHRASES_BATCH_SIZE, cursor: args.cursor });
+    const now = Date.now();
+    let scannedProfiles = args.scannedProfiles;
+    let updatedProfiles = args.updatedProfiles;
+    let removedPhraseCount = args.removedPhraseCount;
+
+    for (const profile of page.page) {
       scannedProfiles += 1;
       const currentPhrases = normalizeTraitList(profile.commonPhrases || [], LEARNED_TRAIT_LIMITS.commonPhrases);
       const nextPhrases = normalizeCommonPhraseList(currentPhrases, LEARNED_TRAIT_LIMITS.commonPhrases, { strict: true });
@@ -960,7 +991,7 @@ export const cleanupCommonPhrases = mutation({
       updatedProfiles += 1;
       removedPhraseCount += Math.max(0, currentPhrases.length - nextPhrases.length);
 
-      if (!dryRun) {
+      if (!args.dryRun) {
         await snapshotProfile(ctx, profile, "pre-common-phrases-cleanup", now);
         await ctx.db.patch(profile._id, {
           commonPhrases: nextPhrases,
@@ -969,7 +1000,17 @@ export const cleanupCommonPhrases = mutation({
       }
     }
 
-    if (!dryRun) {
+    if (!args.dryRun && !page.isDone) {
+      await ctx.scheduler.runAfter(0, internal.style.cleanupCommonPhrasesBatch, {
+        dryRun: false,
+        cursor: page.continueCursor,
+        scannedProfiles,
+        updatedProfiles,
+        removedPhraseCount,
+      });
+    }
+
+    if (!args.dryRun && page.isDone) {
       await ctx.db.insert("systemEvents", {
         source: "convex",
         eventType: "style.commonPhrases.cleanup",
@@ -979,10 +1020,11 @@ export const cleanupCommonPhrases = mutation({
     }
 
     return {
-      dryRun,
+      dryRun: args.dryRun,
       scannedProfiles,
       updatedProfiles,
       removedPhraseCount,
+      isDone: page.isDone,
     } as const;
   },
 });

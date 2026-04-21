@@ -18,7 +18,7 @@
     "dev:all": "concurrently -n next,convex,worker-wa,worker-ig -c cyan,magenta,yellow,green \"bun run dev:next\" \"bun run dev:convex\" \"bun run worker\" \"bun run worker:instagram\"",
     "build": "next build",
     "start": "mkdir -p .slm && sh -lc 'echo $$ > .slm/app.pid; exec next start'",
-    "lint": "eslint"
+    "lint": "bunx eslint ."
   },
   "dependencies": {
     "@azure-rest/ai-inference": "^1.0.0-beta.6",

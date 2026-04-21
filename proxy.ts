@@ -6,6 +6,13 @@ import {
   verifyInstancePinSessionToken,
 } from "./src/lib/instance-pin";
 import { gatewayApiKeyConfigured, requestHasGatewayApiKey } from "./src/lib/api-gateway-auth";
+import {
+  getSetupBootstrapCookieName,
+  isLoopbackHostname,
+  requestHasValidSetupBootstrapSecret,
+  setupBootstrapConfigured,
+  verifySetupBootstrapCookie,
+} from "./src/lib/setup-bootstrap-auth";
 
 const PUBLIC_FILE_REGEX = /\.(?:svg|png|jpg|jpeg|gif|webp|ico|txt|xml)$/i;
 const GATEWAY_PATH_PREFIX = "/api/gateway/";
@@ -34,6 +41,8 @@ function gatewayJsonResponse(status: number, message: string) {
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
   const gatewayRequest = pathname.startsWith(GATEWAY_PATH_PREFIX);
+  const setupApiRequest = pathname.startsWith("/api/setup/");
+  const setupPageRequest = pathname.startsWith("/setup");
   if (
     pathname.startsWith("/_next/") ||
     pathname === "/favicon.ico" ||
@@ -55,8 +64,29 @@ export async function proxy(request: NextRequest) {
   const gate = await resolveInstanceGateState();
 
   if (!gate.setupCompleted) {
-    if (pathname.startsWith("/setup") || pathname.startsWith("/api/setup/")) {
-      return NextResponse.next();
+    if (setupPageRequest || setupApiRequest) {
+      if (!setupApiRequest) {
+        return NextResponse.next();
+      }
+
+      const bootstrapCookie = request.cookies.get(getSetupBootstrapCookieName())?.value;
+      const hasBootstrapAccess =
+        isLoopbackHostname(request.nextUrl.hostname) ||
+        verifySetupBootstrapCookie(bootstrapCookie) ||
+        requestHasValidSetupBootstrapSecret(request.headers);
+      if (hasBootstrapAccess) {
+        return NextResponse.next();
+      }
+
+      const detail = setupBootstrapConfigured()
+        ? "Setup is locked. Complete first-run setup from localhost or provide a valid setup bootstrap secret."
+        : "Setup is locked. Complete first-run setup from localhost or configure SLM_SETUP_SECRET for remote bootstrap.";
+      return NextResponse.json(
+        {
+          error: detail,
+        },
+        { status: 403 },
+      );
     }
 
     if (gatewayRequest) {
@@ -66,7 +96,14 @@ export async function proxy(request: NextRequest) {
     return NextResponse.redirect(new URL("/setup", request.url), 302);
   }
 
+  if (gatewayRequest && !gatewayApiKeyConfigured()) {
+    return gatewayJsonResponse(503, "API gateway is disabled until SLM_API_GATEWAY_KEY is configured.");
+  }
+
   if (!gate.pinEnabled) {
+    if (gatewayRequest && !gatewayApiKeyConfigured()) {
+      return gatewayJsonResponse(503, "API gateway is disabled until SLM_API_GATEWAY_KEY is configured.");
+    }
     return NextResponse.next();
   }
 
