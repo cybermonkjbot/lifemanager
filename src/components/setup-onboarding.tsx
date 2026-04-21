@@ -2,6 +2,7 @@
 
 import { ActionNotices } from "@/components/action-notices";
 import { SetupWizard } from "@/components/setup-wizard";
+import { getSetupBootstrapHeaderName } from "@/lib/setup-bootstrap-auth";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
 import { api } from "../../convex/_generated/api";
 import {
@@ -141,6 +142,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
   const [preferences, setPreferences] = useState<InstanceSetupPreferences>(
     initialInstanceState.preferences || DEFAULT_INSTANCE_SETUP_PREFERENCES,
   );
+  const [setupSecret, setSetupSecret] = useState("");
   const [pin, setPin] = useState("");
   const [pinConfirm, setPinConfirm] = useState("");
   const { runAction, getRecord, notices, dismissNotice } = useActionStateRegistry();
@@ -208,6 +210,11 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
           method: "POST",
           headers: {
             "content-type": "application/json",
+            ...(setupSecret.trim()
+              ? {
+                  [getSetupBootstrapHeaderName()]: setupSecret.trim(),
+                }
+              : {}),
           },
           body: JSON.stringify(payload),
         });
@@ -304,6 +311,16 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                 <p className="setup-summary-item">Preferences save a real runtime baseline instead of asking you to discover settings later.</p>
                 <p className="setup-summary-item">Channel setup remains live and operational, but it now sits inside a guided onboarding tunnel.</p>
               </div>
+              <label className="setup-input-group">
+                <span className="queue-meta">Setup bootstrap secret</span>
+                <input
+                  type="password"
+                  value={setupSecret}
+                  placeholder="Only needed for remote first-run when SLM_SETUP_SECRET is configured"
+                  onChange={(event) => setSetupSecret(event.target.value)}
+                  autoComplete="off"
+                />
+              </label>
               <div className="wizard-actions">
                 <button className="btn btn-primary" type="button" onClick={() => setStage("security")}>
                   Start setup
@@ -323,6 +340,17 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                 <p className="queue-title">Security posture</p>
                 <p className="queue-meta">{pinRequiredCopy}</p>
               </div>
+
+              <label className="setup-input-group">
+                <span className="queue-meta">Setup bootstrap secret</span>
+                <input
+                  type="password"
+                  value={setupSecret}
+                  placeholder="Only needed for remote first-run when SLM_SETUP_SECRET is configured"
+                  onChange={(event) => setSetupSecret(event.target.value)}
+                  autoComplete="off"
+                />
+              </label>
 
               {!envManagedPin ? (
                 <div className="setup-form-grid">
@@ -559,7 +587,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                   <p className="queue-meta">{simplifyConnectionStatus(instagramLiveState, "Instagram")}</p>
                 </div>
               </div>
-              <SetupWizard realtimeEnabled={realtimeEnabled} embedded initialScreen="whatsapp" />
+              <SetupWizard realtimeEnabled={realtimeEnabled} embedded initialScreen="whatsapp" setupSecret={setupSecret.trim()} />
               <div className="wizard-actions">
                 <button className="btn btn-primary" type="button" onClick={() => setStage("finish")}>
                   Continue to finish

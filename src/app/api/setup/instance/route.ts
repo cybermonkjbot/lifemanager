@@ -16,12 +16,22 @@ import {
   resolveInstancePinSource,
 } from "@/lib/instance-pin";
 import { DEFAULT_INSTANCE_SETUP_PREFERENCES, type InstanceSetupPreferences } from "@/lib/instance-setup-types";
+import {
+  buildSetupBootstrapCookie,
+  clearSetupBootstrapCookieOptions,
+  getSetupBootstrapCookieName,
+  getSetupBootstrapCookieOptions,
+  isLoopbackHostname,
+  requestHasValidSetupBootstrapSecret,
+  setupBootstrapConfigured,
+} from "@/lib/setup-bootstrap-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type SetupInstancePayload = {
   pin?: unknown;
+  setupSecret?: unknown;
   preferences?: Partial<InstanceSetupPreferences> | null;
   setupCompleted?: unknown;
   issueSession?: unknown;
@@ -81,6 +91,16 @@ export async function POST(request: NextRequest) {
 
   try {
     const current = await readLocalInstanceConfig();
+    const currentState = await resolveInstanceSetupState();
+    const isLocalBootstrap = isLoopbackHostname(request.nextUrl.hostname);
+    const hasValidSetupSecret = requestHasValidSetupBootstrapSecret(request.headers);
+    if (!currentState.setupCompleted && !isLocalBootstrap && !hasValidSetupSecret) {
+      const message = setupBootstrapConfigured()
+        ? "Remote setup requires the configured setup bootstrap secret."
+        : "Remote setup is disabled until SLM_SETUP_SECRET is configured. Complete setup from localhost instead.";
+      return NextResponse.json({ error: message }, { status: 403 });
+    }
+
     const pinSource = await resolveInstancePinSource();
     const requestedPin = typeof payload.pin === "string" ? payload.pin.trim() : "";
     const nextPreferences = sanitizeInstanceSetupPreferences({
@@ -145,6 +165,12 @@ export async function POST(request: NextRequest) {
     if (canIssueSession) {
       const token = await buildInstancePinSessionToken();
       response.cookies.set(getInstancePinCookieName(), token, getInstancePinCookieOptions());
+    }
+
+    if (nextConfig.setupCompleted) {
+      response.cookies.set(getSetupBootstrapCookieName(), "", clearSetupBootstrapCookieOptions());
+    } else if (setupBootstrapConfigured() && (isLocalBootstrap || hasValidSetupSecret)) {
+      response.cookies.set(getSetupBootstrapCookieName(), buildSetupBootstrapCookie(), getSetupBootstrapCookieOptions());
     }
 
     return response;
