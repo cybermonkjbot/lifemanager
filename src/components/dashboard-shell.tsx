@@ -1,4 +1,5 @@
 import { ConvexAppProvider } from "@/components/convex-app-provider";
+import { requireInstancePageAccess } from "@/lib/instance-guard";
 import { LogWatcher } from "@/components/log-watcher";
 import { RuntimeStateOverlay } from "@/components/runtime-state-overlay";
 import { ShellControlsModal } from "@/components/shell-controls-modal";
@@ -29,6 +30,8 @@ export async function DashboardShell({
   hideViewHeader = false,
   hideShellChrome = false,
 }: DashboardShellProps) {
+  await requireInstancePageAccess();
+
   const realtimeEnabled = Boolean(convexUrl);
   const pinEnabled = await isInstancePinEnabled();
 

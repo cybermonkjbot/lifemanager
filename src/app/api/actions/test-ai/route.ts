@@ -1,5 +1,6 @@
 import { createConvexClient } from "@/lib/convex-server";
 import { convexRefs } from "@/lib/convex-refs";
+import { requireInstanceApiAccess } from "@/lib/instance-guard";
 import { generateReplyWithFallback } from "@/worker/ai";
 import { NextResponse } from "next/server";
 
@@ -77,6 +78,11 @@ function getErrorMessage(error: unknown) {
 }
 
 export async function POST(request: Request) {
+  const unauthorized = await requireInstanceApiAccess(request);
+  if (unauthorized) {
+    return unauthorized;
+  }
+
   let payload: { message?: unknown; threadId?: unknown };
 
   try {

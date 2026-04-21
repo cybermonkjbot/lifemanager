@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { createConvexClient } from "@/lib/convex-server";
 import { convexRefs } from "@/lib/convex-refs";
+import { requireInstanceApiAccess } from "@/lib/instance-guard";
 import { generateMemeImageWithAzure } from "@/worker/ai";
 import { NextResponse } from "next/server";
 
@@ -77,6 +78,11 @@ function resolveGenerationFailureStatus(errorMessage: string) {
 }
 
 export async function POST(request: Request) {
+  const unauthorized = await requireInstanceApiAccess(request);
+  if (unauthorized) {
+    return unauthorized;
+  }
+
   let payload: {
     prompt?: unknown;
     label?: unknown;

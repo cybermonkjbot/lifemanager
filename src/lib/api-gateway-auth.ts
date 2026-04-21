@@ -1,3 +1,5 @@
+import { timingSafeEqual } from "node:crypto";
+
 const BEARER_PREFIX = "bearer ";
 
 function normalizeToken(value: string | null | undefined) {
@@ -16,6 +18,12 @@ function extractBearerToken(authorizationHeader: string | null | undefined) {
   return header.slice(BEARER_PREFIX.length).trim();
 }
 
+function secureTokenEquals(left: string, right: string) {
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+  return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
+}
+
 export function getGatewayApiKey() {
   return normalizeToken(process.env.SLM_API_GATEWAY_KEY);
 }
@@ -30,9 +38,9 @@ export function requestHasGatewayApiKey(headers: Pick<Headers, "get">) {
     return false;
   }
   const bearerToken = extractBearerToken(headers.get("authorization"));
-  if (bearerToken && bearerToken === configuredKey) {
+  if (bearerToken && secureTokenEquals(bearerToken, configuredKey)) {
     return true;
   }
   const xApiKey = normalizeToken(headers.get("x-api-key"));
-  return xApiKey.length > 0 && xApiKey === configuredKey;
+  return xApiKey.length > 0 && secureTokenEquals(xApiKey, configuredKey);
 }
