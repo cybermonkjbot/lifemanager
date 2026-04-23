@@ -3,6 +3,7 @@ import type { Id } from "./_generated/dataModel";
 import type { QueryCtx } from "./_generated/server";
 import { internalQuery, mutation, query } from "./_generated/server";
 import { getConfig } from "./lib/config";
+import { isQueueDraftStale, isTodoCandidateStale } from "./lib/staleness";
 import {
   classifyThreadKind,
   directIgnoreContactKey,
@@ -601,6 +602,7 @@ export const get = query({
     includeStatusMessages: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
+    const now = Date.now();
     const thread = await ctx.db.get(args.threadId);
     if (!thread) {
       return null;
@@ -624,7 +626,7 @@ export const get = query({
       .withIndex("by_thread", (q) => q.eq("threadId", args.threadId))
       .order("desc")
       .take(220);
-    const pendingDrafts = draftRows.filter((draft) => draft.status === "pending").slice(0, 40);
+    const pendingDraftCandidates = draftRows.filter((draft) => draft.status === "pending").slice(0, 40);
 
     const followupRows = await ctx.db
       .query("followUps")
@@ -639,7 +641,7 @@ export const get = query({
       .query("todoCandidates")
       .withIndex("by_thread", (q) => q.eq("threadId", args.threadId))
       .take(220);
-    const todoCandidates = todoRows
+    const todoCandidateRows = todoRows
       .filter((row) => row.status === "suggested")
       .sort((left, right) => right.createdAt - left.createdAt)
       .slice(0, 40);
@@ -707,13 +709,13 @@ export const get = query({
     }
 
     const sourceMessageIds = new Set<Id<"messages">>();
-    for (const draft of pendingDrafts) {
+    for (const draft of pendingDraftCandidates) {
       sourceMessageIds.add(draft.sourceMessageId);
     }
     for (const followup of followupConfirmations) {
       sourceMessageIds.add(followup.sourceMessageId);
     }
-    for (const todo of todoCandidates) {
+    for (const todo of todoCandidateRows) {
       sourceMessageIds.add(todo.sourceMessageId);
     }
     for (const guardrail of guardrailFlags) {
@@ -752,7 +754,7 @@ export const get = query({
         mediaAssetIds.add(message.mediaAssetId);
       }
     }
-    for (const draft of pendingDrafts) {
+    for (const draft of pendingDraftCandidates) {
       if (draft.mediaAssetId) {
         mediaAssetIds.add(draft.mediaAssetId);
       }
@@ -779,6 +781,38 @@ export const get = query({
         });
       }),
     );
+
+    const pendingDrafts = (
+      await Promise.all(
+        pendingDraftCandidates.map(async (draft) => {
+          const sourceMessage = sourceMessageById.get(draft.sourceMessageId) || null;
+          const stale = await isQueueDraftStale({
+            ctx,
+            draft,
+            thread,
+            sourceMessage,
+            now,
+          });
+          return stale ? null : draft;
+        }),
+      )
+    ).filter((draft) => draft !== null);
+
+    const todoCandidates = (
+      await Promise.all(
+        todoCandidateRows.map(async (candidate) => {
+          const sourceMessage = sourceMessageById.get(candidate.sourceMessageId) || null;
+          const stale = await isTodoCandidateStale({
+            ctx,
+            candidate,
+            thread,
+            sourceMessage,
+            now,
+          });
+          return stale ? null : candidate;
+        }),
+      )
+    ).filter((candidate) => candidate !== null);
 
     const messageIds = visibleMessages.map((message) => message._id);
     let reactions: Array<{

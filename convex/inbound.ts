@@ -32,7 +32,7 @@ type MessageProvider = "whatsapp" | "instagram";
 
 type IngestHistoricalResult = {
   threadId: Id<"threads">;
-  messageId: Id<"messages">;
+  messageId?: Id<"messages">;
   duplicate: boolean;
   ingestMode?: IngestMode;
   ignored?: boolean;
@@ -163,6 +163,22 @@ export function shouldScheduleDraftGeneration(args: {
   return true;
 }
 
+export function isInboundStale(args: {
+  isHistoryIngest: boolean;
+  messageAt: number;
+  latestMessageAt?: number;
+  staleGraceMs?: number;
+}) {
+  if (args.isHistoryIngest) {
+    return false;
+  }
+  if (!Number.isFinite(args.latestMessageAt) || (args.latestMessageAt || 0) <= 0) {
+    return false;
+  }
+  const graceMs = Math.max(1_000, Math.round(args.staleGraceMs ?? INBOUND_STALE_GRACE_MS));
+  return args.messageAt + graceMs < Number(args.latestMessageAt);
+}
+
 async function resetRomanceMorningNoReplyState(args: {
   ctx: MutationCtx;
   threadId: Id<"threads">;
@@ -291,6 +307,20 @@ export const ingest = mutation({
     const config = await getConfig(ctx);
     const inputThreadKind =
       args.threadKind || classifyThreadKind({ jid: args.threadJid, isGroupHint: args.isGroup, provider: messageProvider });
+    if (!thread && inputThreadKind === "direct") {
+      for (const candidateJid of directIgnoreRuleCandidates({ jid: args.threadJid, provider: messageProvider })) {
+        if (candidateJid === args.threadJid) {
+          continue;
+        }
+        thread = await ctx.db
+          .query("threads")
+          .withIndex("by_provider_and_jid", (q) => q.eq("provider", messageProvider).eq("jid", candidateJid))
+          .first();
+        if (thread) {
+          break;
+        }
+      }
+    }
     const shouldIgnoreGroup = inputThreadKind === "group" && config.ignoreGroupsByDefault;
     const normalizedArchivedAt = normalizeTimestampMs(args.archivedAt, messageAt);
 
@@ -431,8 +461,16 @@ export const ingest = mutation({
           .order("desc")
           .take(GHOST_ACTIVITY_WINDOW_MESSAGE_LIMIT);
 
-    const latestMessage = recentWindowMessages[0];
-    const stale = isHistoryIngest ? false : Boolean(latestMessage && messageAt + INBOUND_STALE_GRACE_MS < latestMessage.messageAt);
+    const latestThreadMessage = await ctx.db
+      .query("messages")
+      .withIndex("by_thread_messageAt", (q) => q.eq("threadId", thread._id))
+      .order("desc")
+      .first();
+    const stale = isInboundStale({
+      isHistoryIngest,
+      messageAt,
+      latestMessageAt: latestThreadMessage?.messageAt,
+    });
 
     const shouldEvaluateCallBarrier =
       !isHistoryIngest &&
@@ -501,6 +539,32 @@ export const ingest = mutation({
     });
     const blockedReason = eligibility.allowed ? undefined : eligibility.reason;
     const ignored = isHistoryIngest ? false : Boolean(blockedReason);
+
+    if (!isHistoryIngest && blockedReason === "explicit_ignore") {
+      await ctx.db.insert("systemEvents", {
+        source: "worker",
+        eventType: "inbound.ignored",
+        threadId: thread._id,
+        detail: `${blockedReason}: ${eligibilityReasonLabel(blockedReason)}`,
+        createdAt: now,
+      });
+      return {
+        threadId: thread._id,
+        messageId: "",
+        ignored: true,
+        blockedReason,
+        duplicate: false,
+        stale,
+        messageType,
+        reactionTargetMessageId: undefined,
+        promiseDetected: false,
+        todoDetected: false,
+        ingestMode,
+        nightPausedUntil,
+        callReplyBarrierAt,
+        callReplyBarrierBlocked,
+      };
+    }
 
     let reactionTargetMessageId: Id<"messages"> | undefined;
     const reactionTargetProviderMessageId = args.reactionTargetWhatsAppMessageId;
@@ -874,6 +938,76 @@ export const ingestHistorical = mutation({
         lastMessageAt: isStatusMessage ? thread.lastMessageAt : Math.max(thread.lastMessageAt, messageAt),
         updatedAt: now,
       });
+    }
+
+    if (args.direction === "inbound") {
+      const config = await getConfig(ctx);
+      let explicitIgnore =
+        threadKind === "group"
+          ? await ctx.db
+              .query("ignoreRules")
+              .withIndex("by_target", (q) => q.eq("targetType", "group").eq("targetValue", args.threadJid))
+              .first()
+          : null;
+      if (!explicitIgnore && threadKind === "direct") {
+        for (const candidateJid of directIgnoreRuleCandidates({ jid: args.threadJid, provider: messageProvider })) {
+          explicitIgnore = await ctx.db
+            .query("ignoreRules")
+            .withIndex("by_target", (q) => q.eq("targetType", "contact").eq("targetValue", candidateJid))
+            .first();
+          if (explicitIgnore) {
+            break;
+          }
+        }
+      }
+      if (!explicitIgnore && threadKind === "direct") {
+        const lookupKey = directIgnoreContactKey({ jid: args.threadJid, provider: messageProvider });
+        if (lookupKey) {
+          const contactRules = await ctx.db
+            .query("ignoreRules")
+            .withIndex("by_type", (q) => q.eq("targetType", "contact"))
+            .take(IGNORE_CONTACT_FALLBACK_SCAN_LIMIT);
+          explicitIgnore =
+            contactRules.find(
+              (rule) =>
+                directIgnoreContactKey({
+                  jid: rule.targetValue,
+                  provider: messageProvider,
+                }) === lookupKey,
+            ) || null;
+        }
+      }
+
+      const eligibility = resolveThreadEligibility({
+        thread: {
+          jid: thread.jid,
+          isIgnored: thread.isIgnored,
+          isArchived: thread.isArchived,
+          threadKind,
+          ghostedUntil: thread.ghostedUntil,
+        },
+        ignoreGroupsByDefault: config.ignoreGroupsByDefault,
+        explicitIgnoreEnabled: Boolean(explicitIgnore?.enabled),
+        groupRuleEnabled: threadKind === "group" ? explicitIgnore?.enabled : undefined,
+        nowMs: now,
+      });
+
+      if (!eligibility.allowed && eligibility.reason === "explicit_ignore") {
+        await ctx.db.insert("systemEvents", {
+          source: "worker",
+          eventType: args.ingestMode === "history_fetch" ? "inbound.history_fetch.ignored" : "inbound.history_sync.ignored",
+          threadId: thread._id,
+          detail: `${eligibility.reason}: ${eligibilityReasonLabel(eligibility.reason)}`,
+          createdAt: now,
+        });
+        return {
+          threadId: thread._id,
+          duplicate: false,
+          ingestMode: args.ingestMode,
+          ignored: true,
+          blockedReason: eligibility.reason,
+        };
+      }
     }
 
     const effectiveMessageId = args.providerMessageId || args.whatsappMessageId;

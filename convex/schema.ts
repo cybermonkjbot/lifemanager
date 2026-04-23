@@ -161,11 +161,18 @@ export default defineSchema({
     sourceMessageId: v.optional(v.id("messages")),
     sourceMessageAt: v.optional(v.number()),
     sourceExcerpt: v.optional(v.string()),
+    factStatus: v.optional(
+      v.union(v.literal("active"), v.literal("superseded"), v.literal("expired"), v.literal("quarantined")),
+    ),
+    expiresAt: v.optional(v.number()),
+    supersededAt: v.optional(v.number()),
+    supersededByFactKey: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
     .index("by_thread_and_key", ["threadId", "factKey"])
     .index("by_thread_and_updatedAt", ["threadId", "updatedAt"])
+    .index("by_thread_and_factStatus_and_updatedAt", ["threadId", "factStatus", "updatedAt"])
     .index("by_thread_and_type_and_updatedAt", ["threadId", "factType", "updatedAt"])
     .index("by_updatedAt", ["updatedAt"]),
 
@@ -459,6 +466,24 @@ export default defineSchema({
   })
     .index("by_thread", ["threadId"])
     .index("by_profileSlug", ["profileSlug"]),
+
+  relationshipThreadState: defineTable({
+    threadId: v.id("threads"),
+    profileSlug: v.optional(v.string()),
+    priorityTier: v.union(v.literal("romantic"), v.literal("professional"), v.literal("general")),
+    trustScore: v.number(),
+    warmthTrend: v.union(v.literal(-1), v.literal(0), v.literal(1)),
+    conflictFlag: v.boolean(),
+    responsivenessMismatch: v.boolean(),
+    repairNeeded: v.boolean(),
+    lastReason: v.optional(v.string()),
+    lastInboundAt: v.optional(v.number()),
+    updatedAt: v.number(),
+    createdAt: v.number(),
+  })
+    .index("by_thread", ["threadId"])
+    .index("by_priorityTier_and_updatedAt", ["priorityTier", "updatedAt"])
+    .index("by_updatedAt", ["updatedAt"]),
 
   ignoreRules: defineTable({
     targetType: v.union(v.literal("contact"), v.literal("group"), v.literal("keyword")),

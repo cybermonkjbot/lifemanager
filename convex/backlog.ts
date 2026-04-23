@@ -4,7 +4,7 @@ import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { internalMutation, mutation, query } from "./_generated/server";
 import { detectPromiseOrPlan, detectTodoCandidate, estimateHumanTiming, evaluateGuardrail, looksLikeQuestion } from "./lib/heuristics";
-import { classifyThreadKind } from "./lib/threadEligibility";
+import { classifyThreadKind, directIgnoreRuleCandidates } from "./lib/threadEligibility";
 import { setConfigValue } from "./lib/config";
 
 type RelationshipKind = "girlfriend" | "relationship" | "friendship" | "casual" | "family" | "business";
@@ -968,25 +968,33 @@ export const ignoreThread = mutation({
       updatedAt: now,
     });
 
+    const threadKind = resolveThreadKind(thread);
     const targetType = resolveIgnoreTargetType(thread);
-    const existingRule = await ctx.db
-      .query("ignoreRules")
-      .withIndex("by_target", (q) => q.eq("targetType", targetType).eq("targetValue", thread.jid))
-      .first();
+    const ignoreTargets =
+      targetType === "contact" && (thread.provider || "whatsapp") === "whatsapp" && threadKind === "direct"
+        ? directIgnoreRuleCandidates({ jid: thread.jid, provider: "whatsapp" })
+        : [thread.jid];
 
-    if (existingRule) {
-      await ctx.db.patch(existingRule._id, {
-        enabled: args.enabled,
-        updatedAt: now,
-      });
-    } else {
-      await ctx.db.insert("ignoreRules", {
-        targetType,
-        targetValue: thread.jid,
-        enabled: args.enabled,
-        createdAt: now,
-        updatedAt: now,
-      });
+    for (const targetValue of new Set(ignoreTargets)) {
+      const existingRule = await ctx.db
+        .query("ignoreRules")
+        .withIndex("by_target", (q) => q.eq("targetType", targetType).eq("targetValue", targetValue))
+        .first();
+
+      if (existingRule) {
+        await ctx.db.patch(existingRule._id, {
+          enabled: args.enabled,
+          updatedAt: now,
+        });
+      } else {
+        await ctx.db.insert("ignoreRules", {
+          targetType,
+          targetValue,
+          enabled: args.enabled,
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
     }
 
     const state = await ctx.db

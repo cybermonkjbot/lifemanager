@@ -1,7 +1,7 @@
 import { v } from "convex/values";
 import { makeFunctionReference } from "convex/server";
 import { internal } from "./_generated/api";
-import { internalMutation, mutation, query, type MutationCtx } from "./_generated/server";
+import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import type { Doc } from "./_generated/dataModel";
 import { detectFutureCommitment, hasRecentFollowupDuplicate } from "./lib/commitments";
 import { DEFAULT_LEASE_MS, DEFAULT_RETRY_LIMIT } from "./lib/constants";
@@ -23,6 +23,8 @@ import {
 import type { OutreachMode } from "./lib/outreachModes";
 import {
   classifyThreadKind,
+  directIgnoreContactKey,
+  directIgnoreRuleCandidates,
   eligibilityReasonLabel,
   resolveThreadEligibility,
 } from "./lib/threadEligibility";
@@ -40,6 +42,47 @@ const refChatRebuildThreadStyleProfile = makeFunctionReference<"mutation">("chat
 type MessageProvider = "whatsapp" | "instagram";
 const OUTBOUND_DUPLICATE_WINDOW_MS = 6 * 60 * 60 * 1000;
 const OUTBOUND_DUPLICATE_MIN_KEY_LENGTH = 16;
+const IGNORE_CONTACT_FALLBACK_SCAN_LIMIT = 1000;
+
+async function findExplicitIgnoreRule(args: {
+  ctx: MutationCtx | QueryCtx;
+  threadKind: "direct" | "group" | "broadcast_or_system";
+  jid: string;
+  provider?: "whatsapp" | "instagram";
+}) {
+  if (args.threadKind === "group") {
+    return await args.ctx.db
+      .query("ignoreRules")
+      .withIndex("by_target", (q) => q.eq("targetType", "group").eq("targetValue", args.jid))
+      .first();
+  }
+  if (args.threadKind !== "direct") {
+    return null;
+  }
+
+  const provider = args.provider || "whatsapp";
+  for (const candidateJid of directIgnoreRuleCandidates({ jid: args.jid, provider })) {
+    const rule = await args.ctx.db
+      .query("ignoreRules")
+      .withIndex("by_target", (q) => q.eq("targetType", "contact").eq("targetValue", candidateJid))
+      .first();
+    if (rule) {
+      return rule;
+    }
+  }
+
+  const lookupKey = directIgnoreContactKey({ jid: args.jid, provider });
+  if (!lookupKey) {
+    return null;
+  }
+  const rules = await args.ctx.db
+    .query("ignoreRules")
+    .withIndex("by_type", (q) => q.eq("targetType", "contact"))
+    .take(IGNORE_CONTACT_FALLBACK_SCAN_LIMIT);
+  return (
+    rules.find((rule) => directIgnoreContactKey({ jid: rule.targetValue, provider }) === lookupKey) || null
+  );
+}
 
 export function resolveClaimOutreachMode(
   input?:
@@ -750,12 +793,12 @@ export const claimDue = mutation({
       const isStatusBroadcastSend =
         item.isStatusPost === true && (thread.jid === "status@broadcast" || thread.jid === "ig:story:broadcast");
       if (!isStatusBroadcastSend) {
-        const explicitIgnore = await ctx.db
-          .query("ignoreRules")
-          .withIndex("by_target", (q) =>
-            q.eq("targetType", threadKind === "group" ? "group" : "contact").eq("targetValue", thread.jid),
-          )
-          .first();
+        const explicitIgnore = await findExplicitIgnoreRule({
+          ctx,
+          threadKind,
+          jid: thread.jid,
+          provider: thread.provider || "whatsapp",
+        });
         const eligibility = resolveThreadEligibility({
           thread: {
             jid: thread.jid,
@@ -1032,6 +1075,32 @@ export const getSendDisposition = query({
       };
     }
     const threadKind = thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup, provider: thread.provider });
+    const config = await getConfig(ctx);
+    const explicitIgnore = await findExplicitIgnoreRule({
+      ctx,
+      threadKind,
+      jid: thread.jid,
+      provider: thread.provider || "whatsapp",
+    });
+    const eligibility = resolveThreadEligibility({
+      thread: {
+        jid: thread.jid,
+        isIgnored: thread.isIgnored,
+        isArchived: thread.isArchived,
+        threadKind,
+        ghostedUntil: thread.ghostedUntil,
+      },
+      ignoreGroupsByDefault: config.ignoreGroupsByDefault,
+      explicitIgnoreEnabled: Boolean(explicitIgnore?.enabled),
+      groupRuleEnabled: threadKind === "group" ? explicitIgnore?.enabled : undefined,
+      nowMs: Date.now(),
+    });
+    if (!eligibility.allowed && eligibility.reason !== "temporary_ghost") {
+      return {
+        canSend: false,
+        reason: `eligibility_blocked:${eligibility.reason}`,
+      };
+    }
     if (threadKind === "direct" && (thread.callReplyBarrierAt || 0) > 0) {
       return {
         canSend: false,
@@ -1865,6 +1934,39 @@ export const markFailed = mutation({
       threadId: item.threadId,
     });
 
+    return item._id;
+  },
+});
+
+export const deferClaimed = mutation({
+  args: {
+    outboxId: v.id("outbox"),
+    sendAt: v.number(),
+    reason: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const item = await ctx.db.get(args.outboxId);
+    if (!item) {
+      return null;
+    }
+    const now = Date.now();
+    const nextSendAt = Math.max(now + 1_000, Math.round(args.sendAt));
+    await ctx.db.patch(item._id, {
+      status: "pending",
+      sendAt: nextSendAt,
+      leaseExpiresAt: undefined,
+      workerId: undefined,
+      updatedAt: now,
+      error: args.reason.slice(0, 300),
+    });
+    await ctx.db.insert("systemEvents", {
+      source: "worker",
+      eventType: "outbox.deferred.time_window",
+      threadId: item.threadId,
+      outboxId: item._id,
+      detail: `${args.reason.slice(0, 220)}; nextSendAt=${new Date(nextSendAt).toISOString()}`,
+      createdAt: now,
+    });
     return item._id;
   },
 });

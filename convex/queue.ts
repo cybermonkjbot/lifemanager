@@ -1,6 +1,8 @@
 import { v } from "convex/values";
 import type { Id } from "./_generated/dataModel";
-import { mutation, query } from "./_generated/server";
+import { internal } from "./_generated/api";
+import { internalMutation, mutation, query } from "./_generated/server";
+import { isQueueDraftStale, isTodoCandidateStale } from "./lib/staleness";
 
 export const list = query({
   args: {
@@ -12,6 +14,7 @@ export const list = query({
     includeResolvedGuardrails: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
+    const now = Date.now();
     const messageProvider = args.provider || "all";
     const draftLimit = Math.min(args.draftLimit ?? 40, 100);
     const followupLimit = Math.min(args.followupLimit ?? 40, 100);
@@ -96,10 +99,18 @@ export const list = query({
       pendingDrafts.map(async (draft) => {
         const thread = await ctx.db.get(draft.threadId);
         const sourceMessage = await ctx.db.get(draft.sourceMessageId);
+        const stale = await isQueueDraftStale({
+          ctx,
+          draft,
+          thread,
+          sourceMessage,
+          now,
+        });
         const draftMediaPreview = await loadMediaPreview(draft.mediaAssetId);
         const sourceMediaPreview = await loadMediaPreview(sourceMessage?.mediaAssetId);
         return {
           ...draft,
+          stale,
           thread,
           mediaPreview: draftMediaPreview,
           sourceMessage: sourceMessage
@@ -141,8 +152,16 @@ export const list = query({
           ctx.db.get(candidate.threadId),
           ctx.db.get(candidate.sourceMessageId),
         ]);
+        const stale = await isTodoCandidateStale({
+          ctx,
+          candidate,
+          thread,
+          sourceMessage,
+          now,
+        });
         return {
           ...candidate,
+          stale,
           thread,
           sourceMessage: sourceMessage
             ? {
@@ -169,17 +188,116 @@ export const list = query({
     return {
       needsReply:
         messageProvider === "all"
-          ? enrichedDrafts
-          : enrichedDrafts.filter((draft) => (draft.thread?.provider || draft.messageProvider || "whatsapp") === messageProvider),
+          ? enrichedDrafts.filter((draft) => !draft.stale)
+          : enrichedDrafts.filter(
+              (draft) =>
+                !draft.stale && (draft.thread?.provider || draft.messageProvider || "whatsapp") === messageProvider,
+            ),
       followupConfirmations: enrichedFollowups,
       todoCandidates:
         messageProvider === "all"
-          ? enrichedTodoCandidates
-          : enrichedTodoCandidates.filter((item) => (item.thread?.provider || "whatsapp") === messageProvider),
+          ? enrichedTodoCandidates.filter((item) => !item.stale)
+          : enrichedTodoCandidates.filter(
+              (item) => !item.stale && (item.thread?.provider || "whatsapp") === messageProvider,
+            ),
       guardrailFlags:
         messageProvider === "all"
           ? enrichedGuardrailFlags
           : enrichedGuardrailFlags.filter((item) => (item.thread?.provider || "whatsapp") === messageProvider),
+    };
+  },
+});
+
+export const removeStaleQueueEntries = internalMutation({
+  args: {
+    draftLimit: v.optional(v.number()),
+    todoLimit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    const draftLimit = Math.min(Math.max(5, Math.round(args.draftLimit ?? 40)), 200);
+    const todoLimit = Math.min(Math.max(5, Math.round(args.todoLimit ?? 40)), 200);
+
+    const [pendingDrafts, suggestedTodos] = await Promise.all([
+      ctx.db
+        .query("replyDrafts")
+        .withIndex("by_status", (q) => q.eq("status", "pending"))
+        .order("desc")
+        .take(draftLimit),
+      ctx.db
+        .query("todoCandidates")
+        .withIndex("by_status", (q) => q.eq("status", "suggested"))
+        .order("desc")
+        .take(todoLimit),
+    ]);
+
+    let staleDrafts = 0;
+    let staleTodoCandidates = 0;
+    const touchedThreads = new Set<Id<"threads">>();
+
+    for (const draft of pendingDrafts) {
+      const [thread, sourceMessage] = await Promise.all([ctx.db.get(draft.threadId), ctx.db.get(draft.sourceMessageId)]);
+      const stale = await isQueueDraftStale({
+        ctx,
+        draft,
+        thread,
+        sourceMessage,
+        now,
+      });
+      if (!stale) {
+        continue;
+      }
+      await ctx.db.patch(draft._id, {
+        status: "rejected",
+        reason: draft.reason || "Auto-removed as stale from queue.",
+        updatedAt: now,
+      });
+      staleDrafts += 1;
+      touchedThreads.add(draft.threadId);
+    }
+
+    for (const candidate of suggestedTodos) {
+      const [thread, sourceMessage] = await Promise.all([ctx.db.get(candidate.threadId), ctx.db.get(candidate.sourceMessageId)]);
+      const stale = await isTodoCandidateStale({
+        ctx,
+        candidate,
+        thread,
+        sourceMessage,
+        now,
+      });
+      if (!stale) {
+        continue;
+      }
+      await ctx.db.patch(candidate._id, {
+        status: "dismissed",
+        updatedAt: now,
+      });
+      staleTodoCandidates += 1;
+      touchedThreads.add(candidate.threadId);
+    }
+
+    for (const threadId of touchedThreads) {
+      await ctx.scheduler.runAfter(0, internal.backlog.refreshThread, {
+        threadId,
+      });
+    }
+
+    const removed = staleDrafts + staleTodoCandidates;
+    if (removed > 0) {
+      await ctx.db.insert("systemEvents", {
+        source: "convex",
+        eventType: "queue.stale.cleaned",
+        detail: `Auto-removed ${staleDrafts} stale draft(s) and ${staleTodoCandidates} stale TODO candidate(s).`,
+        createdAt: now,
+      });
+    }
+
+    return {
+      staleDrafts,
+      staleTodoCandidates,
+      removed,
+      scannedDrafts: pendingDrafts.length,
+      scannedTodoCandidates: suggestedTodos.length,
     };
   },
 });

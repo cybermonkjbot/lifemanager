@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   extractAliasesFromText,
   hasGoodActiveChattingWindow,
+  isInboundStale,
   shouldScheduleDraftGeneration,
   shouldEnterGhostMode,
   shouldResetRomanceMorningNoReplyState,
@@ -255,4 +256,33 @@ test("shouldResetRomanceMorningNoReplyState only resets on inbound after last se
     }),
     false,
   );
+});
+
+test("isInboundStale detects stale inbound against latest thread message even after long downtime", () => {
+  const stale = isInboundStale({
+    isHistoryIngest: false,
+    messageAt: 1_000,
+    latestMessageAt: 10_000,
+    staleGraceMs: 2_000,
+  });
+  assert.equal(stale, true);
+});
+
+test("isInboundStale allows near-real-time arrivals within grace", () => {
+  const stale = isInboundStale({
+    isHistoryIngest: false,
+    messageAt: 10_000,
+    latestMessageAt: 11_500,
+    staleGraceMs: 2_000,
+  });
+  assert.equal(stale, false);
+});
+
+test("isInboundStale never marks history ingest as stale", () => {
+  const stale = isInboundStale({
+    isHistoryIngest: true,
+    messageAt: 1_000,
+    latestMessageAt: 50_000,
+  });
+  assert.equal(stale, false);
 });

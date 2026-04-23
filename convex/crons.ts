@@ -9,6 +9,7 @@ crons.interval("recover-stuck-outbox-claims", { minutes: 2 }, internal.outbox.re
 crons.interval("proactive-outreach", { minutes: 30 }, internal.outreach.run, {});
 crons.interval("adaptive-romantic-morning", { minutes: 20 }, refRomanceMorningRun, {});
 crons.interval("auto-status-builder", { minutes: 20 }, internal.statusBuilder.run, {});
+crons.interval("queue-stale-sweeper", { minutes: 30 }, internal.queueStaleSweeper.run, {});
 crons.interval("refresh-backlog-snapshots", { minutes: 30 }, internal.backlog.refreshRecentInternal, {
   limit: 320,
 });

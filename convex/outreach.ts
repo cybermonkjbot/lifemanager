@@ -1,8 +1,8 @@
-import { internalMutation } from "./_generated/server";
+import { internalMutation, mutation, type MutationCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import { getConfig } from "./lib/config";
 import { estimateHumanTiming } from "./lib/heuristics";
-import { classifyThreadKind } from "./lib/threadEligibility";
+import { classifyThreadKind, directIgnoreContactKey, directIgnoreRuleCandidates } from "./lib/threadEligibility";
 import {
   COMPLIMENT_OUTREACH_REASON_PREFIX,
   PROACTIVE_OUTREACH_REASON_PREFIX,
@@ -14,6 +14,7 @@ const MAX_DRAFT_LOOKBACK = 20;
 const AI_OUTREACH_PLACEHOLDER = "__SLM_AI_OUTREACH__";
 const COMPLIMENT_COOLDOWN_MS = 4 * 24 * 60 * 60 * 1000;
 const COMPLIMENT_SELECTION_THRESHOLD = 0.24;
+const IGNORE_CONTACT_FALLBACK_SCAN_LIMIT = 1000;
 
 const OUTREACH_ICEBREAKERS = [
   "How is your day going?",
@@ -136,9 +137,7 @@ export function shouldQueueRandomCompliment(args: {
   return sample < COMPLIMENT_SELECTION_THRESHOLD;
 }
 
-export const run = internalMutation({
-  args: {},
-  handler: async (ctx) => {
+async function runOutreachBatch(ctx: MutationCtx) {
     const now = Date.now();
     const config = await getConfig(ctx);
     const nowHour = new Date(now).getHours();
@@ -202,10 +201,27 @@ export const run = internalMutation({
         continue;
       }
 
-      const explicitIgnore = await ctx.db
-        .query("ignoreRules")
-        .withIndex("by_target", (q) => q.eq("targetType", "contact").eq("targetValue", jid))
-        .first();
+      let explicitIgnore = null;
+      for (const candidateJid of directIgnoreRuleCandidates({ jid, provider: "whatsapp" })) {
+        explicitIgnore = await ctx.db
+          .query("ignoreRules")
+          .withIndex("by_target", (q) => q.eq("targetType", "contact").eq("targetValue", candidateJid))
+          .first();
+        if (explicitIgnore) {
+          break;
+        }
+      }
+      if (!explicitIgnore) {
+        const lookupKey = directIgnoreContactKey({ jid, provider: "whatsapp" });
+        if (lookupKey) {
+          const rules = await ctx.db
+            .query("ignoreRules")
+            .withIndex("by_type", (q) => q.eq("targetType", "contact"))
+            .take(IGNORE_CONTACT_FALLBACK_SCAN_LIMIT);
+          explicitIgnore =
+            rules.find((rule) => directIgnoreContactKey({ jid: rule.targetValue, provider: "whatsapp" }) === lookupKey) || null;
+        }
+      }
 
       if (explicitIgnore?.enabled) {
         continue;
@@ -366,5 +382,18 @@ export const run = internalMutation({
       configuredCount: configuredContacts.length,
       reason: "ok" as const,
     };
+}
+
+export const run = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    return await runOutreachBatch(ctx);
+  },
+});
+
+export const runManual = mutation({
+  args: {},
+  handler: async (ctx) => {
+    return await runOutreachBatch(ctx);
   },
 });

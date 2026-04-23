@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { planToolRouterSteps, toolRouterPlan } from "./chatTools";
+import { judgeFactCandidate, planToolRouterSteps, selectActiveFactsForUse, toolRouterPlan } from "./chatTools";
 
 type ToolRouterHandler = (
   ctx: {
@@ -60,6 +60,22 @@ test("planToolRouterSteps rejects unsupported hints", () => {
 
   const tools = plan.steps.map((step) => step.tool);
   assert.deepEqual(tools, ["memory.search"]);
+});
+
+test("planToolRouterSteps ignores scope-requiring hints when thread scope is missing", () => {
+  const plan = planToolRouterSteps({
+    task: "quick context",
+    threadIdProvided: false,
+    plannerMode: "hybrid",
+    modelHints: ["memory.search", "personal_connectors.search", "external_search.web"],
+    includeExtraction: false,
+    maxToolsPerRun: 4,
+  });
+
+  const tools = plan.steps.map((step) => step.tool);
+  assert.ok(!tools.includes("memory.search"));
+  assert.ok(!tools.includes("personal_connectors.search"));
+  assert.ok(tools.includes("external_search.web"));
 });
 
 test("toolRouterPlan executes read-only steps in parallel", async () => {
@@ -129,7 +145,7 @@ test("toolRouterPlan marks timed out steps with timeout status", async () => {
 
   const ctx = {
     runQuery: async () => await new Promise(() => {}),
-    runAction: async () => ({ ok: true }),
+    runAction: async () => await new Promise(() => {}),
     runMutation: async () => ({ ok: true }),
   };
 
@@ -143,4 +159,143 @@ test("toolRouterPlan marks timed out steps with timeout status", async () => {
 
   assert.equal(result.outputs[0].status, "timeout");
   assert.equal(result.outputs[0].errorCode, "timeout");
+});
+
+test("toolRouterPlan skips connector search when no scope is provided", async () => {
+  const handler = (toolRouterPlan as unknown as { _handler: ToolRouterHandler })._handler;
+
+  const ctx = {
+    runQuery: async () => ({ ok: true }),
+    runAction: async () => ({ ok: true }),
+    runMutation: async () => ({ ok: true }),
+  };
+
+  const result = await handler(ctx, {
+    task: "search personal notes and docs",
+    execute: true,
+    plannerMode: "hybrid",
+    modelHints: ["personal_connectors.search"],
+    maxToolsPerRun: 4,
+    timeoutMs: 500,
+  });
+
+  const connectorStep = result.outputs.find((step) => step.tool === "personal_connectors.search");
+  if (connectorStep) {
+    assert.equal(connectorStep.status, "skipped");
+  } else {
+    const tools = result.outputs.map((step) => step.tool);
+    assert.ok(!tools.includes("personal_connectors.search"));
+  }
+});
+
+test("judgeFactCandidate quarantines likely sarcasm and accepts stable statements", () => {
+  const sarcasm = judgeFactCandidate({
+    text: "Yeah sure I love traffic lol",
+    factType: "preference",
+    factKey: "preference_traffic",
+    factValue: "traffic",
+  });
+  assert.equal(sarcasm.decision, "quarantine");
+
+  const stable = judgeFactCandidate({
+    text: "I live in Abuja",
+    factType: "profile",
+    factKey: "profile_location",
+    factValue: "Abuja",
+  });
+  assert.equal(stable.decision, "accept");
+});
+
+test("selectActiveFactsForUse drops stale schedule facts and keeps newest location fact", () => {
+  const now = Date.now();
+  const selected = selectActiveFactsForUse({
+    nowMs: now,
+    rows: [
+      {
+        _id: "a" as never,
+        _creationTime: now - 1,
+        threadId: "t" as never,
+        factKey: "profile_location",
+        factValue: "Abuja",
+        factType: "profile",
+        confidence: 0.8,
+        createdAt: now - 40 * 24 * 60 * 60 * 1000,
+        updatedAt: now - 40 * 24 * 60 * 60 * 1000,
+      },
+      {
+        _id: "b" as never,
+        _creationTime: now - 1,
+        threadId: "t" as never,
+        factKey: "profile_location",
+        factValue: "Lagos",
+        factType: "profile",
+        confidence: 0.9,
+        createdAt: now - 2 * 24 * 60 * 60 * 1000,
+        updatedAt: now - 2 * 24 * 60 * 60 * 1000,
+      },
+      {
+        _id: "c" as never,
+        _creationTime: now - 1,
+        threadId: "t" as never,
+        factKey: "schedule_tuesday_evening",
+        factValue: "Tuesday evening",
+        factType: "schedule",
+        confidence: 0.8,
+        createdAt: now - 30 * 24 * 60 * 60 * 1000,
+        updatedAt: now - 30 * 24 * 60 * 60 * 1000,
+      },
+    ],
+  });
+
+  assert.equal(selected.some((fact) => fact.factType === "schedule"), false);
+  assert.equal(selected.some((fact) => fact.factKey === "profile_location" && fact.factValue === "Lagos"), true);
+});
+
+test("selectActiveFactsForUse ignores superseded and expired rows", () => {
+  const now = Date.now();
+  const selected = selectActiveFactsForUse({
+    nowMs: now,
+    rows: [
+      {
+        _id: "a" as never,
+        _creationTime: now - 1,
+        threadId: "t" as never,
+        factKey: "profile_location",
+        factValue: "Abuja",
+        factType: "profile",
+        confidence: 0.9,
+        factStatus: "superseded",
+        createdAt: now - 1000,
+        updatedAt: now - 1000,
+      } as never,
+      {
+        _id: "b" as never,
+        _creationTime: now - 1,
+        threadId: "t" as never,
+        factKey: "profile_location",
+        factValue: "Lagos",
+        factType: "profile",
+        confidence: 0.9,
+        factStatus: "active",
+        expiresAt: now - 1000,
+        createdAt: now - 1000,
+        updatedAt: now - 1000,
+      } as never,
+      {
+        _id: "c" as never,
+        _creationTime: now - 1,
+        threadId: "t" as never,
+        factKey: "profile_location",
+        factValue: "Port Harcourt",
+        factType: "profile",
+        confidence: 0.9,
+        factStatus: "active",
+        createdAt: now - 1000,
+        updatedAt: now - 1000,
+      } as never,
+    ],
+  });
+
+  assert.equal(selected.length, 1);
+  assert.equal(selected[0]?.factValue, "Port Harcourt");
 });

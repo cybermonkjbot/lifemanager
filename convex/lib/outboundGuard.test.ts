@@ -88,7 +88,7 @@ test("shouldAllowLongSilenceConversationStarter blocks non-starters and short si
   assert.equal(shortSilence, false);
 });
 
-test("resolveLongSilenceReopenWeeks scales from 1 to 7 weeks", () => {
+test("resolveLongSilenceReopenWeeks scales from 2 to 7 weeks", () => {
   assert.equal(resolveLongSilenceReopenWeeks(2), MIN_LONG_SILENCE_REOPEN_WEEKS);
   assert.equal(resolveLongSilenceReopenWeeks(3), 2);
   assert.equal(resolveLongSilenceReopenWeeks(8), MAX_LONG_SILENCE_REOPEN_WEEKS);
@@ -106,7 +106,7 @@ test("resolveGhostingSeverity reflects unanswered streak and silence age", () =>
   });
   const severeBySilence = resolveGhostingSeverity({
     unansweredStreak: 2,
-    elapsedSilenceMs: 11 * 7 * 24 * 60 * 60 * 1000,
+    elapsedSilenceMs: 13 * 7 * 24 * 60 * 60 * 1000,
   });
 
   assert.equal(mild, "mild");

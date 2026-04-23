@@ -1,6 +1,8 @@
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
-import { classifyThreadKind } from "./lib/threadEligibility";
+import { classifyThreadKind, directIgnoreContactKey, directIgnoreRuleCandidates } from "./lib/threadEligibility";
+
+const IGNORE_CONTACT_FALLBACK_SCAN_LIMIT = 2000;
 
 export const list = query({
   args: {
@@ -52,28 +54,62 @@ export const upsertIgnoreRule = mutation({
       throw new Error("targetValue is required.");
     }
 
-    const existing = await ctx.db
-      .query("ignoreRules")
-      .withIndex("by_target", (q) => q.eq("targetType", targetType).eq("targetValue", targetValue))
-      .first();
-
     const now = Date.now();
+    const targets =
+      targetType === "contact"
+        ? directIgnoreRuleCandidates({ jid: targetValue, provider: "whatsapp" })
+        : [targetValue];
 
-    if (existing) {
-      await ctx.db.patch(existing._id, {
-        enabled: args.enabled,
-        updatedAt: now,
-      });
-      return existing._id;
+    let firstRuleId: string | null = null;
+    for (const value of new Set(targets)) {
+      const existing = await ctx.db
+        .query("ignoreRules")
+        .withIndex("by_target", (q) => q.eq("targetType", targetType).eq("targetValue", value))
+        .first();
+
+      if (existing) {
+        await ctx.db.patch(existing._id, {
+          enabled: args.enabled,
+          updatedAt: now,
+        });
+        firstRuleId = firstRuleId || existing._id;
+      } else {
+        const inserted = await ctx.db.insert("ignoreRules", {
+          targetType,
+          targetValue: value,
+          enabled: args.enabled,
+          createdAt: now,
+          updatedAt: now,
+        });
+        firstRuleId = firstRuleId || inserted;
+      }
     }
 
-    return await ctx.db.insert("ignoreRules", {
-      targetType,
-      targetValue,
-      enabled: args.enabled,
-      createdAt: now,
-      updatedAt: now,
-    });
+    if (targetType === "contact") {
+      const lookupKey = directIgnoreContactKey({ jid: targetValue, provider: "whatsapp" });
+      if (lookupKey) {
+        const directThreads = await ctx.db
+          .query("threads")
+          .withIndex("by_threadKind_and_lastMessageAt", (q) => q.eq("threadKind", "direct"))
+          .order("desc")
+          .take(IGNORE_CONTACT_FALLBACK_SCAN_LIMIT);
+        for (const thread of directThreads) {
+          if ((thread.provider || "whatsapp") !== "whatsapp") {
+            continue;
+          }
+          const threadLookupKey = directIgnoreContactKey({ jid: thread.jid, provider: "whatsapp" });
+          if (!threadLookupKey || threadLookupKey !== lookupKey) {
+            continue;
+          }
+          await ctx.db.patch(thread._id, {
+            isIgnored: args.enabled,
+            updatedAt: now,
+          });
+        }
+      }
+    }
+
+    return firstRuleId;
   },
 });
 

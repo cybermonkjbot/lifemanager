@@ -126,6 +126,8 @@ type ThreadStyleProfilePayload = {
 };
 
 type ContactMemoryFactType = "preference" | "profile" | "schedule" | "relationship" | "promise" | "other";
+type ContactMemoryFactRow = Doc<"contactMemoryFacts">;
+type FactJudgeDecision = "accept" | "accept_with_ttl" | "reject" | "quarantine";
 
 type ParsedExportEntry = {
   senderName: string;
@@ -330,12 +332,12 @@ export function planToolRouterSteps(args: {
   const wantsFacts = /(fact|birthday|prefer|likes|call me|remember about|profile)/i.test(task);
   const wantsConnectors = /(notes|calendar|email|docs|document|personal)/i.test(task);
 
-  if (wantsRecall) {
+  if (wantsRecall && args.threadIdProvided) {
     pushStep({ id: "recall", tool: "conversation_recall.query", reason: "Check if this was discussed before.", readOnly: true });
     pushStep({ id: "memory", tool: "memory.search", reason: "Pull concrete evidence snippets.", readOnly: true });
   }
 
-  if (wantsFacts) {
+  if (wantsFacts && args.threadIdProvided) {
     if (args.includeExtraction && args.threadIdProvided) {
       pushStep({
         id: "facts_extract",
@@ -369,7 +371,7 @@ export function planToolRouterSteps(args: {
     pushStep({ id: "web", tool: "external_search.web", reason: "Fetch up-to-date external info.", readOnly: true });
   }
 
-  if (wantsConnectors) {
+  if (wantsConnectors && args.threadIdProvided) {
     pushStep({
       id: "connectors",
       tool: "personal_connectors.search",
@@ -378,8 +380,16 @@ export function planToolRouterSteps(args: {
     });
   }
 
-  if (deterministicSteps.length === 0) {
+  if (deterministicSteps.length === 0 && args.threadIdProvided) {
     pushStep({ id: "memory", tool: "memory.search", reason: "Default retrieval for chat context.", readOnly: true });
+  }
+  if (deterministicSteps.length === 0 && !args.threadIdProvided) {
+    pushStep({
+      id: "web",
+      tool: "external_search.web",
+      reason: "Use external lookup when thread scope is unavailable.",
+      readOnly: true,
+    });
   }
 
   const deduped: RouterStep[] = [];
@@ -399,6 +409,9 @@ export function planToolRouterSteps(args: {
   const hintAllowlisted = hintTools.filter((tool) => HINT_ALLOWLIST_TOOLS.has(tool)).slice(0, 6);
   const merged = [...deduped];
   for (const hintTool of hintAllowlisted) {
+    if (!args.threadIdProvided && requiresThreadScope(hintTool)) {
+      continue;
+    }
     if (merged.some((step) => step.tool === hintTool)) {
       continue;
     }
@@ -1020,6 +1033,161 @@ function extractFactsFromText(text: string) {
   return facts;
 }
 
+function normalizeFactText(value: string) {
+  return normalizeSpace(value || "").toLowerCase();
+}
+
+function toComparableFactSlot(fact: Pick<ContactMemoryFactRow, "factType" | "factKey">) {
+  if (fact.factType === "profile" && fact.factKey === "profile_location") {
+    return "profile_location";
+  }
+  if (fact.factType === "profile" && fact.factKey === "profile_work") {
+    return "profile_work";
+  }
+  if (fact.factType === "profile" && fact.factKey === "profile_preferred_name") {
+    return "profile_preferred_name";
+  }
+  if (fact.factType === "profile" && fact.factKey === "profile_birthday") {
+    return "profile_birthday";
+  }
+  if (fact.factType === "schedule") {
+    return "schedule_availability";
+  }
+  return `${fact.factType}:${fact.factKey}`;
+}
+
+function resolveFactTtlMs(fact: Pick<ContactMemoryFactRow, "factType" | "factKey">) {
+  if (fact.factType === "schedule") {
+    return 14 * 24 * 60 * 60 * 1000;
+  }
+  if (fact.factType === "profile" && fact.factKey === "profile_location") {
+    return 45 * 24 * 60 * 60 * 1000;
+  }
+  return undefined;
+}
+
+function resolveFactStatusFromJudgeDecision(args: { decision: FactJudgeDecision; expiresAt?: number; now: number }) {
+  if (args.decision === "reject") {
+    return "quarantined" as const;
+  }
+  if (args.decision === "quarantine") {
+    return "quarantined" as const;
+  }
+  if (args.expiresAt !== undefined && args.expiresAt <= args.now) {
+    return "expired" as const;
+  }
+  return "active" as const;
+}
+
+async function supersedeConflictingFactSlots(args: {
+  ctx: MutationCtx;
+  threadId: Id<"threads">;
+  slot: string;
+  keepFactId?: Id<"contactMemoryFacts">;
+  keepFactKey: string;
+  now: number;
+}) {
+  const rows = await args.ctx.db
+    .query("contactMemoryFacts")
+    .withIndex("by_thread_and_updatedAt", (q) => q.eq("threadId", args.threadId))
+    .order("desc")
+    .take(120);
+  for (const row of rows) {
+    if (args.keepFactId && row._id === args.keepFactId) {
+      continue;
+    }
+    if (toComparableFactSlot(row) !== args.slot) {
+      continue;
+    }
+    const status = (row as unknown as { factStatus?: string }).factStatus;
+    if (status === "superseded") {
+      continue;
+    }
+    await args.ctx.db.patch(row._id, {
+      factStatus: "superseded",
+      supersededAt: args.now,
+      supersededByFactKey: args.keepFactKey,
+      updatedAt: args.now,
+    });
+  }
+}
+
+export function judgeFactCandidate(args: {
+  text: string;
+  factType: ContactMemoryFactType;
+  factKey: string;
+  factValue: string;
+}) {
+  const text = normalizeSpace(args.text || "");
+  const normalizedText = text.toLowerCase();
+  const normalizedValue = normalizeFactText(args.factValue);
+  if (!normalizedValue || normalizedValue.length < 2) {
+    return { decision: "reject" as FactJudgeDecision, reason: "empty_value", confidenceScale: 0 };
+  }
+
+  if (/\b(?:forwarded|fwd:|fw:|quote|quoted|someone said)\b/i.test(normalizedText)) {
+    return { decision: "quarantine" as FactJudgeDecision, reason: "forward_or_quote", confidenceScale: 0.45 };
+  }
+  if (/(?:^|[.!?]\s*)(?:yeah|sure|right)\s+.*\b(?:lol|lmao|😂|🤣)\b/i.test(normalizedText)) {
+    return { decision: "quarantine" as FactJudgeDecision, reason: "sarcasm_risk", confidenceScale: 0.4 };
+  }
+  if (/\b(?:not|don't|do not|no longer|never)\b/i.test(normalizedText) && /\b(?:like|love|prefer|free|busy|live|work)\b/i.test(normalizedText)) {
+    return { decision: "quarantine" as FactJudgeDecision, reason: "negation_or_contradiction", confidenceScale: 0.45 };
+  }
+
+  if (args.factType === "schedule" || (args.factType === "profile" && args.factKey === "profile_location")) {
+    if (/\b(today|tonight|this week|this weekend|for now|currently|atm|right now)\b/i.test(normalizedText)) {
+      return { decision: "accept_with_ttl" as FactJudgeDecision, reason: "time_bounded_statement", confidenceScale: 1 };
+    }
+  }
+
+  return { decision: "accept" as FactJudgeDecision, reason: "stable_statement", confidenceScale: 1 };
+}
+
+export function selectActiveFactsForUse(args: {
+  rows: ContactMemoryFactRow[];
+  nowMs?: number;
+  minConfidence?: number;
+}) {
+  const now = Number.isFinite(args.nowMs) ? (args.nowMs as number) : Date.now();
+  const minConfidence = clamp(Number(args.minConfidence ?? 0.5), 0, 1);
+  const bySlot = new Map<string, ContactMemoryFactRow>();
+
+  for (const row of args.rows) {
+    const status = (row as unknown as { factStatus?: string }).factStatus;
+    if (status && status !== "active") {
+      continue;
+    }
+    const confidence = clamp(Number(row.confidence ?? 0), 0, 1);
+    if (confidence < minConfidence) {
+      continue;
+    }
+    const ttlMs = resolveFactTtlMs(row);
+    const explicitExpiresAt = (row as unknown as { expiresAt?: number }).expiresAt;
+    if (Number.isFinite(explicitExpiresAt) && (explicitExpiresAt as number) <= now) {
+      continue;
+    }
+    if (ttlMs !== undefined && (row.updatedAt || 0) + ttlMs < now) {
+      continue;
+    }
+    const slot = toComparableFactSlot(row);
+    const existing = bySlot.get(slot);
+    if (!existing) {
+      bySlot.set(slot, row);
+      continue;
+    }
+    const rowUpdated = Number(row.updatedAt || 0);
+    const existingUpdated = Number(existing.updatedAt || 0);
+    const rowConfidence = Number(row.confidence || 0);
+    const existingConfidence = Number(existing.confidence || 0);
+    if (rowUpdated > existingUpdated || (rowUpdated === existingUpdated && rowConfidence > existingConfidence)) {
+      bySlot.set(slot, row);
+    }
+  }
+
+  return [...bySlot.values()].sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0));
+}
+
 async function fetchJsonWithTimeout(url: string, timeoutMs: number, init?: RequestInit) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -1445,12 +1613,17 @@ export const contactMemoryFactsList = query({
           .withIndex("by_thread_and_updatedAt", (q) => q.eq("threadId", resolved.thread!._id))
           .order("desc")
           .take(limit);
+    const activeFacts = selectActiveFactsForUse({
+      rows,
+      nowMs: Date.now(),
+      minConfidence: 0.5,
+    }).slice(0, limit);
 
     return {
       tool: "contact_memory.facts",
       threadId: resolved.thread._id,
       threadJid: resolved.thread.jid,
-      facts: rows,
+      facts: activeFacts,
     };
   },
 });
@@ -1490,7 +1663,30 @@ export const upsertContactMemoryFact = mutation({
     }
 
     const now = Date.now();
-    const confidence = clamp(args.confidence ?? 0.6, 0, 1);
+    const judge = judgeFactCandidate({
+      text: args.sourceExcerpt || args.factValue,
+      factType: args.factType,
+      factKey,
+      factValue,
+    });
+    if (judge.decision === "reject") {
+      return null;
+    }
+    const confidence = clamp((args.confidence ?? 0.6) * judge.confidenceScale, 0, 1);
+    const ttlMs = resolveFactTtlMs({
+      factType: args.factType,
+      factKey,
+    } as Pick<ContactMemoryFactRow, "factType" | "factKey">);
+    const expiresAt = ttlMs === undefined ? undefined : now + ttlMs;
+    const factStatus = resolveFactStatusFromJudgeDecision({
+      decision: judge.decision,
+      expiresAt,
+      now,
+    });
+    const slot = toComparableFactSlot({
+      factType: args.factType,
+      factKey,
+    } as Pick<ContactMemoryFactRow, "factType" | "factKey">);
     const existing = await ctx.db
       .query("contactMemoryFacts")
       .withIndex("by_thread_and_key", (q) => q.eq("threadId", resolved.thread!._id).eq("factKey", factKey))
@@ -1504,12 +1700,26 @@ export const upsertContactMemoryFact = mutation({
         sourceMessageId: args.sourceMessageId,
         sourceMessageAt: args.sourceMessageAt,
         sourceExcerpt: args.sourceExcerpt ? compactText(args.sourceExcerpt, 220) : existing.sourceExcerpt,
+        factStatus,
+        expiresAt,
+        supersededAt: undefined,
+        supersededByFactKey: undefined,
         updatedAt: now,
       });
+      if (factStatus === "active") {
+        await supersedeConflictingFactSlots({
+          ctx,
+          threadId: resolved.thread!._id,
+          slot,
+          keepFactId: existing._id,
+          keepFactKey: factKey,
+          now,
+        });
+      }
       return existing._id;
     }
 
-    return await ctx.db.insert("contactMemoryFacts", {
+    const inserted = await ctx.db.insert("contactMemoryFacts", {
       threadId: resolved.thread._id,
       factKey,
       factValue,
@@ -1518,9 +1728,22 @@ export const upsertContactMemoryFact = mutation({
       sourceMessageId: args.sourceMessageId,
       sourceMessageAt: args.sourceMessageAt,
       sourceExcerpt: args.sourceExcerpt ? compactText(args.sourceExcerpt, 220) : undefined,
+      factStatus,
+      expiresAt,
       createdAt: now,
       updatedAt: now,
     });
+    if (factStatus === "active") {
+      await supersedeConflictingFactSlots({
+        ctx,
+        threadId: resolved.thread._id,
+        slot,
+        keepFactId: inserted,
+        keepFactKey: factKey,
+        now,
+      });
+    }
+    return inserted;
   },
 });
 
@@ -1565,17 +1788,70 @@ export const extractContactMemoryFacts = mutation({
           sourceExcerpt: compactText(row.text || "", 220),
           updatedAt: Date.now(),
         };
+        const judge = judgeFactCandidate({
+          text: row.text || "",
+          factType: fact.type,
+          factKey: fact.key,
+          factValue: fact.value,
+        });
+        if (judge.decision === "reject") {
+          continue;
+        }
+        const now = Date.now();
+        const ttlMs = resolveFactTtlMs({
+          factType: fact.type,
+          factKey: fact.key,
+        } as Pick<ContactMemoryFactRow, "factType" | "factKey">);
+        const expiresAt = ttlMs === undefined ? undefined : now + ttlMs;
+        const factStatus = resolveFactStatusFromJudgeDecision({
+          decision: judge.decision,
+          expiresAt,
+          now,
+        });
+        const slot = toComparableFactSlot({
+          factType: fact.type,
+          factKey: fact.key,
+        } as Pick<ContactMemoryFactRow, "factType" | "factKey">);
+        const judgedPatch = {
+          ...patch,
+          confidence: clamp(patch.confidence * judge.confidenceScale, 0, 1),
+          factStatus,
+          expiresAt,
+          supersededAt: undefined,
+          supersededByFactKey: undefined,
+          updatedAt: now,
+        };
 
         if (existing) {
-          await ctx.db.patch(existing._id, patch);
+          await ctx.db.patch(existing._id, judgedPatch);
+          if (factStatus === "active") {
+            await supersedeConflictingFactSlots({
+              ctx,
+              threadId: args.threadId,
+              slot,
+              keepFactId: existing._id,
+              keepFactKey: fact.key,
+              now,
+            });
+          }
           updated += 1;
         } else {
-          await ctx.db.insert("contactMemoryFacts", {
+          const insertedId = await ctx.db.insert("contactMemoryFacts", {
             threadId: args.threadId,
             factKey: fact.key,
-            ...patch,
-            createdAt: Date.now(),
+            ...judgedPatch,
+            createdAt: now,
           });
+          if (factStatus === "active") {
+            await supersedeConflictingFactSlots({
+              ctx,
+              threadId: args.threadId,
+              slot,
+              keepFactId: insertedId,
+              keepFactKey: fact.key,
+              now,
+            });
+          }
           inserted += 1;
         }
       }
@@ -2191,13 +2467,17 @@ export const toolRouterPlan = action({
             perStepTimeout,
           );
         } else if (step.tool === "personal_connectors.search") {
-          output = await withTimeout(
-            ctx.runAction(refPersonalConnectorsSearch, {
-              query: task,
-              maxResults,
-            }),
-            perStepTimeout,
-          );
+          if (!args.threadId && !args.contactJid) {
+            output = { skipped: true, reason: "scope_required" };
+          } else {
+            output = await withTimeout(
+              ctx.runAction(refPersonalConnectorsSearch, {
+                query: task,
+                maxResults,
+              }),
+              perStepTimeout,
+            );
+          }
         } else if (step.tool === "reply_style_guardrail.check") {
           output = await withTimeout(
             ctx.runQuery(refReplyStyleGuardrailCheck, {
@@ -2282,3 +2562,11 @@ export const toolRouterPlan = action({
     };
   },
 });
+  const requiresThreadScope = (tool: RouterToolName) =>
+    tool === "conversation_recall.query" ||
+    tool === "memory.search" ||
+    tool === "thread_style.profile" ||
+    tool === "contact_memory.extract" ||
+    tool === "contact_memory.facts" ||
+    tool === "personal_connectors.search" ||
+    tool === "reply_style_guardrail.check";

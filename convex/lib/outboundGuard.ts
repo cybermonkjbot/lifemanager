@@ -1,5 +1,5 @@
 export const MAX_UNANSWERED_OUTBOUND_STREAK = 2;
-export const MIN_LONG_SILENCE_REOPEN_WEEKS = 1;
+export const MIN_LONG_SILENCE_REOPEN_WEEKS = 2;
 export const MAX_LONG_SILENCE_REOPEN_WEEKS = 7;
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -53,10 +53,10 @@ export function resolveGhostingSeverity(args: {
   const unansweredPressure = Math.max(0, args.unansweredStreak - MAX_UNANSWERED_OUTBOUND_STREAK);
   const silenceWeeks = Math.max(0, args.elapsedSilenceMs) / WEEK_MS;
 
-  if (unansweredPressure >= 3 || silenceWeeks >= 10) {
+  if (unansweredPressure >= 3 || silenceWeeks >= 12) {
     return "severe";
   }
-  if (unansweredPressure >= 1 || silenceWeeks >= 4) {
+  if (unansweredPressure >= 1 || silenceWeeks >= 5) {
     return "moderate";
   }
   return "mild";

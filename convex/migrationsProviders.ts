@@ -167,3 +167,90 @@ export const verifyProvidersBackfill = query({
     };
   },
 });
+
+export const backfillContactMemoryFactLifecycleBatch = internalMutation({
+  args: {
+    limit: v.optional(v.number()),
+    minUpdatedAt: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const limit = Math.max(1, Math.min(args.limit ?? 200, 1000));
+    const minUpdatedAt = Math.max(0, Math.round(args.minUpdatedAt ?? 0));
+    const rows = await ctx.db
+      .query("contactMemoryFacts")
+      .withIndex("by_updatedAt", (q) => q.gte("updatedAt", minUpdatedAt))
+      .order("asc")
+      .take(limit);
+
+    let patched = 0;
+    let lastUpdatedAt = minUpdatedAt;
+    const now = Date.now();
+
+    for (const row of rows) {
+      lastUpdatedAt = Math.max(lastUpdatedAt, Number(row.updatedAt || 0));
+      const status = (row as unknown as { factStatus?: string }).factStatus;
+      const expiresAtExisting = (row as unknown as { expiresAt?: number }).expiresAt;
+
+      const ttlMs =
+        row.factType === "schedule"
+          ? 14 * 24 * 60 * 60 * 1000
+          : row.factType === "profile" && row.factKey === "profile_location"
+            ? 45 * 24 * 60 * 60 * 1000
+            : undefined;
+      const expiresAt = Number.isFinite(expiresAtExisting) ? expiresAtExisting : ttlMs === undefined ? undefined : (row.updatedAt || now) + ttlMs;
+      const factStatus =
+        status ||
+        (Number.isFinite(expiresAt) && (expiresAt as number) <= now ? "expired" : Number(row.confidence || 0) < 0.5 ? "quarantined" : "active");
+
+      const patch: {
+        factStatus?: "active" | "superseded" | "expired" | "quarantined";
+        expiresAt?: number;
+      } = {};
+      if (!status) {
+        patch.factStatus = factStatus as "active" | "superseded" | "expired" | "quarantined";
+      }
+      if (!Number.isFinite(expiresAtExisting) && Number.isFinite(expiresAt)) {
+        patch.expiresAt = expiresAt as number;
+      }
+      if (Object.keys(patch).length === 0) {
+        continue;
+      }
+      await ctx.db.patch(row._id, patch);
+      patched += 1;
+    }
+
+    const done = rows.length < limit;
+    return {
+      patched,
+      scanned: rows.length,
+      done,
+      nextMinUpdatedAt: done ? null : lastUpdatedAt + 1,
+    };
+  },
+});
+
+export const verifyContactMemoryFactLifecycle = query({
+  args: {
+    sampleLimit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const sampleLimit = Math.max(50, Math.min(args.sampleLimit ?? 1000, 5000));
+    const rows = await ctx.db.query("contactMemoryFacts").withIndex("by_updatedAt").order("desc").take(sampleLimit);
+    const missingStatus = rows.filter((row) => !(row as unknown as { factStatus?: string }).factStatus).length;
+    const missingExpiresAtForTtlTypes = rows.filter((row) => {
+      const needsTtl = row.factType === "schedule" || (row.factType === "profile" && row.factKey === "profile_location");
+      if (!needsTtl) {
+        return false;
+      }
+      return !Number.isFinite((row as unknown as { expiresAt?: number }).expiresAt);
+    }).length;
+    return {
+      complete: missingStatus === 0 && missingExpiresAtForTtlTypes === 0,
+      sampleWindow: {
+        sampleLimit,
+        missingStatus,
+        missingExpiresAtForTtlTypes,
+      },
+    };
+  },
+});
