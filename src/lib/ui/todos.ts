@@ -4,6 +4,15 @@ type TodoTitleGenerationArgs = {
   threadId?: string;
 };
 
+type TodoTitleFreshCacheEntry = {
+  title: string;
+  createdAt: number;
+};
+
+const TODO_TITLE_FRESHNESS_TTL_MS = 5 * 60 * 1000;
+const TODO_TITLE_FRESH_CACHE_MAX = 200;
+const TODO_TITLE_FRESH_CACHE = new Map<string, TodoTitleFreshCacheEntry>();
+
 function compactText(value: string, maxChars: number) {
   const normalized = value.trim();
   if (normalized.length <= maxChars) {
@@ -38,6 +47,45 @@ function normalizeTodoTitle(text: string) {
   return title;
 }
 
+function normalizeFreshnessFragment(value: string | undefined, maxChars: number) {
+  if (!value) {
+    return "";
+  }
+  return value
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase()
+    .slice(0, maxChars);
+}
+
+function buildTodoFreshnessKey(args: TodoTitleGenerationArgs) {
+  return JSON.stringify({
+    currentTitle: normalizeFreshnessFragment(args.currentTitle, 220),
+    sourceText: normalizeFreshnessFragment(args.sourceText, 520),
+    threadId: normalizeFreshnessFragment(args.threadId, 120),
+  });
+}
+
+function pruneTodoFreshnessCache(now: number) {
+  for (const [key, entry] of TODO_TITLE_FRESH_CACHE.entries()) {
+    if (entry.createdAt + TODO_TITLE_FRESHNESS_TTL_MS <= now) {
+      TODO_TITLE_FRESH_CACHE.delete(key);
+    }
+  }
+  if (TODO_TITLE_FRESH_CACHE.size <= TODO_TITLE_FRESH_CACHE_MAX) {
+    return;
+  }
+  const overflow = TODO_TITLE_FRESH_CACHE.size - TODO_TITLE_FRESH_CACHE_MAX;
+  const keys = TODO_TITLE_FRESH_CACHE.keys();
+  for (let index = 0; index < overflow; index += 1) {
+    const next = keys.next();
+    if (next.done) {
+      break;
+    }
+    TODO_TITLE_FRESH_CACHE.delete(next.value);
+  }
+}
+
 function buildTodoTitlePrompt(args: { currentTitle: string; sourceText?: string }) {
   const sourceText = args.sourceText?.trim() || "(No source message text provided)";
   const currentTitle = args.currentTitle.trim() || "(No current title)";
@@ -67,6 +115,14 @@ async function readApiError(response: Response) {
 }
 
 export async function generateTodoTitleWithAi(args: TodoTitleGenerationArgs) {
+  const now = Date.now();
+  const freshnessKey = buildTodoFreshnessKey(args);
+  const cached = TODO_TITLE_FRESH_CACHE.get(freshnessKey);
+  if (cached && now - cached.createdAt <= TODO_TITLE_FRESHNESS_TTL_MS) {
+    return cached.title;
+  }
+  pruneTodoFreshnessCache(now);
+
   const response = await fetch("/api/actions/test-ai", {
     method: "POST",
     headers: {
@@ -100,5 +156,9 @@ export async function generateTodoTitleWithAi(args: TodoTitleGenerationArgs) {
   if (!title) {
     throw new Error("AI returned an empty TODO title.");
   }
+  TODO_TITLE_FRESH_CACHE.set(freshnessKey, {
+    title,
+    createdAt: now,
+  });
   return title;
 }

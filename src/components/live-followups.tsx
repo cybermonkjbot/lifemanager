@@ -7,9 +7,10 @@ import { formatDateTimeWithRelative, trim } from "@/lib/format";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
 import { createFollowupActionHandlers, followupCommitmentLabel, followupStatusLabel, type FollowupItem } from "@/lib/ui/followups";
 import { api } from "../../convex/_generated/api";
+import type { Id } from "../../convex/_generated/dataModel";
 import { useMutation, useQuery } from "convex/react";
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useMemo, useState, type FormEvent } from "react";
 
 type TimelineFilter = "all" | "needs_review" | "confirmed" | "queued_sent" | "failed" | "dismissed";
 
@@ -37,6 +38,82 @@ type ClearAllBatchResult = {
   scanned: number;
   hasMore: boolean;
 };
+
+type TodoItem = {
+  _id: string;
+  title: string;
+  dueAt?: number;
+  status: "open" | "done";
+};
+
+function formatIsoDate(value: Date) {
+  const year = value.getFullYear();
+  const month = `${value.getMonth() + 1}`.padStart(2, "0");
+  const day = `${value.getDate()}`.padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function addDays(date: Date, days: number) {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function buildAgendaEntries(args: {
+  startDate: string;
+  endDate: string;
+  time: string;
+  weekdaysOnly: boolean;
+}) {
+  const { startDate, endDate, time, weekdaysOnly } = args;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(endDate)) {
+    throw new Error("Pick a valid start and end date.");
+  }
+  if (!/^\d{2}:\d{2}$/.test(time)) {
+    throw new Error("Pick a valid reminder time.");
+  }
+  const start = new Date(`${startDate}T00:00:00`);
+  const end = new Date(`${endDate}T00:00:00`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+    throw new Error("Pick a valid date range.");
+  }
+  if (end.getTime() < start.getTime()) {
+    throw new Error("End date cannot be before start date.");
+  }
+
+  const [hoursText, minutesText] = time.split(":");
+  const hours = Number(hoursText);
+  const minutes = Number(minutesText);
+  if (!Number.isInteger(hours) || !Number.isInteger(minutes) || hours < 0 || hours > 23 || minutes < 0 || minutes > 59) {
+    throw new Error("Pick a valid reminder time.");
+  }
+
+  const entries: Array<{ date: string; dueAt: number }> = [];
+  let current = start;
+  let guard = 0;
+  while (current.getTime() <= end.getTime()) {
+    const dayOfWeek = current.getDay();
+    const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+    if (!weekdaysOnly || !isWeekend) {
+      const due = new Date(current);
+      due.setHours(hours, minutes, 0, 0);
+      entries.push({
+        date: formatIsoDate(current),
+        dueAt: due.getTime(),
+      });
+    }
+    current = addDays(current, 1);
+    guard += 1;
+    if (guard > 366) {
+      throw new Error("Range too large. Keep it under one year.");
+    }
+  }
+
+  if (entries.length === 0) {
+    throw new Error("Range produced no days. Disable weekdays-only or adjust dates.");
+  }
+  return entries;
+}
 
 function TimelineCard(args: {
   item: TimelineItem;
@@ -152,19 +229,36 @@ function FollowupsContent() {
   const snoozeFollowup = useMutation(api.followups.snooze);
   const cancelFollowup = useMutation(api.followups.cancel);
   const clearAllFollowups = useMutation(api.followups.clearAll);
+  const createAgendaRange = useMutation(api.todos.createAgendaRange);
+  const setTodoStatus = useMutation(api.todos.setTodoStatus);
   const { runAction, getRecord, notices, pushNotice, dismissNotice } = useActionStateRegistry();
 
   const [providerFilter, setProviderFilter] = useState<ProviderFilterValue>("all");
   const [filter, setFilter] = useState<TimelineFilter>("needs_review");
+  const [agendaTitle, setAgendaTitle] = useState("");
+  const [startDate, setStartDate] = useState(formatIsoDate(new Date()));
+  const [endDate, setEndDate] = useState(formatIsoDate(addDays(new Date(), 13)));
+  const [agendaTime, setAgendaTime] = useState("09:00");
+  const [weekdaysOnly, setWeekdaysOnly] = useState(false);
 
   const timeline = useQuery(api.followups.timeline, {
     limit: 180,
     filter,
     provider: providerFilter,
   }) as TimelinePayload | undefined;
+  const todoPayload = useQuery(api.todos.list, {
+    todoLimit: 220,
+    candidateLimit: 1,
+  }) as { todos: TodoItem[] } | undefined;
   const loading = timeline === undefined;
   const now = timeline?.now ?? 0;
   const sections = timeline?.sections || { overdue: [], today: [], upcoming: [] };
+  const openAgendaTodos = useMemo(() => {
+    const todos = todoPayload?.todos || [];
+    return todos
+      .filter((todo) => todo.status === "open")
+      .sort((a, b) => (a.dueAt ?? Number.MAX_SAFE_INTEGER) - (b.dueAt ?? Number.MAX_SAFE_INTEGER));
+  }, [todoPayload?.todos]);
 
   const headerCounts = useMemo(() => {
     return {
@@ -232,6 +326,52 @@ function FollowupsContent() {
     })();
   };
 
+  const onCreateAgenda = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    void runAction(
+      "agenda:create-range",
+      async () => {
+        const entries = buildAgendaEntries({
+          startDate,
+          endDate,
+          time: agendaTime,
+          weekdaysOnly,
+        });
+        const title = agendaTitle.trim().replace(/\s+/g, " ");
+        if (!title) {
+          throw new Error("Enter an agenda title.");
+        }
+        return await createAgendaRange({
+          agenda: title,
+          entries,
+        });
+      },
+      {
+        pendingLabel: "Creating agenda schedule…",
+        suppressSuccessNotice: true,
+      },
+    ).then((outcome) => {
+      if (!outcome.executed || outcome.error) {
+        return;
+      }
+      const created = outcome.value?.created ?? 0;
+      pushNotice("success", `Agenda scheduled for ${created} day${created === 1 ? "" : "s"}.`);
+    });
+  };
+
+  const onMarkTodoDone = (todoId: string) => {
+    void runAction(
+      `agenda:done:${todoId}`,
+      async () => {
+        await setTodoStatus({ todoId: todoId as Id<"todos">, status: "done" });
+      },
+      {
+        pendingLabel: "Marking done…",
+        successMessage: "Agenda item marked done.",
+      },
+    );
+  };
+
   const renderSection = (title: string, items: TimelineItem[]) => (
     <article className="panel-card">
       <h3>{title}</h3>
@@ -257,6 +397,83 @@ function FollowupsContent() {
   return (
     <section className="stack">
       <ActionNotices notices={notices} onDismiss={dismissNotice} />
+
+      <article className="panel-card">
+        <h3>Agenda Planner</h3>
+        <p className="queue-meta">Select a calendar range and apply one agenda across the whole span.</p>
+        <form className="stack" onSubmit={onCreateAgenda}>
+          <label className="queue-meta" htmlFor="agenda-title-input">
+            Agenda
+          </label>
+          <input
+            id="agenda-title-input"
+            className="input"
+            placeholder="Morning deep work, outreach, and workout"
+            value={agendaTitle}
+            onChange={(event) => setAgendaTitle(event.target.value)}
+          />
+          <div className="queue-actions">
+            <label className="queue-meta" htmlFor="agenda-start-date">
+              Start
+            </label>
+            <input id="agenda-start-date" className="input" type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} />
+            <label className="queue-meta" htmlFor="agenda-end-date">
+              End
+            </label>
+            <input id="agenda-end-date" className="input" type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} />
+            <label className="queue-meta" htmlFor="agenda-time">
+              Time
+            </label>
+            <input id="agenda-time" className="input" type="time" value={agendaTime} onChange={(event) => setAgendaTime(event.target.value)} />
+          </div>
+          <label className="queue-meta">
+            <input
+              type="checkbox"
+              checked={weekdaysOnly}
+              onChange={(event) => setWeekdaysOnly(event.target.checked)}
+              style={{ marginRight: "0.5rem" }}
+            />
+            Weekdays only
+          </label>
+          <div className="queue-actions">
+            <button
+              type="submit"
+              className="btn btn-primary"
+              disabled={getRecord("agenda:create-range").pending}
+              aria-disabled={getRecord("agenda:create-range").pending}
+            >
+              {getRecord("agenda:create-range").pending ? "Scheduling…" : "Schedule Agenda"}
+            </button>
+          </div>
+        </form>
+
+        <div className="stack">
+          <p className="queue-meta">Open agenda items: {openAgendaTodos.length}</p>
+          {openAgendaTodos.slice(0, 20).map((todo) => (
+            <div key={todo._id} className="queue-item">
+              <p className="queue-title">{todo.title}</p>
+              <p className="queue-meta">
+                {todo.dueAt ? `Due ${formatDateTimeWithRelative(todo.dueAt, Date.now())}` : "No due date"}
+              </p>
+              <div className="queue-actions">
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  onClick={() => onMarkTodoDone(todo._id)}
+                  disabled={getRecord(`agenda:done:${todo._id}`).pending}
+                  aria-disabled={getRecord(`agenda:done:${todo._id}`).pending}
+                >
+                  {getRecord(`agenda:done:${todo._id}`).pending ? "Updating…" : "Mark done"}
+                </button>
+              </div>
+            </div>
+          ))}
+          {openAgendaTodos.length > 20 ? (
+            <p className="queue-meta">Showing first 20 items. Remaining: {openAgendaTodos.length - 20}.</p>
+          ) : null}
+          {openAgendaTodos.length === 0 ? <p className="empty-line">No open agenda items yet.</p> : null}
+        </div>
+      </article>
 
       <article className="panel-card">
         <h3>Timeline Overview</h3>

@@ -1,17 +1,8 @@
 "use client";
 
 import { dashboardNavItems } from "@/lib/ui/dashboard-nav";
-import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { type FormEvent, useEffect, useState } from "react";
-
-type HomeFeature = {
-  href: string;
-  title: string;
-  description: string;
-  footer: string;
-  accentClass: string;
-};
+import { usePathname, useRouter } from "next/navigation";
+import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 type CommandFeedback = {
   kind: "idle" | "success" | "error";
@@ -25,6 +16,45 @@ type SetupStatusSnapshot = {
   listenerActive?: boolean;
   message?: string;
 };
+
+type HomeChatMessage = {
+  id: string;
+  role: "assistant" | "user";
+  text: string;
+  kind?: CommandFeedback["kind"];
+  timestamp: string;
+};
+
+const quickCommands = ["go queue", "open conversations", "run outreach campaign", "setup", "system"];
+
+const commandPrefixes = ["go to ", "go ", "open ", "navigate to ", "navigate ", "take me to ", "nav "];
+
+function normalizeText(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9/\s-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function getNowLabel() {
+  return new Date().toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+async function readApiError(response: Response) {
+  try {
+    const payload = (await response.json()) as { error?: unknown };
+    if (typeof payload.error === "string" && payload.error.trim()) {
+      return payload.error.trim();
+    }
+  } catch {
+    // ignore non-JSON responses
+  }
+  return `Request failed (${response.status}).`;
+}
 
 function summarizeSetupState(snapshot: SetupStatusSnapshot | null) {
   if (!snapshot) {
@@ -67,42 +97,6 @@ function summarizeNextStep(snapshot: SetupStatusSnapshot | null) {
   return "Open Setup to connect WhatsApp first.";
 }
 
-const homeFeatures: HomeFeature[] = [
-  {
-    href: "/queue",
-    title: "Process pending work from one queue.",
-    description: "Handle replies, follow-ups, todos, and safety checks in one place.",
-    footer: "Open Queue",
-    accentClass: "home-feature-mark-queue",
-  },
-  {
-    href: "/conversations",
-    title: "Review thread context before sending.",
-    description: "Check history, adjust tone, and approve outreach with full context.",
-    footer: "Open Conversations",
-    accentClass: "home-feature-mark-conversations",
-  },
-  {
-    href: "/followups",
-    title: "Keep commitments and reminders on track.",
-    description: "Track due outreach, snooze items, and confirm completed follow-ups.",
-    footer: "Open Follow-ups",
-    accentClass: "home-feature-mark-followups",
-  },
-];
-
-const quickCommands = ["go queue", "open conversations", "status", "setup", "system"];
-
-const commandPrefixes = ["go to ", "go ", "open ", "navigate to ", "navigate ", "take me to ", "nav "];
-
-function normalizeText(value: string) {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9/\s-]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
 function getCommandTarget(command: string) {
   const normalized = normalizeText(command);
   if (!normalized) {
@@ -130,9 +124,7 @@ function getCommandTarget(command: string) {
 
   const navWithAliases = dashboardNavItems.map((item) => ({
     item,
-    label: normalizeText(item.label),
-    href: normalizeText(item.href),
-    aliases: [normalizeText(item.label), normalizeText(item.href.replace(/^\//, ""))],
+    aliases: [normalizeText(item.label), normalizeText(item.href.replace(/^\//, ""))].filter((alias) => alias.length > 0),
   }));
 
   const exact = navWithAliases.find((entry) => entry.aliases.includes(target));
@@ -141,7 +133,7 @@ function getCommandTarget(command: string) {
   }
 
   const contains = navWithAliases.find((entry) =>
-    entry.aliases.some((alias) => alias.includes(target) || target.includes(alias)),
+    entry.aliases.some((alias) => alias.length >= 2 && target.length >= 3 && (alias.includes(target) || target.includes(alias))),
   );
 
   if (contains) {
@@ -153,12 +145,61 @@ function getCommandTarget(command: string) {
 
 export function HomeScreen() {
   const router = useRouter();
+  const pathname = usePathname();
   const [commandInput, setCommandInput] = useState("");
   const [setupSnapshot, setSetupSnapshot] = useState<SetupStatusSnapshot | null>(null);
   const [feedback, setFeedback] = useState<CommandFeedback>({
     kind: "idle",
-    message: "Try: go queue, open conversations, setup, /queue",
+    message: "Try: go queue, open conversations, run outreach campaign, setup, /queue",
   });
+  const [isAwaitingOrchestrator, setIsAwaitingOrchestrator] = useState(false);
+  const [messages, setMessages] = useState<HomeChatMessage[]>([
+    {
+      id: "boot-message",
+      role: "assistant",
+      kind: "idle",
+      text: "Home is now command chat. Tell me where to go or what to run, and I will route you.",
+      timestamp: getNowLabel(),
+    },
+  ]);
+
+  const chatWindowRef = useRef<HTMLDivElement | null>(null);
+  const lastStateMessageRef = useRef<string>("");
+
+  const accountName = setupSnapshot?.accountName?.trim() || null;
+  const statusLabel = useMemo(() => {
+    if (setupSnapshot?.status === "connected") {
+      return "Connected";
+    }
+    if (setupSnapshot?.status === "syncing") {
+      return "Syncing";
+    }
+    if (setupSnapshot?.status === "error") {
+      return "Attention needed";
+    }
+    return "Ready";
+  }, [setupSnapshot?.status]);
+  const setupStateLabel = useMemo(() => summarizeSetupState(setupSnapshot), [setupSnapshot]);
+  const nextStep = useMemo(() => summarizeNextStep(setupSnapshot), [setupSnapshot]);
+
+  const pushMessage = (entry: Omit<HomeChatMessage, "id" | "timestamp">) => {
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    setMessages((prev) => [
+      ...prev,
+      {
+        ...entry,
+        id,
+        timestamp: getNowLabel(),
+      },
+    ]);
+  };
+
+  useEffect(() => {
+    if (!chatWindowRef.current) {
+      return;
+    }
+    chatWindowRef.current.scrollTop = chatWindowRef.current.scrollHeight;
+  }, [messages]);
 
   useEffect(() => {
     let cancelled = false;
@@ -172,9 +213,17 @@ export function HomeScreen() {
         const payload = (await response.json()) as SetupStatusSnapshot;
         if (!cancelled) {
           setSetupSnapshot(payload);
+          const stateLabel = summarizeSetupState(payload);
+          const next = summarizeNextStep(payload);
+          const setupMessage = payload.message?.trim();
+          const stateSummary = `Setup state: ${stateLabel}. ${setupMessage ? setupMessage : next}`;
+          if (stateSummary !== lastStateMessageRef.current) {
+            lastStateMessageRef.current = stateSummary;
+            pushMessage({ role: "assistant", text: stateSummary, kind: "idle" });
+          }
         }
       } catch {
-        // Keep generic rail/greeting when setup status is unavailable.
+        // Keep generic greeting when setup status is unavailable.
       }
     };
 
@@ -185,122 +234,128 @@ export function HomeScreen() {
     };
   }, []);
 
-  const accountName = setupSnapshot?.accountName?.trim() || null;
-  const setupStateLabel = summarizeSetupState(setupSnapshot);
-  const setupMessage = setupSnapshot?.message?.trim() || "Setup status will appear when runtime responds.";
-  const nextStep = summarizeNextStep(setupSnapshot);
+  const runCommand = async (command: string) => {
+    pushMessage({ role: "user", text: command, kind: "idle" });
 
-  const runCommand = (command: string) => {
     const result = getCommandTarget(command);
 
     if (result.mode === "empty") {
-      setFeedback({ kind: "error", message: "Type a command first." });
+      const message = "Type a command first.";
+      setFeedback({ kind: "error", message });
+      pushMessage({ role: "assistant", text: message, kind: "error" });
       return;
     }
 
     if (result.mode === "help") {
-      setFeedback({
-        kind: "idle",
-        message: "Commands: go <tab>, open <tab>, /route. Example: go queue",
-      });
+      const message =
+        "Commands: go <tab>, open <tab>, /route. Natural language also works for task intents and routes to conversations tooling.";
+      setFeedback({ kind: "idle", message });
+      pushMessage({ role: "assistant", text: message, kind: "idle" });
       return;
     }
 
     if (result.mode === "route") {
-      router.push(result.href);
-      setFeedback({
-        kind: "success",
-        message: `Navigating to ${result.label || result.href}`,
-      });
       setCommandInput("");
+      if (pathname === result.href) {
+        const message = `Already on ${result.label || result.href}`;
+        setFeedback({ kind: "idle", message });
+        pushMessage({ role: "assistant", text: message, kind: "idle" });
+        return;
+      }
+      const message = `Navigating to ${result.label || result.href}`;
+      setFeedback({ kind: "success", message });
+      pushMessage({ role: "assistant", text: message, kind: "success" });
+      router.push(result.href);
       return;
     }
 
-    setFeedback({
-      kind: "error",
-      message: `Unknown command: ${result.mode === "unknown" ? result.target : command}`,
-    });
+    setIsAwaitingOrchestrator(true);
+    setFeedback({ kind: "idle", message: "Thinking..." });
+    try {
+      const response = await fetch("/api/actions/test-ai", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          message: command,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(await readApiError(response));
+      }
+      const payload = (await response.json()) as {
+        replyText?: string;
+        guardrailBlocked?: boolean;
+        guardrailReason?: string;
+      };
+      if (payload.guardrailBlocked) {
+        const guardrailMessage = payload.guardrailReason?.trim() || "Blocked by guardrail.";
+        setFeedback({ kind: "error", message: guardrailMessage });
+        pushMessage({ role: "assistant", text: guardrailMessage, kind: "error" });
+        return;
+      }
+      const replyText = typeof payload.replyText === "string" ? payload.replyText.trim() : "";
+      if (!replyText) {
+        throw new Error("Orchestrator returned an empty reply.");
+      }
+      setFeedback({ kind: "success", message: "Response generated." });
+      pushMessage({ role: "assistant", text: replyText, kind: "success" });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not get orchestrator response.";
+      const fallback =
+        setupStateLabel === "Connected"
+          ? `${message} Try: go queue or open conversations.`
+          : `${message} Try setup first, then go queue.`;
+      setFeedback({ kind: "error", message: fallback });
+      pushMessage({ role: "assistant", text: fallback, kind: "error" });
+    } finally {
+      setIsAwaitingOrchestrator(false);
+    }
   };
 
   const onCommandSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    runCommand(commandInput);
+    void runCommand(commandInput);
   };
 
   return (
-    <section className="home-shell" aria-label="Home overview">
-      <section className="home-rail" aria-label="Quick sections">
-        <p className="home-rail-title">Desk Brief</p>
-        <p className="home-rail-note">Live setup context and next-step guidance.</p>
-        <div className="home-rail-list">
-          <article className="home-rail-card">
-            <div className="home-rail-card-topline">
-              <span className="home-rail-card-label">Profile Name</span>
-              <span className="home-rail-card-value">{accountName || "Unknown"}</span>
-            </div>
-            <p className="home-rail-card-note">Loaded from WhatsApp setup credentials.</p>
-          </article>
-          <article className="home-rail-card">
-            <div className="home-rail-card-topline">
-              <span className="home-rail-card-label">WhatsApp Setup</span>
-              <span className="home-rail-card-value">{setupStateLabel}</span>
-            </div>
-            <p className="home-rail-card-note">{setupMessage}</p>
-          </article>
-          <article className="home-rail-card">
-            <div className="home-rail-card-topline">
-              <span className="home-rail-card-label">Command Pattern</span>
-              <span className="home-rail-card-value">go &lt;section&gt;</span>
-            </div>
-            <p className="home-rail-card-note">Also supports open &lt;section&gt; and direct /route input.</p>
-          </article>
-          <article className="home-rail-card">
-            <div className="home-rail-card-topline">
-              <span className="home-rail-card-label">Recommended Next Step</span>
-            </div>
-            <p className="home-rail-card-note">{nextStep}</p>
-          </article>
-        </div>
-      </section>
-
+    <section className="home-shell" aria-label="Home chat">
       <div className="home-canvas">
         <div className="home-topline">
           <p className="home-assistant">Assistant v2.6</p>
           <h1 className="home-title">Daily Nixtio</h1>
         </div>
 
-        <div className="home-hero">
-          <div className="home-hero-copy">
-            <p className="home-hero-kicker">{accountName ? `Welcome back, ${accountName}` : "Welcome back"}</p>
-            <h2 className="home-hero-title">What needs attention right now?</h2>
-          </div>
-          <div className="home-avatar-wrap" aria-hidden>
-            <p className="home-avatar-note">Need help picking the next task?</p>
-            <div className="home-avatar">
-              <div className="home-avatar-face">
-                <span />
-                <span />
-              </div>
+        <div className="home-chat-platform">
+          <header className="home-chat-header">
+            <p className="home-chat-kicker">{accountName ? `Welcome back, ${accountName}` : "Welcome back"}</p>
+            <h2 className="home-chat-title">Home chat</h2>
+            <p className="home-chat-status">Status: {statusLabel}</p>
+            <p className="home-chat-status">Setup: {setupStateLabel}</p>
+            <p className="home-chat-status">Next: {nextStep}</p>
+          </header>
+
+          <div className="conversation-chat home-conversation-chat">
+            <div ref={chatWindowRef} className="conversation-chat-window home-chat-window" role="log" aria-live="polite">
+              {messages.map((message) => {
+                const outbound = message.role === "user";
+                const toneClass = message.kind ? `home-bubble-${message.kind}` : "";
+                return (
+                  <div key={message.id} className={`chat-row ${outbound ? "outbound" : "inbound"}`}>
+                    <span className={`chat-avatar ${outbound ? "outbound" : "inbound"}`} aria-hidden="true">
+                      {outbound ? "You" : "AI"}
+                    </span>
+                    <div className={`message-bubble ${toneClass}`}>
+                      <p>{message.text}</p>
+                      <span>{message.timestamp}</span>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </div>
-        </div>
 
-        <div className="home-feature-grid">
-          {homeFeatures.map((feature) => (
-            <Link key={feature.href} href={feature.href} className="home-feature-card">
-              <span className={`home-feature-mark ${feature.accentClass}`} aria-hidden />
-              <p className="home-feature-title">{feature.title}</p>
-              <p className="home-feature-copy">{feature.description}</p>
-              <p className="home-feature-footer">{feature.footer}</p>
-            </Link>
-          ))}
-        </div>
-
-        <div className="home-console">
-          <div className="home-console-meta">
-            <p className="home-console-hint">Command line: type the workspace or route you want.</p>
-            <p className="home-console-hint">Tip: use go &lt;tab&gt;, open &lt;tab&gt;, or /route.</p>
-          </div>
           <form className="home-prompt-row" onSubmit={onCommandSubmit}>
             <button type="button" className="home-plus" aria-label="Show command help" onClick={() => runCommand("help")}>
               ?
@@ -308,16 +363,19 @@ export function HomeScreen() {
             <input
               type="text"
               className="home-prompt-input"
-              placeholder="Try: go queue"
-              aria-label="Command input"
+              placeholder="Message Home: go queue"
+              aria-label="Chat command input"
               value={commandInput}
               onChange={(event) => setCommandInput(event.target.value)}
+              disabled={isAwaitingOrchestrator}
             />
-            <button type="submit" className="home-send" aria-label="Run command">
-              Run
+            <button type="submit" className="home-send" aria-label="Send command" disabled={isAwaitingOrchestrator}>
+              {isAwaitingOrchestrator ? "..." : "Send"}
             </button>
           </form>
+
           <p className={`home-command-feedback home-command-${feedback.kind}`}>{feedback.message}</p>
+
           <div className="home-action-row" aria-label="Suggested commands">
             {quickCommands.map((command) => (
               <button
@@ -326,8 +384,9 @@ export function HomeScreen() {
                 className="home-action-chip"
                 onClick={() => {
                   setCommandInput(command);
-                  runCommand(command);
+                  void runCommand(command);
                 }}
+                disabled={isAwaitingOrchestrator}
               >
                 {command}
               </button>

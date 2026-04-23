@@ -47,6 +47,18 @@ type ThreadPersonalitySetting = {
   threadPromptProfileUpdatedAt?: number;
 };
 
+type RelationshipThreadState = {
+  profileSlug?: string;
+  priorityTier: "romantic" | "professional" | "general";
+  trustScore: number;
+  warmthTrend: -1 | 0 | 1;
+  conflictFlag: boolean;
+  responsivenessMismatch: boolean;
+  repairNeeded: boolean;
+  lastReason?: string;
+  updatedAt: number;
+};
+
 type ThreadPersonalityFormProps = {
   profiles: PersonalityProfile[];
   initialProfileSlug: string;
@@ -792,6 +804,13 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
     api.threads.getToolEvents,
     selectedThreadId ? { threadId: selectedThreadId as Id<"threads">, limit: 260 } : "skip",
   ) as ThreadToolEvent[] | undefined;
+  const relationshipStateQueryRef = (
+    (api as unknown as Record<string, unknown>).relationshipState as { getThreadState?: unknown } | undefined
+  )?.getThreadState;
+  const relationshipState = useQuery(
+    relationshipStateQueryRef ? (relationshipStateQueryRef as never) : "skip",
+    relationshipStateQueryRef && selectedThreadId ? { threadId: selectedThreadId as Id<"threads"> } : "skip",
+  ) as RelationshipThreadState | null | undefined;
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
   const [toolSummaryMessageId, setToolSummaryMessageId] = useState<string | null>(null);
   const [mediaPreviewModal, setMediaPreviewModal] = useState<MessageMediaPreview | null>(null);
@@ -1216,6 +1235,26 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
     () => buildMessageToolSummaries(thread?.messages, threadToolEvents),
     [thread?.messages, threadToolEvents],
   );
+  const isSelfChatSystemThread = useMemo(() => {
+    if (!thread) {
+      return false;
+    }
+    if (thread.thread.threadKind && thread.thread.threadKind !== "direct") {
+      return false;
+    }
+    const nonStatusMessages = (thread.messages || []).filter((message) => !message.isStatus);
+    if (nonStatusMessages.length === 0) {
+      return false;
+    }
+    const inboundCount = nonStatusMessages.filter((message) => message.direction === "inbound").length;
+    const manualOutboundCount = nonStatusMessages.filter(
+      (message) => message.direction === "outbound" && !message.toolRunId,
+    ).length;
+    const automatedOutboundCount = nonStatusMessages.filter(
+      (message) => message.direction === "outbound" && Boolean(message.toolRunId),
+    ).length;
+    return inboundCount === 0 && manualOutboundCount > 0 && automatedOutboundCount > 0;
+  }, [thread]);
   const threadMessagesById = useMemo(() => {
     const map = new Map<string, ThreadMessage>();
     for (const message of thread?.messages || []) {
@@ -1594,6 +1633,13 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
               <p className="queue-meta">
                 Auto-respond: {thread.thread.isIgnored ? "Disabled (ignored)" : "Enabled"}
               </p>
+              <p className="queue-meta">
+                Relationship tier: {relationshipState?.priorityTier || "general"} · Trust {(Math.round((relationshipState?.trustScore || 0.5) * 100))}%
+              </p>
+              <p className="queue-meta">
+                Conflict: {relationshipState?.conflictFlag ? "Active" : "Clear"} · Repair: {relationshipState?.repairNeeded ? "Needed" : "Not needed"}
+              </p>
+              {relationshipState?.lastReason ? <p className="queue-meta">Last policy reason: {relationshipState.lastReason}</p> : null}
               <p className="queue-meta">Needs review in this thread: {reviewCount}</p>
               <div className="queue-actions">
                 <button
@@ -1625,20 +1671,24 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
               {threadReviewBySourceMessageId.unanchored.length > 0 ? (
                 <div className="thread-review-stack thread-review-floating">
                   <p className="thread-review-group-title">Review items from older messages</p>
-                  {threadReviewBySourceMessageId.unanchored.map((entry) => renderThreadReviewEntry(entry))}
+              {threadReviewBySourceMessageId.unanchored.map((entry) => renderThreadReviewEntry(entry))}
                 </div>
               ) : null}
               {(thread.messages || []).map((message) => {
-                const outbound = message.direction === "outbound";
+                const isAutomatedSelfChatReply =
+                  isSelfChatSystemThread && message.direction === "outbound" && Boolean(message.toolRunId);
+                const outbound = message.direction === "outbound" && !isAutomatedSelfChatReply;
                 const isStatusPost = isStatusPostMessage(message, thread.thread.jid);
                 const senderName = outbound
                   ? threadGrounding?.myName?.trim() || "You"
-                  : threadGrounding?.theirName?.trim() || thread.thread.title || "Contact";
+                  : isAutomatedSelfChatReply
+                    ? "System"
+                    : threadGrounding?.theirName?.trim() || thread.thread.title || "Contact";
                 const senderBadge = senderName.charAt(0).toUpperCase();
                 const displayText = messageDisplayText(message);
                 const mediaCaption = message.mediaCaption?.trim();
                 const showMediaCaption = Boolean(mediaCaption && mediaCaption !== displayText);
-                const messageToolSummary = outbound ? toolEventSummary.byMessageId.get(message._id) : undefined;
+                const messageToolSummary = message.direction === "outbound" ? toolEventSummary.byMessageId.get(message._id) : undefined;
                 const toolSummaryCount = messageToolSummary
                   ? messageToolSummary.toolCalls.length + messageToolSummary.contextWindows.length + messageToolSummary.styleGuardrails.length
                   : 0;
@@ -1667,7 +1717,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
                           ))}
                         </div>
                       ) : null}
-                      {outbound && toolSummaryCount > 0 ? (
+                      {message.direction === "outbound" && toolSummaryCount > 0 ? (
                         <div className="queue-actions">
                           <button
                             type="button"

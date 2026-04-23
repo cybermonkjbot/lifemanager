@@ -1,3 +1,8 @@
+import {
+  buildAiFreshnessFingerprint,
+  getAiFreshnessCachedValue,
+  setAiFreshnessCachedValue,
+} from "@/lib/ai-freshness";
 import { createConvexClient } from "@/lib/convex-server";
 import { convexRefs } from "@/lib/convex-refs";
 import { gatewayApiKeyConfigured, requestHasGatewayApiKey } from "@/lib/api-gateway-auth";
@@ -318,6 +323,55 @@ export async function POST(request: Request) {
 
     const resolvedTemperature = requestTemperature ?? runtimeSettings?.aiTemperature;
     const resolvedMaxOutputTokens = requestMaxOutputTokens ?? runtimeSettings?.aiMaxOutputTokens;
+    const freshnessKey = buildAiFreshnessFingerprint({
+      scope: "gateway",
+      inboundText,
+      threadId,
+      historyLines: combinedHistoryLines,
+      styleHints,
+      contactFacts,
+      model: runtimeModel || requestModel,
+      temperature: resolvedTemperature,
+      maxOutputTokens: resolvedMaxOutputTokens,
+    });
+
+    const cached = getAiFreshnessCachedValue<{
+      id: string;
+      object: string;
+      created: number;
+      model: string;
+      choices: unknown[];
+      usage?: unknown;
+      slm: Record<string, unknown>;
+    }>(freshnessKey);
+    if (cached) {
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "dashboard",
+          eventType: "api.gateway.freshness.hit",
+          detail: compactText(`Gateway reused fresh cached result (${cached.ageMs}ms old).`, MAX_EVENT_DETAIL_CHARS),
+          ...(threadId ? { threadId } : {}),
+        })
+        .catch(() => undefined);
+
+      return NextResponse.json(
+        {
+          ...cached.value,
+          slm: {
+            ...(cached.value.slm || {}),
+            freshness: {
+              cacheHit: true,
+              ageMs: cached.ageMs,
+            },
+          },
+        },
+        {
+          headers: buildHeaders({
+            "Cache-Control": "no-store",
+          }),
+        },
+      );
+    }
 
     const aiResult = await generateReplyWithFallback({
       inboundText,
@@ -462,26 +516,32 @@ export async function POST(request: Request) {
       attempts: aiResult.attempts,
       finishReason: aiResult.guardrailBlocked ? "content_filter" : "stop",
     });
-
-    return NextResponse.json(
-      {
-        ...completion,
-        slm: {
-          provider: aiResult.provider,
-          resolvedModel: aiResult.model,
-          latencyMs: aiResult.latencyMs,
-          guardrailBlocked: aiResult.guardrailBlocked,
-          guardrailReason: aiResult.guardrailReason,
-          attempts: aiResult.attempts,
-          contextToolCalls: aiResult.contextToolCalls || [],
-          contextWindow: aiResult.contextWindow || null,
-          qualityScore: aiResult.qualityScore,
-          qualityChecks: aiResult.qualityChecks || [],
-          qualityRewriteApplied: aiResult.qualityRewriteApplied || false,
-          activePersonaPackId: aiResult.activePersonaPackId || null,
-          threadId: threadId || null,
+    const responsePayload = {
+      ...completion,
+      slm: {
+        provider: aiResult.provider,
+        resolvedModel: aiResult.model,
+        latencyMs: aiResult.latencyMs,
+        guardrailBlocked: aiResult.guardrailBlocked,
+        guardrailReason: aiResult.guardrailReason,
+        attempts: aiResult.attempts,
+        contextToolCalls: aiResult.contextToolCalls || [],
+        contextWindow: aiResult.contextWindow || null,
+        qualityScore: aiResult.qualityScore,
+        qualityChecks: aiResult.qualityChecks || [],
+        qualityRewriteApplied: aiResult.qualityRewriteApplied || false,
+        activePersonaPackId: aiResult.activePersonaPackId || null,
+        threadId: threadId || null,
+        freshness: {
+          cacheHit: false,
+          ageMs: 0,
         },
       },
+    };
+    setAiFreshnessCachedValue(freshnessKey, responsePayload);
+
+    return NextResponse.json(
+      responsePayload,
       {
         headers: buildHeaders({
           "Cache-Control": "no-store",

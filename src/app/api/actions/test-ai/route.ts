@@ -1,3 +1,8 @@
+import {
+  buildAiFreshnessFingerprint,
+  getAiFreshnessCachedValue,
+  setAiFreshnessCachedValue,
+} from "@/lib/ai-freshness";
 import { createConvexClient } from "@/lib/convex-server";
 import { convexRefs } from "@/lib/convex-refs";
 import { requireInstanceApiAccess } from "@/lib/instance-guard";
@@ -186,6 +191,55 @@ export async function POST(request: Request) {
           .catch(() => null)) as { profile?: StyleProfile } | null)?.profile
       : null;
 
+    const freshnessKey = buildAiFreshnessFingerprint({
+      scope: "test_ai",
+      inboundText: message,
+      threadId,
+      historyLines,
+      styleHints,
+      contactFacts,
+      model: runtimeSettings?.aiModelFirstEnabled ? "model_first" : undefined,
+      temperature: runtimeSettings?.aiTemperature,
+      maxOutputTokens: runtimeSettings?.aiMaxOutputTokens,
+    });
+    const cached = getAiFreshnessCachedValue<{
+      replyText: string;
+      provider: string;
+      model: string;
+      latencyMs: number;
+      guardrailBlocked: boolean;
+      guardrailReason?: string;
+      attempts: unknown[];
+      contextToolCalls: unknown[];
+      contextWindow: unknown;
+      qualityScore?: number;
+      qualityChecks: unknown[];
+      qualityRewriteApplied: boolean;
+      activePersonaPackId: string | null;
+      createdAt: number;
+      usedThreadContext: boolean;
+      threadId: string | null;
+      freshness: { cacheHit: boolean; ageMs: number };
+    }>(freshnessKey);
+    if (cached) {
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "dashboard",
+          eventType: "ai.test.freshness.hit",
+          detail: `Dashboard AI test reused fresh cached result (${cached.ageMs}ms old).`,
+          ...(threadId ? { threadId } : {}),
+        })
+        .catch(() => undefined);
+
+      return NextResponse.json({
+        ...cached.value,
+        freshness: {
+          cacheHit: true,
+          ageMs: cached.ageMs,
+        },
+      });
+    }
+
     const aiResult = await generateReplyWithFallback({
       inboundText: message,
       historyLines,
@@ -323,7 +377,7 @@ export async function POST(request: Request) {
       })
       .catch(() => undefined);
 
-    return NextResponse.json({
+    const responsePayload = {
       replyText: aiResult.text,
       provider: aiResult.provider,
       model: aiResult.model,
@@ -340,7 +394,14 @@ export async function POST(request: Request) {
       createdAt: Date.now(),
       usedThreadContext: historyLines.length > 0,
       threadId: threadId || null,
-    });
+      freshness: {
+        cacheHit: false,
+        ageMs: 0,
+      },
+    };
+
+    setAiFreshnessCachedValue(freshnessKey, responsePayload);
+    return NextResponse.json(responsePayload);
   } catch (error) {
     return NextResponse.json({ error: getErrorMessage(error) }, { status: 500 });
   }

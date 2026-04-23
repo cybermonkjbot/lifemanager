@@ -46,9 +46,12 @@ export const convexRefs = {
   backlogUnsnooze: makeFunctionReference<"mutation">("backlog:unsnooze"),
   backlogIgnoreThread: makeFunctionReference<"mutation">("backlog:ignoreThread"),
   todosFromCandidate: makeFunctionReference<"mutation">("todos:fromCandidate"),
+  todosCreateAgendaRange: makeFunctionReference<"mutation">("todos:createAgendaRange"),
   rulesUpsertIgnoreRule: makeFunctionReference<"mutation">("rules:upsertIgnoreRule"),
   threadsUpsertMetadata: makeFunctionReference<"mutation">("threads:upsertMetadata"),
   threadsSetNightPause: makeFunctionReference<"mutation">("threads:setNightPause"),
+  threadsListContacts: makeFunctionReference<"query">("threads:listContacts"),
+  outreachRunManual: makeFunctionReference<"mutation">("outreach:runManual"),
   callsRecordEvent: makeFunctionReference<"mutation">("calls:recordEvent"),
 
   outboxClaimDue: makeFunctionReference<"mutation">("outbox:claimDue"),
@@ -59,6 +62,7 @@ export const convexRefs = {
   outboxHydrateAiStatus: makeFunctionReference<"mutation">("outbox:hydrateAiStatus"),
   outboxStageStatusReview: makeFunctionReference<"mutation">("outbox:stageStatusReview"),
   outboxRewriteClaimedMessage: makeFunctionReference<"mutation">("outbox:rewriteClaimedMessage"),
+  outboxDeferClaimed: makeFunctionReference<"mutation">("outbox:deferClaimed"),
   outboxMarkSent: makeFunctionReference<"mutation">("outbox:markSent"),
   outboxMarkFailed: makeFunctionReference<"mutation">("outbox:markFailed"),
 
@@ -86,6 +90,8 @@ export const convexRefs = {
   personalityUpsertProfile: makeFunctionReference<"mutation">("personality:upsertProfile"),
   romanceMorningGetThreadState: makeFunctionReference<"query">("romanceProtocol:getThreadState"),
   romanceMorningRecordHydration: makeFunctionReference<"mutation">("romanceProtocol:recordHydration"),
+  relationshipStateGetThreadState: makeFunctionReference<"query">("relationshipState:getThreadState"),
+  relationshipStateUpsertFromSignals: makeFunctionReference<"mutation">("relationshipState:upsertFromSignals"),
 
   mediaGenerateUploadUrl: makeFunctionReference<"mutation">("media:generateUploadUrl"),
   mediaRegisterAsset: makeFunctionReference<"mutation">("media:registerAsset"),
