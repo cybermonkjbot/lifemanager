@@ -154,7 +154,13 @@ Notes:
 - Shortcuts are supported for worker control: `pause`, `resume`, `restart`, `status` (and `/slm pause`, etc.).
 - Send `help` anytime to get the full command list in chat.
 - Optional hard gate: set `SLM_SELF_CONTROL_MESSAGE_PREFIX` (for example `slm`) to require prefixed commands like `slm help`.
+- Implicit self-chat routing is enabled by default, so plain messages can trigger manager/smart routing without `openclaw` or `codex` mentions.
 - Plain self-chat requests are also auto-routed by a model router (OpenClaw vs Codex improve), so explicit prefixes are no longer required.
+- Natural language requests for conversation ops are supported, e.g. "run a reach out campaign", "start conversations with dormant contacts", "draft follow-up agenda for this week".
+- A manager planner now runs first for self-chat requests and can orchestrate multiple in-system tools (runtime control, outreach run, agenda scheduling, settings/contacts snapshots, OpenClaw, Codex improve).
+- Manager is now the primary self-chat control plane: it is evaluated before direct `openclaw`, `improve`, and runtime command handlers (which remain as compatibility fallback).
+- Manager now sends live progress updates in self chat (plan ready, tools selected, per-step start/completion/failure, final summary).
+- Manager tool registry and telemetry reference: `docs/self-control-manager-tool-registry.md`.
 - `pause worker` pauses automation while keeping the listener alive, so `resume worker` still works.
 - App controls use `.slm/app.pid` and start with `SLM_APP_START_CMD` (default `bun run dev:next`).
 
@@ -196,6 +202,11 @@ Environment variables:
 - `SLM_SELF_CONTROL_SMART_ROUTING_ENABLED` (optional, default `true`)
 - `SLM_SELF_CONTROL_ROUTER_MODEL` (optional, default `gpt-5.2`)
 - `SLM_SELF_CONTROL_ROUTER_TIMEOUT_MS` (optional, default `45000`)
+- `SLM_SELF_CONTROL_MANAGER_ENABLED` (optional, default `true`)
+- `SLM_SELF_CONTROL_MANAGER_MODEL` (optional, default `gpt-5.2`)
+- `SLM_SELF_CONTROL_MANAGER_TIMEOUT_MS` (optional, default `60000`)
+- `SLM_SELF_CONTROL_MANAGER_MAX_STEPS` (optional, default `3`, max `5`)
+- `SLM_SELF_CONTROL_IMPLICIT_ROUTING_ENABLED` (optional, default `true`; set `false` to enforce strict prefix-only command handling)
 
 Long-running behavior:
 - `openclaw <instruction>` and `@openclaw <instruction>` are queued and run in background.

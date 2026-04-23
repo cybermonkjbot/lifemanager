@@ -4,6 +4,7 @@ import {
   DEFAULT_CALL_AUTO_DECLINE_FALLBACK_VARIANTS,
   resolveCallFallbackVariants,
   selectCallFallbackVariant,
+  shouldSkipStaleCallOffer,
   shouldSuppressCallFallbackAfterOffer,
 } from "./call-fallback";
 
@@ -61,4 +62,23 @@ test("selectCallFallbackVariant is deterministic and only returns configured var
   });
   assert.equal(first, second);
   assert.equal(variants.includes(first), true);
+});
+
+test("shouldSkipStaleCallOffer blocks outdated missed-call handling", () => {
+  assert.equal(
+    shouldSkipStaleCallOffer({
+      offerAtMs: 1_000,
+      nowMs: 100_000,
+      recencyWindowMs: 30_000,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldSkipStaleCallOffer({
+      offerAtMs: 80_000,
+      nowMs: 100_000,
+      recencyWindowMs: 30_000,
+    }),
+    false,
+  );
 });

@@ -7,6 +7,9 @@ import {
   enforceGoodMorningStyleLint,
 } from "./outreach-hydration";
 
+const MORNING_MS = Date.UTC(2026, 0, 1, 9, 0, 0);
+const AFTERNOON_MS = Date.UTC(2026, 0, 1, 15, 0, 0);
+
 test("buildOutreachPromptSeed enforces constrained good-morning lead prompt", () => {
   const prompt = buildOutreachPromptSeed({
     outreachMode: "good_morning",
@@ -111,6 +114,7 @@ test("buildOutreachFallbackText uses mode-aware good-morning fallback", () => {
     longSilenceGhostReopen: true,
     ghostReopenTone: "naija_tease",
     ghostSeverity: "severe",
+    nowMs: MORNING_MS,
   });
   const warm = buildOutreachFallbackText({
     outreachMode: "good_morning",
@@ -118,6 +122,7 @@ test("buildOutreachFallbackText uses mode-aware good-morning fallback", () => {
     longSilenceGhostReopen: true,
     ghostReopenTone: "hard_banter",
     ghostSeverity: "severe",
+    nowMs: MORNING_MS,
   });
 
   assert.equal(lead, "Good morning, I want to make today sweet for us. What time works for a quick plan later?");
@@ -162,6 +167,7 @@ test("buildOutreachFallbackText uses boundary reopen fallback after ignored paus
     longSilenceGhostReopen: false,
     ghostReopenTone: "warm",
     ghostSeverity: "mild",
+    nowMs: MORNING_MS,
   });
   const fallbackB = buildOutreachFallbackText({
     outreachMode: "good_morning",
@@ -171,6 +177,7 @@ test("buildOutreachFallbackText uses boundary reopen fallback after ignored paus
     longSilenceGhostReopen: false,
     ghostReopenTone: "warm",
     ghostSeverity: "mild",
+    nowMs: MORNING_MS,
   });
   const fallbackC = buildOutreachFallbackText({
     outreachMode: "good_morning",
@@ -180,6 +187,7 @@ test("buildOutreachFallbackText uses boundary reopen fallback after ignored paus
     longSilenceGhostReopen: false,
     ghostReopenTone: "warm",
     ghostSeverity: "mild",
+    nowMs: MORNING_MS,
   });
   const fallbackZ = buildOutreachFallbackText({
     outreachMode: "good_morning",
@@ -189,6 +197,7 @@ test("buildOutreachFallbackText uses boundary reopen fallback after ignored paus
     longSilenceGhostReopen: false,
     ghostReopenTone: "warm",
     ghostSeverity: "mild",
+    nowMs: MORNING_MS,
   });
 
   assert.equal(
@@ -231,6 +240,7 @@ test("enforceGoodMorningStyleLint rewrites long/question-heavy/emoji-heavy text"
   const linted = enforceGoodMorningStyleLint({
     text: "Good morning babe 😍😍. I miss you. What are you up to today? Will you call me later?",
     fallbackText: "Good morning, sending you warm energy. How are you feeling this morning?",
+    nowMs: MORNING_MS,
   });
 
   assert.match(linted.text, /^Good morning babe/);
@@ -246,10 +256,12 @@ test("enforceGoodMorningStyleLint falls back on robotic or pressure cues", () =>
   const robotic = enforceGoodMorningStyleLint({
     text: "As your assistant workflow, this is your scheduled protocol reminder.",
     fallbackText: fallback,
+    nowMs: MORNING_MS,
   });
   const pressure = enforceGoodMorningStyleLint({
     text: "Good morning. Reply now and stop ignoring me.",
     fallbackText: fallback,
+    nowMs: MORNING_MS,
   });
 
   assert.equal(robotic.text, fallback);
@@ -262,10 +274,12 @@ test("enforceGoodMorningStyleLint normalizes GM shorthand and morning prefix", (
   const linted = enforceGoodMorningStyleLint({
     text: "GM bby, thinking of you.",
     fallbackText: "Good morning, sending you warm energy. How are you feeling this morning?",
+    nowMs: MORNING_MS,
   });
   const lintedMorning = enforceGoodMorningStyleLint({
     text: "Morning love, hope you're good.",
     fallbackText: "Good morning, sending you warm energy. How are you feeling this morning?",
+    nowMs: MORNING_MS,
   });
 
   assert.match(linted.text, /^Good morning\b/);
@@ -278,10 +292,33 @@ test("enforceGoodMorningStyleLint blocks pidgin wording", () => {
   const linted = enforceGoodMorningStyleLint({
     text: "Good morning bby, shey you dey alright?",
     fallbackText: fallback,
+    nowMs: MORNING_MS,
   });
 
   assert.equal(linted.text, fallback);
   assert.ok(linted.violations.includes("pidgin_wording"));
+});
+
+test("buildOutreachFallbackText uses afternoon greeting outside morning window", () => {
+  const warm = buildOutreachFallbackText({
+    outreachMode: "good_morning",
+    romanceMorningMode: "warm",
+    longSilenceGhostReopen: false,
+    ghostReopenTone: "warm",
+    ghostSeverity: "mild",
+    nowMs: AFTERNOON_MS,
+  });
+  const lead = buildOutreachFallbackText({
+    outreachMode: "good_morning",
+    romanceMorningMode: "lead",
+    longSilenceGhostReopen: false,
+    ghostReopenTone: "warm",
+    ghostSeverity: "mild",
+    nowMs: AFTERNOON_MS,
+  });
+
+  assert.equal(warm, "Good afternoon, sending you warm energy. How are you feeling today?");
+  assert.equal(lead, "Good afternoon, I want to make today sweet for us. What time works for a quick plan later?");
 });
 
 test("enforceComplimentStyleLint rewrites long/question-heavy/emoji-heavy text", () => {

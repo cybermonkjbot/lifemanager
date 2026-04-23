@@ -88,6 +88,8 @@ export function evaluateRollingStickerThreadMode(args: {
 const ACK_ONLY_PATTERN = /\b(ok|okay|sure|cool|great|thanks|thank you|thx|noted|done|alright|safe|bet)\b/i;
 const REQUEST_CUE_PATTERN =
   /\?|(?:\b(can|could|will|would|should|when|where|what|why|how|who)\b)|(?:\b(please|pls|abeg|help|need|send|share|confirm|check|update|reply|call)\b)/i;
+const PASSIVE_AGGRESSIVE_TONE_PATTERN =
+  /\b(no worry|no wahala)\b.*\b(enjoy|carry on|continue)\b|\bfine then\b|\bokay then\b|\bdo your thing\b/i;
 
 export function needsTextReplyInStickerMode(args: {
   inboundText: string;
@@ -107,6 +109,10 @@ export function needsTextReplyInStickerMode(args: {
   }
 
   if (REQUEST_CUE_PATTERN.test(text)) {
+    return true;
+  }
+
+  if (PASSIVE_AGGRESSIVE_TONE_PATTERN.test(text)) {
     return true;
   }
 

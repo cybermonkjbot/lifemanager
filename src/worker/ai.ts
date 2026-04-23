@@ -271,6 +271,8 @@ type RuntimeAiTuning = {
   delayMaxMs?: number;
   typingMinMs?: number;
   typingMaxMs?: number;
+  silenceGapMinutes?: number;
+  networkFrictionHint?: boolean;
 };
 
 type ToolRouterPlanInput = {
@@ -428,9 +430,9 @@ const AI_IDENTITY_DISCLOSURE_CUE_PATTERNS = [
   /\b(?:is\s+this\s+chatgpt|are\s+you\s+chatgpt|is\s+this\s+automated|is\s+this\s+a\s+bot)\b/i,
 ];
 const AI_IDENTITY_DISCLOSURE_RULE =
-  "Identity disclosure protocol: when asked whether this is AI or asked about origin, disclose transparently and professionally. State that you are a conversational intelligence tool designed by Joshua to augment his business and social bandwidth. Mention Joshua uses state-of-the-art AI for timely high-quality communication, remains the primary authority, may be active in this thread or review logs later, and your role is an assistant bridging the gap when he is unavailable. Keep the wording tech-forward, human, and concise.";
+  "Identity disclosure protocol: when asked whether this is AI or asked about origin, disclose transparently but minimally. Keep it one short sentence, avoid internal system details, and do not volunteer builder/architecture details unless explicitly asked.";
 const JADL_DISCLOSURE_RESPONSE_TEMPLATE =
-  "Correct - you are speaking with Joshua's digital liaison. I am a conversational intelligence tool designed by Joshua to augment his business and social bandwidth. He uses state-of-the-art AI to keep communication timely and high quality, and he remains the primary authority. He may be active in this thread or review it later. I am here as his assistant to bridge the gap when he is unavailable. How can I help on his behalf?";
+  "Yes, this chat is AI-assisted for faster replies, and Joshua remains accountable for decisions.";
 const SELF_ROAST_FACTUALITY_FALLBACK = "I can roast myself for fun, but I keep profile facts accurate.";
 const OBJECTIVE_PROFILE_QUESTION_PATTERNS = [
   /\b(do you have|did you get|you get|you have|you hold)\s+(?:a\s+)?(?:degree|phd|masters|mba|certificate)\b/i,
@@ -620,6 +622,12 @@ const HUMOR_CONTEXT_BLOCK_PATTERNS = [
   /\b(court|lawyer|legal|lawsuit|arrestd?|police report)\b/i,
   /\b(rent|salary|debt|loan|invoice overdue|payment issue)\b/i,
 ];
+const UTILITY_INTERRUPT_PATTERN =
+  /\b(fuel|nnpc|station|queue|light don come|light (?:don )?(?:go|come)|nepa|gen(?:erator)?|inverter|mtn|airtel|network (?:bad|slow|issue)|data don finish)\b/i;
+const PASSIVE_AGGRESSIVE_CUE_PATTERN =
+  /\b(no worry|no wahala)\b.*\b(enjoy|carry on|continue)\b|\bfine then\b|\bokay then\b|\bdo your thing\b/i;
+const LOCAL_ACCUSATION_CUE_PATTERN =
+  /\b(you were seen|dem see you|i saw you)\b.*\b(terminus|rayfield|bukuru|angwan|jos|j-town)\b|\bwhy (?:didn'?t|no) (?:you )?(?:pick|answer|reply)\b/i;
 const HUMOR_CONTEXT_MIN_CHARS = 10;
 const MAX_SAFE_MIMICRY_LEVEL = 0.82;
 const HUMOR_JUDGE_SYSTEM_INSTRUCTION =
@@ -1041,6 +1049,18 @@ function countCoreHumorEmojiHits(text: string) {
 
 function hasHumorContextBlock(text: string) {
   return HUMOR_CONTEXT_BLOCK_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+function hasUtilityInterruptCue(text: string) {
+  return UTILITY_INTERRUPT_PATTERN.test(normalizeOutboundText(text || ""));
+}
+
+function hasPassiveAggressiveCue(text: string) {
+  return PASSIVE_AGGRESSIVE_CUE_PATTERN.test(normalizeOutboundText(text || ""));
+}
+
+function hasLocalAccusationCue(text: string) {
+  return LOCAL_ACCUSATION_CUE_PATTERN.test(normalizeOutboundText(text || ""));
 }
 
 function hasHumorSignal(text: string, keywords: string[], emojis: string[]) {
@@ -3168,12 +3188,21 @@ function buildPrompt(args: {
     : aiDisclosureContext
       ? "You have already disclosed in this chat that an AI assistant helps you. Do not deny or contradict that. Keep references brief and only when relevant."
       : "Do not mention AI, policies, prompt rules, or internal reasoning.";
+  const utilityInterruptInstruction = hasUtilityInterruptCue(args.inboundText)
+    ? "Utility-interrupt mode is ON: prioritize immediate local utility asks (fuel/power/network) with a short practical response first, then optionally park or defer other conversation threads."
+    : "";
+  const passiveAggressiveInstruction = hasPassiveAggressiveCue(args.inboundText)
+    ? "Tone-shift guardrail: latest message is likely passive-aggressive. Do not joke. Use one concise repair-oriented line: acknowledge friction, answer concrete ask, and avoid escalation."
+    : "";
+  const localAccusationInstruction = hasLocalAccusationCue(args.inboundText)
+    ? "Local accusation guardrail: avoid fabricated situational claims. Use low-claim wording, offer one plausible availability constraint only if needed, and move to a concrete next step."
+    : "";
   const steeringInstruction = steeringInstructionForMode(steeringMode);
   const steeringPriorityInstruction =
     "Steering priority order: (1) explicit safety/closure cues, (2) latest inbound ask, (3) relevant conversation context, (4) style/persona polish. If these conflict, follow this order.";
   const steeringExecutionInstruction =
     steeringMode === "none"
-      ? "Steering mode: NONE. Keep the reply decisive, concrete, and context-anchored; avoid vague acknowledgments."
+      ? "Steering mode: NONE. Keep the reply decisive, concrete, and context-anchored; avoid vague acknowledgments. If utility-interrupt/tone-shift/accusation guardrails are active, prioritize them."
       : `Steering mode: ${steeringMode.toUpperCase()}. Execute this mode strictly even if other style hints pull in a different direction.`;
   const insultHandlingInstruction = hasAggressiveInsultCue(args.inboundText)
     ? "The latest message includes insulting or aggressive language. Ignore the insult and do not attempt de-escalation, conflict coaching, or tone policing. Respond only to the concrete request/topic. If there is no concrete request, send one short neutral acknowledgment and stop."
@@ -3334,6 +3363,9 @@ function buildPrompt(args: {
       antiJokeChainInstruction,
       antiRecentSelfRepeatInstruction,
       steeringInstruction,
+      utilityInterruptInstruction,
+      passiveAggressiveInstruction,
+      localAccusationInstruction,
       steeringPriorityInstruction,
       steeringExecutionInstruction,
       insultHandlingInstruction,
@@ -4801,7 +4833,7 @@ function evaluateReplyQuality(args: {
     .length;
   const naturalShortcutsScore =
     shortcutTokens.length === 0 ? 1 : shortcutHits === 0 ? 0.62 : shortcutHits <= 2 ? 1 : shortcutHits === 3 ? 0.68 : 0.32;
-  const antiGenericScore = isLowValueReply(text, inbound) ? 0.08 : 1;
+  const antiGenericScore = isLowValueReply(text, inbound) ? 0.03 : 1;
   const cringeHit = isCringeJoke(text) || /\b(skibidi|gyatt|sigma|rizz)\b/i.test(text);
   const repeatedPunctHit = /([!?])\1{3,}/.test(text);
   const antiCringeScore = cringeHit ? 0.05 : repeatedPunctHit ? 0.72 : 1;
@@ -4809,11 +4841,11 @@ function evaluateReplyQuality(args: {
   const brevityScore = words === 0 ? 0.1 : words <= 3 ? 1 : words <= 24 ? 1 : words <= 36 ? 0.72 : 0.38;
 
   const defaultCriteria: Array<{ id: string; label: string; weight: number; description: string }> = [
-    { id: "context_specificity", label: "Context Specificity", weight: 0.3, description: "Reply references inbound specifics." },
-    { id: "natural_shortcuts", label: "Natural Shortcuts", weight: 0.2, description: "Shorthand usage feels organic." },
-    { id: "anti_generic", label: "Anti-Generic", weight: 0.2, description: "Avoids canned template wording." },
-    { id: "anti_cringe", label: "Anti-Cringe", weight: 0.2, description: "Avoids forced or awkward tone." },
-    { id: "brevity_fit", label: "Brevity Fit", weight: 0.1, description: "Stays concise and natural." },
+    { id: "context_specificity", label: "Context Specificity", weight: 0.38, description: "Reply references inbound specifics." },
+    { id: "anti_generic", label: "Anti-Generic", weight: 0.27, description: "Avoids canned template wording." },
+    { id: "anti_cringe", label: "Anti-Cringe", weight: 0.15, description: "Avoids forced or awkward tone." },
+    { id: "natural_shortcuts", label: "Natural Shortcuts", weight: 0.12, description: "Shorthand usage feels organic." },
+    { id: "brevity_fit", label: "Brevity Fit", weight: 0.08, description: "Stays concise and natural." },
   ];
   const criteria = args.pack?.checklist.criteria.length ? args.pack.checklist.criteria : defaultCriteria;
 
@@ -5144,12 +5176,14 @@ async function rewriteReplyOnce(args: {
     .slice(0, 4)
     .map((check) => `${check.label} (${Math.round(check.score * 100)}%)`)
     .join(", ");
-  const rewriteInstruction = args.pack?.rewritePolicy.instruction || "Rewrite to be specific, concise, and natural.";
+  const rewriteInstruction = args.pack?.rewritePolicy.instruction || "Rewrite to be specific, concise, natural, and decisively useful.";
   const rewritePrompt = [
     args.basePrompt,
     `Current draft reply: ${args.candidateText}`,
     failedCheckText ? `Failed quality checks: ${failedCheckText}.` : "",
     rewriteInstruction,
+    "Anchor the rewrite to at least one concrete detail from the latest inbound message.",
+    "Avoid generic acknowledgments and vague future promises.",
     "Return only the revised reply text.",
   ]
     .filter(Boolean)
@@ -8766,5 +8800,11 @@ export function estimateDelayAndTyping(text: string, runtime?: RuntimeAiTuning) 
   const delayMs = Math.round(minDelay + (maxDelay - minDelay) * Math.min(len / 320, 1));
   const typingMs = Math.round(minTyping + (maxTyping - minTyping) * Math.min(len / 220, 1));
 
-  return { delayMs, typingMs };
+  const silenceGapMinutes = Math.max(0, Number(runtime?.silenceGapMinutes || 0));
+  const silenceFactor = Math.min(silenceGapMinutes / 240, 1);
+  const frictionMultiplier = runtime?.networkFrictionHint ? 1.25 : 1;
+  const adjustedDelayMs = Math.round(delayMs * (1 + silenceFactor * 0.3) * frictionMultiplier);
+  const adjustedTypingMs = Math.round(typingMs * (1 + silenceFactor * 0.2) * frictionMultiplier);
+
+  return { delayMs: adjustedDelayMs, typingMs: adjustedTypingMs };
 }

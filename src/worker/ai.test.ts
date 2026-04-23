@@ -314,10 +314,8 @@ test("postProcessReplyText enforces JADL disclosure when inbound asks if this is
     inboundText: "Are you an AI or a real person?",
     historyLines: [],
   });
-  assert.match(output, /Joshua's digital liaison/i);
-  assert.match(output, /conversational intelligence tool designed by Joshua/i);
-  assert.match(output, /state-of-the-art AI/i);
-  assert.match(output, /primary authority/i);
+  assert.match(output, /AI-assisted/i);
+  assert.match(output, /Joshua remains accountable/i);
 });
 
 test("postProcessReplyText strips awkward catchphrase prefix while keeping core response", () => {
@@ -2494,8 +2492,8 @@ test("generateReplyWithFallback injects JADL identity disclosure protocol when i
 
     assert.equal(result.provider, "azure");
     assert.ok(requestBodies.some((body) => /Identity disclosure protocol/i.test(body)));
-    assert.ok(requestBodies.some((body) => /conversational intelligence tool designed by Joshua/i.test(body)));
-    assert.ok(requestBodies.some((body) => /primary authority/i.test(body)));
+    assert.ok(requestBodies.some((body) => /disclose transparently but minimally/i.test(body)));
+    assert.ok(requestBodies.some((body) => /do not volunteer builder\/architecture details/i.test(body)));
   } finally {
     globalThis.fetch = originalFetch;
     restoreAiEnv(snapshot);

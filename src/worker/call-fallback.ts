@@ -88,3 +88,13 @@ export function shouldSuppressCallFallbackAfterOffer(
   const status = (snapshot.lastStatus || "").trim().toLowerCase();
   return status === "accept";
 }
+
+export function shouldSkipStaleCallOffer(args: {
+  offerAtMs: number;
+  nowMs?: number;
+  recencyWindowMs: number;
+}) {
+  const nowMs = Number.isFinite(args.nowMs) ? (args.nowMs as number) : Date.now();
+  const recencyWindowMs = Math.round(Math.max(30_000, args.recencyWindowMs));
+  return args.offerAtMs + recencyWindowMs < nowMs;
+}

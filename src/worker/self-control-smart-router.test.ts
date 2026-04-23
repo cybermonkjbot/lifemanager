@@ -60,6 +60,23 @@ test("fallbackSelfControlSmartRoute chooses codex improve for improve phrasing",
   });
 });
 
+test("fallbackSelfControlSmartRoute prioritizes conversation operations for openclaw", () => {
+  assert.deepEqual(fallbackSelfControlSmartRoute("run a reach out campaign for cold leads"), {
+    tool: "openclaw",
+    action: "forward",
+    input: "run a reach out campaign for cold leads",
+    reason: "conversation_ops_keyword",
+    confidence: 0.82,
+  });
+  assert.deepEqual(fallbackSelfControlSmartRoute("start a new conversation with my old clients"), {
+    tool: "openclaw",
+    action: "forward",
+    input: "start a new conversation with my old clients",
+    reason: "conversation_ops_keyword",
+    confidence: 0.82,
+  });
+});
+
 test("fallbackSelfControlSmartRoute defaults to openclaw forward", () => {
   assert.deepEqual(fallbackSelfControlSmartRoute("Can you find public blogs and write positive posts?"), {
     tool: "openclaw",
@@ -74,4 +91,5 @@ test("buildSelfControlSmartRouterPrompt includes message payload", () => {
   const prompt = buildSelfControlSmartRouterPrompt("send the file again");
   assert.equal(prompt.includes("Message: send the file again"), true);
   assert.equal(prompt.includes("strict JSON"), true);
+  assert.equal(prompt.includes("conversation operations"), true);
 });

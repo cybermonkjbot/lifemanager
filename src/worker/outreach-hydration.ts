@@ -8,6 +8,7 @@ import { stripEmojiCharacters } from "./emoji-policy";
 type OutreachMode = "proactive" | "good_morning" | "compliment";
 type GhostReopenTone = "naija_tease" | "hard_banter" | "playful" | "warm";
 type GhostSeverity = "mild" | "moderate" | "severe";
+type DaypartGreeting = "Good morning" | "Good afternoon" | "Good evening";
 
 const LEAD_MODE_INTENT_LINES = [
   "Lead with warmth and initiative by proposing one simple plan for later today.",
@@ -119,6 +120,22 @@ function resolveBoundaryReopenFallback(variant: number | undefined) {
   return BOUNDARY_REOPEN_FALLBACK_VARIATIONS[normalizeBoundaryVariant(variant)];
 }
 
+function resolveDaypartGreeting(nowMs: number | undefined): DaypartGreeting {
+  const now = Number.isFinite(nowMs) ? new Date(nowMs as number) : new Date();
+  const hour = now.getHours();
+  if (hour >= 5 && hour < 12) {
+    return "Good morning";
+  }
+  if (hour >= 12 && hour < 17) {
+    return "Good afternoon";
+  }
+  return "Good evening";
+}
+
+function applyDaypartGreeting(text: string, greeting: DaypartGreeting) {
+  return normalizeSingleLine(text).replace(/^Good morning\b/i, greeting);
+}
+
 function resolveComplimentIntentLine(variant: number | undefined) {
   const resolved = Math.round(variant ?? 0);
   const index = ((resolved % COMPLIMENT_MODE_INTENT_LINES.length) + COMPLIMENT_MODE_INTENT_LINES.length) %
@@ -221,15 +238,19 @@ export function buildOutreachFallbackText(args: {
   longSilenceGhostReopen: boolean;
   ghostReopenTone: GhostReopenTone;
   ghostSeverity: GhostSeverity;
+  nowMs?: number;
 }) {
+  const daypartGreeting = resolveDaypartGreeting(args.nowMs);
   if (args.outreachMode === "good_morning") {
     if (args.ignoredBoundaryReopen) {
-      return resolveBoundaryReopenFallback(args.romancePromptVariant);
+      return applyDaypartGreeting(resolveBoundaryReopenFallback(args.romancePromptVariant), daypartGreeting);
     }
     if (args.romanceMorningMode === "lead") {
-      return "Good morning, I want to make today sweet for us. What time works for a quick plan later?";
+      return `${daypartGreeting}, I want to make today sweet for us. What time works for a quick plan later?`;
     }
-    return "Good morning, sending you warm energy. How are you feeling this morning?";
+    return daypartGreeting === "Good morning"
+      ? "Good morning, sending you warm energy. How are you feeling this morning?"
+      : `${daypartGreeting}, sending you warm energy. How are you feeling today?`;
   }
 
   if (args.outreachMode === "compliment") {
@@ -315,22 +336,25 @@ function keepAtMostOneEmoji(text: string) {
   return `${stripped} ${firstEmoji}`.trim();
 }
 
-function enforceGoodMorningOpening(text: string) {
+function enforceGoodMorningOpening(text: string, greeting: DaypartGreeting) {
   let next = text.trim();
   let changed = false;
 
   if (GOOD_MORNING_SHORT_CUE_PATTERN.test(next)) {
-    next = next.replace(/\b(gm|gud\s*morn(?:ing)?|gud\s*mrng)\b/gi, "Good morning");
+    next = next.replace(/\b(gm|gud\s*morn(?:ing)?|gud\s*mrng)\b/gi, greeting);
     changed = true;
   }
 
   if (/^morning\b/i.test(next)) {
-    next = next.replace(/^morning\b/i, "Good morning");
+    next = next.replace(/^morning\b/i, greeting);
     changed = true;
   }
 
-  if (!/^good morning\b/i.test(next)) {
-    next = `Good morning, ${next}`.replace(/,\s*,/g, ",");
+  if (!/^good (morning|afternoon|evening)\b/i.test(next)) {
+    next = `${greeting}, ${next}`.replace(/,\s*,/g, ",");
+    changed = true;
+  } else if (!new RegExp(`^${greeting}\\b`, "i").test(next)) {
+    next = next.replace(/^good (morning|afternoon|evening)\b/i, greeting);
     changed = true;
   }
 
@@ -343,10 +367,14 @@ function enforceGoodMorningOpening(text: string) {
 export function enforceGoodMorningStyleLint(args: {
   text: string;
   fallbackText: string;
+  nowMs?: number;
 }) {
   const violations: string[] = [];
   let next = normalizeSingleLine(args.text);
-  const fallback = normalizeSingleLine(args.fallbackText || "Good morning, hope you slept well.");
+  const daypartGreeting = resolveDaypartGreeting(args.nowMs);
+  const fallback = normalizeSingleLine(
+    args.fallbackText || `${daypartGreeting}, hope you are having a beautiful day.`,
+  );
   if (!next) {
     return {
       text: fallback,
@@ -373,7 +401,7 @@ export function enforceGoodMorningStyleLint(args: {
     };
   }
 
-  const openingNormalized = enforceGoodMorningOpening(next);
+  const openingNormalized = enforceGoodMorningOpening(next, daypartGreeting);
   if (openingNormalized.changed) {
     violations.push("good_morning_opening_normalized");
   }

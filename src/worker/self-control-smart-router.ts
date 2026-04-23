@@ -29,6 +29,8 @@ const CODEX_IMPROVE_LATEST_PATTERN =
   /\b(?:improve|self[-\s]?improve|self[-\s]?improvement)\s+(?:latest|report|last(?:\s+run)?)\b/i;
 const CODEX_IMPROVE_RUN_PATTERN =
   /\b(?:improve|self[-\s]?improve|self[-\s]?improvement|refactor|fix(?:\s+the)?\s+repo|update\s+the\s+worker)\b/i;
+const OPENCLAW_CONVERSATION_OPS_PATTERN =
+  /\b(?:reach\s*out|outreach|campaign|start\s+(?:a\s+)?(?:new\s+)?conversation|open(?:\s+a)?\s+chat|re[-\s]?engage|follow[-\s]?up|agenda)\b/i;
 
 function normalizeWord(value: string) {
   return value.trim().toLowerCase().replace(/[\s-]+/g, "_");
@@ -215,6 +217,7 @@ export function buildSelfControlSmartRouterPrompt(inputText: string) {
     '- none: for plain notes with no action request',
     "Rules:",
     "- Prefer openclaw for general tasks, research, writing, file handling, and broad assistant requests.",
+    "- Use openclaw for conversation operations: outreach, campaigns, starting/restarting chats, and agenda-style reach-out planning.",
     "- Use codex_improve only for local repository self-improvement tasks.",
     "- If the user asks for progress/status/latest for improve runs, choose codex_improve status/latest.",
     "- Keep input concise and preserve the user intent.",
@@ -244,6 +247,9 @@ export function fallbackSelfControlSmartRoute(inputText: string): SelfControlSma
   }
   if (CODEX_IMPROVE_RUN_PATTERN.test(raw)) {
     return { tool: "codex_improve", action: "run", input: raw, reason: "improve_keyword", confidence: 0.75 };
+  }
+  if (OPENCLAW_CONVERSATION_OPS_PATTERN.test(raw)) {
+    return { tool: "openclaw", action: "forward", input: raw, reason: "conversation_ops_keyword", confidence: 0.82 };
   }
   return { tool: "openclaw", action: "forward", input: raw, reason: "default_openclaw", confidence: 0.65 };
 }

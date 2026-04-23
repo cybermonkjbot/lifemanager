@@ -10,6 +10,7 @@ export type ParsedInboundMessage =
       text: string;
       caption?: string;
       mimeType?: string;
+      isViewOnce?: boolean;
     }
   | {
       kind: "reaction";
@@ -22,6 +23,7 @@ export type ParsedInboundMessage =
       text: string;
       caption?: string;
       mimeType?: string;
+      isViewOnce?: boolean;
     }
   | {
       kind: "audio";
@@ -29,12 +31,14 @@ export type ParsedInboundMessage =
       mimeType?: string;
       durationSeconds?: number;
       isVoiceNote: boolean;
+      isViewOnce?: boolean;
     }
   | {
       kind: "video";
       text: string;
       caption?: string;
       mimeType?: string;
+      isViewOnce?: boolean;
     }
   | {
       kind: "document";
@@ -42,6 +46,7 @@ export type ParsedInboundMessage =
       caption?: string;
       fileName?: string;
       mimeType?: string;
+      isViewOnce?: boolean;
     }
   | {
       kind: "unsupported";
@@ -65,15 +70,22 @@ function extractTextFromMessage(message: proto.IMessage | null | undefined) {
   ).trim();
 }
 
-function unwrapNestedMessage(message: proto.IMessage | null | undefined): proto.IMessage | null | undefined {
+function unwrapNestedMessage(message: proto.IMessage | null | undefined): {
+  message: proto.IMessage | null | undefined;
+  isViewOnce: boolean;
+} {
   if (!message) {
-    return message;
+    return { message, isViewOnce: false };
   }
 
   let current: proto.IMessage | null | undefined = message;
+  let isViewOnce = false;
   for (let i = 0; i < 8; i += 1) {
     if (!current) {
-      return current;
+      return { message: current, isViewOnce };
+    }
+    if (current.viewOnceMessage?.message || current.viewOnceMessageV2?.message || current.viewOnceMessageV2Extension?.message) {
+      isViewOnce = true;
     }
     const next: proto.IMessage | null | undefined =
       current.ephemeralMessage?.message ||
@@ -86,15 +98,17 @@ function unwrapNestedMessage(message: proto.IMessage | null | undefined): proto.
       current.groupMentionedMessage?.message ||
       current.lottieStickerMessage?.message;
     if (!next) {
-      return current;
+      return { message: current, isViewOnce };
     }
     current = next;
   }
-  return current;
+  return { message: current, isViewOnce };
 }
 
 export function parseInboundMessage(message: proto.IMessage | null | undefined): ParsedInboundMessage {
-  const unwrapped = unwrapNestedMessage(message);
+  const unwrappedResult = unwrapNestedMessage(message);
+  const unwrapped = unwrappedResult.message;
+  const isViewOnce = unwrappedResult.isViewOnce;
   if (!unwrapped) {
     return { kind: "unsupported", text: "" };
   }
@@ -118,6 +132,7 @@ export function parseInboundMessage(message: proto.IMessage | null | undefined):
       text: caption ? `[Image] ${caption}` : "[Image]",
       caption,
       mimeType,
+      ...(isViewOnce ? { isViewOnce } : {}),
     };
   }
 
@@ -129,6 +144,7 @@ export function parseInboundMessage(message: proto.IMessage | null | undefined):
       text: "[Sticker]",
       caption: caption.trim() || undefined,
       mimeType,
+      ...(isViewOnce ? { isViewOnce } : {}),
     };
   }
 
@@ -143,6 +159,7 @@ export function parseInboundMessage(message: proto.IMessage | null | undefined):
       mimeType,
       durationSeconds,
       isVoiceNote,
+      ...(isViewOnce ? { isViewOnce } : {}),
     };
   }
 
@@ -154,6 +171,7 @@ export function parseInboundMessage(message: proto.IMessage | null | undefined):
       text: caption ? `[Video] ${caption}` : "[Video]",
       caption,
       mimeType,
+      ...(isViewOnce ? { isViewOnce } : {}),
     };
   }
 
@@ -168,6 +186,7 @@ export function parseInboundMessage(message: proto.IMessage | null | undefined):
       caption,
       fileName,
       mimeType,
+      ...(isViewOnce ? { isViewOnce } : {}),
     };
   }
 

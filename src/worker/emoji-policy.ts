@@ -1,4 +1,4 @@
-export const EMOJI_COOLDOWN_MS = 15 * 60 * 1000;
+export const EMOJI_COOLDOWN_MS = 12 * 60 * 1000;
 
 const EMOJI_DETECTION_REGEX = /[\p{Extended_Pictographic}\p{Regional_Indicator}]/u;
 const EMOJI_STRIP_REGEX = /[\p{Extended_Pictographic}\p{Regional_Indicator}\uFE0F\u200D]/gu;
