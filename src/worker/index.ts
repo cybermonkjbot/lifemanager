@@ -106,6 +106,7 @@ import {
   enforceComplimentStyleLint,
   enforceGoodMorningStyleLint,
 } from "./outreach-hydration";
+import { selectPreferredSenderTitle } from "./contact-title-policy";
 import {
   buildPdfAwareInboundText,
   buildPdfReplyPolicyInstruction,
@@ -121,6 +122,7 @@ import {
   resolveMemeAssetWithFallback,
   type MemeAssetSource,
 } from "./meme-policy";
+import { enforceNightWindDownStyle } from "./night-wind-down";
 import {
   extractStickerProviderContentHashFromMessage,
   normalizeHexHashToken,
@@ -136,6 +138,7 @@ import { isStrictSelfControlScope } from "./self-control-scope";
 import { parseSelfControlCommandText } from "./self-control-command-text";
 import { parseOpenClawCommand, type OpenClawCommand } from "./openclaw-command";
 import { extractOpenClawReplyFiles, type OpenClawReplyFile } from "./openclaw-output-files";
+import { decideAutoVoiceNote, generateVoiceNoteFromDirective, parseVoiceNoteDirective } from "./voice-note";
 import {
   buildSelfControlSmartRouterPrompt,
   fallbackSelfControlSmartRoute,
@@ -150,8 +153,10 @@ import {
   type SelfControlManagerPlanStep,
 } from "./self-control-manager";
 import {
+  buildCallFallbackText,
   resolveCallFallbackVariants,
-  selectCallFallbackVariant,
+  resolveCallAutoRejectDelayMs,
+  shouldCancelPendingCallAutoReject,
   shouldSkipStaleCallOffer,
   shouldSuppressCallFallbackAfterOffer,
 } from "./call-fallback";
@@ -189,6 +194,7 @@ type RuntimeSettings = {
   aiReplyPolicy: string;
   aiSystemInstruction: string;
   activePersonaPackId: string;
+  activePersonaPackIdsByProfile?: Record<string, string>;
   qualityGateMode: "auto_rewrite_once" | "manual_review" | "log_only";
   qualityGateThreshold: number;
   humanDelayMinMs: number;
@@ -217,6 +223,7 @@ type RuntimeSettings = {
   statusPostAudienceMode: "whatsapp_privacy" | "manual_allowlist";
   statusBuilderAudienceJids: string[];
   statusBuilderAudienceSampleSize: number;
+  quietHoursEnabled: boolean;
   quietHoursStartHour: number;
   quietHoursEndHour: number;
   autoMarkReadEnabled: boolean;
@@ -227,12 +234,28 @@ type RuntimeSettings = {
   aboutAutomationEnabled: boolean;
   aboutAutomationIntervalMinutes: number;
   aboutAutomationTemplate: string;
+  voiceNotesAutoEnabled: boolean;
+  voiceNotesAutoProbability: number;
+  voiceNotesAutoMaxPerThreadPerDay: number;
+  voiceNotesAutoNeedKeywords: string[];
   romanticMorningEnabled: boolean;
   romanticMorningStartHour: number;
   romanticMorningEndHour: number;
   romanticMorningLeadRatio: number;
   romanticMorningCollisionCooldownHours: number;
   romanticMorningMaxPerThreadPerDay: number;
+  conversationIntelligenceEnabled: boolean;
+  checkInRecencyTargetDays: number;
+  topicDyingAckStreakThreshold: number;
+  topicLaneMaxActive: number;
+  pivotReplyEnabled: boolean;
+  antiDwellingEnabled: boolean;
+  antiDwellingEndgameCloseCooldownMinutes: number;
+  antiDwellingTopicTurnSoftLimit: number;
+  antiDwellingTopicTurnHardLimit: number;
+  topicLeadPivotEnabled: boolean;
+  topicLeadPivotMinVibeScore: number;
+  topicLeadPivotCooldownMinutes: number;
 };
 
 type StyleProfileSnapshot = {
@@ -286,7 +309,7 @@ type OutboxClaimedItem = {
   messageText: string;
   typingMs: number;
   provider: "azure" | "codex" | "heuristic";
-  sendKind: "text" | "reaction" | "sticker" | "meme";
+  sendKind: "text" | "reaction" | "sticker" | "meme" | "voice_note";
   isStatusPost?: boolean;
   statusAudienceJids?: string[];
   statusTrendTheme?: string;
@@ -387,6 +410,47 @@ type ThreadContextSnapshot = {
   }>;
   grounding?: { myName?: string; theirName?: string; autoAliases?: string[]; vibeNotes?: string } | null;
   memory?: { styleNotes?: string[] } | null;
+  conversationState?: {
+    lastMutualCheckInAt?: number;
+    lastInboundCheckInAt?: number;
+    lastOutboundCheckInAt?: number;
+    currentPrimaryTopicKey?: string;
+    topicDyingScore?: number;
+    nextMove?: "none" | "check_in" | "pivot" | "close";
+    conversationEndImminent?: boolean;
+    topicDwellScore?: number;
+    lastPivotAt?: number;
+    lastCloseAt?: number;
+    lastLeadQuestionAt?: number;
+  } | null;
+  topicLanes?: Array<{
+    topicKey: string;
+    topicLabel: string;
+    status: "active" | "cooling" | "closed";
+    lastMessageAt?: number;
+    inboundTurns?: number;
+    outboundTurns?: number;
+    dyingScore?: number;
+  }>;
+} | null;
+
+type ConversationReplyGuidanceSnapshot = {
+  enabled: boolean;
+  shouldClose: boolean;
+  shouldLeadPivot: boolean;
+  shouldCheckIn: boolean;
+  conversationEndImminent: boolean;
+  topicDwellScore: number;
+  vibeScore: number;
+  daysSinceMutualCheckIn?: number;
+  activeTopic?: {
+    topicKey: string;
+    topicLabel: string;
+    status: "active" | "cooling" | "closed";
+    turnCount: number;
+  } | null;
+  leadPivotTheme?: "wellbeing" | "plans" | "day_recap";
+  reasonCodes: string[];
 } | null;
 
 type SystemHealthSnapshot = {
@@ -397,6 +461,7 @@ const AI_OUTREACH_PLACEHOLDER = "__SLM_AI_OUTREACH__";
 const AI_STATUS_PLACEHOLDER = "__SLM_AI_STATUS__";
 const DEFAULT_NIGHT_WIND_DOWN_START_HOUR = 23;
 const DEFAULT_NIGHT_WIND_DOWN_END_HOUR = 7;
+const DEFAULT_QUIET_HOURS_ENABLED = readEnvBoolean("SLM_QUIET_HOURS_ENABLED", false);
 const TEXT_EMOJI_ALLOWLIST = ["🌚", "🙂‍↔️", "🥲", "😒"];
 const TEXT_EMOJI_MAX_PER_WINDOW = 2;
 const TEXT_EMOJI_NON_ALLOWLIST_WARMUP_MAX_PER_WINDOW = 2;
@@ -405,6 +470,12 @@ const STICKER_COMPANION_COOLDOWN_MS = 45 * 60 * 1000;
 const CALL_FALLBACK_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 const CALL_FALLBACK_POST_REJECT_GRACE_MS = Math.round(
   clamp(Number(process.env.SLM_CALL_FALLBACK_GRACE_MS || 2000), 0, 15_000),
+);
+const CALL_AUTO_REJECT_MIN_MS = Math.round(
+  clamp(Number(process.env.SLM_CALL_AUTO_REJECT_MIN_MS || 8_000), 0, 60_000),
+);
+const CALL_AUTO_REJECT_MAX_MS = Math.round(
+  clamp(Number(process.env.SLM_CALL_AUTO_REJECT_MAX_MS || 22_000), CALL_AUTO_REJECT_MIN_MS, 60_000),
 );
 const CALL_CONTEXT_MIN_DURATION_MS = Math.round(
   clamp(Number(process.env.SLM_CALL_CONTEXT_MIN_DURATION_MS || 2 * 60 * 1000), 30_000, 30 * 60 * 1000),
@@ -522,6 +593,10 @@ function resolvePresenceSubscribeEnabled(runtimeSettings: RuntimeSettings | null
 
 function resolveChatModifyQuietHoursEnabled(runtimeSettings: RuntimeSettings | null) {
   return runtimeSettings?.chatModifyQuietHoursEnabled ?? DEFAULT_CHAT_MODIFY_QUIET_HOURS_ENABLED;
+}
+
+function resolveQuietHoursEnabled(runtimeSettings: RuntimeSettings | null) {
+  return runtimeSettings?.quietHoursEnabled ?? DEFAULT_QUIET_HOURS_ENABLED;
 }
 
 function resolveAboutAutomationEnabled(runtimeSettings: RuntimeSettings | null) {
@@ -668,7 +743,7 @@ function shouldPreferVideoMeme(args: { inboundText: string; recentHistoryLines: 
   return /\b(video|clip|reel|animated|animation|moving|motion|gif|giphy|shorts?)\b/i.test(signalText);
 }
 
-type StoredMessageType = "text" | "reaction" | "sticker" | "meme" | "image" | "video" | "audio" | "document";
+type StoredMessageType = "text" | "reaction" | "sticker" | "meme" | "image" | "video" | "audio" | "voice_note" | "document";
 type CapturableMediaKind = "sticker" | "image" | "video" | "audio" | "document";
 
 function resolveMessageTypeFromParsed(parsed: ParsedInboundMessage): StoredMessageType {
@@ -1009,7 +1084,7 @@ function buildNightWindDownInstruction(resumeAtMs: number) {
     hour: "numeric",
     minute: "2-digit",
   });
-  return `It's late night. Gently close this chat in 1 short line and do not start new topics. Prefer phrasing like "I'll get back to you tomorrow", "I'm famished and need some rest", or "Let's continue after ${resumeLabel}". Do not ask follow-up questions.`;
+  return `It's late night. Gently close this chat in 1 short line and do not start new topics. Prefer considerate phrasing like "I want to give this a proper reply tomorrow morning", "I'm winding down for tonight but this matters to me", or "I'll send a proper reply after ${resumeLabel}". Never reference protocol, automation, system rules, or quiet hours. Do not ask follow-up questions.`;
 }
 
 function historySyncEnabled() {
@@ -2180,6 +2255,8 @@ async function run() {
   const memePrewarmInFlightByThread = new Set<string>();
   const memePrewarmSkipUntilByThread = new Map<string, number>();
   const memeGenerationSkipUntilByThread = new Map<string, number>();
+  const autoVoiceNoteCountByThreadDay = new Map<string, number>();
+  let autoVoiceNoteCountDayBucket = "";
 
   const SETTINGS_CACHE_TTL_MS = 1500;
   const STYLE_PROFILE_CACHE_TTL_MS = 20_000;
@@ -2196,6 +2273,29 @@ const MEDIA_ASSET_BUFFER_CACHE_MAX_ITEMS = 24;
 function resolveTextEmojiAllowlist() {
   return TEXT_EMOJI_ALLOWLIST;
 }
+
+  const ensureVoiceNoteDayBucket = (dayBucket: string) => {
+    if (autoVoiceNoteCountDayBucket === dayBucket) {
+      return;
+    }
+    autoVoiceNoteCountDayBucket = dayBucket;
+    for (const key of autoVoiceNoteCountByThreadDay.keys()) {
+      if (!key.endsWith(`|${dayBucket}`)) {
+        autoVoiceNoteCountByThreadDay.delete(key);
+      }
+    }
+  };
+
+  const getAutoVoiceNoteSentCount = (threadId: string, dayBucket: string) => {
+    ensureVoiceNoteDayBucket(dayBucket);
+    return autoVoiceNoteCountByThreadDay.get(`${threadId}|${dayBucket}`) || 0;
+  };
+
+  const markAutoVoiceNoteSent = (threadId: string, dayBucket: string) => {
+    ensureVoiceNoteDayBucket(dayBucket);
+    const key = `${threadId}|${dayBucket}`;
+    autoVoiceNoteCountByThreadDay.set(key, (autoVoiceNoteCountByThreadDay.get(key) || 0) + 1);
+  };
 
   const getRuntimeSettings = async () => {
     const settings = await resolveTtlCache(runtimeSettingsCache, SETTINGS_CACHE_TTL_MS, async () => {
@@ -3382,6 +3482,7 @@ function resolveTextEmojiAllowlist() {
 
   const chatArchiveState = new Map<string, { isArchived: boolean; archivedAt: number }>();
   const threadTitleByJid = new Map<string, string>();
+  const preferredSenderTitleByJid = new Map<string, { title: string; rank: number }>();
   const contactNameByJid = new Map<
     string,
     {
@@ -3406,6 +3507,7 @@ function resolveTextEmojiAllowlist() {
     }
   >();
   const pendingCallFallbackById = new Map<string, ReturnType<typeof setTimeout>>();
+  const pendingCallAutoRejectById = new Map<string, ReturnType<typeof setTimeout>>();
   const recentMarkedReadByMessage = new Map<string, number>();
   const recentPresenceSubscribeByThread = new Map<string, number>();
   const quietHoursMutedByThread = new Map<string, number>();
@@ -3414,6 +3516,7 @@ function resolveTextEmojiAllowlist() {
   const inboundImageVisionLastSentAtByThread = new Map<string, number>();
   let inboundConcurrency = Math.round(clamp(Number(process.env.SLM_INBOUND_CONCURRENCY || 4), 1, 16));
   let outboxSendConcurrency = Math.round(clamp(Number(process.env.SLM_OUTBOX_CONCURRENCY || 4), 1, 16));
+  let adaptiveOutboxClaimLimit = 4;
   const runInboundWithLimit = createDynamicLimiter(() => inboundConcurrency);
   const runOutboxWithLimit = createDynamicLimiter(() => outboxSendConcurrency);
   const pruneRecentEmojiOutboundByThread = () => {
@@ -3498,6 +3601,11 @@ function resolveTextEmojiAllowlist() {
           clearTimeout(pending);
           pendingCallFallbackById.delete(callId);
         }
+        const pendingReject = pendingCallAutoRejectById.get(callId);
+        if (pendingReject) {
+          clearTimeout(pendingReject);
+          pendingCallAutoRejectById.delete(callId);
+        }
       }
     }
   };
@@ -3541,12 +3649,79 @@ function resolveTextEmojiAllowlist() {
     clearTimeout(pending);
     pendingCallFallbackById.delete(callId);
   };
+  const clearPendingCallAutoReject = (callId: string) => {
+    if (!callId) {
+      return;
+    }
+    const pending = pendingCallAutoRejectById.get(callId);
+    if (!pending) {
+      return;
+    }
+    clearTimeout(pending);
+    pendingCallAutoRejectById.delete(callId);
+  };
+  const scheduleCallAutoReject = (args: {
+    callId: string;
+    callFrom: string;
+    threadJid: string;
+    threadKind: "direct" | "group" | "broadcast_or_system";
+    delayMs: number;
+    threadId?: Id<"threads">;
+    afterReject?: () => Promise<void>;
+  }) => {
+    clearPendingCallAutoReject(args.callId);
+    const timer = setTimeout(() => {
+      pendingCallAutoRejectById.delete(args.callId);
+      void (async () => {
+        const latest = getRecentCallState(args.callId);
+        if (shouldCancelPendingCallAutoReject(latest)) {
+          await convex
+            .mutation(convexRefs.systemRecordEvent, {
+              source: "worker",
+              eventType: "inbound.call.auto_reject_suppressed",
+              threadId: args.threadId,
+              detail: compactLogText(
+                `jid=${args.threadJid} callId=${args.callId} status=${latest?.lastStatus || "unknown"}`,
+                240,
+              ),
+            })
+            .catch(() => undefined);
+          return;
+        }
+
+        try {
+          await sock.rejectCall(args.callId, args.callFrom);
+          logger.info(
+            { callId: args.callId, callFrom: args.callFrom, threadJid: args.threadJid, threadKind: args.threadKind, delayMs: args.delayMs },
+            "Inbound call auto-rejected",
+          );
+          await args.afterReject?.();
+        } catch (error) {
+          const err = error instanceof Error ? error.message : String(error);
+          logger.warn(
+            { err, callId: args.callId, callFrom: args.callFrom, threadJid: args.threadJid },
+            "Inbound call auto-reject failed",
+          );
+          await convex
+            .mutation(convexRefs.systemRecordEvent, {
+              source: "worker",
+              eventType: "inbound.call.auto_reject_error",
+              threadId: args.threadId,
+              detail: compactLogText(err, 280),
+            })
+            .catch(() => undefined);
+        }
+      })();
+    }, Math.max(0, Math.round(args.delayMs)));
+    pendingCallAutoRejectById.set(args.callId, timer);
+  };
   const scheduleCallFallbackMessage = (args: {
     callId: string;
     callFrom: string;
     threadJid: string;
     fallbackKey: string;
     threadId?: Id<"threads">;
+    callerName?: string;
   }) => {
     clearPendingCallFallback(args.callId);
     const timer = setTimeout(() => {
@@ -3586,9 +3761,10 @@ function resolveTextEmojiAllowlist() {
           }
         }
 
-        const fallbackText = selectCallFallbackVariant({
+        const fallbackText = buildCallFallbackText({
           variants: CALL_AUTO_DECLINE_FALLBACK_VARIANTS,
           seed: `${args.fallbackKey}|${Math.floor(Date.now() / CALL_FALLBACK_COOLDOWN_MS)}`,
+          callerName: args.callerName,
         });
         if (!fallbackText) {
           return;
@@ -3733,6 +3909,9 @@ function resolveTextEmojiAllowlist() {
     }
   };
   const resolveQuietHoursWindow = (runtimeSettings: RuntimeSettings | null, nowMs: number) => {
+    if (!resolveQuietHoursEnabled(runtimeSettings)) {
+      return { active: false, muteUntilMs: undefined };
+    }
     const startHour = normalizeHour(runtimeSettings?.quietHoursStartHour, DEFAULT_NIGHT_WIND_DOWN_START_HOUR);
     const endHour = normalizeHour(runtimeSettings?.quietHoursEndHour, DEFAULT_NIGHT_WIND_DOWN_END_HOUR);
     const hour = new Date(nowMs).getHours();
@@ -4133,7 +4312,40 @@ function resolveTextEmojiAllowlist() {
       return chatTitle;
     }
 
-    return savedName || chatTitle || whatsappName || normalizeDisplayName(args.pushName) || verifiedName;
+    const pushName = normalizeDisplayName(args.pushName);
+    const rankedCandidates = [
+      { title: savedName, rank: 5 },
+      { title: chatTitle, rank: 4 },
+      { title: whatsappName, rank: 3 },
+      { title: pushName, rank: 2 },
+      { title: verifiedName, rank: 1 },
+    ].filter((candidate): candidate is { title: string; rank: number } => Boolean(candidate.title));
+
+    if (rankedCandidates.length === 0) {
+      return undefined;
+    }
+
+    const existingPreferred = jidLookupKeys(args.threadJid)
+      .map((key) => preferredSenderTitleByJid.get(key))
+      .find((entry): entry is { title: string; rank: number } => Boolean(entry));
+
+    const selected = selectPreferredSenderTitle({
+      existingPreferred,
+      candidates: rankedCandidates,
+    });
+    if (!selected) {
+      return undefined;
+    }
+    if (!selected.title) {
+      return undefined;
+    }
+    const resolvedSelection = { title: selected.title, rank: selected.rank };
+
+    for (const key of jidLookupKeys(args.threadJid)) {
+      preferredSenderTitleByJid.set(key, resolvedSelection);
+    }
+
+    return resolvedSelection.title;
   };
 
   const syncThreadMetadata = async (chatLike: unknown) => {
@@ -6607,6 +6819,9 @@ function resolveTextEmojiAllowlist() {
       const recordedThreadId = callRecord?.stored ? callRecord.threadId : undefined;
 
       if (callStatus !== "offer") {
+        if (shouldCancelPendingCallAutoReject(latestCallState)) {
+          clearPendingCallAutoReject(callId);
+        }
         if (shouldSuppressCallFallbackAfterOffer(latestCallState)) {
           clearPendingCallFallback(callId);
         }
@@ -6673,55 +6888,83 @@ function resolveTextEmojiAllowlist() {
         return;
       }
 
-      await sock.rejectCall(callId, callFrom);
-      logger.info({ callId, callFrom, threadJid, threadKind }, "Inbound call rejected");
+      const callerName = resolveSenderTitle({
+        threadJid,
+        threadKind,
+      });
+      const autoRejectDelayMs = resolveCallAutoRejectDelayMs({
+        seed: `${callId}|${fallbackKey}|${callEventAt}`,
+        minMs: CALL_AUTO_REJECT_MIN_MS,
+        maxMs: CALL_AUTO_REJECT_MAX_MS,
+      });
 
       if (!eligibility.allowed) {
-        await convex
-          .mutation(convexRefs.systemRecordEvent, {
-            source: "worker",
-            eventType: "inbound.call.rejected_ignored",
-            detail: compactLogText(
-              `jid=${threadJid} reason=${eligibility.reason || "blocked"} detail=${eligibility.detail || "none"}`,
-              280,
-            ),
-          })
-          .catch(() => undefined);
+        scheduleCallAutoReject({
+          callId,
+          callFrom,
+          threadJid,
+          threadKind,
+          delayMs: autoRejectDelayMs,
+          threadId: recordedThreadId,
+          afterReject: async () => {
+            await convex
+              .mutation(convexRefs.systemRecordEvent, {
+                source: "worker",
+                eventType: "inbound.call.rejected_ignored",
+                detail: compactLogText(
+                  `jid=${threadJid} reason=${eligibility.reason || "blocked"} detail=${eligibility.detail || "none"}`,
+                  280,
+                ),
+              })
+              .catch(() => undefined);
+          },
+        });
         return;
       }
 
-      if (threadKind !== "direct") {
-        return;
-      }
-
-      if (CALL_AUTO_DECLINE_FALLBACK_VARIANTS.length === 0 || hasRecentCallFallback(fallbackKey)) {
-        return;
-      }
-
-      if (recordedThreadId) {
-        const recentFallback = (await convex
-          .query(convexRefs.callsHasRecentFallbackSend, {
-            threadId: recordedThreadId,
-            withinMs: CALL_FALLBACK_COOLDOWN_MS,
-          })
-          .catch(() => null)) as
-          | {
-              hasRecent?: boolean;
-              lastSentAt?: number;
-            }
-          | null;
-        if (recentFallback?.hasRecent) {
-          rememberCallFallbackAt(fallbackKey, recentFallback.lastSentAt || Date.now());
-          return;
-        }
-      }
-
-      scheduleCallFallbackMessage({
+      scheduleCallAutoReject({
         callId,
         callFrom,
         threadJid,
-        fallbackKey,
+        threadKind,
+        delayMs: autoRejectDelayMs,
         threadId: recordedThreadId,
+        afterReject: async () => {
+          if (threadKind !== "direct") {
+            return;
+          }
+
+          if (CALL_AUTO_DECLINE_FALLBACK_VARIANTS.length === 0 || hasRecentCallFallback(fallbackKey)) {
+            return;
+          }
+
+          if (recordedThreadId) {
+            const recentFallback = (await convex
+              .query(convexRefs.callsHasRecentFallbackSend, {
+                threadId: recordedThreadId,
+                withinMs: CALL_FALLBACK_COOLDOWN_MS,
+              })
+              .catch(() => null)) as
+              | {
+                  hasRecent?: boolean;
+                  lastSentAt?: number;
+                }
+              | null;
+            if (recentFallback?.hasRecent) {
+              rememberCallFallbackAt(fallbackKey, recentFallback.lastSentAt || Date.now());
+              return;
+            }
+          }
+
+          scheduleCallFallbackMessage({
+            callId,
+            callFrom,
+            threadJid,
+            fallbackKey,
+            threadId: recordedThreadId,
+            callerName,
+          });
+        },
       });
     } catch (error) {
       const err = error instanceof Error ? error.message : String(error);
@@ -7015,6 +7258,7 @@ function resolveTextEmojiAllowlist() {
       const nightStartHour = normalizeHour(runtimeSettings?.quietHoursStartHour, DEFAULT_NIGHT_WIND_DOWN_START_HOUR);
       const nightEndHour = normalizeHour(runtimeSettings?.quietHoursEndHour, DEFAULT_NIGHT_WIND_DOWN_END_HOUR);
       const nightWindDownActive =
+        resolveQuietHoursEnabled(runtimeSettings) &&
         !isStatusBroadcast &&
         threadKind === "direct" &&
         isWithinHourWindow(new Date(now).getHours(), nightStartHour, nightEndHour);
@@ -7061,6 +7305,7 @@ function resolveTextEmojiAllowlist() {
         replyPolicyInstruction: effectiveReplyPolicyInstruction,
         systemInstruction: runtimeSettings?.aiSystemInstruction || "",
         activePersonaPackId: runtimeSettings?.activePersonaPackId || "",
+        activePersonaPackIdsByProfile: runtimeSettings?.activePersonaPackIdsByProfile || {},
         qualityGateMode: runtimeSettings?.qualityGateMode,
         qualityGateThreshold: runtimeSettings?.qualityGateThreshold,
         soulModeEnabled: runtimeSettings?.soulModeEnabled,
@@ -7299,15 +7544,25 @@ function resolveTextEmojiAllowlist() {
           .filter(Boolean)
           .join("\n")
           .slice(0, 600);
-        await convex
-          .mutation(convexRefs.styleLearnFromHumorSignal, {
+        try {
+          await convex.mutation(convexRefs.styleLearnFromHumorSignal, {
             threadId: ingest.threadId as Id<"threads">,
             inboundText: effectiveParsed.text,
             signalKind: effectiveParsed.kind === "reaction" ? "reaction" : "text",
             reactionEmoji: effectiveParsed.kind === "reaction" ? effectiveParsed.emoji : undefined,
             contextText: humorContextText || undefined,
-          })
-          .catch(() => undefined);
+          });
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          await convex
+            .mutation(convexRefs.systemRecordEvent, {
+              source: "worker",
+              eventType: "style.humor.learn_failed",
+              threadId: ingest.threadId as Id<"threads">,
+              detail: compactLogText(`Humor learning failed: ${reason}`, 280),
+            })
+            .catch(() => undefined);
+        }
       }
 
       await maybeMarkInboundAsRead({
@@ -7540,6 +7795,7 @@ function resolveTextEmojiAllowlist() {
         });
       }
       let historySearchOverride: HistorySearchOverrideSnapshot | undefined;
+      let conversationGuidance: ConversationReplyGuidanceSnapshot = null;
 
       let inboundTextForAi =
         effectiveParsed.kind === "sticker"
@@ -7562,6 +7818,40 @@ function resolveTextEmojiAllowlist() {
           pdfContext,
           caption: effectiveParsed.kind === "document" ? effectiveParsed.caption : undefined,
         });
+      }
+
+      if (shouldGenerateAiText && runtimeSettings?.conversationIntelligenceEnabled !== false) {
+        conversationGuidance = (await convex
+          .query(convexRefs.conversationIntelligenceGetReplyGuidance, {
+            threadId: ingest.threadId,
+            inboundText: (effectiveParsed.text || "").slice(0, 500),
+          })
+          .catch(() => null)) as ConversationReplyGuidanceSnapshot;
+
+        if (conversationGuidance?.enabled) {
+          if (conversationGuidance.shouldClose) {
+            styleHints = [
+              ...styleHints,
+              "Conversation guidance: endgame detected. Use one concise close line only, no follow-up question, and do not reopen this topic immediately.",
+            ];
+          } else if (conversationGuidance.shouldLeadPivot) {
+            const pivotThemeHint =
+              conversationGuidance.leadPivotTheme === "wellbeing"
+                ? "wellbeing check-in"
+                : conversationGuidance.leadPivotTheme === "plans"
+                  ? "near-term plan"
+                  : "day recap";
+            styleHints = [
+              ...styleHints,
+              `Conversation guidance: topic is dwelling. After one brief acknowledgment, lead with one short pivot question toward ${pivotThemeHint}.`,
+            ];
+          } else if (conversationGuidance.shouldCheckIn) {
+            styleHints = [
+              ...styleHints,
+              "Conversation guidance: mutual wellbeing check-in is due. If flow allows, include one concise welfare-check question.",
+            ];
+          }
+        }
       }
 
       if (shouldGenerateAiText && threadContext) {
@@ -7768,6 +8058,7 @@ function resolveTextEmojiAllowlist() {
               threadId: String(ingest.threadId),
               contactJid: threadJid,
             }),
+            conversationGuidance: conversationGuidance || undefined,
           }
         : null;
 
@@ -8139,7 +8430,70 @@ function resolveTextEmojiAllowlist() {
               allowedEmojiWindowMs: TEXT_EMOJI_WINDOW_MS,
             })
           : null;
-      const textForDraft = emojiAdjustedDraft?.text || rawTextForDraft;
+      let textForDraft = emojiAdjustedDraft?.text || rawTextForDraft;
+      if (
+        nightWindDownUntil &&
+        (outboundPolicy.mode === "text" || outboundPolicy.mode === "reaction_plus_text" || outboundPolicy.mode === "meme")
+      ) {
+        const resumeLabel = new Date(nightWindDownUntil).toLocaleTimeString(undefined, {
+          hour: "numeric",
+          minute: "2-digit",
+        });
+        const lintedNightWindDownText = enforceNightWindDownStyle({
+          text: textForDraft,
+          resumeLabel,
+        });
+        if (lintedNightWindDownText.violations.length > 0 || lintedNightWindDownText.text !== textForDraft) {
+          await convex
+            .mutation(convexRefs.systemRecordEvent, {
+              source: "ai",
+              eventType: "ai.reply.night_wind_down_style_lint",
+              threadId: ingest.threadId,
+              toolRunId,
+              detail: compactLogText(
+                `violations=${lintedNightWindDownText.violations.join("|") || "none"} text=${lintedNightWindDownText.text}`,
+                260,
+              ),
+            })
+            .catch(() => undefined);
+        }
+        textForDraft = lintedNightWindDownText.text;
+      }
+      if ((outboundPolicy.mode === "text" || outboundPolicy.mode === "reaction_plus_text") && threadKind === "direct") {
+        const dayBucketForVoiceAuto = new Date().toISOString().slice(0, 10);
+        const autoVoiceEnabled = runtimeSettings?.voiceNotesAutoEnabled ?? false;
+        const autoVoiceDecision = decideAutoVoiceNote({
+          text: textForDraft,
+          threadId: String(ingest.threadId),
+          outboxId: String(ingest.messageId),
+          dayBucket: dayBucketForVoiceAuto,
+          sentToday: getAutoVoiceNoteSentCount(String(ingest.threadId), dayBucketForVoiceAuto),
+          runtimeConfig: {
+            enabled: autoVoiceEnabled,
+            probability: runtimeSettings?.voiceNotesAutoProbability ?? 0.35,
+            maxPerThreadPerDay: runtimeSettings?.voiceNotesAutoMaxPerThreadPerDay ?? 1,
+            needKeywords: runtimeSettings?.voiceNotesAutoNeedKeywords || [],
+          },
+        });
+        if (autoVoiceEnabled) {
+          await convex
+            .mutation(convexRefs.systemRecordEvent, {
+              source: "worker",
+              eventType: autoVoiceDecision.shouldAttempt
+                ? "outbound.media_policy.selected"
+                : "outbound.media_policy.skipped",
+              threadId: ingest.threadId as Id<"threads">,
+              detail: compactLogText(
+                `kind=voice_note reason=${autoVoiceDecision.reason} probability=${autoVoiceDecision.probability.toFixed(2)} roll=${autoVoiceDecision.roll !== undefined ? autoVoiceDecision.roll.toFixed(3) : "n/a"} cap=${autoVoiceDecision.sentToday}/${autoVoiceDecision.maxPerThreadPerDay} matched=${autoVoiceDecision.matchedKeywords.join(",") || "none"}`,
+                300,
+              ),
+            })
+            .catch(() => undefined);
+        }
+        if (autoVoiceDecision.shouldAttempt) {
+          textForDraft = `/vna ${textForDraft}`;
+        }
+      }
       const timing = estimateDelayAndTyping(textForDraft, {
         delayMinMs: runtimeSettings?.humanDelayMinMs,
         delayMaxMs: runtimeSettings?.humanDelayMaxMs,
@@ -8150,7 +8504,8 @@ function resolveTextEmojiAllowlist() {
       });
       const primaryConfidence = clamp(runtimeSettings?.aiPrimaryConfidence ?? 0.78, 0.01, 1);
       const fallbackConfidence = clamp(runtimeSettings?.aiFallbackConfidence ?? 0.58, 0.01, 1);
-      const sendKind =
+      const voiceDirective = parseVoiceNoteDirective(textForDraft);
+      let sendKind =
         outboundPolicy.mode === "reaction_only"
           ? "reaction"
           : outboundPolicy.mode === "sticker"
@@ -8158,6 +8513,9 @@ function resolveTextEmojiAllowlist() {
             : outboundPolicy.mode === "meme"
               ? "meme"
               : "text";
+      if (sendKind === "text" && voiceDirective) {
+        sendKind = "voice_note";
+      }
 
       const draftPayload = {
         threadId: ingest.threadId,
@@ -8183,6 +8541,14 @@ function resolveTextEmojiAllowlist() {
             : undefined,
         mediaCaption: outboundPolicy.mode === "meme" ? textForDraft : undefined,
       };
+      const appliedGuidanceMode =
+        conversationGuidance?.enabled && conversationGuidance.shouldClose
+          ? ("close" as const)
+          : conversationGuidance?.enabled && conversationGuidance.shouldLeadPivot
+            ? ("lead_pivot" as const)
+            : conversationGuidance?.enabled && conversationGuidance.shouldCheckIn
+              ? ("check_in" as const)
+              : null;
 
       await convex
         .mutation(convexRefs.systemRecordEvent, {
@@ -8215,6 +8581,7 @@ function resolveTextEmojiAllowlist() {
         outboundPolicy.mode === "meme" &&
         outboundPolicy.assetSource === "generated" &&
         !(runtimeSettings?.generatedMemesAutoSendEnabled ?? false);
+      let draftPersisted = false;
 
       if (stageGeneratedMemeForManualReview) {
         await convex
@@ -8227,12 +8594,15 @@ function resolveTextEmojiAllowlist() {
           })
           .catch(() => undefined);
         await convex.mutation(convexRefs.draftSaveGenerated, draftPayload);
+        draftPersisted = true;
       } else if (health?.config?.autonomyPaused) {
         await convex.mutation(convexRefs.draftSaveGenerated, draftPayload);
+        draftPersisted = true;
       } else {
         const saveResult = (await convex.mutation(convexRefs.draftSaveOrReplacePending, draftPayload)) as
           | { draftId: string; outboxId: string; replaced: boolean }
           | null;
+        draftPersisted = Boolean(saveResult);
         if (saveResult?.outboxId && aiCandidateEvals.length > 0) {
           await convex
             .mutation(convexRefs.aiFeedbackRecordCandidateEvals, {
@@ -8271,6 +8641,18 @@ function resolveTextEmojiAllowlist() {
             })
             .catch(() => undefined);
         }
+      }
+
+      if (appliedGuidanceMode && draftPersisted) {
+        await convex
+          .mutation(convexRefs.conversationIntelligenceRecordReplyGuidance, {
+            threadId: ingest.threadId as Id<"threads">,
+            appliedAt: Date.now(),
+            mode: appliedGuidanceMode,
+            outboundText: textForDraft,
+            reasonCodes: conversationGuidance?.reasonCodes || [],
+          })
+          .catch(() => undefined);
       }
 
       if ((stageGeneratedMemeForManualReview || health?.config?.autonomyPaused) && aiCandidateEvals.length > 0) {
@@ -8575,6 +8957,7 @@ function resolveTextEmojiAllowlist() {
       | {
           thread: { title?: string; jid: string };
           messages: Array<{ direction: "inbound" | "outbound"; text: string; messageAt?: number }>;
+          conversationState?: { lastMutualCheckInAt?: number } | null;
           grounding?: { myName?: string; theirName?: string; autoAliases?: string[]; vibeNotes?: string } | null;
           memory?: { summary?: string; styleNotes?: string[] } | null;
         }
@@ -8616,6 +8999,15 @@ function resolveTextEmojiAllowlist() {
     const outreachMode = item.outreachMode || "proactive";
     const contactName = threadContext?.thread?.title?.split(/\s+/)[0] || "there";
     const memorySummary = threadContext?.memory?.summary ? `Memory summary: ${threadContext.memory.summary}` : "";
+    const lastMutualCheckInAt =
+      Number.isFinite(threadContext?.conversationState?.lastMutualCheckInAt) &&
+      (threadContext?.conversationState?.lastMutualCheckInAt || 0) > 0
+        ? Number(threadContext?.conversationState?.lastMutualCheckInAt)
+        : undefined;
+    const daysSinceMutualCheckIn =
+      lastMutualCheckInAt && lastMutualCheckInAt > 0
+        ? Math.floor((Date.now() - lastMutualCheckInAt) / (24 * 60 * 60 * 1000))
+        : undefined;
     const romanceMorningState = outreachMode === "good_morning"
       ? ((await convex.query(convexRefs.romanceMorningGetThreadState, {
           threadId: item.threadId as Id<"threads">,
@@ -8726,6 +9118,8 @@ function resolveTextEmojiAllowlist() {
       ignoredBoundaryReopen,
       complimentPlayfulScenario,
       ghostReopenInstruction,
+      daysSinceMutualCheckIn,
+      checkInRecencyTargetDays: runtimeSettings?.checkInRecencyTargetDays,
       memorySummary,
       contactName,
     });
@@ -8869,6 +9263,7 @@ function resolveTextEmojiAllowlist() {
         replyPolicyInstruction: runtimeSettings?.aiReplyPolicy || "",
         systemInstruction: runtimeSettings?.aiSystemInstruction || "",
         activePersonaPackId: runtimeSettings?.activePersonaPackId || "",
+        activePersonaPackIdsByProfile: runtimeSettings?.activePersonaPackIdsByProfile || {},
         qualityGateMode: runtimeSettings?.qualityGateMode,
         qualityGateThreshold: runtimeSettings?.qualityGateThreshold,
         soulModeEnabled: runtimeSettings?.soulModeEnabled,
@@ -9015,6 +9410,8 @@ function resolveTextEmojiAllowlist() {
       romancePromptVariant,
       ignoredBoundaryReopen,
       complimentPlayfulScenario,
+      daysSinceMutualCheckIn,
+      checkInRecencyTargetDays: runtimeSettings?.checkInRecencyTargetDays,
       longSilenceGhostReopen,
       ghostReopenTone,
       ghostSeverity,
@@ -9376,6 +9773,7 @@ function resolveTextEmojiAllowlist() {
         replyPolicyInstruction: runtimeSettings?.aiReplyPolicy || "",
         systemInstruction: runtimeSettings?.aiSystemInstruction || "",
         activePersonaPackId: runtimeSettings?.activePersonaPackId || "",
+        activePersonaPackIdsByProfile: runtimeSettings?.activePersonaPackIdsByProfile || {},
         qualityGateMode: runtimeSettings?.qualityGateMode,
         qualityGateThreshold: runtimeSettings?.qualityGateThreshold,
         soulModeEnabled: runtimeSettings?.soulModeEnabled,
@@ -9723,12 +10121,14 @@ function resolveTextEmojiAllowlist() {
     processingOutbox = true;
     try {
       const runtimeSettings = await getRuntimeSettings();
-      const claimLimit = Math.round(clamp(runtimeSettings?.outboxClaimLimit ?? 8, 1, 20));
+      const configuredClaimLimit = Math.round(clamp(runtimeSettings?.outboxClaimLimit ?? 8, 1, 20));
+      const claimLimit = Math.round(clamp(Math.min(configuredClaimLimit, adaptiveOutboxClaimLimit), 1, 20));
       const claimed = (await convex.mutation(convexRefs.outboxClaimDue, {
         workerId,
         messageProvider: "whatsapp",
         limit: claimLimit,
       })) as OutboxClaimedItem[];
+      let sendFailures = 0;
       const tasks = claimed.map((item) =>
         enqueueByThreadLane(outboxThreadLanes, item.threadId, () =>
           runOutboxWithLimit(async () => {
@@ -9785,7 +10185,7 @@ function resolveTextEmojiAllowlist() {
               if (
                 runtimeSettings?.aiFallbackMode === "azure_only" &&
                 item.provider !== "azure" &&
-                (item.sendKind === "text" || item.sendKind === "meme") &&
+                (item.sendKind === "text" || item.sendKind === "meme" || item.sendKind === "voice_note") &&
                 item.messageText !== AI_OUTREACH_PLACEHOLDER &&
                 item.messageText !== AI_STATUS_PLACEHOLDER
               ) {
@@ -9854,7 +10254,11 @@ function resolveTextEmojiAllowlist() {
                 return;
               }
 
-              if (hydrated.reactionEmoji && hydrated.reactionTargetWhatsAppMessageId && hydrated.sendKind === "text") {
+              if (
+                hydrated.reactionEmoji &&
+                hydrated.reactionTargetWhatsAppMessageId &&
+                (hydrated.sendKind === "text" || hydrated.sendKind === "voice_note")
+              ) {
                 rememberAutomatedThreadSend(item.jid);
                 const preReactionSent = await sock.sendMessage(item.jid, {
                   react: {
@@ -9874,7 +10278,10 @@ function resolveTextEmojiAllowlist() {
               const quotedMessageOptions = buildQuotedMessageOptions(hydrated);
               let threadForEmojiPolicy: ThreadContextSnapshot = null;
               let emojiPolicyApplied = false;
-              if (!isStatusBroadcastSend && (hydrated.sendKind === "text" || hydrated.sendKind === "meme")) {
+              if (
+                !isStatusBroadcastSend &&
+                (hydrated.sendKind === "text" || hydrated.sendKind === "meme" || hydrated.sendKind === "voice_note")
+              ) {
                 threadForEmojiPolicy = (await convex
                   .query(convexRefs.threadGet, {
                     threadId: item.threadId as Id<"threads">,
@@ -9895,7 +10302,7 @@ function resolveTextEmojiAllowlist() {
                   allowedEmojiWindowMs: TEXT_EMOJI_WINDOW_MS,
                 });
                 emojiPolicyApplied = emojiAdjusted.emojiSuppressed;
-                if (hydrated.sendKind === "text") {
+                if (hydrated.sendKind === "text" || hydrated.sendKind === "voice_note") {
                   effectiveMessageText = emojiAdjusted.text;
                 } else {
                   effectiveMediaCaption = emojiAdjusted.text;
@@ -10091,6 +10498,88 @@ function resolveTextEmojiAllowlist() {
                   );
                 }
                 await sock.sendPresenceUpdate("paused", item.jid);
+              } else if (hydrated.sendKind === "voice_note") {
+                await maybeSubscribePresence(item.jid, runtimeSettings);
+                await sock.sendPresenceUpdate("composing", item.jid);
+                await convex.mutation(convexRefs.outboxMarkTyping, { outboxId: item.outboxId });
+                await sleep(hydrated.typingMs);
+                const postTypingDisposition = (await convex.query(convexRefs.outboxGetSendDisposition, {
+                  outboxId: item.outboxId,
+                })) as { canSend: boolean; reason?: string };
+                if (await maybeFinalizeStaleDisposition(item, postTypingDisposition)) {
+                  await sock.sendPresenceUpdate("paused", item.jid);
+                  return;
+                }
+
+                const dayBucket = new Date().toISOString().slice(0, 10);
+                const parsedVoiceDirective = parseVoiceNoteDirective(effectiveMessageText);
+                const voiceText = (parsedVoiceDirective?.normalizedText || effectiveMessageText || "").trim();
+                const voiceSource = parsedVoiceDirective?.source || "explicit";
+                if (!voiceText) {
+                  throw new Error("Voice note outbox item has empty text.");
+                }
+                if (voiceText !== effectiveMessageText) {
+                  effectiveMessageText = voiceText;
+                  await convex
+                    .mutation(convexRefs.outboxRewriteClaimedMessage, {
+                      outboxId: item.outboxId as Id<"outbox">,
+                      messageText: effectiveMessageText,
+                      mediaCaption: undefined,
+                    })
+                    .catch(() => undefined);
+                }
+
+                const voiceNote = await generateVoiceNoteFromDirective({
+                  text: voiceText,
+                });
+
+                if (voiceNote.status === "success") {
+                  effectiveMessageText = voiceNote.generatedText;
+                  rememberAutomatedThreadSend(item.jid);
+                  sent = await sock.sendMessage(
+                    item.jid,
+                    {
+                      audio: voiceNote.buffer,
+                      mimetype: voiceNote.mimeType,
+                      ptt: true,
+                    },
+                    quotedMessageOptions,
+                  );
+                  if (voiceSource === "auto") {
+                    markAutoVoiceNoteSent(item.threadId, dayBucket);
+                  }
+                  await convex
+                    .mutation(convexRefs.systemRecordEvent, {
+                      source: "worker",
+                      eventType: "outbox.voice_note.generated",
+                      threadId: item.threadId as Id<"threads">,
+                      outboxId: item.outboxId as Id<"outbox">,
+                      detail: compactLogText(
+                        `mode=${voiceSource} model=${voiceNote.modelId} transcode=${voiceNote.usedTranscode ? "opus" : "wav"} duration_ms=${voiceNote.durationMs}`,
+                        260,
+                      ),
+                    })
+                    .catch(() => undefined);
+                } else {
+                  await convex
+                    .mutation(convexRefs.systemRecordEvent, {
+                      source: "worker",
+                      eventType:
+                        voiceNote.status === "not_configured"
+                          ? "outbox.voice_note.unavailable"
+                          : "outbox.voice_note.error",
+                      threadId: item.threadId as Id<"threads">,
+                      outboxId: item.outboxId as Id<"outbox">,
+                      detail: compactLogText(
+                        `mode=${voiceSource} ${voiceNote.status === "not_configured" ? voiceNote.reason : voiceNote.error}`,
+                        280,
+                      ),
+                    })
+                    .catch(() => undefined);
+                  rememberAutomatedThreadSend(item.jid);
+                  sent = await sock.sendMessage(item.jid, { text: effectiveMessageText }, quotedMessageOptions);
+                }
+                await sock.sendPresenceUpdate("paused", item.jid);
               } else {
                 await maybeSubscribePresence(item.jid, runtimeSettings);
                 await sock.sendPresenceUpdate("composing", item.jid);
@@ -10103,14 +10592,83 @@ function resolveTextEmojiAllowlist() {
                   await sock.sendPresenceUpdate("paused", item.jid);
                   return;
                 }
-                await maybeSendStickerCompanion("before");
-                rememberAutomatedThreadSend(item.jid);
-                sent = await sock.sendMessage(item.jid, { text: effectiveMessageText }, quotedMessageOptions);
-                await maybeSendStickerCompanion("after");
+                const dayBucket = new Date().toISOString().slice(0, 10);
+                const voiceDirective = parseVoiceNoteDirective(effectiveMessageText);
+                if (voiceDirective) {
+                  effectiveMessageText = voiceDirective.normalizedText;
+                  await convex
+                    .mutation(convexRefs.outboxRewriteClaimedMessage, {
+                      outboxId: item.outboxId as Id<"outbox">,
+                      messageText: effectiveMessageText,
+                      mediaCaption: undefined,
+                    })
+                    .catch(() => undefined);
+                  const voiceNote = await generateVoiceNoteFromDirective({
+                    text: effectiveMessageText,
+                  });
+
+                  if (voiceNote.status === "success") {
+                    effectiveMessageText = voiceNote.generatedText;
+                    rememberAutomatedThreadSend(item.jid);
+                    sent = await sock.sendMessage(
+                      item.jid,
+                      {
+                        audio: voiceNote.buffer,
+                        mimetype: voiceNote.mimeType,
+                        ptt: true,
+                      },
+                      quotedMessageOptions,
+                    );
+                    if (voiceDirective.source === "auto") {
+                      markAutoVoiceNoteSent(item.threadId, dayBucket);
+                    }
+                    await convex
+                      .mutation(convexRefs.systemRecordEvent, {
+                        source: "worker",
+                        eventType: "outbox.voice_note.generated",
+                        threadId: item.threadId as Id<"threads">,
+                        outboxId: item.outboxId as Id<"outbox">,
+                        detail: compactLogText(
+                          `mode=${voiceDirective.source} model=${voiceNote.modelId} transcode=${voiceNote.usedTranscode ? "opus" : "wav"} duration_ms=${voiceNote.durationMs}`,
+                          260,
+                        ),
+                      })
+                      .catch(() => undefined);
+                  } else {
+                    await convex
+                      .mutation(convexRefs.systemRecordEvent, {
+                        source: "worker",
+                        eventType:
+                          voiceNote.status === "not_configured"
+                            ? "outbox.voice_note.unavailable"
+                            : "outbox.voice_note.error",
+                        threadId: item.threadId as Id<"threads">,
+                        outboxId: item.outboxId as Id<"outbox">,
+                        detail: compactLogText(
+                          `mode=${voiceDirective.source} ${voiceNote.status === "not_configured" ? voiceNote.reason : voiceNote.error}`,
+                          280,
+                        ),
+                      })
+                      .catch(() => undefined);
+                    await maybeSendStickerCompanion("before");
+                    rememberAutomatedThreadSend(item.jid);
+                    sent = await sock.sendMessage(item.jid, { text: effectiveMessageText }, quotedMessageOptions);
+                    await maybeSendStickerCompanion("after");
+                  }
+                } else {
+                  await maybeSendStickerCompanion("before");
+                  rememberAutomatedThreadSend(item.jid);
+                  sent = await sock.sendMessage(item.jid, { text: effectiveMessageText }, quotedMessageOptions);
+                  await maybeSendStickerCompanion("after");
+                }
                 await sock.sendPresenceUpdate("paused", item.jid);
               }
 
-              if (!isStatusBroadcastSend && hydrated.sendKind === "text" && containsAnyEmoji(effectiveMessageText)) {
+              if (
+                !isStatusBroadcastSend &&
+                (hydrated.sendKind === "text" || hydrated.sendKind === "voice_note") &&
+                containsAnyEmoji(effectiveMessageText)
+              ) {
                 rememberEmojiOutboundAt(item.jid, Date.now());
               } else if (!isStatusBroadcastSend && hydrated.sendKind === "meme" && containsAnyEmoji(effectiveMediaCaption || "")) {
                 rememberEmojiOutboundAt(item.jid, Date.now());
@@ -10127,6 +10685,7 @@ function resolveTextEmojiAllowlist() {
                 await markMediaAssetUsed(hydrated.mediaAssetId);
               }
             } catch (error) {
+              sendFailures += 1;
               const err = error instanceof Error ? error.message : String(error);
               await convex.mutation(convexRefs.outboxMarkFailed, {
                 outboxId: item.outboxId,
@@ -10149,6 +10708,13 @@ function resolveTextEmojiAllowlist() {
         ),
       );
       await Promise.allSettled(tasks);
+      if (claimed.length > 0) {
+        if (sendFailures > 0) {
+          adaptiveOutboxClaimLimit = Math.max(1, adaptiveOutboxClaimLimit - 1);
+        } else if (claimed.length >= claimLimit) {
+          adaptiveOutboxClaimLimit = Math.min(20, adaptiveOutboxClaimLimit + 1);
+        }
+      }
     } catch (error) {
       const err = error instanceof Error ? error.message : String(error);
       logger.error({ err }, "WhatsApp outbox poll failed");
@@ -10454,6 +11020,7 @@ function resolveTextEmojiAllowlist() {
       autoMarkReadStatus: resolveAutoMarkReadStatusEnabled(startupSettings),
       presenceSubscribeEnabled: resolvePresenceSubscribeEnabled(startupSettings),
       chatModifyQuietHoursEnabled: resolveChatModifyQuietHoursEnabled(startupSettings),
+      quietHoursEnabled: resolveQuietHoursEnabled(startupSettings),
       aboutAutomationEnabled: resolveAboutAutomationEnabled(startupSettings),
       aboutAutomationIntervalMinutes: Math.round(resolveAboutAutomationIntervalMs(startupSettings) / 60_000),
     },

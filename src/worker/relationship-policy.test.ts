@@ -18,6 +18,18 @@ test("deriveRelationshipState flags conflict and repair need on accusation", () 
   assert.equal(state.warmthTrend, -1);
 });
 
+test("deriveRelationshipState catches broader hurt and ghosting language", () => {
+  for (const inboundText of ["you ghosted me and you don't care", "that was cold, I felt ignored", "you made me feel stupid"]) {
+    const state = deriveRelationshipState({
+      inboundText,
+      historyLines: [],
+    });
+
+    assert.equal(state.conflictFlag, true, inboundText);
+    assert.equal(state.repairNeeded, true, inboundText);
+  }
+});
+
 test("decideRelationshipPolicy forces deterministic repair on passive-aggressive cue", () => {
   const policy = decideRelationshipPolicy({
     inboundText: "No worry, enjoy.",
@@ -27,6 +39,18 @@ test("decideRelationshipPolicy forces deterministic repair on passive-aggressive
   assert.equal(policy.forceDeterministicRepair, true);
   assert.equal(policy.allowHumor, false);
   assert.equal(policy.reason, "relationship_conflict_repair");
+});
+
+test("decideRelationshipPolicy catches softer passive-aggressive variants", () => {
+  for (const inboundText of ["that's fine then", "forget it", "no stress, do your thing"]) {
+    const policy = decideRelationshipPolicy({
+      inboundText,
+      historyLines: [],
+    });
+
+    assert.equal(policy.forceDeterministicRepair, true, inboundText);
+    assert.equal(policy.allowHumor, false, inboundText);
+  }
 });
 
 test("decideRelationshipPolicy allows humor only in safe playful context", () => {
@@ -70,4 +94,26 @@ test("romantic profile prioritizes romantic care and repair reasoning", () => {
     prioritizeRomanticCare: policy.prioritizeRomanticCare,
   });
   assert.match(reply, /I care about us/i);
+});
+
+test("romantic repair validates feelings before explaining logic", () => {
+  const policy = decideRelationshipPolicy({
+    inboundText: "You are always explaining and you do not get it",
+    historyLines: ["Them: babe I am tired of arguing"],
+    profileSlug: "relationship",
+  });
+
+  assert.equal(policy.prioritizeRomanticCare, true);
+  assert.equal(policy.emotionFirstRepair, true);
+  assert.equal(policy.forceDeterministicRepair, true);
+
+  const reply = buildDeterministicRepairReply({
+    inboundText: "You are always explaining and you do not get it",
+    state: policy.state,
+    prioritizeRomanticCare: policy.prioritizeRomanticCare,
+  });
+
+  assert.match(reply, /I care about us/i);
+  assert.match(reply, /explaining first|not listening|understand you/i);
+  assert.doesNotMatch(reply, /\byou should understand\b|\bmake you understand\b|\blogically\b/i);
 });

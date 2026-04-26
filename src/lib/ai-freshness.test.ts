@@ -52,3 +52,34 @@ test("freshness cache returns value before expiry and clears on expiry", () => {
   const expired = getAiFreshnessCachedValue<{ value: string }>(key, now + 31 * 60 * 1000);
   assert.equal(expired, null);
 });
+
+test("buildAiFreshnessFingerprint changes when style-affecting inputs change", () => {
+  const base = {
+    scope: "test_ai" as const,
+    inboundText: "I miss you",
+    threadId: "thread-1",
+    styleProfile: { mimicryLevel: 0.7, learnedEmojiAllowlist: ["😌"] },
+    personality: { profileSlug: "girlfriend", intensity: 0.8, threadPromptProfile: "warm and short" },
+    activePersonaPackIdsByProfile: { girlfriend: "josh_witty_shortcuts.v1" },
+    qualityGateMode: "auto_rewrite_once",
+    qualityGateThreshold: 0.76,
+  };
+
+  const same = buildAiFreshnessFingerprint(base);
+  const differentPersona = buildAiFreshnessFingerprint({
+    ...base,
+    personality: { ...base.personality, threadPromptProfile: "more formal" },
+  });
+  const differentPack = buildAiFreshnessFingerprint({
+    ...base,
+    activePersonaPackIdsByProfile: { girlfriend: "other_pack.v1" },
+  });
+  const differentStyle = buildAiFreshnessFingerprint({
+    ...base,
+    styleProfile: { mimicryLevel: 0.3, learnedEmojiAllowlist: [] },
+  });
+
+  assert.notEqual(same, differentPersona);
+  assert.notEqual(same, differentPack);
+  assert.notEqual(same, differentStyle);
+});

@@ -35,7 +35,7 @@ type OutboxClaimedItem = {
   typingMs: number;
   messageProvider: MessageProvider;
   provider: "azure" | "codex" | "heuristic";
-  sendKind: "text" | "reaction" | "sticker" | "meme";
+  sendKind: "text" | "reaction" | "sticker" | "meme" | "voice_note";
   isStatusPost?: boolean;
   mediaAssetId?: string;
   mediaCaption?: string;
@@ -653,7 +653,22 @@ async function run() {
 
     let sendResponse: unknown;
 
-    if (item.sendKind === "reaction") {
+    if (item.sendKind === "voice_note") {
+      const text = (item.messageText || "").trim();
+      if (!text) {
+        throw new Error("Cannot send empty Instagram voice-note fallback text.");
+      }
+      sendResponse = await thread.broadcastText(text);
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: "instagram.voice_note.sent_as_text",
+          threadId: item.threadId as Id<"threads">,
+          outboxId: item.outboxId as Id<"outbox">,
+          detail: "Sent voice note as text fallback because Instagram voice-note sending is not implemented.",
+        })
+        .catch(() => undefined);
+    } else if (item.sendKind === "reaction") {
       const emoji = (item.reactionEmoji || "❤️").trim();
       sendResponse = await thread.broadcastText(emoji);
       await convex
@@ -704,6 +719,8 @@ async function run() {
       const claimed = (await convex.mutation(convexRefs.outboxClaimDue, {
         workerId,
         messageProvider: "instagram",
+        limit: 1,
+        leaseMs: 3 * 60_000,
       })) as OutboxClaimedItem[];
 
       for (const item of claimed) {

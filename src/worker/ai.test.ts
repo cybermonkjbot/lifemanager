@@ -281,6 +281,19 @@ test("postProcessReplyText rewrites self-care advice for health disclosures to e
   assert.match(output, /\b(better|recover)\b/i);
 });
 
+test("postProcessReplyText catches broader health disclosures", () => {
+  for (const inboundText of ["I'm not feeling myself today.", "I had a panic attack.", "I'm exhausted and at the hospital."]) {
+    const output = postProcessReplyText({
+      text: "Sorry to hear that. Take care of yourself and get some rest.",
+      inboundText,
+      historyLines: [],
+    });
+
+    assert.doesNotMatch(output, /\b(take care|rest(?: up)?|drink water|hydrate|meds?|doctor|hospital|clinic)\b/i, inboundText);
+    assert.match(output, /\b(better|recover)\b/i, inboundText);
+  }
+});
+
 test("postProcessReplyText keeps non-health take-care phrasing unchanged", () => {
   const output = postProcessReplyText({
     text: "Take care and talk soon.",
@@ -316,6 +329,18 @@ test("postProcessReplyText enforces JADL disclosure when inbound asks if this is
   });
   assert.match(output, /AI-assisted/i);
   assert.match(output, /Joshua remains accountable/i);
+});
+
+test("postProcessReplyText enforces JADL disclosure for broader AI identity accusations", () => {
+  for (const inboundText of ["is this you or AI?", "this sounds automated", "bot reply?", "are you the one replying?"]) {
+    const output = postProcessReplyText({
+      text: "No AI here, just me.",
+      inboundText,
+      historyLines: [],
+    });
+
+    assert.match(output, /AI-assisted/i, inboundText);
+  }
 });
 
 test("postProcessReplyText strips awkward catchphrase prefix while keeping core response", () => {
@@ -451,6 +476,8 @@ test("postProcessReplyText strips close-mode reopen cues even without question m
 test("hasBossAddressCue detects vocative boss forms and ignores plain references", () => {
   assert.equal(hasBossAddressCue("Boss, can you send the update?"), true);
   assert.equal(hasBossAddressCue("Hi oga please check this."), true);
+  assert.equal(hasBossAddressCue("Chief, send the update when you can."), true);
+  assert.equal(hasBossAddressCue("yo bossman, you around?"), true);
   assert.equal(hasBossAddressCue("My boss asked for the report."), false);
 });
 
@@ -624,6 +651,57 @@ test("detectConversationSteeringMode flags pause requests", () => {
   assert.equal(mode, "pause");
 });
 
+test("detectConversationSteeringMode flags night sign-offs as pause requests", () => {
+  const mode = detectConversationSteeringMode({
+    inboundText: "Have a good night",
+    historyLines: [],
+  });
+  assert.equal(mode, "pause");
+});
+
+test("detectConversationSteeringMode flags talk-tomorrow sign-offs with typo variants", () => {
+  const mode = detectConversationSteeringMode({
+    inboundText: "Can we talk tommorrow?",
+    historyLines: [],
+  });
+  assert.equal(mode, "pause");
+});
+
+test("detectConversationSteeringMode flags compact night and next-day sign-offs", () => {
+  const samples = [
+    "gn",
+    "nite",
+    "night",
+    "sweet dreams",
+    "rest up",
+    "see you tomorrow",
+    "catch you tmr",
+    "talk to you in the morning",
+    "tomoz then",
+    "I'll ping you tmr",
+    "let's chat in the morning",
+    "make i sleep",
+  ];
+
+  for (const inboundText of samples) {
+    const mode = detectConversationSteeringMode({
+      inboundText,
+      historyLines: [],
+    });
+    assert.equal(mode, "pause", inboundText);
+  }
+});
+
+test("detectConversationSteeringMode does not close ordinary night/tomorrow references", () => {
+  for (const inboundText of ["last night was funny", "tomorrow meeting is at 9", "the morning report is ready"]) {
+    const mode = detectConversationSteeringMode({
+      inboundText,
+      historyLines: [],
+    });
+    assert.equal(mode, "none", inboundText);
+  }
+});
+
 test("detectConversationSteeringMode flags driving-now pause requests", () => {
   const mode = detectConversationSteeringMode({
     inboundText: "I'm driving rn, will text later",
@@ -656,6 +734,24 @@ test("detectConversationSteeringMode flags anti beggi beggi money requests", () 
   assert.equal(mode, "anti_beggi_beggi");
 });
 
+test("detectConversationSteeringMode flags colloquial money requests", () => {
+  for (const inboundText of [
+    "can you sub me 5k for fuel?",
+    "I am stranded, need transport fare",
+    "please spot me airtime",
+    "help me with data abeg",
+    "borrow me small thing",
+    "need urgent 2k",
+    "account dry abeg send something",
+  ]) {
+    const mode = detectConversationSteeringMode({
+      inboundText,
+      historyLines: [],
+    });
+    assert.equal(mode, "anti_beggi_beggi", inboundText);
+  }
+});
+
 test("detectConversationSteeringMode does not flag non-money send requests as anti beggi beggi", () => {
   const mode = detectConversationSteeringMode({
     inboundText: "Can you send me the invoice summary?",
@@ -670,6 +766,22 @@ test("detectConversationSteeringMode flags sales pitch negotiation attempts", ()
     historyLines: [],
   });
   assert.equal(mode, "anti_sales_pitch");
+});
+
+test("detectConversationSteeringMode flags informal sales and booking pitches", () => {
+  for (const inboundText of [
+    "slots available, book your slot now",
+    "kindly patronize my business, price list available",
+    "new packages available, send a DM",
+    "flash sale, delivery nationwide",
+    "wholesale available for pickup",
+  ]) {
+    const mode = detectConversationSteeringMode({
+      inboundText,
+      historyLines: [],
+    });
+    assert.equal(mode, "anti_sales_pitch", inboundText);
+  }
 });
 
 test("detectConversationSteeringMode does not flag non-sales buy wording", () => {
@@ -834,6 +946,16 @@ test("detectConversationSteeringMode flags colloquial hard stop requests", () =>
   assert.equal(mode, "hard_stop");
 });
 
+test("detectConversationSteeringMode flags broader hard stop requests", () => {
+  for (const inboundText of ["delete my number", "give me space please", "I'm done, this is over"]) {
+    const mode = detectConversationSteeringMode({
+      inboundText,
+      historyLines: [],
+    });
+    assert.equal(mode, "hard_stop", inboundText);
+  }
+});
+
 test("detectConversationSteeringMode flags pidgin hard stop requests", () => {
   const mode = detectConversationSteeringMode({
     inboundText: "abeg no text me again",
@@ -862,6 +984,8 @@ test("hasAggressiveInsultCue detects direct aggressive insults", () => {
   assert.equal(hasAggressiveInsultCue("You are useless and stupid."), true);
   assert.equal(hasAggressiveInsultCue("abeg mumu, rest"), true);
   assert.equal(hasAggressiveInsultCue("wtf is wrong with you"), true);
+  assert.equal(hasAggressiveInsultCue("you are a clown"), true);
+  assert.equal(hasAggressiveInsultCue("craze dey worry you"), true);
 });
 
 test("hasAggressiveInsultCue ignores normal frustration language", () => {
@@ -875,6 +999,16 @@ test("detectConversationSteeringMode treats social acknowledgement tails as wrap
     historyLines: [],
   });
   assert.equal(mode, "wrap_up");
+});
+
+test("detectConversationSteeringMode treats soft acknowledgements as wrap-up", () => {
+  for (const inboundText of ["fair", "real", "valid", "facts", "true true", "seen", "no stress", "alright then"]) {
+    const mode = detectConversationSteeringMode({
+      inboundText,
+      historyLines: [],
+    });
+    assert.equal(mode, "wrap_up", inboundText);
+  }
 });
 
 test("detectConversationSteeringMode treats code-switched wrap-up phrases as wrap-up", () => {
@@ -1297,6 +1431,25 @@ test("generateReplyWithFallback honors custom deterministic mode list in model-f
 
     assert.equal(result.provider, "heuristic");
     assert.equal(result.model, "heuristic-local-pause");
+  } finally {
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback reciprocates night sign-offs without reopening", async () => {
+  const snapshot = clearAiEnv();
+
+  try {
+    const result = await generateReplyWithFallback({
+      inboundText: "Have a good night",
+      historyLines: [],
+      styleHints: [],
+    });
+
+    assert.equal(result.provider, "heuristic");
+    assert.equal(result.model, "heuristic-local-pause");
+    assert.match(result.text, /(good night|sleep well|rest well|talk tomorrow)/i);
+    assert.doesNotMatch(result.text, /continue/i);
   } finally {
     restoreAiEnv(snapshot);
   }
@@ -1758,6 +1911,42 @@ test("generateReplyWithFallback blocks when self-repeat rewrite still repeats pr
   }
 });
 
+test("generateReplyWithFallback allows recent self-repeat when guardrail is explicitly disabled", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async () => {
+      return new Response(JSON.stringify({ output_text: "Better so, devil no get shift for this one." }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "Generate one task title for a personal TODO list.",
+      historyLines: ["Them: Candidate TODO", "Me: Better so."],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "log_only",
+        guardrailRepromptLimit: 0,
+        disableRecentSelfRepeatGuardrail: true,
+      },
+    });
+
+    assert.equal(result.guardrailBlocked, false);
+    assert.match(result.text, /^better so\b/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
 test("generateReplyWithFallback reprompts with guardrail block reason until draft passes criteria", async () => {
   const snapshot = clearAiEnv();
   const originalFetch = globalThis.fetch;
@@ -1888,6 +2077,122 @@ test("generateReplyWithFallback sends manual review when copy-risk rewrite still
     assert.equal(result.guardrailBlocked, true);
     assert.match(result.guardrailReason || "", /copy-risk rewrite still violated guardrail/i);
     assert.ok(generationCalls >= 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback rewrites objective-profile claim when AI fact judge flags factuality risk", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  let generationCalls = 0;
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      const bodyText = typeof init?.body === "string" ? init.body : "";
+      const isFactJudgeCall = /strict factuality classifier|hasObjectiveClaim|factualRisk/i.test(bodyText);
+      if (isFactJudgeCall) {
+        return new Response(
+          JSON.stringify({
+            output_text: '{"hasObjectiveClaim":true,"factualRisk":true,"confidence":0.9,"reason":"unverified credential claim"}',
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      generationCalls += 1;
+      if (/Objective-profile factuality guardrail/i.test(bodyText)) {
+        return new Response(JSON.stringify({ output_text: "Let's keep profile details brief for now." }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ output_text: "Yes, I have a degree in medicine." }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "Do you have a degree?",
+      historyLines: ["Them: Do you have a degree?"],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "log_only",
+      },
+    });
+
+    assert.equal(result.guardrailBlocked, false);
+    assert.equal(result.text, "Let's keep profile details brief for now.");
+    assert.ok(generationCalls >= 2);
+    assert.ok(result.attempts.some((attempt) => attempt.stage === "fact_judge_azure" && attempt.status === "success"));
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback rewrites escalatory tone when AI tone-shift judge flags risk", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  let generationCalls = 0;
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      const bodyText = typeof init?.body === "string" ? init.body : "";
+      const isToneShiftJudgeCall = /strict tone-shift safety classifier|requiresRepairTone/i.test(bodyText);
+      if (isToneShiftJudgeCall) {
+        return new Response(
+          JSON.stringify({
+            output_text: '{"requiresRepairTone":true,"confidence":0.88,"reason":"dismissive wording escalates tension"}',
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      generationCalls += 1;
+      if (/Tone-shift guardrail: AI tone-shift judge flagged escalation risk/i.test(bodyText)) {
+        return new Response(JSON.stringify({ output_text: "I hear you. I can send the update in 10 minutes." }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ output_text: "Fine then, do your thing." }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "no worry, carry on then, can you send the update now?",
+      historyLines: ["Them: no worry, carry on then, can you send the update now?"],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "log_only",
+      },
+    });
+
+    assert.equal(result.guardrailBlocked, false);
+    assert.equal(result.text, "I hear you. I can send the update in 10 minutes.");
+    assert.ok(generationCalls >= 2);
+    assert.ok(result.attempts.some((attempt) => attempt.stage === "tone_shift_judge_azure" && attempt.status === "success"));
   } finally {
     globalThis.fetch = originalFetch;
     restoreAiEnv(snapshot);
@@ -2537,6 +2842,48 @@ test("generateReplyWithFallback injects personal-first anti-corporate instructio
   }
 });
 
+test("generateReplyWithFallback injects romantic emotion-first conflict instruction", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  const requestBodies: string[] = [];
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      requestBodies.push(typeof init?.body === "string" ? init.body : "");
+      return new Response(JSON.stringify({ output_text: "I hear you. I will slow down and listen first." }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "You keep explaining and you are not listening",
+      historyLines: ["Them: babe I am tired of this"],
+      styleHints: [],
+      personality: {
+        profileSlug: "relationship",
+        profileName: "Relationship",
+      },
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "log_only",
+      },
+    });
+
+    assert.equal(result.provider, "azure");
+    assert.ok(requestBodies.some((body) => /Romantic relationship mode/i.test(body)));
+    assert.ok(requestBodies.some((body) => /validate the feeling before explaining logic/i.test(body)));
+    assert.ok(requestBodies.some((body) => /Do not manipulate, pressure, guilt-trip, corner/i.test(body)));
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
 test("generateReplyWithFallback injects professional lingua instructions for professional persona", async () => {
   const snapshot = clearAiEnv();
   const originalFetch = globalThis.fetch;
@@ -2831,7 +3178,8 @@ test("generateReplyWithFallback executes one Responses tool round and resumes wi
                 type: "function_call",
                 name: "tool_router_plan",
                 call_id: "call_1",
-                arguments: '{"task":"find invoice summary","includeExtraction":true,"maxResults":6,"maxToolsPerRun":4}',
+                arguments:
+                  '{"task":"find invoice summary","toolRationale":"Need retrieval before final reply.","includeExtraction":true,"maxResults":6,"maxToolsPerRun":4}',
               },
             ],
           }),
@@ -2877,8 +3225,9 @@ test("generateReplyWithFallback executes one Responses tool round and resumes wi
     assert.ok(Array.isArray(requestBodies[0]?.tools));
     const firstTool = (requestBodies[0]?.tools as Array<Record<string, unknown>>)[0];
     const params = (firstTool?.parameters ?? {}) as Record<string, unknown>;
-    assert.deepEqual(params.required, ["task", "candidateReply", "includeExtraction", "maxResults", "maxToolsPerRun"]);
+    assert.deepEqual(params.required, ["task", "toolRationale", "candidateReply", "includeExtraction", "maxResults", "maxToolsPerRun"]);
     const properties = (params.properties ?? {}) as Record<string, Record<string, unknown>>;
+    assert.equal(properties.toolRationale?.type, "string");
     assert.deepEqual(properties.candidateReply?.type, ["string", "null"]);
     assert.deepEqual(properties.includeExtraction?.type, ["boolean", "null"]);
     assert.deepEqual(properties.maxResults?.type, ["integer", "null"]);
@@ -2888,6 +3237,71 @@ test("generateReplyWithFallback executes one Responses tool round and resumes wi
     const secondInput = requestBodies[1]?.input;
     assert.ok(Array.isArray(secondInput));
     assert.ok(result.contextToolCalls?.some((call) => call.name === "model_tool_router_plan"));
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback records Responses reasoning summary alongside tool rationale", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    let callCount = 0;
+    globalThis.fetch = (async () => {
+      callCount += 1;
+      if (callCount === 1) {
+        return new Response(
+          JSON.stringify({
+            id: "resp_reasoning_1",
+            output: [
+              {
+                type: "reasoning",
+                summary: [{ type: "summary_text", text: "Need retrieval before drafting." }],
+              },
+              {
+                type: "function_call",
+                name: "tool_router_plan",
+                call_id: "call_reasoning_1",
+                arguments: '{"task":"find context","toolRationale":"Need context data before answer."}',
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response(JSON.stringify({ id: "resp_reasoning_2", output_text: "Done." }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "What did I ask before?",
+      historyLines: [],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+      },
+      modelToolContext: {
+        threadId: "thread_1",
+        executeToolRouterPlan: async () => ({
+          status: "success",
+          output: { ok: true },
+          latencyMs: 2,
+        }),
+      },
+    });
+
+    const toolCall = result.contextToolCalls?.find((call) => call.name === "model_tool_router_plan");
+    assert.ok(toolCall);
+    assert.equal(toolCall?.input?.toolRationale, "Need context data before answer.");
+    assert.equal(toolCall?.input?.reasoningSummary, "Need retrieval before drafting.");
   } finally {
     globalThis.fetch = originalFetch;
     restoreAiEnv(snapshot);
@@ -2911,7 +3325,7 @@ test("generateReplyWithFallback enforces Responses tool round cap", async () => 
               type: "function_call",
               name: "tool_router_plan",
               call_id: "call_repeat",
-              arguments: '{"task":"keep calling"}',
+              arguments: '{"task":"keep calling","toolRationale":"Need more data."}',
             },
           ],
         }),
@@ -2969,7 +3383,7 @@ test("generateReplyWithFallback sends structured validation errors for malformed
                 type: "function_call",
                 name: "tool_router_plan",
                 call_id: "bad_1",
-                arguments: '{"task":"","maxResults":200}',
+                arguments: '{"task":"","toolRationale":"Checking options.","maxResults":200}',
               },
             ],
           }),
@@ -3040,7 +3454,7 @@ test("generateReplyWithFallback supports chat-completions tool-call loop", async
                       type: "function",
                       function: {
                         name: "tool_router_plan",
-                        arguments: '{"task":"find recall evidence"}',
+                        arguments: '{"task":"find recall evidence","toolRationale":"Need context lookup."}',
                       },
                     },
                   ],
@@ -3117,7 +3531,7 @@ test("generateReplyWithFallback captures tool executor timeout/failure and conti
                 type: "function_call",
                 name: "tool_router_plan",
                 call_id: "timeout_call",
-                arguments: '{"task":"slow call"}',
+                arguments: '{"task":"slow call","toolRationale":"Need tool run first."}',
               },
             ],
           }),
@@ -3764,6 +4178,47 @@ test("generateReplyWithFallback applies friendship cross-gen pack only for frien
       },
     });
     assert.equal(casual.activePersonaPackId, undefined);
+  } finally {
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback resolves per-profile active persona packs independently", async () => {
+  const snapshot = clearAiEnv();
+  process.env.CODEX_CLI_PATH = "__missing_codex_binary__";
+  try {
+    const romantic = await generateReplyWithFallback({
+      inboundText: "I miss you lol",
+      historyLines: ["Them: I miss you lol"],
+      styleHints: [],
+      personality: { profileSlug: "girlfriend" },
+      styleProfile: { learnedEmojiAllowlist: ["😌"] },
+      runtime: {
+        activePersonaPackIdsByProfile: {
+          girlfriend: "josh_witty_shortcuts.v1",
+          friendship: "friendship_cross_gen.v1",
+        },
+        qualityGateMode: "log_only",
+      },
+    });
+    assert.equal(romantic.activePersonaPackId, "josh_witty_shortcuts.v1");
+    assert.equal(romantic.conversationStyleMatrix?.relationship, "romantic");
+    assert.equal(romantic.conversationStyleMatrix?.emojiTextPolicy, "allow_limited");
+
+    const friendship = await generateReplyWithFallback({
+      inboundText: "lowkey i'm down fr, we should catch up rn",
+      historyLines: ["Them: lowkey i'm down fr, we should catch up rn"],
+      styleHints: [],
+      personality: { profileSlug: "friendship" },
+      runtime: {
+        activePersonaPackIdsByProfile: {
+          girlfriend: "josh_witty_shortcuts.v1",
+          friendship: "friendship_cross_gen.v1",
+        },
+        qualityGateMode: "log_only",
+      },
+    });
+    assert.equal(friendship.activePersonaPackId, "friendship_cross_gen.v1");
   } finally {
     restoreAiEnv(snapshot);
   }

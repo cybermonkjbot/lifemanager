@@ -20,6 +20,12 @@ import {
   hasPidginWrapUpCue,
   normalizePidginFamilyTerms,
 } from "../../shared/pidgin-lexicon";
+import {
+  computeConversationStyleMatrix,
+  summarizeConversationStyleMatrix,
+  type ConversationStyleMatrixResult,
+} from "../../shared/conversation-style-matrix";
+import type { InstanceSetupPreferences, InstanceSoulProfile } from "@/lib/instance-setup-types";
 import { stripEmojiCharacters } from "./emoji-policy";
 import {
   isFactStale,
@@ -42,6 +48,8 @@ type AiResult = {
   qualityChecks?: QualityCheck[];
   qualityRewriteApplied?: boolean;
   activePersonaPackId?: string;
+  activeDynamicStylePackIds?: string[];
+  conversationStyleMatrix?: ConversationStyleMatrixResult;
   attempts: AiAttempt[];
   contextToolCalls?: ContextToolCall[];
   contextWindow?: ContextWindowStats;
@@ -58,8 +66,8 @@ export type AiAttempt = {
     | "ack_router_codex"
     | "heuristic_guardrail"
     | "heuristic_fallback"
-    | "humor_judge_azure"
-    | "humor_judge_codex";
+    | `${string}_judge_azure`
+    | `${string}_judge_codex`;
   model: string;
   status: "success" | "error";
   latencyMs: number;
@@ -214,6 +222,7 @@ export type ContextToolName =
   | "context_window_cleaning"
   | "conversation_history_search"
   | "contact_memory_fact_selection"
+  | "conversation_style_matrix"
   | "response_workbench"
   | "model_tool_router_plan";
 
@@ -233,6 +242,25 @@ export type ContextWindowStats = {
   relevantHistoryLines: number;
 };
 
+export type ConversationReplyGuidance = {
+  enabled: boolean;
+  shouldClose: boolean;
+  shouldLeadPivot: boolean;
+  shouldCheckIn: boolean;
+  conversationEndImminent: boolean;
+  topicDwellScore: number;
+  vibeScore: number;
+  daysSinceMutualCheckIn?: number;
+  activeTopic?: {
+    topicKey: string;
+    topicLabel: string;
+    status: "active" | "cooling" | "closed";
+    turnCount: number;
+  } | null;
+  leadPivotTheme?: "wellbeing" | "plans" | "day_recap";
+  reasonCodes: string[];
+};
+
 type ResponseReplyMode = "answer" | "confirm" | "clarify" | "close" | "lead";
 
 type RuntimeAiTuning = {
@@ -245,6 +273,7 @@ type RuntimeAiTuning = {
   systemInstruction?: string;
   replyPolicyInstruction?: string;
   activePersonaPackId?: string;
+  activePersonaPackIdsByProfile?: Record<string, string>;
   qualityGateMode?: QualityGateMode;
   qualityGateThreshold?: number;
   soulModeEnabled?: boolean;
@@ -273,10 +302,12 @@ type RuntimeAiTuning = {
   typingMaxMs?: number;
   silenceGapMinutes?: number;
   networkFrictionHint?: boolean;
+  disableRecentSelfRepeatGuardrail?: boolean;
 };
 
 type ToolRouterPlanInput = {
   task: string;
+  toolRationale: string;
   candidateReply?: string;
   includeExtraction?: boolean;
   maxResults?: number;
@@ -319,6 +350,23 @@ type AzureConfig = {
 type HumorJudgment = {
   isJokeAttempt: boolean;
   isFunny: boolean;
+  confidence: number;
+  reason: string;
+  provider: "azure" | "codex";
+  model: string;
+};
+
+type FactJudgment = {
+  hasObjectiveClaim: boolean;
+  factualRisk: boolean;
+  confidence: number;
+  reason: string;
+  provider: "azure" | "codex";
+  model: string;
+};
+
+type ToneShiftJudgment = {
+  requiresRepairTone: boolean;
   confidence: number;
   reason: string;
   provider: "azure" | "codex";
@@ -377,9 +425,12 @@ const HARD_CODED_AZURE_DEFAULTS: {
 const HIGH_RISK_PATTERNS = [
   /password/i,
   /otp/i,
+  /\b(one[-\s]?time|login|verification|security|2fa|two[-\s]?factor)\s+(?:code|pin)\b/i,
+  /\b(?:code|pin)\s+(?:sent|delivered)\s+(?:to|for)\s+(?:your|my)\s+(?:phone|email|account)\b/i,
   /bank\s*account/i,
   /wire\s*transfer/i,
   /social\s*security/i,
+  /\b(i can'?t breathe|cannot breathe|struggling to breathe|chest pain|suicidal|kill myself|end my life)\b/i,
 ];
 
 const LOW_VALUE_REPLY_PATTERNS = [
@@ -423,8 +474,13 @@ const AI_DENIAL_PATTERNS = [
 ];
 const AI_IDENTITY_DISCLOSURE_CUE_PATTERNS = [
   /\b(?:are|r)\s+(?:you|u)\s+(?:an?\s+)?(?:ai|bot|assistant)\b/i,
-  /\bis\s+this\s+(?:an?\s+)?(?:ai|bot|assistant)\b/i,
+  /\bis\s+this\s+(?:you\s+or\s+)?(?:an?\s+)?(?:ai|bot|assistant|chatgpt)\b/i,
   /\b(?:you(?:'|’)re|you are)\s+(?:an?\s+)?(?:ai|bot|assistant)\b/i,
+  /\b(?:are|r)\s+(?:you|u)\s+using\s+(?:chatgpt|ai|an?\s+assistant|automation)\b/i,
+  /\bthis\s+sounds\s+(?:automated|like\s+(?:ai|chatgpt|a\s+bot))\b/i,
+  /\b(?:bot|ai)\s+reply\b/i,
+  /\bwho(?:'|’)s typing\b/i,
+  /\bare\s+you\s+the\s+one\s+replying\b/i,
   /\b(?:who\s+(?:are|r)\s+(?:you|u)|what\s+are\s+you)\b/i,
   /\b(?:who\s+(?:built|made|designed|created)\s+(?:you|this)|where\s+did\s+you\s+come\s+from|what(?:'|’)s\s+your\s+origin|what\s+is\s+your\s+origin)\b/i,
   /\b(?:is\s+this\s+chatgpt|are\s+you\s+chatgpt|is\s+this\s+automated|is\s+this\s+a\s+bot)\b/i,
@@ -546,6 +602,11 @@ const MODEL_TOOL_ROUTER_SCHEMA = {
       minLength: 1,
       maxLength: 320,
     },
+    toolRationale: {
+      type: "string",
+      minLength: 1,
+      maxLength: 280,
+    },
     candidateReply: {
       type: ["string", "null"],
       maxLength: 600,
@@ -564,7 +625,7 @@ const MODEL_TOOL_ROUTER_SCHEMA = {
       maximum: MODEL_TOOL_MAX_TOOLS_PER_RUN_CAP,
     },
   },
-  required: ["task", "candidateReply", "includeExtraction", "maxResults", "maxToolsPerRun"],
+  required: ["task", "toolRationale", "candidateReply", "includeExtraction", "maxResults", "maxToolsPerRun"],
 } as const;
 const AWKWARD_CATCHPHRASE_PATTERNS = [
   /\b(?:please|kindly|abeg)\s+(?:just\s+)?(?:allow|pardon)\s+me(?:\s+small)?\b/i,
@@ -628,10 +689,18 @@ const PASSIVE_AGGRESSIVE_CUE_PATTERN =
   /\b(no worry|no wahala)\b.*\b(enjoy|carry on|continue)\b|\bfine then\b|\bokay then\b|\bdo your thing\b/i;
 const LOCAL_ACCUSATION_CUE_PATTERN =
   /\b(you were seen|dem see you|i saw you)\b.*\b(terminus|rayfield|bukuru|angwan|jos|j-town)\b|\bwhy (?:didn'?t|no) (?:you )?(?:pick|answer|reply)\b/i;
+const TONE_SHIFT_ESCALATION_CUE_PATTERN =
+  /\b(stupid|idiot|fool|mumu|nonsense|mtchew|whatever|do your thing|carry on|not my problem|as you wish|fine then|okay then)\b/i;
+const FACT_JUDGE_TRIGGER_PATTERN =
+  /\b(?:i\s+(?:have|got)|i(?:'|’)ve)\s+(?:a\s+)?(?:degree|phd|masters|mba|certificate)\b|\b(?:i\s+(?:do\s+not|don't|dont)\s+(?:have|hold)|no)\s+(?:a\s+)?(?:degree|phd|masters|mba|certificate)\b|\b(?:i\s+(?:studied|study)|i\s+went\s+to\s+school|my\s+background|i(?:'|’)m\s+from|i\s+am\s+from|i\s+was\s+born|i\s+worked\s+as)\b/i;
 const HUMOR_CONTEXT_MIN_CHARS = 10;
 const MAX_SAFE_MIMICRY_LEVEL = 0.82;
 const HUMOR_JUDGE_SYSTEM_INSTRUCTION =
   "You are a strict humor classifier for WhatsApp drafts. Output JSON only with: isJokeAttempt (boolean), isFunny (boolean), confidence (0..1), reason (string <= 140 chars).";
+const FACT_JUDGE_SYSTEM_INSTRUCTION =
+  "You are a strict factuality classifier for WhatsApp drafts. Output JSON only with: hasObjectiveClaim (boolean), factualRisk (boolean), confidence (0..1), reason (string <= 140 chars).";
+const TONE_SHIFT_JUDGE_SYSTEM_INSTRUCTION =
+  "You are a strict tone-shift safety classifier for WhatsApp drafts. Output JSON only with: requiresRepairTone (boolean), confidence (0..1), reason (string <= 140 chars).";
 
 const STOPWORDS = new Set([
   "a",
@@ -714,13 +783,30 @@ const DEFAULT_FUNNY_STATUS_EMOJIS = ["😂", "🤣", "😹", "😆", "😅", "�
 const HARD_STOP_PATTERNS = [
   /\b(stop texting|stop messaging|do not text|don't text|do not message|don't message)\b/i,
   /\b((?:abeg\s+)?no text me again|(?:abeg\s+)?no message me again)\b/i,
-  /\b((?:abeg\s+)?no call me again|(?:abeg\s+)?no disturb me again)\b/i,
-  /\b(don'?t hit me up|do not hit me up|stop hitting me up|lose my number)\b/i,
+  /\b((?:abeg\s+)?no call me again|(?:abeg\s+)?no disturb me again|no dey disturb me)\b/i,
+  /\b(don'?t hit me up|do not hit me up|stop hitting me up|lose my number|delete my number|remove my number)\b/i,
   /\b(stop blowing up my phone|quit texting me|unadd me|unsubscribe)\b/i,
-  /\b(leave me alone|back off|no contact|don't contact me)\b/i,
-  /\b(not interested|don't want to talk|do not want to talk|let'?s end this)\b/i,
+  /\b(leave me alone|back off|no contact|don't contact me|do not contact me|give me space)\b/i,
+  /\b(not interested|don't want to talk|do not want to talk|let'?s end this|i(?:'|’)?m done|we(?:'|’)?re done|this is over)\b/i,
 ];
+const NIGHT_SIGNOFF_PATTERN =
+  /\b(good ?night|good ?nite|gud ?night|gud ?nite|gudnyt|gnight|goodnightt+|night night|nighty night|sweet dreams?|sleep (?:well|tight)|rest well|rest up|have (?:a )?(?:good|great|lovely|nice|peaceful) (?:night|evening)|about to sleep|going to sleep|go(?:ing)? bed|off to bed|heading to bed|bedtime|sleep calls|i (?:need|wan|wanna|want) (?:to )?sleep|i(?:'|’)?m sleeping|i(?:'|’)?m off|i(?:'|’)?m going off|let me sleep|make i sleep)\b/i;
+const SHORT_NIGHT_SIGNOFF_PATTERN = /^(?:gn+|g9|nyt|nite|night|goodnight|good night|sleep well|sweet dreams?|rest well|rest up)[.!?~\s]*$/i;
+const TOMORROW_SIGNOFF_PATTERN =
+  /\b((?:can|could|shall)\s+we\s+|let(?:'|’)?s\s+|we(?:'|’)?ll\s+|we\s+will\s+)?(talk|speak|chat|catch(?:\s+up)?|continue|yarn|gist|resume|pick\s+this\s+up)\s+(?:to\s+you\s+|again\s+|more\s+|properly\s+)?(?:tom+or+ow|tmrw?|tmr|tomoz|in\s+the\s+morning|later)\b/i;
+const NEXT_DAY_CONTACT_SIGNOFF_PATTERN =
+  /\b(i(?:'|’)?ll|i will|we(?:'|’)?ll|we will|let(?:'|’)?s|make i|make we)\s+(?:text|message|msg|call|ring|ping|dm|holla|buzz|talk|speak|chat|continue|yarn|gist|resume)\s+(?:you\s+|again\s+|properly\s+)?(?:tom+or+ow|tmrw?|tmr|tomoz|in\s+the\s+morning|later)\b/i;
+const SEE_YOU_SIGNOFF_PATTERN =
+  /\b(see (?:you|u|ya)|cya|catch (?:you|u|ya)|talk to (?:you|u)|speak to (?:you|u)|chat to (?:you|u))\s+(?:tom+or+ow|tmrw?|tmr|tomoz|in\s+the\s+morning|later)\b/i;
+const TOMORROW_ONLY_SIGNOFF_PATTERN =
+  /^(?:okay\s+|ok\s+|kk\s+|alright\s+|sounds good\s+|cool\s+|sure\s+|bet\s+|then\s+)?(?:tom+or+ow|tmrw?|tmr|tomoz|morning)(?:\s+(?:then|it is|works|sounds good|by god'?s grace|lord willing))?[.!?~\s]*$/i;
 const PAUSE_PATTERNS = [
+  NIGHT_SIGNOFF_PATTERN,
+  SHORT_NIGHT_SIGNOFF_PATTERN,
+  TOMORROW_SIGNOFF_PATTERN,
+  NEXT_DAY_CONTACT_SIGNOFF_PATTERN,
+  SEE_YOU_SIGNOFF_PATTERN,
+  TOMORROW_ONLY_SIGNOFF_PATTERN,
   /\b(talk later|catch up later|we can continue later|pick this up later)\b/i,
   /\b(make we continue later|we go continue later|continue later abeg)\b/i,
   /\b(make i (?:call|text|ping) you later|i go (?:call|text|ping) you later)\b/i,
@@ -738,19 +824,24 @@ const PAUSE_PATTERNS = [
   /\b(i('|’)m busy|in a meeting|driving right now|about to sleep|heading out)\b/i,
 ];
 const MONEY_REQUEST_PATTERNS = [
-  /\b(?:abeg|please|pls)\b[\s,]*(?:you\s+)?(?:fit|go\s+fit|can|could)?[\s,]*(?:send|borrow|lend|loan|dash|transfer|help|assist)\b.*\b(?:me|my)\b.*\b(?:\d+(?:\.\d+)?\s*[km]?|money|cash|naira|funds?|airtime|transport|fare)\b/i,
-  /\b(?:can|could|fit)\s+you\b.*\b(?:send|borrow|lend|loan|dash|transfer|help|assist)\b.*\b(?:me|my)\b.*\b(?:\d+(?:\.\d+)?\s*[km]?|money|cash|naira|funds?|airtime|transport|fare)\b/i,
-  /\b(?:send|borrow|lend|loan|dash|transfer)\s+me\s+(?:like\s+|just\s+|small\s+)?(?:\d+(?:\.\d+)?\s*[km]?|money|cash|naira|funds?|airtime)\b/i,
-  /\bhelp\s+me\b.*\b(?:with|for)\b.*\b(?:\d+(?:\.\d+)?\s*[km]?|money|cash|naira|funds?|airtime|transport|fare)\b/i,
+  /\b(?:abeg|please|pls)\b[\s,]*(?:you\s+)?(?:fit|go\s+fit|can|could)?[\s,]*(?:send|borrow|lend|loan|dash|transfer|help|assist|sub|spot)\b.*\b(?:me|my)\b.*\b(?:\d+(?:\.\d+)?\s*[km]?|money|cash|naira|funds?|airtime|transport|fare|tfare|data|fuel)\b/i,
+  /\b(?:can|could|fit|go\s+fit)\s+you\b.*\b(?:send|borrow|lend|loan|dash|transfer|help|assist|sub|spot)\b.*\b(?:me|my)\b.*\b(?:\d+(?:\.\d+)?\s*[km]?|money|cash|naira|funds?|airtime|transport|fare|tfare)\b/i,
+  /\b(?:send|borrow|lend|loan|dash|transfer|sub|spot)\s+me\s+(?:like\s+|just\s+|small\s+)?(?:\d+(?:\.\d+)?\s*[km]?|money|cash|naira|funds?|airtime|tfare)\b/i,
+  /\bhelp\s+me\b.*\b(?:with|for)\b.*\b(?:\d+(?:\.\d+)?\s*[km]?|money|cash|naira|funds?|airtime|transport|fare|tfare|data|fuel)\b/i,
+  /\b(?:i\s+need|need|short(?:\s+of)?|short on|stranded|broke)\b.*\b(?:\d+(?:\.\d+)?\s*[km]?|money|cash|naira|funds?|airtime|transport|fare|tfare|data|fuel)\b/i,
+  /\b(?:need|i\s+need)\s+urgent\s+\d+(?:\.\d+)?\s*[km]?\b/i,
+  /\b(?:borrow|loan|hold|run)\s+me\s+(?:small\s+thing|small\s+money|\d+(?:\.\d+)?\s*[km]?|money|cash|naira|funds?)\b/i,
+  /\bsend\s+(?:small\s+thing|something|urgent\s+\d+(?:\.\d+)?\s*[km]?|\d+(?:\.\d+)?\s*[km]?)\b/i,
+  /\b(?:account|acct)\s+(?:dry|red|empty)\b/i,
 ];
 const SALES_PITCH_STRONG_PATTERN =
-  /\b(link in bio|order now|buy now|book now|promo code|use code|limited offer|while stocks? last|for sale|available for (booking|bookings|order|orders|sale))\b/i;
+  /\b(link in bio|order now|buy now|book now|promo code|use code|limited offer|while stocks? last|for sale|available for (booking|bookings|order|orders|sale)|slots? available|price list|kindly patroni[sz]e|patroni[sz]e my business|available for pickup|delivery nationwide|flash sale|early bird|bulk orders?|wholesale)\b/i;
 const SALES_PITCH_INTENT_PATTERN =
-  /\b(sale|discount|promo|promotion|offer|deal|clearance|pre[- ]?order|order|orders|buy|selling|sell|book|booking|bookings|price|pricing|rates?|slot|slots|available|delivery)\b/i;
+  /\b(sale|discount|promo|promotion|offer|deal|clearance|pre[- ]?order|order|orders|buy|selling|sell|book|booking|bookings|price|pricing|rates?|slot|slots|available|availability|delivery|vendor|vendors?|product|products?|package|packages?)\b/i;
 const SALES_PITCH_CTA_PATTERN = /\b(dm|dms|inbox|message|whatsapp|call|text|tap|click|contact|pay|payment|deposit)\b/i;
 const SALES_PITCH_PRICE_PATTERN = /(?:[$£€₦]|usd|ngn|naira)\s?\d|\b\d{2,}\s?(?:usd|ngn|naira|bucks|k)\b/i;
 const SALES_PITCH_DISCOUNT_PATTERN = /\b\d{1,3}\s?%\s?off\b/i;
-const SALES_PITCH_PATRONIZE_PATTERN = /\b(patroni[sz]e|place an? order|interested\??|available now)\b/i;
+const SALES_PITCH_PATRONIZE_PATTERN = /\b(patroni[sz]e|place an? order|interested\??|available now|send (?:a )?dm|dm (?:me|us)|inbox (?:me|us)|book your slot|limited slots?)\b/i;
 const PUPPET_JOKE_REQUEST_PATTERNS = [
   /\b(?:tell|give|say|drop|share|crack)\s+(?:me\s+)?(?:a\s+|one\s+|some\s+)?(?:joke|jokes|pun|something funny)\b/i,
   /\bmake\s+me\s+laugh\b/i,
@@ -894,24 +985,24 @@ const ANTI_BEGGI_BEGGI_EN_VARIANTS: Record<AntiBeggiBeggiTone, string[]> = {
   ],
 };
 const WRAP_UP_PATTERNS = [
-  /^(ok|okay|cool|great|nice|perfect|all good|all gud|sounds good|done|resolved|all set|we good|we gud|bet+|say less+|k{1,4}|o+k+|works|copy|solid|valid|for sure|fs|fasho|word|heard|copy that|copy dat|sharp sharp|na so|ehen)[.!]*$/i,
-  /^(thanks|thank you|thx|ty|tnx|thnks|tysm|that helps|got it|noted|understood|appreciate it|appreciate you)[.!]*$/i,
-  /^(safe|safee|we move|we mov|no wahala|nwahala|sharp|copy o|na true|alright na|alrighty|alryt|all good sha|we good abeg|noted boss|thanks o|thank you o+|thx abeg|na so|ehen|sharp sharp)[.!]*$/i,
+  /^(ok|okay|okey|oki|okie|cool|great|nice|perfect|fair|real|valid|facts|true true|seen|no stress|no worries|alright then|that'?s fine|all good|all gud|sounds good|done|resolved|all set|we good|we gud|bet+|say less+|k{1,4}|o+k+|works|copy|solid|valid|for sure|fs|fasho|word|heard|copy that|copy dat|sharp sharp|na so|ehen|roger|roger that|fair enough|fine by me)[.!]*$/i,
+  /^(thanks|thank you|thx|ty|tnx|thnks|tysm|that helps|got it|gotcha|noted|understood|appreciate it|appreciate you|preciate it|preciate you)[.!]*$/i,
+  /^(safe|safee|we move|we mov|no wahala|nwahala|sharp|copy o|na true|alright na|alrighty|alryt|alr|all good sha|we good abeg|noted boss|thanks o|thank you o+|thx abeg|na so|ehen|sharp sharp)[.!]*$/i,
   /^(thanks|thank you|thx|ty|appreciate it|appreciate you)\s*,\s*(all good|we good|sounds good|got it|that helps|done|resolved|all set)[.!]*$/i,
-  /^(bet+|say less+|kk|k|works|copy|solid|valid|all set|we good|for sure|fs|fasho|word|heard|copy that)[.!]*$/i,
+  /^(bet+|say less+|kk|k|works|copy|solid|valid|all set|we good|for sure|fs|fasho|word|heard|copy that|roger that|gotcha)[.!]*$/i,
 ];
 const AGGRESSIVE_INSULT_PATTERNS = [
-  /\b(fuck you|f\*+\s*you|go to hell|shut up|idiot|stupid|moron|loser|useless|trash|piece of shit|nonsense)\b/i,
-  /\b(you(?:'re| are)\s+(?:so\s+)?(?:an?\s+)?(idiot|stupid|dumb|moron|useless|trash|mad|crazy))\b/i,
+  /\b(fuck you|f\*+\s*you|go to hell|shut up|idiot|stupid|moron|loser|useless|trash|piece of shit|nonsense|clown|fool)\b/i,
+  /\b(you(?:'re| are)\s+(?:so\s+)?(?:an?\s+)?(idiot|stupid|dumb|moron|useless|trash|mad|crazy|clown|fool))\b/i,
   /\b(dumbass|jackass|asshole)\b/i,
-  /\b(mumu|werey|olodo|thunder fire you)\b/i,
+  /\b(mumu|werey|olodo|ode|thunder fire you|craze dey worry you|you dey mad)\b/i,
   /\bwtf\b/i,
 ];
 const BOSS_ADDRESS_VOCATIVE_PATTERNS = [
-  /^(?:hi|hey|hello|yo|dear|good\s+(?:morning|afternoon|evening))[\s,!.-]*(?:boss|oga|chairman)\b/i,
-  /^(?:boss|oga|chairman)\b/i,
-  /[,;]\s*(?:boss|oga|chairman)\b/i,
-  /\b(?:boss|oga|chairman)\s*[!?.]*$/i,
+  /^(?:hi|hey|hello|yo|dear|good\s+(?:morning|afternoon|evening))[\s,!.-]*(?:boss|bossman|oga|chairman|chief|capo|chairmo|big man)\b/i,
+  /^(?:boss|bossman|oga|chairman|chief|capo|chairmo|big man)\b/i,
+  /[,;]\s*(?:boss|bossman|oga|chairman|chief|capo|chairmo|big man)\b/i,
+  /\b(?:boss|bossman|oga|chairman|chief|capo|chairmo|big man)\s*[!?.]*$/i,
 ];
 const BOSS_ESCALATION_TITLES_EN = [
   "main boss",
@@ -957,7 +1048,7 @@ const LEAD_HANDOFF_PATTERNS = [
   /\b(i (?:do(?:n't|nt) know|dont know)|not sure|no preference)\b/i,
 ];
 const LOW_MOMENTUM_PATTERNS = [
-  /^(hmm+|hmmm+|idk|i don't know|i dont know|not sure|whatever|anything|either one|you choose|up to you)[.!]*$/i,
+  /^(hmm+|hmmm+|idk|i don't know|i dont know|not sure|whatever|anything|either one|you choose|up to you|fair|real|valid|facts|true true|seen|no stress|no worries|alright then|that'?s fine)[.!]*$/i,
 ];
 const CLOSE_MODE_REOPEN_PATTERNS = [
   /\b(let me know|keep me posted)\b/i,
@@ -966,7 +1057,8 @@ const CLOSE_MODE_REOPEN_PATTERNS = [
   /\b(feel free to .*reach out|reach out if you need)\b/i,
 ];
 const HEALTH_DISCLOSURE_PATTERNS = [
-  /\b(sick|ill|unwell|not feeling well|fever|flu|migraine|pain|injur(?:ed|y)|hurt)\b/i,
+  /\b(sick|ill|unwell|not feeling well|not feeling myself|fever|flu|migraine|pain|injur(?:ed|y)|hurt|exhausted|panic attack)\b/i,
+  /\b(i(?:'|’)m down|i am down)\b/i,
   /\b(accident|car crash|bike crash|motor accident|slip and fall|fell down)\b/i,
   /\b(hospital|clinic|doctor said|diagnos(?:ed|is)|emergency room|er)\b/i,
 ];
@@ -1617,6 +1709,21 @@ function hasCloseModeReopenCue(text: string) {
   return CLOSE_MODE_REOPEN_PATTERNS.some((pattern) => pattern.test(normalized));
 }
 
+function hasNightOrTomorrowSignoffCue(text: string) {
+  const normalized = normalizeOutboundText(text || "");
+  if (!normalized) {
+    return false;
+  }
+  return (
+    NIGHT_SIGNOFF_PATTERN.test(normalized) ||
+    SHORT_NIGHT_SIGNOFF_PATTERN.test(normalized) ||
+    TOMORROW_SIGNOFF_PATTERN.test(normalized) ||
+    NEXT_DAY_CONTACT_SIGNOFF_PATTERN.test(normalized) ||
+    SEE_YOU_SIGNOFF_PATTERN.test(normalized) ||
+    TOMORROW_ONLY_SIGNOFF_PATTERN.test(normalized)
+  );
+}
+
 function heuristicReply(input: string, historyLines: string[] = []) {
   const steeringMode = detectConversationSteeringMode({
     inboundText: input,
@@ -1670,6 +1777,13 @@ function heuristicReply(input: string, historyLines: string[] = []) {
   }
 
   if (steeringMode === "pause") {
+    if (hasNightOrTomorrowSignoffCue(input)) {
+      return finalize(
+        pidginMode
+          ? pickVariant(input, ["Good night, rest well.", "No wahala, we go talk tomorrow.", "Sleep well, talk tomorrow."])
+          : pickVariant(input, ["You too, good night.", "Sleep well, talk tomorrow.", "Sounds good, talk tomorrow."]),
+      );
+    }
     return finalize(
       pidginMode
         ? pickVariant(input, ["No wahala, make we continue later.", "Sharp, we go yarn later.", "All good, ping me when you free."])
@@ -1826,6 +1940,7 @@ type PromptBuildResult = {
   prompt: string;
   contextToolCalls: ContextToolCall[];
   contextWindow: ContextWindowStats;
+  conversationStyleMatrix: ConversationStyleMatrixResult;
 };
 
 type HistorySearchOverride = {
@@ -1875,6 +1990,7 @@ type ResponseWorkbenchInput = {
   pidginMode: boolean;
   oldEnglishMode: boolean;
   friendshipInference?: FriendshipCohortInference;
+  conversationGuidance?: ConversationReplyGuidance;
 };
 
 type ResponseWorkbench = {
@@ -1894,6 +2010,10 @@ type ResponseWorkbench = {
   friendshipCohortSignals?: string[];
   friendshipScenario?: string;
   friendshipBridgeFallback?: boolean;
+  guidanceShouldClose?: boolean;
+  guidanceShouldLeadPivot?: boolean;
+  guidanceShouldCheckIn?: boolean;
+  guidanceReasonCodes?: string[];
 };
 
 type PersonalConversationDomain =
@@ -2217,6 +2337,24 @@ function detectPersonalConversationDomain(text: string): PersonalConversationDom
   return "general";
 }
 
+function isRomanticRelationshipContext(args: {
+  inboundText: string;
+  historyLines: string[];
+  personality?: PersonalityContext;
+  personalDomain?: PersonalConversationDomain;
+}) {
+  const slug = (args.personality?.profileSlug || "").trim().toLowerCase();
+  const profileName = (args.personality?.profileName || "").trim().toLowerCase();
+  if (slug === "girlfriend" || slug === "relationship" || profileName.includes("girlfriend") || profileName.includes("relationship")) {
+    return true;
+  }
+  if (args.personalDomain === "relationship") {
+    return true;
+  }
+  const corpus = [args.inboundText, ...args.historyLines.slice(-8)].join(" ");
+  return /\b(babe|baby|my love|sweetheart|darling|girlfriend|boyfriend|relationship|us two|date night|miss you|love you)\b/i.test(corpus);
+}
+
 function hasCapitalMarketsGuidanceCue(text: string) {
   const normalized = normalizeOutboundText(text).toLowerCase();
   if (!normalized) {
@@ -2330,6 +2468,10 @@ function buildResponseWorkbench(args: ResponseWorkbenchInput) {
   const startedAt = Date.now();
   const explicitAsks = extractQuestionFragments(args.inboundText);
   const ambiguitySignals: string[] = [];
+  const guidanceEnabled = Boolean(args.conversationGuidance?.enabled);
+  const guidanceShouldClose = Boolean(guidanceEnabled && args.conversationGuidance?.shouldClose);
+  const guidanceShouldLeadPivot = Boolean(guidanceEnabled && args.conversationGuidance?.shouldLeadPivot);
+  const guidanceShouldCheckIn = Boolean(guidanceEnabled && args.conversationGuidance?.shouldCheckIn);
   const personalContext = inferPersonalContextProfile({
     inboundText: args.inboundText,
     recentHistory: args.recentHistory,
@@ -2347,6 +2489,9 @@ function buildResponseWorkbench(args: ResponseWorkbenchInput) {
   if (args.relevantHistory.length === 0 && /\b(as discussed|earlier|before|last time|follow up)\b/i.test(args.inboundText)) {
     ambiguitySignals.push("recall_requested_without_match");
   }
+  if (guidanceShouldCheckIn) {
+    ambiguitySignals.push("checkin_due");
+  }
 
   let replyMode: ResponseReplyMode = "answer";
   if (
@@ -2357,9 +2502,12 @@ function buildResponseWorkbench(args: ResponseWorkbenchInput) {
     args.steeringMode === "anti_beggi_beggi" ||
     args.steeringMode === "anti_sales_pitch" ||
     args.steeringMode === "anti_puppet" ||
-    args.steeringMode === "anti_dry_joke"
+    args.steeringMode === "anti_dry_joke" ||
+    guidanceShouldClose
   ) {
     replyMode = "close";
+  } else if (explicitAsks.length === 0 && guidanceShouldLeadPivot) {
+    replyMode = "lead";
   } else if (explicitAsks.length === 0 && hasLeadHandoffCue(args.inboundText)) {
     replyMode = "lead";
   } else if (explicitAsks.length === 0 && /\b(confirm|is that fine|is that okay|still on|we good)\b/i.test(args.inboundText)) {
@@ -2394,6 +2542,10 @@ function buildResponseWorkbench(args: ResponseWorkbenchInput) {
     friendshipCohortSignals: args.friendshipInference?.signals,
     friendshipScenario: args.friendshipInference?.scenario,
     friendshipBridgeFallback: args.friendshipInference?.usedBridgeFallback,
+    guidanceShouldClose,
+    guidanceShouldLeadPivot,
+    guidanceShouldCheckIn,
+    guidanceReasonCodes: args.conversationGuidance?.reasonCodes,
   };
 
   return {
@@ -2426,6 +2578,10 @@ function buildResponseWorkbench(args: ResponseWorkbenchInput) {
         friendshipCohortSignals: workbench.friendshipCohortSignals,
         friendshipScenario: workbench.friendshipScenario,
         friendshipBridgeFallback: workbench.friendshipBridgeFallback,
+        guidanceShouldClose: workbench.guidanceShouldClose,
+        guidanceShouldLeadPivot: workbench.guidanceShouldLeadPivot,
+        guidanceShouldCheckIn: workbench.guidanceShouldCheckIn,
+        guidanceReasonCodes: workbench.guidanceReasonCodes,
       },
     },
   };
@@ -2808,6 +2964,7 @@ function buildPrompt(args: {
   contactFacts?: ContactMemoryFactContext[];
   contextPack?: ContextPackSnapshot;
   adaptiveHints?: AdaptiveTuningHintsSnapshot;
+  conversationGuidance?: ConversationReplyGuidance;
   styleHints: string[];
   styleProfile?: StyleProfileContext;
   personality?: PersonalityContext;
@@ -3112,6 +3269,16 @@ function buildPrompt(args: {
         .join(" | ")
     : "";
   const personaPackGuardrails = activePersonaPack ? activePersonaPack.guardrails.slice(0, 6).join(" | ") : "";
+  const personaPackStyleTraits = activePersonaPack
+    ? [
+        ...activePersonaPack.styleTraits.commonPhrases.map((item) => `phrase:${item}`),
+        ...activePersonaPack.styleTraits.punctuationStyle.map((item) => `punctuation:${item}`),
+        ...activePersonaPack.styleTraits.humorNotes.map((item) => `humor:${item}`),
+        ...activePersonaPack.styleTraits.spellingNotes.map((item) => `spelling:${item}`),
+      ]
+        .slice(0, 18)
+        .join(" | ")
+    : "";
   const personaPackFewShots = activePersonaPack
     ? selectFewShotsForPrompt(activePersonaPack, 900, args.inboundText, {
         preferredCohort: friendshipInference?.cohort,
@@ -3228,6 +3395,34 @@ function buildPrompt(args: {
     pidginMode,
     oldEnglishMode,
     friendshipInference,
+    conversationGuidance: args.conversationGuidance,
+  });
+  const conversationStyleMatrix = computeConversationStyleMatrix({
+    inboundText: args.inboundText,
+    recentHistoryLines: recentHistory.map((line) => line.line),
+    relevantHistoryLines: relevantHistory.map((line) => line.line),
+    profileSlug: args.personality?.profileSlug,
+    profileName: args.personality?.profileName,
+    conversationGuidance: args.conversationGuidance,
+    learnedEmojiAllowlist: args.styleProfile?.learnedEmojiAllowlist,
+    learnedEmojiCategoryHints: args.styleProfile?.learnedEmojiCategoryHints,
+  });
+  const conversationStyleMatrixInstruction =
+    `Conversation style matrix:\n${summarizeConversationStyleMatrix(conversationStyleMatrix)}`;
+  const dynamicStylePackInstruction = buildDynamicStylePackInstruction(conversationStyleMatrix);
+  const emojiPolicyInstruction =
+    conversationStyleMatrix.emojiTextPolicy === "allow_limited"
+      ? "Emoji text policy: limited emoji are allowed only if they are natural for this relationship and thread. Use at most one emoji, and skip emoji for serious, money, health, conflict, identity, or professional content."
+      : "Emoji text policy: do not use emoji characters in the text reply.";
+  toolCalls.push({
+    name: "conversation_style_matrix",
+    latencyMs: 0,
+    input: {
+      inboundText: args.inboundText,
+      profileSlug: args.personality?.profileSlug || "",
+      profileName: args.personality?.profileName || "",
+    },
+    output: conversationStyleMatrix as unknown as Record<string, unknown>,
   });
   const professionalLingua = inferProfessionalLinguaProfile({
     inboundText: args.inboundText,
@@ -3245,6 +3440,14 @@ function buildPrompt(args: {
     : "";
   const professionalLinguaGuardrailInstruction = professionalLingua.enabled
     ? "Avoid robotic corporate filler (for example: 'Please be informed', 'Thanks for reaching out', or rigid template phrasing). Keep it naturally human."
+    : "";
+  const romanticEmotionFirstInstruction = isRomanticRelationshipContext({
+    inboundText: args.inboundText,
+    historyLines: recentHistory.map((line) => line.line),
+    personality: args.personality,
+    personalDomain: responseWorkbench.workbench.personalDomain,
+  })
+    ? "Romantic relationship mode: when there is friction, hurt, or misunderstanding, validate the feeling before explaining logic. Do not manipulate, pressure, guilt-trip, corner, or try to make them 'understand'. Use consent-based influence: acknowledge impact, own your part, then offer one calm explanation or next step only if useful."
     : "";
   const capitalMarketsPersonaInstruction = responseWorkbench.workbench.capitalMarketsGuidanceCue
     ? [
@@ -3273,6 +3476,15 @@ function buildPrompt(args: {
         : responseWorkbench.workbench.replyMode === "close"
           ? "Reply mode is CLOSE. End gracefully in one short line without reopening the topic."
           : "Reply mode is FOLLOW conversation. Continue the thread naturally, put the direct answer in the first sentence, then add only the minimum practical detail needed.";
+  const conversationGuidanceInstruction = !args.conversationGuidance?.enabled
+    ? ""
+    : args.conversationGuidance.shouldClose
+      ? "Conversation guidance layer: anti-dwelling close is active. Send one short close line only. No follow-up question and no topic reopening."
+      : args.conversationGuidance.shouldLeadPivot
+        ? `Conversation guidance layer: controlled lead-pivot is active${args.conversationGuidance.leadPivotTheme ? ` (${args.conversationGuidance.leadPivotTheme})` : ""}. After a brief acknowledgment, ask one concise pivot question to move into a fresh lane.`
+        : args.conversationGuidance.shouldCheckIn
+          ? "Conversation guidance layer: mutual wellbeing check-in is due. If natural, include one concise check-in question."
+          : "";
   const isLeadOrFollowConversation =
     responseWorkbench.workbench.replyMode === "lead" || responseWorkbench.workbench.replyMode === "answer";
   const decisionFirstSteeringInstruction =
@@ -3318,6 +3530,18 @@ function buildPrompt(args: {
     responseWorkbench.workbench.capitalMarketsGuidanceCue
       ? "Capital-markets guidance cue: yes"
       : "Capital-markets guidance cue: no",
+    args.conversationGuidance?.enabled
+      ? `Conversation guidance: close=${args.conversationGuidance.shouldClose ? "yes" : "no"} lead_pivot=${args.conversationGuidance.shouldLeadPivot ? "yes" : "no"} checkin=${args.conversationGuidance.shouldCheckIn ? "yes" : "no"}`
+      : "Conversation guidance: off",
+    args.conversationGuidance?.enabled
+      ? `Guidance dwell=${Number(args.conversationGuidance.topicDwellScore || 0).toFixed(2)} vibe=${Number(args.conversationGuidance.vibeScore || 0).toFixed(2)}`
+      : "Guidance dwell/vibe: n/a",
+    args.conversationGuidance?.enabled && args.conversationGuidance.activeTopic
+      ? `Guidance active topic: ${args.conversationGuidance.activeTopic.topicLabel} (${args.conversationGuidance.activeTopic.status}) turns=${args.conversationGuidance.activeTopic.turnCount}`
+      : "Guidance active topic: n/a",
+    args.conversationGuidance?.enabled && args.conversationGuidance.reasonCodes.length > 0
+      ? `Guidance reasons: ${args.conversationGuidance.reasonCodes.join(", ")}`
+      : "Guidance reasons: none",
     responseWorkbench.workbench.explicitAsks.length > 0
       ? `Explicit asks: ${responseWorkbench.workbench.explicitAsks.join(" | ")}`
       : "Explicit asks: none",
@@ -3344,7 +3568,7 @@ function buildPrompt(args: {
       "Do not overpromise. If timing is uncertain, say you'll confirm shortly.",
       "Do not prolong the conversation unnecessarily. If the intent is complete, close gracefully in one short line.",
       "When the other person hands you the choice or sounds indecisive, take the lead with one practical recommendation instead of bouncing back vague follow-up prompts.",
-      "Do not use emoji characters.",
+      emojiPolicyInstruction,
       "Avoid direct name address by default. Only use the contact's name if they used your name first in the latest message or disambiguation is required.",
       "Avoid generic fillers like 'Noted', 'As an AI', 'I hope this message finds you well', or repetitive templates.",
       "Never send placeholder lines like 'Sounds good, I'll handle it and update you soon' or 'Got it, I'm on it.'",
@@ -3373,12 +3597,16 @@ function buildPrompt(args: {
       professionalLinguaInstruction,
       professionalLinguaCadenceInstruction,
       professionalLinguaGuardrailInstruction,
+      romanticEmotionFirstInstruction,
       capitalMarketsPersonaInstruction,
+      conversationStyleMatrixInstruction,
+      dynamicStylePackInstruction,
       pidginInstruction,
       oldEnglishInstruction,
       bossEscalationInstruction,
       mimicryInjectionInstruction,
       responseWorkbenchInstruction,
+      conversationGuidanceInstruction,
       decisionFirstSteeringInstruction,
       antiHedgeSteeringInstruction,
       noBounceBackSteeringInstruction,
@@ -3407,6 +3635,7 @@ function buildPrompt(args: {
       activePersonaPack ? `Persona pack master prompt: ${activePersonaPack.masterPrompt}` : "",
       personaPackShortcuts ? `Shortcut dictionary: ${personaPackShortcuts}` : "",
       personaPackGuardrails ? `Persona guardrails: ${personaPackGuardrails}` : "",
+      personaPackStyleTraits ? `Persona pack style traits (profile-scoped, inspiration only): ${personaPackStyleTraits}` : "",
       personaPackFewShotText ? `Persona few-shot examples:\n${personaPackFewShotText}` : "",
       args.grounding?.myName ? `My preferred name in this thread: ${args.grounding.myName}` : "",
       args.grounding?.theirName
@@ -3565,6 +3794,7 @@ function buildPrompt(args: {
     prompt,
     contextToolCalls: toolCalls,
     contextWindow: detection.stats,
+    conversationStyleMatrix,
   };
 }
 
@@ -4790,11 +5020,12 @@ export function sanitizeCommonPhrasesForPrompt(phrases: string[]) {
 }
 
 function resolveActivePersonaPack(runtime: RuntimeAiTuning | undefined, personality: PersonalityContext | undefined) {
-  const pack = getPersonaPackById(runtime?.activePersonaPackId);
+  const slug = (personality?.profileSlug || "").trim().toLowerCase();
+  const profilePackId = slug ? runtime?.activePersonaPackIdsByProfile?.[slug] : undefined;
+  const pack = getPersonaPackById(profilePackId || runtime?.activePersonaPackId);
   if (!pack) {
     return null;
   }
-  const slug = (personality?.profileSlug || "").trim().toLowerCase();
   if (!slug) {
     return null;
   }
@@ -4802,6 +5033,28 @@ function resolveActivePersonaPack(runtime: RuntimeAiTuning | undefined, personal
     return null;
   }
   return pack;
+}
+
+function buildDynamicStylePackInstruction(matrix: ConversationStyleMatrixResult) {
+  const blocks: Record<string, string> = {
+    "family_core.v1":
+      "Dynamic style pack FAMILY: sound familiar, respectful, and warm. Avoid corporate phrasing; keep care practical without overexplaining.",
+    "grief_support.v1":
+      "Dynamic style pack GRIEF_SUPPORT: use brief empathy and presence. Do not give medical, legal, or therapeutic advice unless directly asked; avoid cheerful pivots.",
+    "conflict_repair.v1":
+      "Dynamic style pack CONFLICT_REPAIR: acknowledge the friction, take appropriate accountability, answer the concrete issue, and avoid sarcasm, blame, or over-apology.",
+    "group_community.v1":
+      "Dynamic style pack GROUP_COMMUNITY: write for a group audience, keep it inclusive and concise, and avoid intimate one-to-one phrasing.",
+    "vendor_service.v1":
+      "Dynamic style pack VENDOR_SERVICE: stay clear, polite, and transactional. Keep claims low, ask for exact details only when needed, and avoid emoji.",
+    "mentorship.v1":
+      "Dynamic style pack MENTORSHIP: give grounded guidance, one clear recommendation, and a practical next step. Avoid sounding superior or lecture-like.",
+  };
+  return matrix.dynamicStylePackIds.map((id) => blocks[id]).filter(Boolean).join(" ");
+}
+
+function shouldPreserveTextEmoji(matrix: ConversationStyleMatrixResult) {
+  return matrix.emojiTextPolicy === "allow_limited";
 }
 
 function evaluateReplyQuality(args: {
@@ -4889,6 +5142,30 @@ function shouldRunHumorJudge(text: string) {
   return isJokeLike(trimmed) || CORE_HUMOR_PATTERN.test(trimmed) || CORE_HUMOR_EMOJI_PATTERN.test(trimmed);
 }
 
+function shouldRunFactJudge(text: string) {
+  const trimmed = normalizeOutboundText(text || "");
+  if (trimmed.length < 12) {
+    return false;
+  }
+  return FACT_JUDGE_TRIGGER_PATTERN.test(trimmed);
+}
+
+function shouldRunToneShiftJudge(args: { candidateText: string; inboundText: string }) {
+  const candidate = normalizeOutboundText(args.candidateText || "");
+  if (candidate.length < 8) {
+    return false;
+  }
+  if (shouldRunHumorJudge(candidate)) {
+    return false;
+  }
+  const tensionContext =
+    hasPassiveAggressiveCue(args.inboundText) || hasLocalAccusationCue(args.inboundText) || hasAggressiveInsultCue(args.inboundText);
+  if (!tensionContext) {
+    return false;
+  }
+  return TONE_SHIFT_ESCALATION_CUE_PATTERN.test(candidate);
+}
+
 function buildHumorJudgePrompt(args: { candidateText: string; inboundText: string; historyLines: string[] }) {
   const recentHistory = args.historyLines.slice(-6).join("\n");
   return [
@@ -4899,6 +5176,38 @@ function buildHumorJudgePrompt(args: { candidateText: string; inboundText: strin
     recentHistory ? `Recent chat context:\n${recentHistory}` : "",
     `Candidate reply: ${args.candidateText}`,
     'Return JSON only, e.g. {"isJokeAttempt":true,"isFunny":false,"confidence":0.83,"reason":"forced punchline"}',
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function buildFactJudgePrompt(args: { candidateText: string; inboundText: string; historyLines: string[] }) {
+  const recentHistory = args.historyLines.slice(-6).join("\n");
+  return [
+    FACT_JUDGE_SYSTEM_INSTRUCTION,
+    "Assess whether the draft contains objective profile claims (education, credentials, background, origin, work history, legal/health history).",
+    "If draft has no objective profile claim, set hasObjectiveClaim=false and factualRisk=false.",
+    "If draft contains objective profile claims that could be inaccurate, overconfident, or weakly grounded, set factualRisk=true.",
+    `Latest inbound message: ${args.inboundText}`,
+    recentHistory ? `Recent chat context:\n${recentHistory}` : "",
+    `Draft reply: ${args.candidateText}`,
+    'Return JSON only, e.g. {"hasObjectiveClaim":true,"factualRisk":true,"confidence":0.88,"reason":"unverified credential claim"}',
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function buildToneShiftJudgePrompt(args: { candidateText: string; inboundText: string; historyLines: string[] }) {
+  const recentHistory = args.historyLines.slice(-6).join("\n");
+  return [
+    TONE_SHIFT_JUDGE_SYSTEM_INSTRUCTION,
+    "Assess whether the draft tone is likely to escalate friction in this context.",
+    "Set requiresRepairTone=true when the draft is dismissive, sarcastic, hostile, or likely to inflame tension.",
+    "Set requiresRepairTone=false when the draft stays neutral, repair-oriented, and non-escalatory.",
+    `Latest inbound message: ${args.inboundText}`,
+    recentHistory ? `Recent chat context:\n${recentHistory}` : "",
+    `Draft reply: ${args.candidateText}`,
+    'Return JSON only, e.g. {"requiresRepairTone":true,"confidence":0.87,"reason":"dismissive phrase likely escalates"}',
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -4939,23 +5248,107 @@ function parseHumorJudgeOutput(raw: string): Omit<HumorJudgment, "provider" | "m
   }
 }
 
-async function runHumorJudgeWithAzure(args: {
-  candidateText: string;
-  inboundText: string;
-  historyLines: string[];
+function parseFactJudgeOutput(raw: string): Omit<FactJudgment, "provider" | "model"> | null {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const objectStart = trimmed.indexOf("{");
+  const objectEnd = trimmed.lastIndexOf("}");
+  const jsonText = objectStart >= 0 && objectEnd > objectStart ? trimmed.slice(objectStart, objectEnd + 1) : trimmed;
+  try {
+    const parsed = JSON.parse(jsonText) as {
+      hasObjectiveClaim?: unknown;
+      factualRisk?: unknown;
+      confidence?: unknown;
+      reason?: unknown;
+    };
+    if (typeof parsed.hasObjectiveClaim !== "boolean" || typeof parsed.factualRisk !== "boolean") {
+      return null;
+    }
+    const confidenceRaw = Number(parsed.confidence);
+    const confidence = Number.isFinite(confidenceRaw) ? clamp01(confidenceRaw) : 0.5;
+    const reason =
+      typeof parsed.reason === "string" && parsed.reason.trim()
+        ? normalizeOutboundText(parsed.reason).slice(0, 140)
+        : "No reason provided.";
+    return {
+      hasObjectiveClaim: parsed.hasObjectiveClaim,
+      factualRisk: parsed.factualRisk,
+      confidence,
+      reason,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function parseToneShiftJudgeOutput(raw: string): Omit<ToneShiftJudgment, "provider" | "model"> | null {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const objectStart = trimmed.indexOf("{");
+  const objectEnd = trimmed.lastIndexOf("}");
+  const jsonText = objectStart >= 0 && objectEnd > objectStart ? trimmed.slice(objectStart, objectEnd + 1) : trimmed;
+  try {
+    const parsed = JSON.parse(jsonText) as {
+      requiresRepairTone?: unknown;
+      confidence?: unknown;
+      reason?: unknown;
+    };
+    if (typeof parsed.requiresRepairTone !== "boolean") {
+      return null;
+    }
+    const confidenceRaw = Number(parsed.confidence);
+    const confidence = Number.isFinite(confidenceRaw) ? clamp01(confidenceRaw) : 0.5;
+    const reason =
+      typeof parsed.reason === "string" && parsed.reason.trim()
+        ? normalizeOutboundText(parsed.reason).slice(0, 140)
+        : "No reason provided.";
+    return {
+      requiresRepairTone: parsed.requiresRepairTone,
+      confidence,
+      reason,
+    };
+  } catch {
+    return null;
+  }
+}
+
+type JudgeStageBase = `${string}_judge`;
+type AiJudgeProvider = "azure" | "codex";
+
+type JsonJudgeDefinition<TParsed, TJudgment> = {
+  judgeName: string;
+  stageBase: JudgeStageBase;
+  systemInstruction: string;
+  prompt: string;
   runtime?: RuntimeAiTuning;
-}): Promise<{ judgment?: HumorJudgment; attempts: AiAttempt[] }> {
-  const cfg = getAzureConfig(args.runtime);
+  codexTempFilePrefix: string;
+  maxOutputTokens?: number;
+  parseOutput: (raw: string) => TParsed | null;
+  toJudgment: (parsed: TParsed, provider: AiJudgeProvider, model: string) => TJudgment;
+};
+
+function buildJudgeStage(stageBase: JudgeStageBase, provider: AiJudgeProvider): AiAttempt["stage"] {
+  return `${stageBase}_${provider}`;
+}
+
+async function runJsonJudgeWithAzure<TParsed, TJudgment>(
+  definition: JsonJudgeDefinition<TParsed, TJudgment>,
+): Promise<{ judgment?: TJudgment; attempts: AiAttempt[] }> {
+  const cfg = getAzureConfig(definition.runtime);
   const attempts: AiAttempt[] = [];
-  const prompt = buildHumorJudgePrompt(args);
+  const stage = buildJudgeStage(definition.stageBase, "azure");
   if (!cfg.endpoint || !cfg.apiKey) {
     attempts.push({
       provider: "azure",
-      stage: "humor_judge_azure",
+      stage,
       model: cfg.model,
       status: "error",
       latencyMs: 0,
-      error: "Azure AI endpoint/key missing for humor judge.",
+      error: `Azure AI endpoint/key missing for ${definition.judgeName}.`,
     });
     return { attempts };
   }
@@ -4974,15 +5367,15 @@ async function runHumorJudgeWithAzure(args: {
         },
         body: JSON.stringify({
           model: cfg.model,
-          instructions: HUMOR_JUDGE_SYSTEM_INSTRUCTION,
-          input: prompt,
+          instructions: definition.systemInstruction,
+          input: definition.prompt,
           temperature: 0,
-          max_output_tokens: 220,
+          max_output_tokens: definition.maxOutputTokens ?? 220,
         }),
       });
       if (!response.ok) {
         const text = await response.text();
-        throw new Error(`Azure humor judge failed (${response.status}): ${text.slice(0, 240)}`);
+        throw new Error(`Azure ${definition.judgeName} failed (${response.status}): ${text.slice(0, 240)}`);
       }
       const payload = await response.json();
       tokenUsage = extractTokenUsageFromProviderPayload(payload);
@@ -5000,33 +5393,33 @@ async function runHumorJudgeWithAzure(args: {
           messages: [
             {
               role: "system",
-              content: HUMOR_JUDGE_SYSTEM_INSTRUCTION,
+              content: definition.systemInstruction,
             },
             {
               role: "user",
-              content: prompt,
+              content: definition.prompt,
             },
           ],
           temperature: 0,
-          max_tokens: 220,
+          max_tokens: definition.maxOutputTokens ?? 220,
         }),
       });
       if (!response.ok) {
         const text = await response.text();
-        throw new Error(`Azure humor judge failed (${response.status}): ${text.slice(0, 240)}`);
+        throw new Error(`Azure ${definition.judgeName} failed (${response.status}): ${text.slice(0, 240)}`);
       }
       const payload = await response.json();
       tokenUsage = extractTokenUsageFromProviderPayload(payload);
       rawText = extractAzureChatCompletionText(payload);
     }
 
-    const parsed = parseHumorJudgeOutput(rawText);
+    const parsed = definition.parseOutput(rawText);
     if (!parsed) {
-      throw new Error(`Unable to parse humor judge JSON: ${rawText.slice(0, 200)}`);
+      throw new Error(`Unable to parse ${definition.judgeName} JSON: ${rawText.slice(0, 200)}`);
     }
     attempts.push({
       provider: "azure",
-      stage: "humor_judge_azure",
+      stage,
       model: cfg.model,
       status: "success",
       latencyMs: Date.now() - startedAt,
@@ -5038,17 +5431,13 @@ async function runHumorJudgeWithAzure(args: {
       }),
     });
     return {
-      judgment: {
-        ...parsed,
-        provider: "azure",
-        model: cfg.model,
-      },
+      judgment: definition.toJudgment(parsed, "azure", cfg.model),
       attempts,
     };
   } catch (error) {
     attempts.push({
       provider: "azure",
-      stage: "humor_judge_azure",
+      stage,
       model: cfg.model,
       status: "error",
       latencyMs: Date.now() - startedAt,
@@ -5058,38 +5447,36 @@ async function runHumorJudgeWithAzure(args: {
   }
 }
 
-async function runHumorJudgeWithCodex(args: {
-  candidateText: string;
-  inboundText: string;
-  historyLines: string[];
-  runtime?: RuntimeAiTuning;
-}): Promise<{ judgment?: HumorJudgment; attempts: AiAttempt[] }> {
+async function runJsonJudgeWithCodex<TParsed, TJudgment>(
+  definition: JsonJudgeDefinition<TParsed, TJudgment>,
+): Promise<{ judgment?: TJudgment; attempts: AiAttempt[] }> {
   const codexPath = process.env.CODEX_CLI_PATH || "codex";
   const model = process.env.CODEX_FALLBACK_MODEL || "gpt-5.2";
-  const outFile = join(tmpdir(), `slm-codex-humor-${Date.now()}-${Math.random().toString(16).slice(2)}.txt`);
-  const prompt = buildHumorJudgePrompt(args);
+  const stage = buildJudgeStage(definition.stageBase, "codex");
+  const outFile = join(
+    tmpdir(),
+    `${definition.codexTempFilePrefix}-${Date.now()}-${Math.random().toString(16).slice(2)}.txt`,
+  );
   const startedAt = Date.now();
   try {
-    await execFileAsync(codexPath, ["exec", "--model", model, "--output-last-message", outFile, prompt], {
-      timeout: Math.round(Math.max(20_000, Math.min(args.runtime?.codexTimeoutMs ?? QUALITY_FIRST_CODEX_TIMEOUT_MS, 300_000))),
+    await execFileAsync(codexPath, ["exec", "--model", model, "--output-last-message", outFile, definition.prompt], {
+      timeout: Math.round(
+        Math.max(20_000, Math.min(definition.runtime?.codexTimeoutMs ?? QUALITY_FIRST_CODEX_TIMEOUT_MS, 300_000)),
+      ),
       maxBuffer: 1024 * 1024,
     });
     const rawText = await fs.readFile(outFile, "utf8");
     await fs.unlink(outFile).catch(() => undefined);
-    const parsed = parseHumorJudgeOutput(rawText);
+    const parsed = definition.parseOutput(rawText);
     if (!parsed) {
-      throw new Error(`Unable to parse codex humor judge JSON: ${rawText.slice(0, 200)}`);
+      throw new Error(`Unable to parse codex ${definition.judgeName} JSON: ${rawText.slice(0, 200)}`);
     }
     return {
-      judgment: {
-        ...parsed,
-        provider: "codex",
-        model,
-      },
+      judgment: definition.toJudgment(parsed, "codex", model),
       attempts: [
         {
           provider: "codex",
-          stage: "humor_judge_codex",
+          stage,
           model,
           status: "success",
           latencyMs: Date.now() - startedAt,
@@ -5097,7 +5484,7 @@ async function runHumorJudgeWithCodex(args: {
             provider: "codex",
             model,
             usageSource: "estimated",
-            inputTokens: estimateTextTokens(prompt),
+            inputTokens: estimateTextTokens(definition.prompt),
             outputTokens: estimateTextTokens(rawText),
           }),
         },
@@ -5109,7 +5496,7 @@ async function runHumorJudgeWithCodex(args: {
       attempts: [
         {
           provider: "codex",
-          stage: "humor_judge_codex",
+          stage,
           model,
           status: "error",
           latencyMs: Date.now() - startedAt,
@@ -5120,13 +5507,11 @@ async function runHumorJudgeWithCodex(args: {
   }
 }
 
-async function evaluateHumorWithAi(args: {
-  candidateText: string;
-  inboundText: string;
-  historyLines: string[];
-  runtime?: RuntimeAiTuning;
-}): Promise<{ required: boolean; judgment?: HumorJudgment; attempts: AiAttempt[] }> {
-  if (!shouldRunHumorJudge(args.candidateText)) {
+async function evaluateJsonJudge<TParsed, TJudgment>(args: {
+  required: boolean;
+  definition: JsonJudgeDefinition<TParsed, TJudgment>;
+}): Promise<{ required: boolean; judgment?: TJudgment; attempts: AiAttempt[] }> {
+  if (!args.required) {
     return {
       required: false,
       attempts: [],
@@ -5134,7 +5519,7 @@ async function evaluateHumorWithAi(args: {
   }
 
   const attempts: AiAttempt[] = [];
-  const azure = await runHumorJudgeWithAzure(args);
+  const azure = await runJsonJudgeWithAzure(args.definition);
   attempts.push(...azure.attempts);
   if (azure.judgment) {
     return {
@@ -5144,8 +5529,8 @@ async function evaluateHumorWithAi(args: {
     };
   }
 
-  if (resolveFallbackMode(args.runtime) === "all") {
-    const codex = await runHumorJudgeWithCodex(args);
+  if (resolveFallbackMode(args.definition.runtime) === "all") {
+    const codex = await runJsonJudgeWithCodex(args.definition);
     attempts.push(...codex.attempts);
     if (codex.judgment) {
       return {
@@ -5160,6 +5545,87 @@ async function evaluateHumorWithAi(args: {
     required: true,
     attempts,
   };
+}
+
+async function evaluateHumorWithAi(args: {
+  candidateText: string;
+  inboundText: string;
+  historyLines: string[];
+  runtime?: RuntimeAiTuning;
+}): Promise<{ required: boolean; judgment?: HumorJudgment; attempts: AiAttempt[] }> {
+  return evaluateJsonJudge({
+    required: shouldRunHumorJudge(args.candidateText),
+    definition: {
+      judgeName: "humor judge",
+      stageBase: "humor_judge",
+      systemInstruction: HUMOR_JUDGE_SYSTEM_INSTRUCTION,
+      prompt: buildHumorJudgePrompt(args),
+      runtime: args.runtime,
+      codexTempFilePrefix: "slm-codex-humor",
+      maxOutputTokens: 220,
+      parseOutput: parseHumorJudgeOutput,
+      toJudgment: (parsed, provider, model) => ({
+        ...parsed,
+        provider,
+        model,
+      }),
+    },
+  });
+}
+
+async function evaluateFactWithAi(args: {
+  candidateText: string;
+  inboundText: string;
+  historyLines: string[];
+  runtime?: RuntimeAiTuning;
+}): Promise<{ required: boolean; judgment?: FactJudgment; attempts: AiAttempt[] }> {
+  return evaluateJsonJudge({
+    required: shouldRunFactJudge(args.candidateText),
+    definition: {
+      judgeName: "fact judge",
+      stageBase: "fact_judge",
+      systemInstruction: FACT_JUDGE_SYSTEM_INSTRUCTION,
+      prompt: buildFactJudgePrompt(args),
+      runtime: args.runtime,
+      codexTempFilePrefix: "slm-codex-fact",
+      maxOutputTokens: 220,
+      parseOutput: parseFactJudgeOutput,
+      toJudgment: (parsed, provider, model) => ({
+        ...parsed,
+        provider,
+        model,
+      }),
+    },
+  });
+}
+
+async function evaluateToneShiftWithAi(args: {
+  candidateText: string;
+  inboundText: string;
+  historyLines: string[];
+  runtime?: RuntimeAiTuning;
+}): Promise<{ required: boolean; judgment?: ToneShiftJudgment; attempts: AiAttempt[] }> {
+  return evaluateJsonJudge({
+    required: shouldRunToneShiftJudge({
+      candidateText: args.candidateText,
+      inboundText: args.inboundText,
+    }),
+    definition: {
+      judgeName: "tone-shift judge",
+      stageBase: "tone_shift_judge",
+      systemInstruction: TONE_SHIFT_JUDGE_SYSTEM_INSTRUCTION,
+      prompt: buildToneShiftJudgePrompt(args),
+      runtime: args.runtime,
+      codexTempFilePrefix: "slm-codex-tone-shift",
+      maxOutputTokens: 180,
+      parseOutput: parseToneShiftJudgeOutput,
+      toJudgment: (parsed, provider, model) => ({
+        ...parsed,
+        provider,
+        model,
+      }),
+    },
+  });
 }
 
 async function rewriteReplyOnce(args: {
@@ -5709,6 +6175,7 @@ function parseToolRouterPlanInput(raw: unknown): { parsed?: ToolRouterPlanInput;
 
   const allowedKeys = new Set([
     "task",
+    "toolRationale",
     "candidateReply",
     "includeExtraction",
     "maxResults",
@@ -5727,6 +6194,12 @@ function parseToolRouterPlanInput(raw: unknown): { parsed?: ToolRouterPlanInput;
   if (!task) {
     return {
       error: "Tool argument 'task' is required.",
+    };
+  }
+  const toolRationale = typeof payload.toolRationale === "string" ? payload.toolRationale.trim() : "";
+  if (!toolRationale) {
+    return {
+      error: "Tool argument 'toolRationale' is required.",
     };
   }
 
@@ -5760,6 +6233,7 @@ function parseToolRouterPlanInput(raw: unknown): { parsed?: ToolRouterPlanInput;
   return {
     parsed: {
       task: task.slice(0, 320),
+      toolRationale: toolRationale.slice(0, 280),
       candidateReply: candidateReply || undefined,
       includeExtraction,
       maxResults,
@@ -5791,6 +6265,46 @@ type ParsedResponseToolCall = {
   name: string;
   arguments: unknown;
 };
+
+function extractResponseReasoningSummary(payload: unknown) {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+  const output = (payload as { output?: unknown }).output;
+  if (!Array.isArray(output)) {
+    return null;
+  }
+  const parts: string[] = [];
+  for (const item of output) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    const type = (item as { type?: unknown }).type;
+    if (typeof type !== "string" || !type.includes("reasoning")) {
+      continue;
+    }
+    const summary = (item as { summary?: unknown }).summary;
+    if (typeof summary === "string" && summary.trim()) {
+      parts.push(summary.trim());
+      continue;
+    }
+    if (Array.isArray(summary)) {
+      for (const segment of summary) {
+        if (!segment || typeof segment !== "object") {
+          continue;
+        }
+        const text = (segment as { text?: unknown }).text;
+        if (typeof text === "string" && text.trim()) {
+          parts.push(text.trim());
+        }
+      }
+    }
+  }
+  if (parts.length === 0) {
+    return null;
+  }
+  return parts.join(" ").slice(0, 800);
+}
 
 function extractResponseFunctionCalls(payload: unknown): ParsedResponseToolCall[] {
   if (!payload || typeof payload !== "object") {
@@ -5874,6 +6388,7 @@ async function executeModelToolRouterCall(args: {
   callIndex: number;
   toolTimeoutMs: number;
   context: ModelToolContext;
+  reasoningSummary?: string | null;
 }): Promise<{
   outputPayload: Record<string, unknown>;
   call: ContextToolCall;
@@ -5922,6 +6437,7 @@ async function executeModelToolRouterCall(args: {
           callIndex: args.callIndex,
           parseOk: true,
           task: parsed.parsed.task,
+          toolRationale: parsed.parsed.toolRationale,
         },
         output: {
           status: "error",
@@ -5948,6 +6464,7 @@ async function executeModelToolRouterCall(args: {
           callIndex: args.callIndex,
           parseOk: true,
           task: parsed.parsed.task,
+          toolRationale: parsed.parsed.toolRationale,
         },
         output: {
           status: "error",
@@ -5987,9 +6504,11 @@ async function executeModelToolRouterCall(args: {
           callIndex: args.callIndex,
           parseOk: true,
           task: parsed.parsed.task,
+          toolRationale: parsed.parsed.toolRationale,
           includeExtraction: Boolean(parsed.parsed.includeExtraction),
           maxResults: parsed.parsed.maxResults ?? 8,
           maxToolsPerRun: parsed.parsed.maxToolsPerRun ?? 6,
+          ...(args.reasoningSummary ? { reasoningSummary: args.reasoningSummary } : {}),
         },
         output: {
           status: execution.status,
@@ -6016,6 +6535,7 @@ async function executeModelToolRouterCall(args: {
           callIndex: args.callIndex,
           parseOk: true,
           task: parsed.parsed.task,
+          toolRationale: parsed.parsed.toolRationale,
         },
         output: {
           status: "timeout",
@@ -6025,6 +6545,254 @@ async function executeModelToolRouterCall(args: {
       },
     };
   }
+}
+
+const SETUP_APPLY_INITIAL_SETTINGS_TOOL_NAME = "setup_apply_initial_settings";
+
+const SETUP_APPLY_INITIAL_SETTINGS_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "autonomyMode",
+    "replyPace",
+    "mimicryPreset",
+    "memesEnabled",
+    "quietHoursEnabled",
+    "quietHoursStartHour",
+    "quietHoursEndHour",
+    "instagramEnabled",
+    "rationale",
+  ],
+  properties: {
+    autonomyMode: {
+      type: "string",
+      enum: ["review_first", "autopilot"],
+      description: "Use autopilot only when the user clearly asks the assistant to take action without review.",
+    },
+    replyPace: {
+      type: "string",
+      enum: ["measured", "deliberate", "unhurried"],
+      description: "How quickly the assistant should normally draft/send.",
+    },
+    mimicryPreset: {
+      type: "string",
+      enum: ["light", "balanced", "close"],
+      description: "How closely the assistant should match the user's style.",
+    },
+    memesEnabled: {
+      type: "boolean",
+      description: "Whether meme/humor tools should be visible from setup.",
+    },
+    quietHoursEnabled: {
+      type: "boolean",
+      description: "Whether automatic actions should pause overnight.",
+    },
+    quietHoursStartHour: {
+      type: "number",
+      description: "0-23 local start hour for quiet hours.",
+    },
+    quietHoursEndHour: {
+      type: "number",
+      description: "0-23 local end hour for quiet hours.",
+    },
+    instagramEnabled: {
+      type: "boolean",
+      description: "Whether Instagram setup should be visible from setup.",
+    },
+    rationale: {
+      type: "string",
+      description: "Short explanation of why these setup defaults fit the soul profile.",
+    },
+  },
+} as const;
+
+function buildSetupAiPrompt(args: { soulProfile: InstanceSoulProfile; currentPreferences: InstanceSetupPreferences }) {
+  return [
+    "You are configuring a user's LifeManager instance during the one-time setup flow.",
+    `You must call ${SETUP_APPLY_INITIAL_SETTINGS_TOOL_NAME} exactly once with conservative initial defaults.`,
+    "The tool call is immediately applied by the setup server and then disabled forever for this setup run.",
+    "Keep the user in control: choose review_first unless the profile explicitly asks for automatic delegation.",
+    "Preserve quiet hours unless the profile strongly says they operate late at night.",
+    "Use optional gender, pronoun, and romantic-context fields only to fine tune defaults and tone; do not assume or invent sexuality, relationship facts, or intimacy levels.",
+    "",
+    "Soul profile:",
+    JSON.stringify(args.soulProfile, null, 2),
+    "",
+    "Current setup preferences:",
+    JSON.stringify(args.currentPreferences, null, 2),
+  ].join("\n");
+}
+
+function parseHour(value: unknown, fallback: number) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return fallback;
+  }
+  const rounded = Math.round(numeric);
+  return ((rounded % 24) + 24) % 24;
+}
+
+function parseSetupApplySettingsArguments(
+  rawArguments: unknown,
+  currentPreferences: InstanceSetupPreferences,
+): { preferences: InstanceSetupPreferences; rationale: string } {
+  const payload = safeParseJsonObject(rawArguments);
+  if (!payload) {
+    throw new Error("Setup AI tool arguments must be a JSON object.");
+  }
+
+  const autonomyMode = payload.autonomyMode === "autopilot" ? "autopilot" : "review_first";
+  const replyPace =
+    payload.replyPace === "measured" || payload.replyPace === "unhurried" || payload.replyPace === "deliberate"
+      ? payload.replyPace
+      : currentPreferences.replyPace;
+  const mimicryPreset =
+    payload.mimicryPreset === "light" || payload.mimicryPreset === "close" || payload.mimicryPreset === "balanced"
+      ? payload.mimicryPreset
+      : currentPreferences.mimicryPreset;
+
+  return {
+    preferences: {
+      ...currentPreferences,
+      autonomyMode,
+      replyPace,
+      mimicryPreset,
+      memesEnabled: typeof payload.memesEnabled === "boolean" ? payload.memesEnabled : currentPreferences.memesEnabled,
+      quietHoursEnabled:
+        typeof payload.quietHoursEnabled === "boolean" ? payload.quietHoursEnabled : currentPreferences.quietHoursEnabled,
+      quietHoursStartHour: parseHour(payload.quietHoursStartHour, currentPreferences.quietHoursStartHour),
+      quietHoursEndHour: parseHour(payload.quietHoursEndHour, currentPreferences.quietHoursEndHour),
+      instagramEnabled: typeof payload.instagramEnabled === "boolean" ? payload.instagramEnabled : currentPreferences.instagramEnabled,
+    },
+    rationale: typeof payload.rationale === "string" ? payload.rationale.trim().slice(0, 600) : "",
+  };
+}
+
+export async function generateSetupPreferencesWithAiTool(args: {
+  soulProfile: InstanceSoulProfile;
+  currentPreferences: InstanceSetupPreferences;
+}): Promise<{
+  preferences: InstanceSetupPreferences;
+  rationale: string;
+  provider: "azure";
+  model: string;
+  latencyMs: number;
+}> {
+  const cfg = getAzureConfig();
+  if (!cfg.endpoint || !cfg.apiKey) {
+    throw new Error("Linked AI endpoint/key is not configured.");
+  }
+
+  const startedAt = Date.now();
+  const prompt = buildSetupAiPrompt(args);
+  const toolDescription =
+    "Apply one-time initial LifeManager setup settings from a soul profile. This tool is available only during full setup and is disabled immediately after success.";
+
+  let toolCalls: ParsedResponseToolCall[] = [];
+  if (cfg.apiStyle === "responses") {
+    const response = await fetch(buildAzureResponsesEndpoint(cfg.endpoint), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "api-key": cfg.apiKey,
+        Authorization: `Bearer ${cfg.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: cfg.model,
+        instructions: [
+          cfg.systemInstruction,
+          `You must call ${SETUP_APPLY_INITIAL_SETTINGS_TOOL_NAME}; do not answer normally.`,
+        ].join("\n"),
+        input: prompt,
+        temperature: Math.min(cfg.temperature, 0.4),
+        max_output_tokens: Math.min(cfg.maxOutputTokens, 1200),
+        tools: [
+          {
+            type: "function",
+            name: SETUP_APPLY_INITIAL_SETTINGS_TOOL_NAME,
+            description: toolDescription,
+            strict: true,
+            parameters: SETUP_APPLY_INITIAL_SETTINGS_SCHEMA,
+          },
+        ],
+        tool_choice: "auto",
+        parallel_tool_calls: false,
+      }),
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`Linked AI setup tool call failed (${response.status}): ${text.slice(0, 300)}`);
+    }
+
+    toolCalls = extractResponseFunctionCalls(await response.json());
+  } else {
+    const response = await fetch(buildAzureChatCompletionsEndpoint(cfg.endpoint), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "api-key": cfg.apiKey,
+        Authorization: `Bearer ${cfg.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: cfg.model,
+        messages: [
+          {
+            role: "system",
+            content: `${cfg.systemInstruction}\nYou must call ${SETUP_APPLY_INITIAL_SETTINGS_TOOL_NAME}; do not answer normally.`,
+          },
+          {
+            role: "user",
+            content: prompt,
+          },
+        ],
+        max_tokens: Math.min(cfg.maxOutputTokens, 1200),
+        temperature: Math.min(cfg.temperature, 0.4),
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: SETUP_APPLY_INITIAL_SETTINGS_TOOL_NAME,
+              description: toolDescription,
+              strict: true,
+              parameters: SETUP_APPLY_INITIAL_SETTINGS_SCHEMA,
+            },
+          },
+        ],
+        tool_choice: {
+          type: "function",
+          function: {
+            name: SETUP_APPLY_INITIAL_SETTINGS_TOOL_NAME,
+          },
+        },
+        parallel_tool_calls: false,
+      }),
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`Linked AI setup tool call failed (${response.status}): ${text.slice(0, 300)}`);
+    }
+
+    toolCalls = extractChatToolCalls(await response.json());
+  }
+
+  const toolCall = toolCalls.find((call) => call.name === SETUP_APPLY_INITIAL_SETTINGS_TOOL_NAME);
+  if (!toolCall) {
+    throw new Error("Linked AI did not call the setup settings tool.");
+  }
+
+  const parsed = parseSetupApplySettingsArguments(toolCall.arguments, args.currentPreferences);
+  return {
+    preferences: {
+      ...parsed.preferences,
+      soulProfile: args.soulProfile,
+    },
+    rationale: parsed.rationale,
+    provider: "azure",
+    model: cfg.model,
+    latencyMs: Date.now() - startedAt,
+  };
 }
 
 async function runAzure(
@@ -6132,6 +6900,7 @@ async function runAzure(
           }
 
           const functionCalls = extractResponseFunctionCalls(raw);
+          const reasoningSummary = extractResponseReasoningSummary(raw);
           if (functionCalls.length === 0) {
             break;
           }
@@ -6174,6 +6943,7 @@ async function runAzure(
                 callIndex: index,
                 toolTimeoutMs: toolConfig.toolTimeoutMs,
                 context: modelToolContext,
+                reasoningSummary,
               });
               return {
                 callId: call.callId,
@@ -7795,27 +8565,76 @@ async function applyQualityGate(args: {
     }
   }
 
-  const recentSelfRepeat = evaluateRecentSelfRepeatRisk({
-    replyText: selected.text,
+  if (!args.runtime?.disableRecentSelfRepeatGuardrail) {
+    const recentSelfRepeat = evaluateRecentSelfRepeatRisk({
+      replyText: selected.text,
+      historyLines: args.historyLines,
+    });
+    if (recentSelfRepeat.blocked) {
+      const selfRepeatRewrite = await rewriteRecentSelfRepeatReplyOnce({
+        candidateText: selected.text,
+        inboundText: args.inboundText,
+        historyLines: args.historyLines,
+        basePrompt: args.basePrompt,
+        runtime: args.runtime,
+        selfRepeatRisk: recentSelfRepeat,
+      });
+      selectedAttempts = [...selectedAttempts, ...selfRepeatRewrite.attempts];
+      if (!selfRepeatRewrite.result) {
+        return manualReviewResult(`Recent self-repeat rewrite failed: ${recentSelfRepeat.reason}`);
+      }
+
+      selected = selfRepeatRewrite.result;
+      selectedEvaluation = evaluateReplyQuality({
+        replyText: selfRepeatRewrite.result.text,
+        inboundText: args.inboundText,
+        historyLines: args.historyLines,
+        pack: args.activePersonaPack,
+        threshold,
+      });
+      qualityRewriteApplied =
+        qualityRewriteApplied || normalizeOutboundText(args.candidate.text) !== normalizeOutboundText(selected.text);
+
+      const rewrittenSelfRepeat = evaluateRecentSelfRepeatRisk({
+        replyText: selected.text,
+        historyLines: args.historyLines,
+      });
+      if (rewrittenSelfRepeat.blocked) {
+        return manualReviewResult(`Recent self-repeat rewrite still violated guardrail: ${rewrittenSelfRepeat.reason}`);
+      }
+    }
+  }
+
+  const factEvaluation = await evaluateFactWithAi({
+    candidateText: selected.text,
+    inboundText: args.inboundText,
     historyLines: args.historyLines,
+    runtime: args.runtime,
   });
-  if (recentSelfRepeat.blocked) {
-    const selfRepeatRewrite = await rewriteRecentSelfRepeatReplyOnce({
+  selectedAttempts = [...selectedAttempts, ...factEvaluation.attempts];
+
+  if (factEvaluation.required && !factEvaluation.judgment) {
+    return manualReviewResult("Objective-profile fact candidate detected but AI fact judge was unavailable.");
+  }
+
+  if (factEvaluation.judgment?.hasObjectiveClaim && factEvaluation.judgment.factualRisk) {
+    const factGuardrailInstruction = `Objective-profile factuality guardrail: AI fact judge flagged risk (${factEvaluation.judgment.reason}). Rewrite to avoid uncertain profile claims. Keep objective details minimal, avoid overconfident assertions, and prefer safe neutral wording when uncertain.`;
+    const factRewrite = await rewriteJokeChainReplyOnce({
       candidateText: selected.text,
       inboundText: args.inboundText,
       historyLines: args.historyLines,
       basePrompt: args.basePrompt,
       runtime: args.runtime,
-      selfRepeatRisk: recentSelfRepeat,
+      guardrailInstruction: factGuardrailInstruction,
     });
-    selectedAttempts = [...selectedAttempts, ...selfRepeatRewrite.attempts];
-    if (!selfRepeatRewrite.result) {
-      return manualReviewResult(`Recent self-repeat rewrite failed: ${recentSelfRepeat.reason}`);
+    selectedAttempts = [...selectedAttempts, ...factRewrite.attempts];
+    if (!factRewrite.result) {
+      return manualReviewResult("Objective-profile factuality guardrail blocked draft. Auto-rewrite failed.");
     }
 
-    selected = selfRepeatRewrite.result;
+    selected = factRewrite.result;
     selectedEvaluation = evaluateReplyQuality({
-      replyText: selfRepeatRewrite.result.text,
+      replyText: factRewrite.result.text,
       inboundText: args.inboundText,
       historyLines: args.historyLines,
       pack: args.activePersonaPack,
@@ -7823,12 +8642,78 @@ async function applyQualityGate(args: {
     });
     qualityRewriteApplied = qualityRewriteApplied || normalizeOutboundText(args.candidate.text) !== normalizeOutboundText(selected.text);
 
-    const rewrittenSelfRepeat = evaluateRecentSelfRepeatRisk({
-      replyText: selected.text,
+    const rewrittenFactEvaluation = await evaluateFactWithAi({
+      candidateText: selected.text,
+      inboundText: args.inboundText,
       historyLines: args.historyLines,
+      runtime: args.runtime,
     });
-    if (rewrittenSelfRepeat.blocked) {
-      return manualReviewResult(`Recent self-repeat rewrite still violated guardrail: ${rewrittenSelfRepeat.reason}`);
+    selectedAttempts = [...selectedAttempts, ...rewrittenFactEvaluation.attempts];
+
+    if (rewrittenFactEvaluation.required && !rewrittenFactEvaluation.judgment) {
+      return manualReviewResult("Fact-guardrail rewrite produced a fact-like draft but AI fact judge was unavailable.");
+    }
+
+    if (rewrittenFactEvaluation.judgment?.hasObjectiveClaim && rewrittenFactEvaluation.judgment.factualRisk) {
+      return manualReviewResult(
+        `Fact-guardrail rewrite still has factuality risk (${Math.round(rewrittenFactEvaluation.judgment.confidence * 100)}%): ${rewrittenFactEvaluation.judgment.reason}`,
+      );
+    }
+  }
+
+  const toneShiftEvaluation = await evaluateToneShiftWithAi({
+    candidateText: selected.text,
+    inboundText: args.inboundText,
+    historyLines: args.historyLines,
+    runtime: args.runtime,
+  });
+  selectedAttempts = [...selectedAttempts, ...toneShiftEvaluation.attempts];
+
+  if (toneShiftEvaluation.required && !toneShiftEvaluation.judgment) {
+    return manualReviewResult("Tone-shift risk candidate detected but AI tone-shift judge was unavailable.");
+  }
+
+  if (toneShiftEvaluation.judgment?.requiresRepairTone) {
+    const toneShiftInstruction = `Tone-shift guardrail: AI tone-shift judge flagged escalation risk (${toneShiftEvaluation.judgment.reason}). Rewrite into one concise repair-oriented line that stays calm, answers the concrete ask, and avoids sarcasm, hostility, or dismissive phrasing.`;
+    const toneShiftRewrite = await rewriteJokeChainReplyOnce({
+      candidateText: selected.text,
+      inboundText: args.inboundText,
+      historyLines: args.historyLines,
+      basePrompt: args.basePrompt,
+      runtime: args.runtime,
+      guardrailInstruction: toneShiftInstruction,
+    });
+    selectedAttempts = [...selectedAttempts, ...toneShiftRewrite.attempts];
+    if (!toneShiftRewrite.result) {
+      return manualReviewResult("Tone-shift guardrail blocked draft. Auto-rewrite failed.");
+    }
+
+    selected = toneShiftRewrite.result;
+    selectedEvaluation = evaluateReplyQuality({
+      replyText: toneShiftRewrite.result.text,
+      inboundText: args.inboundText,
+      historyLines: args.historyLines,
+      pack: args.activePersonaPack,
+      threshold,
+    });
+    qualityRewriteApplied = qualityRewriteApplied || normalizeOutboundText(args.candidate.text) !== normalizeOutboundText(selected.text);
+
+    const rewrittenToneShiftEvaluation = await evaluateToneShiftWithAi({
+      candidateText: selected.text,
+      inboundText: args.inboundText,
+      historyLines: args.historyLines,
+      runtime: args.runtime,
+    });
+    selectedAttempts = [...selectedAttempts, ...rewrittenToneShiftEvaluation.attempts];
+
+    if (rewrittenToneShiftEvaluation.required && !rewrittenToneShiftEvaluation.judgment) {
+      return manualReviewResult("Tone-shift rewrite produced a risky candidate but AI tone-shift judge was unavailable.");
+    }
+
+    if (rewrittenToneShiftEvaluation.judgment?.requiresRepairTone) {
+      return manualReviewResult(
+        `Tone-shift guardrail rewrite still escalates (${Math.round(rewrittenToneShiftEvaluation.judgment.confidence * 100)}%): ${rewrittenToneShiftEvaluation.judgment.reason}`,
+      );
     }
   }
 
@@ -8360,6 +9245,7 @@ export async function generateReplyWithFallback(args: {
   contactFacts?: ContactMemoryFactContext[];
   contextPack?: ContextPackSnapshot;
   adaptiveHints?: AdaptiveTuningHintsSnapshot;
+  conversationGuidance?: ConversationReplyGuidance;
   styleHints: string[];
   styleProfile?: StyleProfileContext;
   personality?: PersonalityContext;
@@ -8368,30 +9254,37 @@ export async function generateReplyWithFallback(args: {
   modelToolContext?: ModelToolContext;
 }): Promise<AiResult> {
   const activePersonaPack = resolveActivePersonaPack(args.runtime, args.personality);
+  const builtPrompt = buildPrompt({
+    ...args,
+    contextPack: args.contextPack,
+    adaptiveHints: args.adaptiveHints,
+  });
   const finalizeResult = (result: AiResult): AiResult => {
     if (result.guardrailBlocked) {
-      return result;
+      return {
+        ...result,
+        activeDynamicStylePackIds: builtPrompt.conversationStyleMatrix.dynamicStylePackIds,
+        conversationStyleMatrix: builtPrompt.conversationStyleMatrix,
+      };
     }
     return {
       ...result,
+      activeDynamicStylePackIds: builtPrompt.conversationStyleMatrix.dynamicStylePackIds,
+      conversationStyleMatrix: builtPrompt.conversationStyleMatrix,
       text: postProcessReplyText({
         text: result.text,
         inboundText: args.inboundText,
         historyLines: args.historyLines,
         theirName: args.grounding?.theirName,
         fallbackText: "All good.",
+        preserveEmojis: shouldPreserveTextEmoji(builtPrompt.conversationStyleMatrix),
         selfRoastModeEnabled: args.runtime?.selfRoastModeEnabled,
       }),
     };
   };
-  const builtPrompt = buildPrompt({
-    ...args,
-    contextPack: args.contextPack,
-    adaptiveHints: args.adaptiveHints,
-  });
   const blocked = HIGH_RISK_PATTERNS.find((pattern) => pattern.test(args.inboundText));
   if (blocked) {
-    return {
+    return finalizeResult({
       text: "Manual review required.",
       provider: "heuristic",
       model: "guardrail",
@@ -8413,7 +9306,7 @@ export async function generateReplyWithFallback(args: {
           latencyMs: 0,
         },
       ],
-    };
+    });
   }
 
   const steeringMode = detectConversationSteeringMode({
@@ -8638,6 +9531,7 @@ function toCandidateEvaluation(args: {
   historyLines: string[];
   contextPack?: ContextPackSnapshot;
   adaptiveHints?: AdaptiveTuningHintsSnapshot;
+  disableRecentSelfRepeatGuardrail?: boolean;
 }): AiCandidateEvaluation {
   const contextSupport = scoreCandidateContextSupport(args.result);
   const steeringFit = scoreCandidateSteeringFit({
@@ -8653,12 +9547,14 @@ function toCandidateEvaluation(args: {
   }).blocked
     ? 1
     : 0;
-  const selfRepeatPenalty = evaluateRecentSelfRepeatRisk({
-    replyText: args.result.text,
-    historyLines: args.historyLines,
-  }).blocked
-    ? 1
-    : 0;
+  const selfRepeatPenalty = args.disableRecentSelfRepeatGuardrail
+    ? 0
+    : evaluateRecentSelfRepeatRisk({
+        replyText: args.result.text,
+        historyLines: args.historyLines,
+      }).blocked
+      ? 1
+      : 0;
   const freshnessSupport = scoreCandidateFreshnessSupport({
     contextPack: args.contextPack,
     adaptiveHints: args.adaptiveHints,
@@ -8727,6 +9623,7 @@ export async function generateReplyCandidatesWithRerank(args: {
   contactFacts?: ContactMemoryFactContext[];
   contextPack?: ContextPackSnapshot;
   adaptiveHints?: AdaptiveTuningHintsSnapshot;
+  conversationGuidance?: ConversationReplyGuidance;
   styleHints: string[];
   styleProfile?: StyleProfileContext;
   personality?: PersonalityContext;
@@ -8743,6 +9640,7 @@ export async function generateReplyCandidatesWithRerank(args: {
       contactFacts: args.contactFacts,
       contextPack: args.contextPack,
       adaptiveHints: args.adaptiveHints,
+      conversationGuidance: args.conversationGuidance,
       styleHints: [...args.styleHints, variantHint],
       styleProfile: args.styleProfile,
       personality: args.personality,
@@ -8757,6 +9655,7 @@ export async function generateReplyCandidatesWithRerank(args: {
       historyLines: args.historyLines,
       contextPack: args.contextPack,
       adaptiveHints: args.adaptiveHints,
+      disableRecentSelfRepeatGuardrail: Boolean(runtime?.disableRecentSelfRepeatGuardrail),
     });
   };
 

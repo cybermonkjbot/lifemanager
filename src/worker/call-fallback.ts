@@ -10,6 +10,11 @@ export const DEFAULT_CALL_AUTO_DECLINE_FALLBACK_VARIANTS = [
   "I can't pick WhatsApp calls right now. Drop a message here and I'll reply soon.",
 ];
 
+const CALL_FALLBACK_CALLER_TOKEN_PATTERN = /\{+\s*(?:caller(?:Name)?|name)\s*\}+/gi;
+const DEFAULT_CALL_AUTO_REJECT_MIN_MS = 8_000;
+const DEFAULT_CALL_AUTO_REJECT_MAX_MS = 22_000;
+const MAX_CALL_AUTO_REJECT_DELAY_MS = 60_000;
+
 function stableHash(input: string) {
   let hash = 0;
   for (let index = 0; index < input.length; index += 1) {
@@ -33,6 +38,36 @@ function normalizeVariants(values: Array<string | undefined | null>) {
     deduped.push(normalized);
   }
   return deduped;
+}
+
+function sanitizeCallerName(value: string | undefined | null) {
+  const normalized = (value || "")
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) {
+    return undefined;
+  }
+  if (/[@/\\{}<>]/.test(normalized)) {
+    return undefined;
+  }
+  if (/^\+?\d[\d\s().-]{5,}$/.test(normalized)) {
+    return undefined;
+  }
+  return normalized.slice(0, 40).trim() || undefined;
+}
+
+function prefixWithCallerName(message: string, callerName: string) {
+  const lower = message.toLowerCase();
+  if (lower.startsWith(`hey ${callerName.toLowerCase()}`) || lower.startsWith(`hi ${callerName.toLowerCase()}`)) {
+    return message;
+  }
+  return `Hey ${callerName}, ${message}`;
+}
+
+function hasCallerToken(message: string) {
+  CALL_FALLBACK_CALLER_TOKEN_PATTERN.lastIndex = 0;
+  return CALL_FALLBACK_CALLER_TOKEN_PATTERN.test(message);
 }
 
 export function resolveCallFallbackVariants(args?: {
@@ -74,6 +109,47 @@ export function selectCallFallbackVariant(args: {
   return variants[index];
 }
 
+export function buildCallFallbackText(args: {
+  variants: string[];
+  seed: string;
+  callerName?: string | null;
+}) {
+  const selected = selectCallFallbackVariant({
+    variants: args.variants,
+    seed: args.seed,
+  });
+  if (!selected) {
+    return "";
+  }
+
+  const callerName = sanitizeCallerName(args.callerName);
+  if (!callerName) {
+    return selected.replace(CALL_FALLBACK_CALLER_TOKEN_PATTERN, "").replace(/\s+/g, " ").trim();
+  }
+
+  if (hasCallerToken(selected)) {
+    CALL_FALLBACK_CALLER_TOKEN_PATTERN.lastIndex = 0;
+    return selected.replace(CALL_FALLBACK_CALLER_TOKEN_PATTERN, callerName).replace(/\s+/g, " ").trim();
+  }
+
+  return prefixWithCallerName(selected, callerName);
+}
+
+export function resolveCallAutoRejectDelayMs(args: {
+  seed: string;
+  minMs?: number;
+  maxMs?: number;
+}) {
+  const rawMin = Number.isFinite(args.minMs) ? (args.minMs as number) : DEFAULT_CALL_AUTO_REJECT_MIN_MS;
+  const rawMax = Number.isFinite(args.maxMs) ? (args.maxMs as number) : DEFAULT_CALL_AUTO_REJECT_MAX_MS;
+  const minMs = Math.round(Math.max(0, Math.min(rawMin, MAX_CALL_AUTO_REJECT_DELAY_MS)));
+  const maxMs = Math.round(Math.max(minMs, Math.min(rawMax, MAX_CALL_AUTO_REJECT_DELAY_MS)));
+  if (maxMs <= minMs) {
+    return minMs;
+  }
+  return minMs + (stableHash(args.seed) % (maxMs - minMs + 1));
+}
+
 export function shouldSuppressCallFallbackAfterOffer(
   snapshot: CallFallbackSessionSnapshot | null | undefined,
 ) {
@@ -87,6 +163,19 @@ export function shouldSuppressCallFallbackAfterOffer(
 
   const status = (snapshot.lastStatus || "").trim().toLowerCase();
   return status === "accept";
+}
+
+export function shouldCancelPendingCallAutoReject(
+  snapshot: CallFallbackSessionSnapshot | null | undefined,
+) {
+  if (!snapshot) {
+    return false;
+  }
+  if (shouldSuppressCallFallbackAfterOffer(snapshot)) {
+    return true;
+  }
+  const status = (snapshot.lastStatus || "").trim().toLowerCase();
+  return status === "timeout" || status === "reject" || status === "terminate";
 }
 
 export function shouldSkipStaleCallOffer(args: {

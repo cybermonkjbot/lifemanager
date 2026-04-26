@@ -42,6 +42,7 @@ type RuntimeSettings = {
   aiReplyPolicy?: string;
   aiSystemInstruction?: string;
   activePersonaPackId?: string;
+  activePersonaPackIdsByProfile?: Record<string, string>;
   qualityGateMode?: "auto_rewrite_once" | "manual_review" | "log_only";
   qualityGateThreshold?: number;
   humanDelayMinMs?: number;
@@ -56,6 +57,8 @@ type StyleProfile = {
   punctuationStyle?: string[];
   humorNotes?: string[];
   spellingNotes?: string[];
+  learnedEmojiAllowlist?: string[];
+  learnedEmojiCategoryHints?: string[];
 };
 
 type ContactMemoryFact = {
@@ -74,6 +77,8 @@ type PersonalitySetting = {
   profileSlug?: string;
   intensity?: number;
   customPrompt?: string;
+  threadPromptProfile?: string;
+  threadPromptProfileSource?: "manual" | "auto";
   profile?: {
     slug?: string;
     name?: string;
@@ -267,6 +272,8 @@ export async function POST(request: Request) {
       profilePrompt?: string;
       intensity?: number;
       customPrompt?: string;
+      threadPromptProfile?: string;
+      threadPromptProfileSource?: "manual" | "auto";
     } | undefined;
 
     if (threadId) {
@@ -308,6 +315,8 @@ export async function POST(request: Request) {
           profilePrompt: personalitySetting.profile?.prompt,
           intensity: personalitySetting.intensity,
           customPrompt: personalitySetting.customPrompt || "",
+          threadPromptProfile: personalitySetting.threadPromptProfile || "",
+          threadPromptProfileSource: personalitySetting.threadPromptProfileSource,
         };
       }
     }
@@ -329,7 +338,13 @@ export async function POST(request: Request) {
       threadId,
       historyLines: combinedHistoryLines,
       styleHints,
+      styleProfile: scopedStyleProfile || globalStyleProfile || null,
+      personality,
       contactFacts,
+      activePersonaPackId: runtimeSettings?.activePersonaPackId || "",
+      activePersonaPackIdsByProfile: runtimeSettings?.activePersonaPackIdsByProfile || {},
+      qualityGateMode: runtimeSettings?.qualityGateMode,
+      qualityGateThreshold: runtimeSettings?.qualityGateThreshold,
       model: runtimeModel || requestModel,
       temperature: resolvedTemperature,
       maxOutputTokens: resolvedMaxOutputTokens,
@@ -393,6 +408,7 @@ export async function POST(request: Request) {
         replyPolicyInstruction: runtimeSettings?.aiReplyPolicy || "",
         systemInstruction: runtimeSettings?.aiSystemInstruction || "",
         activePersonaPackId: runtimeSettings?.activePersonaPackId || "",
+        activePersonaPackIdsByProfile: runtimeSettings?.activePersonaPackIdsByProfile || {},
         qualityGateMode: runtimeSettings?.qualityGateMode,
         qualityGateThreshold: runtimeSettings?.qualityGateThreshold,
         soulModeEnabled: runtimeSettings?.soulModeEnabled,
@@ -531,6 +547,8 @@ export async function POST(request: Request) {
         qualityChecks: aiResult.qualityChecks || [],
         qualityRewriteApplied: aiResult.qualityRewriteApplied || false,
         activePersonaPackId: aiResult.activePersonaPackId || null,
+        activeDynamicStylePackIds: aiResult.activeDynamicStylePackIds || [],
+        conversationStyleMatrix: aiResult.conversationStyleMatrix || null,
         threadId: threadId || null,
         freshness: {
           cacheHit: false,

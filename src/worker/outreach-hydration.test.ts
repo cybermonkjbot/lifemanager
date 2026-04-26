@@ -79,6 +79,35 @@ test("buildOutreachPromptSeed keeps proactive branch shape unchanged", () => {
   assert.match(prompt, /Contact first name: Tobi/);
 });
 
+test("buildOutreachPromptSeed adjusts proactive guidance when mutual check-in is recent", () => {
+  const prompt = buildOutreachPromptSeed({
+    outreachMode: "proactive",
+    daysSinceMutualCheckIn: 1,
+    checkInRecencyTargetDays: 7,
+    contactName: "Tobi",
+  });
+
+  assert.match(prompt, /Recent mutual check-in was 1 day\(s\) ago\./);
+  assert.match(prompt, /Do not open with a generic "just checking in" line/i);
+});
+
+test("buildOutreachPromptSeed nudges wellbeing when mutual check-in is stale or missing", () => {
+  const stalePrompt = buildOutreachPromptSeed({
+    outreachMode: "proactive",
+    daysSinceMutualCheckIn: 12,
+    checkInRecencyTargetDays: 7,
+    contactName: "Tobi",
+  });
+  const missingPrompt = buildOutreachPromptSeed({
+    outreachMode: "proactive",
+    contactName: "Tobi",
+  });
+
+  assert.match(stalePrompt, /Last mutual check-in was 12 day\(s\) ago \(target 7 days\)/i);
+  assert.match(stalePrompt, /Prioritize a warm wellbeing check-in opener/i);
+  assert.match(missingPrompt, /No known mutual check-in on record/i);
+});
+
 test("buildOutreachPromptSeed includes compliment constraints for appreciation mode", () => {
   const prompt = buildOutreachPromptSeed({
     outreachMode: "compliment",
@@ -234,6 +263,19 @@ test("buildOutreachFallbackText keeps proactive fallback behavior", () => {
 
   assert.equal(defaultFallback, "Hey, just checking in. How is your day going?");
   assert.equal(ghostFallback, "You sly mf, you ghosted me 😭. You good though?");
+});
+
+test("buildOutreachFallbackText avoids generic check-in fallback when mutual check-in is recent", () => {
+  const fallback = buildOutreachFallbackText({
+    outreachMode: "proactive",
+    daysSinceMutualCheckIn: 2,
+    checkInRecencyTargetDays: 7,
+    longSilenceGhostReopen: false,
+    ghostReopenTone: "warm",
+    ghostSeverity: "mild",
+  });
+
+  assert.equal(fallback, "Hey, quick one for today: what has been the highlight of your day so far?");
 });
 
 test("enforceGoodMorningStyleLint rewrites long/question-heavy/emoji-heavy text", () => {

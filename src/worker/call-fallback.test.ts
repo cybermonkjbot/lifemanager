@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  buildCallFallbackText,
   DEFAULT_CALL_AUTO_DECLINE_FALLBACK_VARIANTS,
   resolveCallFallbackVariants,
+  resolveCallAutoRejectDelayMs,
   selectCallFallbackVariant,
+  shouldCancelPendingCallAutoReject,
   shouldSkipStaleCallOffer,
   shouldSuppressCallFallbackAfterOffer,
 } from "./call-fallback";
@@ -62,6 +65,56 @@ test("selectCallFallbackVariant is deterministic and only returns configured var
   });
   assert.equal(first, second);
   assert.equal(variants.includes(first), true);
+});
+
+test("buildCallFallbackText personalizes only with a safe caller name", () => {
+  assert.equal(
+    buildCallFallbackText({
+      variants: ["I can't take WhatsApp calls here right now. Please send a message and I'll reply here."],
+      seed: "threadA|day1",
+      callerName: "Amina",
+    }),
+    "Hey Amina, I can't take WhatsApp calls here right now. Please send a message and I'll reply here.",
+  );
+  assert.equal(
+    buildCallFallbackText({
+      variants: ["Hey {callerName}, I can't take calls right now. Text me here."],
+      seed: "threadA|day1",
+      callerName: "Amina",
+    }),
+    "Hey Amina, I can't take calls right now. Text me here.",
+  );
+  assert.equal(
+    buildCallFallbackText({
+      variants: ["I can't take calls right now. Text me here."],
+      seed: "threadA|day1",
+      callerName: "+234 800 000 0000",
+    }),
+    "I can't take calls right now. Text me here.",
+  );
+});
+
+test("resolveCallAutoRejectDelayMs picks a deterministic bounded delay", () => {
+  const first = resolveCallAutoRejectDelayMs({
+    seed: "call-1",
+    minMs: 8_000,
+    maxMs: 22_000,
+  });
+  const second = resolveCallAutoRejectDelayMs({
+    seed: "call-1",
+    minMs: 8_000,
+    maxMs: 22_000,
+  });
+  assert.equal(first, second);
+  assert.equal(first >= 8_000, true);
+  assert.equal(first <= 22_000, true);
+});
+
+test("shouldCancelPendingCallAutoReject cancels once the call is answered or ended", () => {
+  assert.equal(shouldCancelPendingCallAutoReject({ lastStatus: "offer" }), false);
+  assert.equal(shouldCancelPendingCallAutoReject({ lastStatus: "accept" }), true);
+  assert.equal(shouldCancelPendingCallAutoReject({ lastStatus: "timeout" }), true);
+  assert.equal(shouldCancelPendingCallAutoReject({ lastStatus: "terminate" }), true);
 });
 
 test("shouldSkipStaleCallOffer blocks outdated missed-call handling", () => {

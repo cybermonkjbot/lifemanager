@@ -11,6 +11,7 @@ import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 const MAX_TEST_AI_MESSAGE_CHARS = 8000;
+type TestAiPurpose = "reply_test" | "todo_title" | "followup_reason";
 
 type RuntimeSettings = {
   soulModeEnabled?: boolean;
@@ -28,6 +29,7 @@ type RuntimeSettings = {
   aiReplyPolicy?: string;
   aiSystemInstruction?: string;
   activePersonaPackId?: string;
+  activePersonaPackIdsByProfile?: Record<string, string>;
   qualityGateMode?: "auto_rewrite_once" | "manual_review" | "log_only";
   qualityGateThreshold?: number;
   humanDelayMinMs?: number;
@@ -42,6 +44,8 @@ type StyleProfile = {
   punctuationStyle?: string[];
   humorNotes?: string[];
   spellingNotes?: string[];
+  learnedEmojiAllowlist?: string[];
+  learnedEmojiCategoryHints?: string[];
 };
 
 type ContactMemoryFact = {
@@ -60,6 +64,8 @@ type PersonalitySetting = {
   profileSlug?: string;
   intensity?: number;
   customPrompt?: string;
+  threadPromptProfile?: string;
+  threadPromptProfileSource?: "manual" | "auto";
   profile?: {
     slug?: string;
     name?: string;
@@ -88,16 +94,18 @@ export async function POST(request: Request) {
     return unauthorized;
   }
 
-  let payload: { message?: unknown; threadId?: unknown };
+  let payload: { message?: unknown; threadId?: unknown; purpose?: unknown };
 
   try {
-    payload = (await request.json()) as { message?: unknown; threadId?: unknown };
+    payload = (await request.json()) as { message?: unknown; threadId?: unknown; purpose?: unknown };
   } catch {
     return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
   }
 
   const message = typeof payload.message === "string" ? payload.message.trim() : "";
   const threadId = typeof payload.threadId === "string" && payload.threadId.trim() ? payload.threadId.trim() : undefined;
+  const purpose: TestAiPurpose =
+    payload.purpose === "todo_title" || payload.purpose === "followup_reason" ? payload.purpose : "reply_test";
 
   if (!message) {
     return NextResponse.json({ error: "Message is required." }, { status: 400 });
@@ -138,6 +146,8 @@ export async function POST(request: Request) {
       profilePrompt?: string;
       intensity?: number;
       customPrompt?: string;
+      threadPromptProfile?: string;
+      threadPromptProfileSource?: "manual" | "auto";
     } | undefined;
 
     if (threadId) {
@@ -178,6 +188,8 @@ export async function POST(request: Request) {
           profilePrompt: personalitySetting.profile?.prompt,
           intensity: personalitySetting.intensity,
           customPrompt: personalitySetting.customPrompt || "",
+          threadPromptProfile: personalitySetting.threadPromptProfile || "",
+          threadPromptProfileSource: personalitySetting.threadPromptProfileSource,
         };
       }
     }
@@ -192,12 +204,23 @@ export async function POST(request: Request) {
       : null;
 
     const freshnessKey = buildAiFreshnessFingerprint({
-      scope: "test_ai",
+      scope:
+        purpose === "todo_title"
+          ? "test_ai_todo_title"
+          : purpose === "followup_reason"
+            ? "test_ai_followup_reason"
+            : "test_ai",
       inboundText: message,
       threadId,
       historyLines,
       styleHints,
+      styleProfile: scopedStyleProfile || globalStyleProfile || null,
+      personality,
       contactFacts,
+      activePersonaPackId: runtimeSettings?.activePersonaPackId || "",
+      activePersonaPackIdsByProfile: runtimeSettings?.activePersonaPackIdsByProfile || {},
+      qualityGateMode: runtimeSettings?.qualityGateMode,
+      qualityGateThreshold: runtimeSettings?.qualityGateThreshold,
       model: runtimeSettings?.aiModelFirstEnabled ? "model_first" : undefined,
       temperature: runtimeSettings?.aiTemperature,
       maxOutputTokens: runtimeSettings?.aiMaxOutputTokens,
@@ -216,6 +239,8 @@ export async function POST(request: Request) {
       qualityChecks: unknown[];
       qualityRewriteApplied: boolean;
       activePersonaPackId: string | null;
+      activeDynamicStylePackIds?: string[];
+      conversationStyleMatrix?: unknown;
       createdAt: number;
       usedThreadContext: boolean;
       threadId: string | null;
@@ -259,6 +284,7 @@ export async function POST(request: Request) {
         replyPolicyInstruction: runtimeSettings?.aiReplyPolicy || "",
         systemInstruction: runtimeSettings?.aiSystemInstruction || "",
         activePersonaPackId: runtimeSettings?.activePersonaPackId || "",
+        activePersonaPackIdsByProfile: runtimeSettings?.activePersonaPackIdsByProfile || {},
         qualityGateMode: runtimeSettings?.qualityGateMode,
         qualityGateThreshold: runtimeSettings?.qualityGateThreshold,
         soulModeEnabled: runtimeSettings?.soulModeEnabled,
@@ -269,6 +295,7 @@ export async function POST(request: Request) {
         delayMaxMs: runtimeSettings?.humanDelayMaxMs,
         typingMinMs: runtimeSettings?.humanTypingMinMs,
         typingMaxMs: runtimeSettings?.humanTypingMaxMs,
+        disableRecentSelfRepeatGuardrail: purpose === "todo_title" || purpose === "followup_reason",
       },
       modelToolContext: {
         threadId,
@@ -391,6 +418,8 @@ export async function POST(request: Request) {
       qualityChecks: aiResult.qualityChecks || [],
       qualityRewriteApplied: aiResult.qualityRewriteApplied || false,
       activePersonaPackId: aiResult.activePersonaPackId || null,
+      activeDynamicStylePackIds: aiResult.activeDynamicStylePackIds || [],
+      conversationStyleMatrix: aiResult.conversationStyleMatrix || null,
       createdAt: Date.now(),
       usedThreadContext: historyLines.length > 0,
       threadId: threadId || null,

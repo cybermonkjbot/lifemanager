@@ -7,12 +7,35 @@ type AiFreshnessCandidateFact = {
 };
 
 type AiFreshnessFingerprintArgs = {
-  scope: "test_ai" | "gateway";
+  scope: "test_ai" | "test_ai_todo_title" | "test_ai_followup_reason" | "gateway";
   inboundText: string;
   threadId?: string;
   historyLines?: string[];
   styleHints?: string[];
+  styleProfile?: {
+    mimicryLevel?: number;
+    commonPhrases?: string[];
+    punctuationStyle?: string[];
+    humorNotes?: string[];
+    spellingNotes?: string[];
+    learnedEmojiAllowlist?: string[];
+    learnedEmojiCategoryHints?: string[];
+  } | null;
+  personality?: {
+    profileSlug?: string;
+    profileName?: string;
+    profileDescription?: string;
+    profilePrompt?: string;
+    intensity?: number;
+    customPrompt?: string;
+    threadPromptProfile?: string;
+    threadPromptProfileSource?: string;
+  };
   contactFacts?: AiFreshnessCandidateFact[];
+  activePersonaPackId?: string;
+  activePersonaPackIdsByProfile?: Record<string, string>;
+  qualityGateMode?: string;
+  qualityGateThreshold?: number;
   model?: string;
   temperature?: number;
   maxOutputTokens?: number;
@@ -89,6 +112,22 @@ function normalizeFacts(facts: AiFreshnessCandidateFact[] | undefined) {
     .filter((fact) => fact.factValue);
 }
 
+function normalizeOptionalNumber(value: number | undefined, precision = 1000) {
+  return value === undefined || !Number.isFinite(value) ? undefined : Math.round(value * precision) / precision;
+}
+
+function normalizeStringRecord(record: Record<string, string> | undefined) {
+  if (!record) {
+    return {};
+  }
+  return Object.fromEntries(
+    Object.entries(record)
+      .map(([key, value]) => [normalizeText(key), normalizeText(value)])
+      .filter(([key, value]) => key && value)
+      .sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
 export function buildAiFreshnessFingerprint(args: AiFreshnessFingerprintArgs) {
   const payload = {
     scope: args.scope,
@@ -96,7 +135,34 @@ export function buildAiFreshnessFingerprint(args: AiFreshnessFingerprintArgs) {
     threadId: args.threadId?.trim() || "",
     historyLines: normalizeLineSet(args.historyLines, 60, 320),
     styleHints: normalizeLineSet(args.styleHints, 30, 220),
+    styleProfile: args.styleProfile
+      ? {
+          mimicryLevel: normalizeOptionalNumber(args.styleProfile.mimicryLevel),
+          commonPhrases: normalizeLineSet(args.styleProfile.commonPhrases, 12, 140),
+          punctuationStyle: normalizeLineSet(args.styleProfile.punctuationStyle, 12, 140),
+          humorNotes: normalizeLineSet(args.styleProfile.humorNotes, 12, 140),
+          spellingNotes: normalizeLineSet(args.styleProfile.spellingNotes, 12, 140),
+          learnedEmojiAllowlist: normalizeLineSet(args.styleProfile.learnedEmojiAllowlist, 20, 24),
+          learnedEmojiCategoryHints: normalizeLineSet(args.styleProfile.learnedEmojiCategoryHints, 20, 80),
+        }
+      : null,
+    personality: args.personality
+      ? {
+          profileSlug: normalizeText(args.personality.profileSlug || ""),
+          profileName: normalizeText(args.personality.profileName || ""),
+          profileDescription: normalizeText(args.personality.profileDescription || "").slice(0, 360),
+          profilePrompt: normalizeText(args.personality.profilePrompt || "").slice(0, 900),
+          intensity: normalizeOptionalNumber(args.personality.intensity),
+          customPrompt: normalizeText(args.personality.customPrompt || "").slice(0, 900),
+          threadPromptProfile: normalizeText(args.personality.threadPromptProfile || "").slice(0, 1200),
+          threadPromptProfileSource: normalizeText(args.personality.threadPromptProfileSource || ""),
+        }
+      : null,
     contactFacts: normalizeFacts(args.contactFacts),
+    activePersonaPackId: normalizeText(args.activePersonaPackId || ""),
+    activePersonaPackIdsByProfile: normalizeStringRecord(args.activePersonaPackIdsByProfile),
+    qualityGateMode: normalizeText(args.qualityGateMode || ""),
+    qualityGateThreshold: normalizeOptionalNumber(args.qualityGateThreshold),
     model: normalizeText(args.model || ""),
     temperature:
       args.temperature === undefined || !Number.isFinite(args.temperature) ? undefined : Math.round(args.temperature * 1000) / 1000,

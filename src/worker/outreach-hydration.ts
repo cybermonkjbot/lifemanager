@@ -158,6 +158,8 @@ export function buildOutreachPromptSeed(args: {
   ignoredBoundaryReopen?: boolean;
   complimentPlayfulScenario?: boolean;
   ghostReopenInstruction?: string;
+  daysSinceMutualCheckIn?: number;
+  checkInRecencyTargetDays?: number;
   memorySummary?: string;
   contactName: string;
 }) {
@@ -216,9 +218,23 @@ export function buildOutreachPromptSeed(args: {
       .join("\n");
   }
 
+  const checkInRecencyTargetDays = Math.max(1, Math.round(args.checkInRecencyTargetDays ?? 7));
+  const daysSinceMutualCheckIn = Number.isFinite(args.daysSinceMutualCheckIn)
+    ? Math.max(0, Math.round(args.daysSinceMutualCheckIn as number))
+    : undefined;
+  const recentMutualCheckIn =
+    daysSinceMutualCheckIn !== undefined && daysSinceMutualCheckIn < checkInRecencyTargetDays;
+  const mutualCheckInGuidance =
+    daysSinceMutualCheckIn === undefined
+      ? `No known mutual check-in on record. Prioritize a warm wellbeing check-in opener.`
+      : recentMutualCheckIn
+        ? `Recent mutual check-in was ${daysSinceMutualCheckIn} day(s) ago. Do not open with a generic "just checking in" line; use light continuity or a fresh topic hook.`
+        : `Last mutual check-in was ${daysSinceMutualCheckIn} day(s) ago (target ${checkInRecencyTargetDays} days). Prioritize a warm wellbeing check-in opener.`;
+
   return [
     "Proactively start a fresh check-in conversation with this contact now.",
     "Use previous chat context so the opener feels natural, specific, and warm.",
+    mutualCheckInGuidance,
     "Keep it to 1-2 short sentences, avoid sounding robotic, and include exactly one gentle question.",
     "Do not sound needy, accusatory, or passive-aggressive.",
     args.ghostReopenInstruction,
@@ -235,6 +251,8 @@ export function buildOutreachFallbackText(args: {
   romancePromptVariant?: number;
   ignoredBoundaryReopen?: boolean;
   complimentPlayfulScenario?: boolean;
+  daysSinceMutualCheckIn?: number;
+  checkInRecencyTargetDays?: number;
   longSilenceGhostReopen: boolean;
   ghostReopenTone: GhostReopenTone;
   ghostSeverity: GhostSeverity;
@@ -260,7 +278,15 @@ export function buildOutreachFallbackText(args: {
     return "You have such a beautiful energy, and I still catch myself smiling when I think of you.";
   }
 
+  const checkInRecencyTargetDays = Math.max(1, Math.round(args.checkInRecencyTargetDays ?? 7));
+  const daysSinceMutualCheckIn = Number.isFinite(args.daysSinceMutualCheckIn)
+    ? Math.max(0, Math.round(args.daysSinceMutualCheckIn as number))
+    : undefined;
+
   if (!args.longSilenceGhostReopen) {
+    if (daysSinceMutualCheckIn !== undefined && daysSinceMutualCheckIn < checkInRecencyTargetDays) {
+      return "Hey, quick one for today: what has been the highlight of your day so far?";
+    }
     return "Hey, just checking in. How is your day going?";
   }
 
