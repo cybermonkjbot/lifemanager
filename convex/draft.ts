@@ -5,6 +5,7 @@ import { action, internalAction, internalQuery, mutation } from "./_generated/se
 import { contextPackValidator, outreachModeValidator, resolveFeedbackPath, resolveOutreachModeWithFallback } from "./lib/aiSmartness";
 import { getConfig } from "./lib/config";
 import { estimateHumanTiming, evaluateGuardrail, looksLikeQuestion } from "./lib/heuristics";
+import { enqueueOutbox } from "./lib/outboxEnqueue";
 
 const refGetGenerationContext = makeFunctionReference<"query">("threads:getGenerationContext");
 const refSystemRecordEvent = makeFunctionReference<"mutation">("system:recordEvent");
@@ -134,7 +135,7 @@ export const saveGenerated = mutation({
     outreachMode: v.optional(outreachModeValidator),
     contextPack: v.optional(contextPackValidator),
     reason: v.optional(v.string()),
-    sendKind: v.optional(v.union(v.literal("text"), v.literal("reaction"), v.literal("sticker"), v.literal("meme"))),
+    sendKind: v.optional(v.union(v.literal("text"), v.literal("reaction"), v.literal("sticker"), v.literal("meme"), v.literal("voice_note"))),
     reactionEmoji: v.optional(v.string()),
     reactionTargetMessageId: v.optional(v.id("messages")),
     mediaAssetId: v.optional(v.id("mediaAssets")),
@@ -170,7 +171,7 @@ export const saveOrReplacePending = mutation({
     outreachMode: v.optional(outreachModeValidator),
     contextPack: v.optional(contextPackValidator),
     reason: v.optional(v.string()),
-    sendKind: v.optional(v.union(v.literal("text"), v.literal("reaction"), v.literal("sticker"), v.literal("meme"))),
+    sendKind: v.optional(v.union(v.literal("text"), v.literal("reaction"), v.literal("sticker"), v.literal("meme"), v.literal("voice_note"))),
     reactionEmoji: v.optional(v.string()),
     reactionTargetMessageId: v.optional(v.id("messages")),
     mediaAssetId: v.optional(v.id("mediaAssets")),
@@ -304,7 +305,7 @@ export const saveOrReplacePending = mutation({
       updatedAt: now,
     });
 
-    const outboxId = await ctx.db.insert("outbox", {
+    const { outboxId } = await enqueueOutbox(ctx, {
       messageProvider,
       threadId: args.threadId,
       draftId,
@@ -317,14 +318,11 @@ export const saveOrReplacePending = mutation({
       mediaAssetId: args.mediaAssetId,
       mediaCaption: args.mediaCaption,
       sendAt: now + args.delayMs,
-      status: "pending",
-      attempts: 0,
-      idempotencyKey: `${draftId}-${now}`,
+      idempotencyKey: `draft:${draftId}:approve`,
       provider: args.provider,
       outreachMode: args.outreachMode,
       contextPack: args.contextPack,
-      createdAt: now,
-      updatedAt: now,
+      now,
     });
 
     await ctx.db.insert("systemEvents", {
@@ -504,7 +502,7 @@ export const approve = mutation({
       updatedAt: now,
     });
 
-    const outboxId = await ctx.db.insert("outbox", {
+    const { outboxId } = await enqueueOutbox(ctx, {
       messageProvider,
       threadId: draft.threadId,
       draftId: draft._id,
@@ -517,14 +515,11 @@ export const approve = mutation({
       mediaAssetId: draft.mediaAssetId,
       mediaCaption: draft.mediaCaption,
       sendAt: nextSendAt,
-      status: "pending",
-      attempts: 0,
-      idempotencyKey: `${draft._id}-${now}`,
+      idempotencyKey: `draft:${draft._id}:approve`,
       provider: draft.provider,
       outreachMode: draft.outreachMode,
       contextPack: draft.contextPack,
-      createdAt: now,
-      updatedAt: now,
+      now,
     });
     await ctx.scheduler
       .runAfter(0, internal.aiFeedback.linkCandidateEvalsToOutbox, {
@@ -755,7 +750,7 @@ export const snooze = mutation({
       return activeOutbox._id;
     }
     const reactionTargetMessage = draft.reactionTargetMessageId ? await ctx.db.get(draft.reactionTargetMessageId) : null;
-    const outboxId = await ctx.db.insert("outbox", {
+    const { outboxId } = await enqueueOutbox(ctx, {
       messageProvider,
       threadId: draft.threadId,
       draftId: draft._id,
@@ -770,14 +765,11 @@ export const snooze = mutation({
       mediaAssetId: draft.mediaAssetId,
       mediaCaption: draft.mediaCaption,
       sendAt,
-      status: "pending",
-      attempts: 0,
-      idempotencyKey: `${draft._id}-snooze-${now}`,
+      idempotencyKey: `draft:${draft._id}:snooze`,
       provider: draft.provider,
       outreachMode: draft.outreachMode,
       contextPack: draft.contextPack,
-      createdAt: now,
-      updatedAt: now,
+      now,
     });
 
     await ctx.scheduler.runAfter(0, internal.backlog.refreshThread, {

@@ -3,6 +3,7 @@ import { internalAction } from "./_generated/server";
 
 const DRAFT_BATCH_SIZE = 40;
 const TODO_BATCH_SIZE = 40;
+const GUARDRAIL_BATCH_SIZE = 80;
 const MAX_BATCHES_PER_RUN = 4;
 
 export const run = internalAction({
@@ -16,9 +17,12 @@ export const run = internalAction({
       const result = (await ctx.runMutation(internal.queue.removeStaleQueueEntries, {
         draftLimit: DRAFT_BATCH_SIZE,
         todoLimit: TODO_BATCH_SIZE,
+        guardrailLimit: GUARDRAIL_BATCH_SIZE,
       })) as {
         staleDrafts?: number;
+        cleanedUnsentDrafts?: number;
         staleTodoCandidates?: number;
+        resolvedGuardrailEvents?: number;
         removed?: number;
       };
 

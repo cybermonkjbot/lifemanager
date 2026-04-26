@@ -12,6 +12,18 @@ export type AiDeterministicMode =
 
 const DEFAULT_AI_DETERMINISTIC_MODES: AiDeterministicMode[] = ["hard_stop", "anti_beggi_beggi", "anti_sales_pitch"];
 const STATUS_BUILDER_MAX_TEXT_POST_RATIO = 0.45;
+const DEFAULT_VOICE_NOTES_NEED_KEYWORDS = [
+  "voice note",
+  "voice",
+  "call",
+  "explain",
+  "walk you through",
+  "hear me out",
+  "quick update",
+  "sorry",
+  "miss you",
+  "love you",
+];
 const ALLOWED_AI_DETERMINISTIC_MODE_SET = new Set<AiDeterministicMode>([
   "hard_stop",
   "anti_beggi_beggi",
@@ -52,6 +64,7 @@ export type AppConfig = {
   aiReplyPolicy: string;
   aiSystemInstruction: string;
   activePersonaPackId: string;
+  activePersonaPackIdsByProfile: Record<string, string>;
   qualityGateMode: QualityGateMode;
   qualityGateThreshold: number;
   humanDelayMinMs: number;
@@ -87,6 +100,10 @@ export type AppConfig = {
   sendRateWindowMinutes: number;
   sendMaxPerThreadInWindow: number;
   sendMaxGlobalInWindow: number;
+  voiceNotesAutoEnabled: boolean;
+  voiceNotesAutoProbability: number;
+  voiceNotesAutoMaxPerThreadPerDay: number;
+  voiceNotesAutoNeedKeywords: string[];
   romanticPartnerJids: string[];
   romanticMorningEnabled: boolean;
   romanticMorningStartHour: number;
@@ -99,6 +116,18 @@ export type AppConfig = {
   outreachMaxContactsPerRun: number;
   outreachContactJids: string[];
   outreachStarterTemplate: string;
+  conversationIntelligenceEnabled: boolean;
+  checkInRecencyTargetDays: number;
+  topicDyingAckStreakThreshold: number;
+  topicLaneMaxActive: number;
+  pivotReplyEnabled: boolean;
+  antiDwellingEnabled: boolean;
+  antiDwellingEndgameCloseCooldownMinutes: number;
+  antiDwellingTopicTurnSoftLimit: number;
+  antiDwellingTopicTurnHardLimit: number;
+  topicLeadPivotEnabled: boolean;
+  topicLeadPivotMinVibeScore: number;
+  topicLeadPivotCooldownMinutes: number;
   statusBuilderEnabled: boolean;
   statusBuilderCadenceHours: number;
   statusBuilderDailyMaxPosts: number;
@@ -149,6 +178,7 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
   aiReplyPolicy: "",
   aiSystemInstruction: "",
   activePersonaPackId: "",
+  activePersonaPackIdsByProfile: {},
   qualityGateMode: "auto_rewrite_once",
   qualityGateThreshold: 0.76,
   humanDelayMinMs: 18_000,
@@ -184,6 +214,10 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
   sendRateWindowMinutes: 60,
   sendMaxPerThreadInWindow: 4,
   sendMaxGlobalInWindow: 40,
+  voiceNotesAutoEnabled: false,
+  voiceNotesAutoProbability: 0.35,
+  voiceNotesAutoMaxPerThreadPerDay: 1,
+  voiceNotesAutoNeedKeywords: DEFAULT_VOICE_NOTES_NEED_KEYWORDS,
   romanticPartnerJids: [],
   romanticMorningEnabled: true,
   romanticMorningStartHour: 6,
@@ -196,6 +230,18 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
   outreachMaxContactsPerRun: 3,
   outreachContactJids: [],
   outreachStarterTemplate: "Hey {{name}}, checking in on you today.",
+  conversationIntelligenceEnabled: true,
+  checkInRecencyTargetDays: 7,
+  topicDyingAckStreakThreshold: 3,
+  topicLaneMaxActive: 4,
+  pivotReplyEnabled: true,
+  antiDwellingEnabled: true,
+  antiDwellingEndgameCloseCooldownMinutes: 45,
+  antiDwellingTopicTurnSoftLimit: 6,
+  antiDwellingTopicTurnHardLimit: 10,
+  topicLeadPivotEnabled: true,
+  topicLeadPivotMinVibeScore: 0.6,
+  topicLeadPivotCooldownMinutes: 180,
   statusBuilderEnabled: true,
   statusBuilderCadenceHours: 2,
   statusBuilderDailyMaxPosts: 10,
@@ -264,6 +310,29 @@ function parseQualityGateMode(value: string | undefined, fallback: QualityGateMo
     return value;
   }
   return fallback;
+}
+
+function parseStringRecord(value: string | undefined, fallback: Record<string, string>) {
+  if (!value) {
+    return fallback;
+  }
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return fallback;
+    }
+    const out: Record<string, string> = {};
+    for (const [key, raw] of Object.entries(parsed)) {
+      const cleanKey = key.trim().toLowerCase();
+      const cleanValue = typeof raw === "string" ? raw.trim() : "";
+      if (cleanKey && cleanValue) {
+        out[cleanKey] = cleanValue;
+      }
+    }
+    return out;
+  } catch {
+    return fallback;
+  }
 }
 
 function parseStatusPostAudienceMode(
@@ -335,6 +404,10 @@ export async function getConfig(ctx: QueryCtx | MutationCtx): Promise<AppConfig>
     aiReplyPolicy: map.get("aiReplyPolicy") ?? DEFAULT_APP_CONFIG.aiReplyPolicy,
     aiSystemInstruction: map.get("aiSystemInstruction") ?? DEFAULT_APP_CONFIG.aiSystemInstruction,
     activePersonaPackId: (map.get("activePersonaPackId") ?? DEFAULT_APP_CONFIG.activePersonaPackId).trim(),
+    activePersonaPackIdsByProfile: parseStringRecord(
+      map.get("activePersonaPackIdsByProfile"),
+      DEFAULT_APP_CONFIG.activePersonaPackIdsByProfile,
+    ),
     qualityGateMode: parseQualityGateMode(map.get("qualityGateMode"), DEFAULT_APP_CONFIG.qualityGateMode),
     qualityGateThreshold: clamp(
       parseNumber(map.get("qualityGateThreshold"), DEFAULT_APP_CONFIG.qualityGateThreshold),
@@ -434,6 +507,25 @@ export async function getConfig(ctx: QueryCtx | MutationCtx): Promise<AppConfig>
     sendMaxGlobalInWindow: Math.round(
       clamp(parseNumber(map.get("sendMaxGlobalInWindow"), DEFAULT_APP_CONFIG.sendMaxGlobalInWindow), 1, 1000),
     ),
+    voiceNotesAutoEnabled: parseBoolean(map.get("voiceNotesAutoEnabled"), DEFAULT_APP_CONFIG.voiceNotesAutoEnabled),
+    voiceNotesAutoProbability: clamp(
+      parseNumber(map.get("voiceNotesAutoProbability"), DEFAULT_APP_CONFIG.voiceNotesAutoProbability),
+      0,
+      1,
+    ),
+    voiceNotesAutoMaxPerThreadPerDay: Math.round(
+      clamp(
+        parseNumber(
+          map.get("voiceNotesAutoMaxPerThreadPerDay"),
+          DEFAULT_APP_CONFIG.voiceNotesAutoMaxPerThreadPerDay,
+        ),
+        1,
+        12,
+      ),
+    ),
+    voiceNotesAutoNeedKeywords: parseList(map.get("voiceNotesAutoNeedKeywords")).length
+      ? parseList(map.get("voiceNotesAutoNeedKeywords"))
+      : DEFAULT_APP_CONFIG.voiceNotesAutoNeedKeywords,
     romanticPartnerJids: parseList(map.get("romanticPartnerJids")).slice(0, 300),
     romanticMorningEnabled: parseBoolean(map.get("romanticMorningEnabled"), DEFAULT_APP_CONFIG.romanticMorningEnabled),
     romanticMorningStartHour: Math.round(
@@ -476,6 +568,62 @@ export async function getConfig(ctx: QueryCtx | MutationCtx): Promise<AppConfig>
     ),
     outreachContactJids: parseList(map.get("outreachContactJids")),
     outreachStarterTemplate: map.get("outreachStarterTemplate") ?? DEFAULT_APP_CONFIG.outreachStarterTemplate,
+    conversationIntelligenceEnabled: parseBoolean(
+      map.get("conversationIntelligenceEnabled"),
+      DEFAULT_APP_CONFIG.conversationIntelligenceEnabled,
+    ),
+    checkInRecencyTargetDays: Math.round(
+      clamp(parseNumber(map.get("checkInRecencyTargetDays"), DEFAULT_APP_CONFIG.checkInRecencyTargetDays), 1, 60),
+    ),
+    topicDyingAckStreakThreshold: Math.round(
+      clamp(
+        parseNumber(map.get("topicDyingAckStreakThreshold"), DEFAULT_APP_CONFIG.topicDyingAckStreakThreshold),
+        1,
+        12,
+      ),
+    ),
+    topicLaneMaxActive: Math.round(
+      clamp(parseNumber(map.get("topicLaneMaxActive"), DEFAULT_APP_CONFIG.topicLaneMaxActive), 1, 12),
+    ),
+    pivotReplyEnabled: parseBoolean(map.get("pivotReplyEnabled"), DEFAULT_APP_CONFIG.pivotReplyEnabled),
+    antiDwellingEnabled: parseBoolean(map.get("antiDwellingEnabled"), DEFAULT_APP_CONFIG.antiDwellingEnabled),
+    antiDwellingEndgameCloseCooldownMinutes: Math.round(
+      clamp(
+        parseNumber(
+          map.get("antiDwellingEndgameCloseCooldownMinutes"),
+          DEFAULT_APP_CONFIG.antiDwellingEndgameCloseCooldownMinutes,
+        ),
+        5,
+        24 * 60,
+      ),
+    ),
+    antiDwellingTopicTurnSoftLimit: Math.round(
+      clamp(
+        parseNumber(map.get("antiDwellingTopicTurnSoftLimit"), DEFAULT_APP_CONFIG.antiDwellingTopicTurnSoftLimit),
+        2,
+        20,
+      ),
+    ),
+    antiDwellingTopicTurnHardLimit: Math.round(
+      clamp(
+        parseNumber(map.get("antiDwellingTopicTurnHardLimit"), DEFAULT_APP_CONFIG.antiDwellingTopicTurnHardLimit),
+        3,
+        30,
+      ),
+    ),
+    topicLeadPivotEnabled: parseBoolean(map.get("topicLeadPivotEnabled"), DEFAULT_APP_CONFIG.topicLeadPivotEnabled),
+    topicLeadPivotMinVibeScore: clamp(
+      parseNumber(map.get("topicLeadPivotMinVibeScore"), DEFAULT_APP_CONFIG.topicLeadPivotMinVibeScore),
+      0,
+      1,
+    ),
+    topicLeadPivotCooldownMinutes: Math.round(
+      clamp(
+        parseNumber(map.get("topicLeadPivotCooldownMinutes"), DEFAULT_APP_CONFIG.topicLeadPivotCooldownMinutes),
+        5,
+        24 * 60,
+      ),
+    ),
     statusBuilderEnabled: parseBoolean(map.get("statusBuilderEnabled"), DEFAULT_APP_CONFIG.statusBuilderEnabled),
     statusBuilderCadenceHours: Math.round(
       clamp(parseNumber(map.get("statusBuilderCadenceHours"), DEFAULT_APP_CONFIG.statusBuilderCadenceHours), 1, 24 * 7),

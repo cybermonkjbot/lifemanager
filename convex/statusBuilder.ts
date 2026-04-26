@@ -2,6 +2,7 @@ import { internalMutation, type MutationCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import { getConfig } from "./lib/config";
 import { classifyThreadKind } from "./lib/threadEligibility";
+import { enqueueOutbox } from "./lib/outboxEnqueue";
 
 const STATUS_JID = "status@broadcast";
 const AI_STATUS_PLACEHOLDER = "__SLM_AI_STATUS__";
@@ -429,7 +430,7 @@ export const run = internalMutation({
       updatedAt: now,
     });
 
-    const outboxId = await ctx.db.insert("outbox", {
+    const { outboxId } = await enqueueOutbox(ctx, {
       messageProvider: "whatsapp",
       threadId: statusThreadId,
       draftId,
@@ -442,12 +443,9 @@ export const run = internalMutation({
       statusFormat,
       statusReviewRequired: requiresReview,
       sendAt: now + 1200,
-      status: "pending",
-      attempts: 0,
-      idempotencyKey: `status-builder-${cadenceBucket}-${statusFormat}`,
+      idempotencyKey: `status-builder:${cadenceBucket}:${statusFormat}`,
       provider: "heuristic",
-      createdAt: now,
-      updatedAt: now,
+      now,
     });
 
     await ctx.db.insert("systemEvents", {

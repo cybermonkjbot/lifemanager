@@ -5,6 +5,7 @@ import { getConfig } from "./lib/config";
 import { classifyThreadKind } from "./lib/threadEligibility";
 import { GOOD_MORNING_OUTREACH_REASON_PREFIX, isConversationStarterReason } from "./lib/outreachModes";
 import { estimateHumanTiming } from "./lib/heuristics";
+import { enqueueOutbox } from "./lib/outboxEnqueue";
 import {
   buildRomancePromptFingerprint,
   isIgnoredMorningPauseActive,
@@ -628,7 +629,7 @@ export const run = internalMutation({
         updatedAt: now,
       });
 
-      const outboxId = await ctx.db.insert("outbox", {
+      const { outboxId } = await enqueueOutbox(ctx, {
         messageProvider,
         threadId,
         draftId,
@@ -636,12 +637,9 @@ export const run = internalMutation({
         sendKind: "text",
         outreachMode: "good_morning",
         sendAt: now + timing.delayMs,
-        status: "pending",
-        attempts: 0,
-        idempotencyKey: `romance-morning-${threadId}-${dayBucket}`,
+        idempotencyKey: `romance-morning:${threadId}:${dayBucket}`,
         provider: "heuristic",
-        createdAt: now,
-        updatedAt: now,
+        now,
       });
 
       if (!romanceState) {

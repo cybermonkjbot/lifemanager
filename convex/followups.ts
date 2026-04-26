@@ -2,6 +2,7 @@ import { v } from "convex/values";
 import type { Doc } from "./_generated/dataModel";
 import { internalMutation, mutation, query } from "./_generated/server";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
+import { enqueueOutbox } from "./lib/outboxEnqueue";
 
 const followupStatusOrAll = v.union(
   v.literal("all"),
@@ -511,19 +512,17 @@ export const promoteDueConfirmed = internalMutation({
         updatedAt: now,
       });
 
-      const outboxId = await ctx.db.insert("outbox", {
+      const { outboxId } = await enqueueOutbox(ctx, {
         messageProvider,
         threadId: followUp.threadId,
         draftId,
         followUpId: followUp._id,
         messageText: followUp.draftText,
+        sendKind: "text",
         sendAt: now + 5_000,
-        status: "pending",
-        attempts: 0,
-        idempotencyKey: `${followUp._id}-${now}`,
+        idempotencyKey: `followup:${followUp._id}`,
         provider: "heuristic",
-        createdAt: now,
-        updatedAt: now,
+        now,
       });
 
       await ctx.db.patch(followUp._id, {

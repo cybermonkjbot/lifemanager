@@ -101,6 +101,7 @@ export default defineSchema({
         v.literal("image"),
         v.literal("video"),
         v.literal("audio"),
+        v.literal("voice_note"),
         v.literal("document"),
       ),
     ),
@@ -115,6 +116,7 @@ export default defineSchema({
     .index("by_thread_messageAt", ["threadId", "messageAt"])
     .index("by_thread_providerMessageId", ["threadId", "providerMessageId"])
     .index("by_thread_whatsappMessageId", ["threadId", "whatsappMessageId"])
+    .index("by_provider_and_providerMessageId", ["provider", "providerMessageId"])
     .index("by_isStatus_and_messageAt", ["isStatus", "messageAt"])
     .index("by_mediaAssetId", ["mediaAssetId"])
     .index("by_provider_and_createdAt", ["provider", "createdAt"])
@@ -137,6 +139,68 @@ export default defineSchema({
     .index("by_message_and_modelVersion", ["messageId", "modelVersion"])
     .index("by_thread_and_updatedAt", ["threadId", "updatedAt"])
     .index("by_thread_and_modelVersion_and_updatedAt", ["threadId", "modelVersion", "updatedAt"]),
+
+  conversationSignals: defineTable({
+    threadId: v.id("threads"),
+    messageId: v.id("messages"),
+    direction: v.union(v.literal("inbound"), v.literal("outbound")),
+    signalType: v.union(
+      v.literal("checkin_prompt"),
+      v.literal("checkin_response"),
+      v.literal("topic_start"),
+      v.literal("topic_continue"),
+      v.literal("topic_close"),
+      v.literal("topic_pivot"),
+    ),
+    topicKey: v.optional(v.string()),
+    confidence: v.number(),
+    excerpt: v.optional(v.string()),
+    messageAt: v.number(),
+    createdAt: v.number(),
+  })
+    .index("by_threadId_and_createdAt", ["threadId", "createdAt"])
+    .index("by_threadId_and_signalType_and_createdAt", ["threadId", "signalType", "createdAt"])
+    .index("by_threadId_and_topicKey_and_createdAt", ["threadId", "topicKey", "createdAt"])
+    .index("by_threadId_and_messageAt", ["threadId", "messageAt"])
+    .index("by_messageId", ["messageId"]),
+
+  threadConversationState: defineTable({
+    threadId: v.id("threads"),
+    lastMutualCheckInAt: v.optional(v.number()),
+    lastOutboundCheckInAt: v.optional(v.number()),
+    lastInboundCheckInAt: v.optional(v.number()),
+    currentPrimaryTopicKey: v.optional(v.string()),
+    topicDyingScore: v.optional(v.number()),
+    nextMove: v.union(v.literal("none"), v.literal("check_in"), v.literal("pivot"), v.literal("close")),
+    conversationEndImminent: v.optional(v.boolean()),
+    topicDwellScore: v.optional(v.number()),
+    lastPivotAt: v.optional(v.number()),
+    lastCloseAt: v.optional(v.number()),
+    lastLeadQuestionAt: v.optional(v.number()),
+    updatedAt: v.number(),
+    createdAt: v.number(),
+  })
+    .index("by_threadId", ["threadId"])
+    .index("by_nextMove_and_updatedAt", ["nextMove", "updatedAt"]),
+
+  threadTopicLanes: defineTable({
+    threadId: v.id("threads"),
+    topicKey: v.string(),
+    topicLabel: v.string(),
+    status: v.union(v.literal("active"), v.literal("cooling"), v.literal("closed")),
+    firstMessageAt: v.number(),
+    lastMessageAt: v.number(),
+    lastInboundAt: v.optional(v.number()),
+    lastOutboundAt: v.optional(v.number()),
+    inboundTurns: v.number(),
+    outboundTurns: v.number(),
+    ackStreak: v.number(),
+    dyingScore: v.number(),
+    updatedAt: v.number(),
+    createdAt: v.number(),
+  })
+    .index("by_threadId_and_topicKey", ["threadId", "topicKey"])
+    .index("by_threadId_and_status_and_lastMessageAt", ["threadId", "status", "lastMessageAt"]),
 
   threadMemory: defineTable({
     threadId: v.id("threads"),
@@ -182,7 +246,7 @@ export default defineSchema({
     sourceMessageId: v.id("messages"),
     toolRunId: v.optional(v.string()),
     text: v.string(),
-    sendKind: v.optional(v.union(v.literal("text"), v.literal("reaction"), v.literal("sticker"), v.literal("meme"))),
+    sendKind: v.optional(v.union(v.literal("text"), v.literal("reaction"), v.literal("sticker"), v.literal("meme"), v.literal("voice_note"))),
     isStatusPost: v.optional(v.boolean()),
     statusAudienceJids: v.optional(v.array(v.string())),
     statusTrendTheme: v.optional(v.string()),
@@ -222,7 +286,7 @@ export default defineSchema({
     toolRunId: v.optional(v.string()),
     followUpId: v.optional(v.id("followUps")),
     messageText: v.string(),
-    sendKind: v.optional(v.union(v.literal("text"), v.literal("reaction"), v.literal("sticker"), v.literal("meme"))),
+    sendKind: v.optional(v.union(v.literal("text"), v.literal("reaction"), v.literal("sticker"), v.literal("meme"), v.literal("voice_note"))),
     isStatusPost: v.optional(v.boolean()),
     statusAudienceJids: v.optional(v.array(v.string())),
     statusTrendTheme: v.optional(v.string()),
@@ -245,6 +309,8 @@ export default defineSchema({
     ),
     workerId: v.optional(v.string()),
     leaseExpiresAt: v.optional(v.number()),
+    leaseRecoveryCount: v.optional(v.number()),
+    lastLeaseRecoveredAt: v.optional(v.number()),
     attempts: v.number(),
     idempotencyKey: v.string(),
     provider: v.union(v.literal("azure"), v.literal("codex"), v.literal("heuristic")),
@@ -261,7 +327,18 @@ export default defineSchema({
     .index("by_thread_and_status", ["threadId", "status"])
     .index("by_worker", ["workerId"])
     .index("by_draft", ["draftId"])
+    .index("by_idempotencyKey", ["idempotencyKey"])
     .index("by_mediaAssetId", ["mediaAssetId"]),
+
+  inboundDedupeKeys: defineTable({
+    provider: v.union(v.literal("whatsapp"), v.literal("instagram")),
+    providerMessageId: v.string(),
+    threadId: v.id("threads"),
+    messageId: v.id("messages"),
+    createdAt: v.number(),
+  })
+    .index("by_provider_and_providerMessageId", ["provider", "providerMessageId"])
+    .index("by_threadId_and_createdAt", ["threadId", "createdAt"]),
 
   aiFeedbackSignals: defineTable({
     threadId: v.id("threads"),
@@ -525,7 +602,9 @@ export default defineSchema({
     costCurrency: v.optional(v.literal("USD")),
     pricingVersion: v.optional(v.string()),
     createdAt: v.number(),
-  }).index("by_createdAt", ["createdAt"]),
+  })
+    .index("by_createdAt", ["createdAt"])
+    .index("by_provider_and_createdAt", ["provider", "createdAt"]),
 
   toolRuns: defineTable({
     threadId: v.optional(v.id("threads")),

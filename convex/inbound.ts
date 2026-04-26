@@ -1,9 +1,10 @@
 import { v } from "convex/values";
+import { makeFunctionReference } from "convex/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { mutation } from "./_generated/server";
-import { detectFutureCommitment, hasRecentFollowupDuplicate } from "./lib/commitments";
+import { detectFutureCommitment, hasRecentFollowupDuplicate, judgeActualFollowupCandidate } from "./lib/commitments";
 import { POSITIVE_ENGAGEMENT_WINDOW_MS, resolveFeedbackPath, resolveOutreachModeWithFallback } from "./lib/aiSmartness";
 import { getConfig } from "./lib/config";
 import {
@@ -26,6 +27,9 @@ const GHOST_ACTIVITY_MIN_OUTBOUND_MESSAGES = 3;
 const GHOST_ACTIVITY_MIN_TURNS = 4;
 const GHOST_TRIGGER_PROBABILITY = 0.2;
 const IGNORE_CONTACT_FALLBACK_SCAN_LIMIT = 1000;
+const refConversationIntelligenceIngestMessageSignals = makeFunctionReference<"mutation">(
+  "conversationIntelligence:ingestMessageSignals",
+);
 type IngestMode = "live" | "history_sync" | "history_fetch";
 type InboundMessageType = "text" | "reaction" | "sticker" | "meme" | "image" | "video" | "audio" | "document";
 type MessageProvider = "whatsapp" | "instagram";
@@ -60,6 +64,13 @@ function normalizeTimestampMs(raw: number | undefined, fallbackMs: number) {
 
 function normalizeProvider(provider?: MessageProvider): MessageProvider {
   return provider === "instagram" ? "instagram" : "whatsapp";
+}
+
+function clamp01(value: number) {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.max(0, Math.min(value, 1));
 }
 
 export function extractAliasesFromText(text: string) {
@@ -420,6 +431,37 @@ export const ingest = mutation({
 
     const effectiveMessageId = args.providerMessageId || args.whatsappMessageId;
     if (effectiveMessageId) {
+      const crossThreadExistingKey = await ctx.db
+        .query("inboundDedupeKeys")
+        .withIndex("by_provider_and_providerMessageId", (q) =>
+          q.eq("provider", messageProvider).eq("providerMessageId", effectiveMessageId),
+        )
+        .first();
+      if (crossThreadExistingKey) {
+        const existingMessage = await ctx.db.get(crossThreadExistingKey.messageId);
+        if (existingMessage) {
+          await ctx.db.insert("systemEvents", {
+            source: "worker",
+            eventType: "inbound.duplicate",
+            threadId: thread._id,
+            detail: (normalizedText || args.reactionEmoji || "[Non-text inbound]").slice(0, 300),
+            createdAt: now,
+          });
+
+          return {
+            threadId: thread._id,
+            messageId: existingMessage._id,
+            ignored: true,
+            duplicate: true,
+            stale: false,
+            promiseDetected: false,
+            todoDetected: false,
+            nightPausedUntil,
+            callReplyBarrierAt,
+            callReplyBarrierBlocked,
+          };
+        }
+      }
       const existing = await ctx.db
         .query("messages")
         .withIndex("by_thread_providerMessageId", (q) =>
@@ -596,6 +638,24 @@ export const ingest = mutation({
       messageAt,
       createdAt: now,
     });
+    if (effectiveMessageId) {
+      await ctx.db.insert("inboundDedupeKeys", {
+        provider: messageProvider,
+        providerMessageId: effectiveMessageId,
+        threadId: thread._id,
+        messageId,
+        createdAt: now,
+      });
+    }
+
+    if (!isHistoryIngest) {
+      await ctx.scheduler
+        .runAfter(0, refConversationIntelligenceIngestMessageSignals, {
+          threadId: thread._id,
+          messageId,
+        })
+        .catch(() => undefined);
+    }
 
     if (!isStatusMessage) {
       await resetRomanceMorningNoReplyState({
@@ -702,34 +762,50 @@ export const ingest = mutation({
             createdAt: now,
           });
         } else {
-          promiseDetected = true;
-          await ctx.db.insert("followUps", {
-            threadId: thread._id,
-            sourceMessageId: messageId,
-            reason: commitment.candidate.reason,
-            draftText:
-              commitment.candidate.kind === "request"
-                ? "Checking back on your request from earlier."
-                : commitment.candidate.kind === "plan"
-                  ? "Following up on the plan we discussed."
-                  : "Following up on what I promised earlier.",
-            dueAt: commitment.candidate.dueAt,
-            kind: commitment.candidate.kind,
-            direction: commitment.candidate.direction,
-            confidence: commitment.candidate.confidence,
-            normalizedKey: commitment.candidate.normalizedKey,
-            sourceSnippet: commitment.candidate.sourceSnippet,
-            status: "suggested",
-            createdAt: now,
-            updatedAt: now,
+          const followupJudge = judgeActualFollowupCandidate({
+            text: normalizedText,
+            candidate: commitment.candidate,
+            now,
           });
-          await ctx.db.insert("systemEvents", {
-            source: "worker",
-            eventType: "followup.detected",
-            threadId: thread._id,
-            detail: `${commitment.candidate.reason} [${Math.round(commitment.candidate.confidence * 100)}%]`,
-            createdAt: now,
-          });
+          if (followupJudge.decision === "reject") {
+            await ctx.db.insert("systemEvents", {
+              source: "worker",
+              eventType: "followup.detected.judge_rejected",
+              threadId: thread._id,
+              detail: `${followupJudge.reasonCode} · ${commitment.candidate.reason}`.slice(0, 240),
+              createdAt: now,
+            });
+          } else {
+            const judgedConfidence = clamp01(commitment.candidate.confidence * followupJudge.confidenceScale);
+            promiseDetected = true;
+            await ctx.db.insert("followUps", {
+              threadId: thread._id,
+              sourceMessageId: messageId,
+              reason: commitment.candidate.reason,
+              draftText:
+                commitment.candidate.kind === "request"
+                  ? "Checking back on your request from earlier."
+                  : commitment.candidate.kind === "plan"
+                    ? "Following up on the plan we discussed."
+                    : "Following up on what I promised earlier.",
+              dueAt: commitment.candidate.dueAt,
+              kind: commitment.candidate.kind,
+              direction: commitment.candidate.direction,
+              confidence: judgedConfidence,
+              normalizedKey: commitment.candidate.normalizedKey,
+              sourceSnippet: commitment.candidate.sourceSnippet,
+              status: "suggested",
+              createdAt: now,
+              updatedAt: now,
+            });
+            await ctx.db.insert("systemEvents", {
+              source: "worker",
+              eventType: "followup.detected",
+              threadId: thread._id,
+              detail: `${commitment.candidate.reason} [${Math.round(judgedConfidence * 100)}%]`,
+              createdAt: now,
+            });
+          }
         }
       } else if (commitment.outcome === "non_actionable") {
         await ctx.db.insert("systemEvents", {
@@ -1012,6 +1088,23 @@ export const ingestHistorical = mutation({
 
     const effectiveMessageId = args.providerMessageId || args.whatsappMessageId;
     if (effectiveMessageId) {
+      const crossThreadExistingKey = await ctx.db
+        .query("inboundDedupeKeys")
+        .withIndex("by_provider_and_providerMessageId", (q) =>
+          q.eq("provider", messageProvider).eq("providerMessageId", effectiveMessageId),
+        )
+        .first();
+      if (crossThreadExistingKey) {
+        const existingMessage = await ctx.db.get(crossThreadExistingKey.messageId);
+        if (existingMessage) {
+          return {
+            threadId: thread._id,
+            messageId: existingMessage._id,
+            duplicate: true,
+            ingestMode: args.ingestMode,
+          };
+        }
+      }
       const existing = await ctx.db
         .query("messages")
         .withIndex("by_thread_providerMessageId", (q) =>
@@ -1046,6 +1139,15 @@ export const ingestHistorical = mutation({
       messageAt,
       createdAt: now,
     });
+    if (args.direction === "inbound" && effectiveMessageId) {
+      await ctx.db.insert("inboundDedupeKeys", {
+        provider: messageProvider,
+        providerMessageId: effectiveMessageId,
+        threadId: thread._id,
+        messageId,
+        createdAt: now,
+      });
+    }
 
     if (args.direction === "inbound" && !isStatusMessage) {
       await resetRomanceMorningNoReplyState({

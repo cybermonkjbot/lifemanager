@@ -21,6 +21,9 @@ export const convexRefs = {
   contextWindowDetection: makeFunctionReference<"query">("contextTools:contextWindowDetection"),
   contextWindowCleaning: makeFunctionReference<"query">("contextTools:contextWindowCleaning"),
   contextGetThreadOldestMessageForFetch: makeFunctionReference<"query">("contextTools:getThreadOldestMessageForFetch"),
+  conversationIntelligenceGetThreadState: makeFunctionReference<"query">("conversationIntelligence:getThreadState"),
+  conversationIntelligenceGetReplyGuidance: makeFunctionReference<"query">("conversationIntelligence:getReplyGuidance"),
+  conversationIntelligenceRecordReplyGuidance: makeFunctionReference<"mutation">("conversationIntelligence:recordReplyGuidance"),
   chatMemorySearch: makeFunctionReference<"query">("chatTools:memorySearch"),
   chatConversationRecallQuery: makeFunctionReference<"query">("chatTools:conversationRecallQuery"),
   chatGetThreadStyleProfile: makeFunctionReference<"query">("chatTools:getThreadStyleProfile"),
@@ -91,6 +94,7 @@ export const convexRefs = {
   romanceMorningGetThreadState: makeFunctionReference<"query">("romanceProtocol:getThreadState"),
   romanceMorningRecordHydration: makeFunctionReference<"mutation">("romanceProtocol:recordHydration"),
   relationshipStateGetThreadState: makeFunctionReference<"query">("relationshipState:getThreadState"),
+  relationshipStateListByPriorityTier: makeFunctionReference<"query">("relationshipState:listByPriorityTier"),
   relationshipStateUpsertFromSignals: makeFunctionReference<"mutation">("relationshipState:upsertFromSignals"),
 
   mediaGenerateUploadUrl: makeFunctionReference<"mutation">("media:generateUploadUrl"),

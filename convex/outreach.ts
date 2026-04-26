@@ -2,6 +2,7 @@ import { internalMutation, mutation, type MutationCtx } from "./_generated/serve
 import type { Id } from "./_generated/dataModel";
 import { getConfig } from "./lib/config";
 import { estimateHumanTiming } from "./lib/heuristics";
+import { enqueueOutbox } from "./lib/outboxEnqueue";
 import { classifyThreadKind, directIgnoreContactKey, directIgnoreRuleCandidates } from "./lib/threadEligibility";
 import {
   COMPLIMENT_OUTREACH_REASON_PREFIX,
@@ -15,6 +16,7 @@ const AI_OUTREACH_PLACEHOLDER = "__SLM_AI_OUTREACH__";
 const COMPLIMENT_COOLDOWN_MS = 4 * 24 * 60 * 60 * 1000;
 const COMPLIMENT_SELECTION_THRESHOLD = 0.24;
 const IGNORE_CONTACT_FALLBACK_SCAN_LIMIT = 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 const OUTREACH_ICEBREAKERS = [
   "How is your day going?",
@@ -88,6 +90,34 @@ function stableHash(seed: string) {
     hash = (hash * 31 + seed.charCodeAt(index)) >>> 0;
   }
   return hash;
+}
+
+type OutreachPriorityCandidate = {
+  jid: string;
+  lastActivityAt: number;
+  lastMutualCheckInAt?: number;
+  mutualCheckInDue: boolean;
+};
+
+export function compareOutreachPriority(args: {
+  left: OutreachPriorityCandidate;
+  right: OutreachPriorityCandidate;
+}) {
+  if (args.left.mutualCheckInDue !== args.right.mutualCheckInDue) {
+    return args.left.mutualCheckInDue ? -1 : 1;
+  }
+
+  const leftMutualAt = args.left.lastMutualCheckInAt || 0;
+  const rightMutualAt = args.right.lastMutualCheckInAt || 0;
+  if (leftMutualAt !== rightMutualAt) {
+    return leftMutualAt - rightMutualAt;
+  }
+
+  if (args.left.lastActivityAt !== args.right.lastActivityAt) {
+    return args.left.lastActivityAt - args.right.lastActivityAt;
+  }
+
+  return args.left.jid.localeCompare(args.right.jid);
 }
 
 function extractDisplayName(threadTitle: string | undefined, jid: string) {
@@ -170,6 +200,7 @@ async function runOutreachBatch(ctx: MutationCtx) {
     const cadenceMs = config.outreachCadenceHours * 60 * 60 * 1000;
     const cadenceBucket = Math.floor(now / cadenceMs);
     const maxToQueue = Math.min(config.outreachMaxContactsPerRun, configuredContacts.length);
+    const checkInRecencyTargetMs = Math.max(1, config.checkInRecencyTargetDays) * DAY_MS;
 
     const eligible: Array<{
       threadId: Id<"threads">;
@@ -178,6 +209,8 @@ async function runOutreachBatch(ctx: MutationCtx) {
       name: string;
       sourceMessageId: Id<"messages">;
       lastActivityAt: number;
+      lastMutualCheckInAt?: number;
+      mutualCheckInDue: boolean;
       outreachMode: "proactive" | "compliment";
       seedText: string;
     }> = [];
@@ -279,6 +312,15 @@ async function runOutreachBatch(ctx: MutationCtx) {
       if (lastActivityAt + cadenceMs > now) {
         continue;
       }
+      const conversationState = await ctx.db
+        .query("threadConversationState")
+        .withIndex("by_threadId", (q) => q.eq("threadId", thread._id))
+        .first();
+      const lastMutualCheckInAt =
+        Number.isFinite(conversationState?.lastMutualCheckInAt) && (conversationState?.lastMutualCheckInAt || 0) > 0
+          ? Number(conversationState?.lastMutualCheckInAt)
+          : undefined;
+      const mutualCheckInDue = !lastMutualCheckInAt || now - lastMutualCheckInAt >= checkInRecencyTargetMs;
 
       const isRomantic = romanticJids.has(jid.trim().toLowerCase());
       const hasRecentCompliment = hasRecentComplimentDraft({
@@ -307,12 +349,29 @@ async function runOutreachBatch(ctx: MutationCtx) {
         name: extractDisplayName(thread.title, jid),
         sourceMessageId: latestMessage._id,
         lastActivityAt,
+        lastMutualCheckInAt,
+        mutualCheckInDue,
         outreachMode: complimentMode ? "compliment" : "proactive",
         seedText: complimentMode ? complimentSeed : proactiveText,
       });
     }
 
-    eligible.sort((a, b) => a.lastActivityAt - b.lastActivityAt);
+    eligible.sort((a, b) =>
+      compareOutreachPriority({
+        left: {
+          jid: a.jid,
+          lastActivityAt: a.lastActivityAt,
+          lastMutualCheckInAt: a.lastMutualCheckInAt,
+          mutualCheckInDue: a.mutualCheckInDue,
+        },
+        right: {
+          jid: b.jid,
+          lastActivityAt: b.lastActivityAt,
+          lastMutualCheckInAt: b.lastMutualCheckInAt,
+          mutualCheckInDue: b.mutualCheckInDue,
+        },
+      }),
+    );
     const targets = eligible.slice(0, maxToQueue);
 
     let queued = 0;
@@ -339,7 +398,7 @@ async function runOutreachBatch(ctx: MutationCtx) {
         updatedAt: now,
       });
 
-      const outboxId = await ctx.db.insert("outbox", {
+      const { outboxId } = await enqueueOutbox(ctx, {
         messageProvider: target.messageProvider,
         threadId: target.threadId,
         draftId,
@@ -347,12 +406,9 @@ async function runOutreachBatch(ctx: MutationCtx) {
         sendKind: "text",
         outreachMode: target.outreachMode,
         sendAt: now + timing.delayMs,
-        status: "pending",
-        attempts: 0,
-        idempotencyKey: `outreach-${target.threadId}-${cadenceBucket}-${target.outreachMode}`,
+        idempotencyKey: `outreach:${target.threadId}:${cadenceBucket}:${target.outreachMode}`,
         provider: "heuristic",
-        createdAt: now,
-        updatedAt: now,
+        now,
       });
 
       await ctx.db.insert("systemEvents", {
@@ -360,7 +416,7 @@ async function runOutreachBatch(ctx: MutationCtx) {
         eventType: "outreach.queued",
         threadId: target.threadId,
         outboxId,
-        detail: `${target.outreachMode}: ${text.slice(0, 220)}`,
+        detail: `${target.outreachMode}: ${text.slice(0, 220)} [mutual_checkin=${target.lastMutualCheckInAt || "none"} due=${target.mutualCheckInDue ? "yes" : "no"}]`,
         createdAt: now,
       });
 
@@ -368,10 +424,11 @@ async function runOutreachBatch(ctx: MutationCtx) {
     }
 
     if (queued > 0) {
+      const dueCount = targets.filter((target) => target.mutualCheckInDue).length;
       await ctx.db.insert("systemEvents", {
         source: "convex",
         eventType: "outreach.batch",
-        detail: `Queued ${queued} outreach message(s).`,
+        detail: `Queued ${queued} outreach message(s). mutual_checkin_due=${dueCount}/${targets.length}.`,
         createdAt: now,
       });
     }

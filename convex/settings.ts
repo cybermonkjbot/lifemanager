@@ -246,6 +246,7 @@ export const save = mutation({
     aiReplyPolicy: v.optional(v.string()),
     aiSystemInstruction: v.optional(v.string()),
     activePersonaPackId: v.optional(v.string()),
+    activePersonaPackIdsByProfile: v.optional(v.record(v.string(), v.string())),
     qualityGateMode: v.optional(v.union(v.literal("auto_rewrite_once"), v.literal("manual_review"), v.literal("log_only"))),
     qualityGateThreshold: v.optional(v.number()),
     humanDelayMinMs: v.number(),
@@ -281,6 +282,10 @@ export const save = mutation({
     sendRateWindowMinutes: v.optional(v.number()),
     sendMaxPerThreadInWindow: v.optional(v.number()),
     sendMaxGlobalInWindow: v.optional(v.number()),
+    voiceNotesAutoEnabled: v.optional(v.boolean()),
+    voiceNotesAutoProbability: v.optional(v.number()),
+    voiceNotesAutoMaxPerThreadPerDay: v.optional(v.number()),
+    voiceNotesAutoNeedKeywords: v.optional(v.array(v.string())),
     romanticPartnerJids: v.optional(v.array(v.string())),
     romanticMorningEnabled: v.optional(v.boolean()),
     romanticMorningStartHour: v.optional(v.number()),
@@ -293,6 +298,18 @@ export const save = mutation({
     outreachMaxContactsPerRun: v.number(),
     outreachContactJids: v.array(v.string()),
     outreachStarterTemplate: v.optional(v.string()),
+    conversationIntelligenceEnabled: v.optional(v.boolean()),
+    checkInRecencyTargetDays: v.optional(v.number()),
+    topicDyingAckStreakThreshold: v.optional(v.number()),
+    topicLaneMaxActive: v.optional(v.number()),
+    pivotReplyEnabled: v.optional(v.boolean()),
+    antiDwellingEnabled: v.optional(v.boolean()),
+    antiDwellingEndgameCloseCooldownMinutes: v.optional(v.number()),
+    antiDwellingTopicTurnSoftLimit: v.optional(v.number()),
+    antiDwellingTopicTurnHardLimit: v.optional(v.number()),
+    topicLeadPivotEnabled: v.optional(v.boolean()),
+    topicLeadPivotMinVibeScore: v.optional(v.number()),
+    topicLeadPivotCooldownMinutes: v.optional(v.number()),
     statusBuilderEnabled: v.boolean(),
     statusBuilderCadenceHours: v.number(),
     statusBuilderDailyMaxPosts: v.number(),
@@ -331,6 +348,9 @@ export const save = mutation({
       40,
     );
     const funnyStatusEmojis = [...new Set((args.funnyStatusEmojis || []).map((item) => item.trim()).filter(Boolean))].slice(0, 40);
+    const voiceNotesAutoNeedKeywords = [
+      ...new Set((args.voiceNotesAutoNeedKeywords || []).map((item) => item.trim().toLowerCase()).filter(Boolean)),
+    ].slice(0, 40);
     const aiDeterministicModes = [...new Set((args.aiDeterministicModes || []).map((item) => item.trim().toLowerCase()).filter(Boolean))]
       .filter((item): item is AiDeterministicMode => isAiDeterministicMode(item))
       .slice(0, 8);
@@ -364,6 +384,11 @@ export const save = mutation({
       aiReplyPolicy: args.aiReplyPolicy?.trim() || "",
       aiSystemInstruction: args.aiSystemInstruction?.trim() || "",
       activePersonaPackId: args.activePersonaPackId?.trim() || "",
+      activePersonaPackIdsByProfile: Object.fromEntries(
+        Object.entries(args.activePersonaPackIdsByProfile || {})
+          .map(([key, value]) => [key.trim().toLowerCase(), value.trim()])
+          .filter(([key, value]) => key && value),
+      ),
       qualityGateMode: args.qualityGateMode || DEFAULT_APP_CONFIG.qualityGateMode,
       qualityGateThreshold: clamp(args.qualityGateThreshold ?? DEFAULT_APP_CONFIG.qualityGateThreshold, 0.4, 0.95),
       humanDelayMinMs: clampInt(args.humanDelayMinMs, 500, 180_000),
@@ -441,6 +466,20 @@ export const save = mutation({
         100,
       ),
       sendMaxGlobalInWindow: clampInt(args.sendMaxGlobalInWindow ?? DEFAULT_APP_CONFIG.sendMaxGlobalInWindow, 1, 1000),
+      voiceNotesAutoEnabled: args.voiceNotesAutoEnabled ?? DEFAULT_APP_CONFIG.voiceNotesAutoEnabled,
+      voiceNotesAutoProbability: clamp(
+        args.voiceNotesAutoProbability ?? DEFAULT_APP_CONFIG.voiceNotesAutoProbability,
+        0,
+        1,
+      ),
+      voiceNotesAutoMaxPerThreadPerDay: clampInt(
+        args.voiceNotesAutoMaxPerThreadPerDay ?? DEFAULT_APP_CONFIG.voiceNotesAutoMaxPerThreadPerDay,
+        1,
+        12,
+      ),
+      voiceNotesAutoNeedKeywords: voiceNotesAutoNeedKeywords.length
+        ? voiceNotesAutoNeedKeywords
+        : DEFAULT_APP_CONFIG.voiceNotesAutoNeedKeywords,
       romanticPartnerJids,
       romanticMorningEnabled: args.romanticMorningEnabled ?? DEFAULT_APP_CONFIG.romanticMorningEnabled,
       romanticMorningStartHour: clampInt(
@@ -473,6 +512,47 @@ export const save = mutation({
       outreachMaxContactsPerRun: clampInt(args.outreachMaxContactsPerRun, 1, 25),
       outreachContactJids,
       outreachStarterTemplate: args.outreachStarterTemplate?.trim() || DEFAULT_APP_CONFIG.outreachStarterTemplate,
+      conversationIntelligenceEnabled:
+        args.conversationIntelligenceEnabled ?? DEFAULT_APP_CONFIG.conversationIntelligenceEnabled,
+      checkInRecencyTargetDays: clampInt(
+        args.checkInRecencyTargetDays ?? DEFAULT_APP_CONFIG.checkInRecencyTargetDays,
+        1,
+        60,
+      ),
+      topicDyingAckStreakThreshold: clampInt(
+        args.topicDyingAckStreakThreshold ?? DEFAULT_APP_CONFIG.topicDyingAckStreakThreshold,
+        1,
+        12,
+      ),
+      topicLaneMaxActive: clampInt(args.topicLaneMaxActive ?? DEFAULT_APP_CONFIG.topicLaneMaxActive, 1, 12),
+      pivotReplyEnabled: args.pivotReplyEnabled ?? DEFAULT_APP_CONFIG.pivotReplyEnabled,
+      antiDwellingEnabled: args.antiDwellingEnabled ?? DEFAULT_APP_CONFIG.antiDwellingEnabled,
+      antiDwellingEndgameCloseCooldownMinutes: clampInt(
+        args.antiDwellingEndgameCloseCooldownMinutes ?? DEFAULT_APP_CONFIG.antiDwellingEndgameCloseCooldownMinutes,
+        5,
+        24 * 60,
+      ),
+      antiDwellingTopicTurnSoftLimit: clampInt(
+        args.antiDwellingTopicTurnSoftLimit ?? DEFAULT_APP_CONFIG.antiDwellingTopicTurnSoftLimit,
+        2,
+        20,
+      ),
+      antiDwellingTopicTurnHardLimit: clampInt(
+        args.antiDwellingTopicTurnHardLimit ?? DEFAULT_APP_CONFIG.antiDwellingTopicTurnHardLimit,
+        3,
+        30,
+      ),
+      topicLeadPivotEnabled: args.topicLeadPivotEnabled ?? DEFAULT_APP_CONFIG.topicLeadPivotEnabled,
+      topicLeadPivotMinVibeScore: clamp(
+        args.topicLeadPivotMinVibeScore ?? DEFAULT_APP_CONFIG.topicLeadPivotMinVibeScore,
+        0,
+        1,
+      ),
+      topicLeadPivotCooldownMinutes: clampInt(
+        args.topicLeadPivotCooldownMinutes ?? DEFAULT_APP_CONFIG.topicLeadPivotCooldownMinutes,
+        5,
+        24 * 60,
+      ),
       statusBuilderEnabled: args.statusBuilderEnabled,
       statusBuilderCadenceHours: clampInt(args.statusBuilderCadenceHours, 1, 24 * 7),
       statusBuilderDailyMaxPosts: clampInt(args.statusBuilderDailyMaxPosts, 1, 24),
@@ -589,6 +669,7 @@ export const save = mutation({
     await setConfigValue(ctx, "aiReplyPolicy", normalized.aiReplyPolicy);
     await setConfigValue(ctx, "aiSystemInstruction", normalized.aiSystemInstruction);
     await setConfigValue(ctx, "activePersonaPackId", normalized.activePersonaPackId);
+    await setConfigValue(ctx, "activePersonaPackIdsByProfile", JSON.stringify(normalized.activePersonaPackIdsByProfile));
     await setConfigValue(ctx, "qualityGateMode", normalized.qualityGateMode);
     await setConfigValue(ctx, "qualityGateThreshold", String(normalized.qualityGateThreshold));
     await setConfigValue(ctx, "humanDelayMinMs", String(normalized.humanDelayMinMs));
@@ -624,6 +705,14 @@ export const save = mutation({
     await setConfigValue(ctx, "sendRateWindowMinutes", String(normalized.sendRateWindowMinutes));
     await setConfigValue(ctx, "sendMaxPerThreadInWindow", String(normalized.sendMaxPerThreadInWindow));
     await setConfigValue(ctx, "sendMaxGlobalInWindow", String(normalized.sendMaxGlobalInWindow));
+    await setConfigValue(ctx, "voiceNotesAutoEnabled", normalized.voiceNotesAutoEnabled ? "true" : "false");
+    await setConfigValue(ctx, "voiceNotesAutoProbability", String(normalized.voiceNotesAutoProbability));
+    await setConfigValue(
+      ctx,
+      "voiceNotesAutoMaxPerThreadPerDay",
+      String(normalized.voiceNotesAutoMaxPerThreadPerDay),
+    );
+    await setConfigValue(ctx, "voiceNotesAutoNeedKeywords", normalized.voiceNotesAutoNeedKeywords.join("\n"));
     await setConfigValue(ctx, "romanticPartnerJids", normalized.romanticPartnerJids.join("\n"));
     await setConfigValue(ctx, "romanticMorningEnabled", normalized.romanticMorningEnabled ? "true" : "false");
     await setConfigValue(ctx, "romanticMorningStartHour", String(normalized.romanticMorningStartHour));
@@ -644,6 +733,26 @@ export const save = mutation({
     await setConfigValue(ctx, "outreachMaxContactsPerRun", String(normalized.outreachMaxContactsPerRun));
     await setConfigValue(ctx, "outreachContactJids", normalized.outreachContactJids.join("\n"));
     await setConfigValue(ctx, "outreachStarterTemplate", normalized.outreachStarterTemplate);
+    await setConfigValue(
+      ctx,
+      "conversationIntelligenceEnabled",
+      normalized.conversationIntelligenceEnabled ? "true" : "false",
+    );
+    await setConfigValue(ctx, "checkInRecencyTargetDays", String(normalized.checkInRecencyTargetDays));
+    await setConfigValue(ctx, "topicDyingAckStreakThreshold", String(normalized.topicDyingAckStreakThreshold));
+    await setConfigValue(ctx, "topicLaneMaxActive", String(normalized.topicLaneMaxActive));
+    await setConfigValue(ctx, "pivotReplyEnabled", normalized.pivotReplyEnabled ? "true" : "false");
+    await setConfigValue(ctx, "antiDwellingEnabled", normalized.antiDwellingEnabled ? "true" : "false");
+    await setConfigValue(
+      ctx,
+      "antiDwellingEndgameCloseCooldownMinutes",
+      String(normalized.antiDwellingEndgameCloseCooldownMinutes),
+    );
+    await setConfigValue(ctx, "antiDwellingTopicTurnSoftLimit", String(normalized.antiDwellingTopicTurnSoftLimit));
+    await setConfigValue(ctx, "antiDwellingTopicTurnHardLimit", String(normalized.antiDwellingTopicTurnHardLimit));
+    await setConfigValue(ctx, "topicLeadPivotEnabled", normalized.topicLeadPivotEnabled ? "true" : "false");
+    await setConfigValue(ctx, "topicLeadPivotMinVibeScore", String(normalized.topicLeadPivotMinVibeScore));
+    await setConfigValue(ctx, "topicLeadPivotCooldownMinutes", String(normalized.topicLeadPivotCooldownMinutes));
     await setConfigValue(ctx, "statusBuilderEnabled", normalized.statusBuilderEnabled ? "true" : "false");
     await setConfigValue(ctx, "statusBuilderCadenceHours", String(normalized.statusBuilderCadenceHours));
     await setConfigValue(ctx, "statusBuilderDailyMaxPosts", String(normalized.statusBuilderDailyMaxPosts));

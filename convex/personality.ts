@@ -73,6 +73,38 @@ const DEFAULT_PERSONALITY_PROFILES: DefaultPersonalityProfile[] = [
       "Write in the account owner's professional lingua: concise, respectful, and action-oriented. Keep wording human and direct, mirror the thread's established professional phrasing, and end with clear ownership or next steps when needed.",
     defaultIntensity: 0.64,
   },
+  {
+    slug: "family",
+    name: "Family",
+    description: "Warm, respectful, and grounded for family conversations.",
+    prompt:
+      "Write with family-appropriate warmth and respect in the account owner's natural voice. Keep care practical, avoid corporate phrasing, and match the closeness of the actual thread.",
+    defaultIntensity: 0.7,
+  },
+  {
+    slug: "community_group",
+    name: "Community / Group",
+    description: "Inclusive, concise, and readable for group or community chats.",
+    prompt:
+      "Write for a group audience: inclusive, concise, and easy to scan. Avoid one-to-one intimacy unless replying to one clearly addressed person.",
+    defaultIntensity: 0.62,
+  },
+  {
+    slug: "vendor_service",
+    name: "Vendor / Service",
+    description: "Clear, polite, and transactional for service or vendor threads.",
+    prompt:
+      "Write with clear service-oriented politeness. Keep claims low, focus on the concrete request, and ask only for details needed to move the issue forward.",
+    defaultIntensity: 0.56,
+  },
+  {
+    slug: "mentorship",
+    name: "Mentorship",
+    description: "Grounded guidance with practical next steps.",
+    prompt:
+      "Write like a thoughtful mentor: direct, kind, specific, and practical. Give one clear recommendation and a next step without sounding superior.",
+    defaultIntensity: 0.68,
+  },
 ];
 
 function clamp01(value: number) {
@@ -112,25 +144,9 @@ function isManualSelfAuthoredMessage(message: Pick<Doc<"messages">, "direction" 
   return message.direction === "outbound" && message.senderJid === "me" && !message.toolRunId;
 }
 
-function mergeUniqueLimited(base: string[], additions: string[], limit: number) {
-  const seen = new Set<string>();
-  const merged: string[] = [];
-  for (const item of [...base, ...additions]) {
-    const normalized = normalizeCompactText(item, 280);
-    if (!normalized) {
-      continue;
-    }
-    const key = normalized.toLowerCase();
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    merged.push(normalized);
-    if (merged.length >= limit) {
-      break;
-    }
-  }
-  return merged;
+function removePackTraitValues(current: string[], packValues: string[]) {
+  const blocked = new Set(packValues.map((value) => normalizeCompactText(value, 280).toLowerCase()).filter(Boolean));
+  return (current || []).filter((value) => !blocked.has(normalizeCompactText(value, 280).toLowerCase()));
 }
 
 function buildPersonaPackBlock(packId: string, promptBlock: string) {
@@ -549,8 +565,10 @@ export const listPersonaPacks = query({
   args: {},
   handler: async (ctx) => {
     const config = await getConfig(ctx);
+    const activePersonaPackIdsByProfile = config.activePersonaPackIdsByProfile || {};
     return {
       activePersonaPackId: config.activePersonaPackId || "",
+      activePersonaPackIdsByProfile,
       qualityGateMode: config.qualityGateMode,
       qualityGateThreshold: config.qualityGateThreshold,
       packs: PERSONA_PACKS.map((pack) => ({
@@ -561,6 +579,8 @@ export const listPersonaPacks = query({
         version: pack.version,
         description: pack.description,
         allowedProfileSlugs: pack.activation.allowedProfileSlugs,
+        activeForProfileSlugs: pack.activation.allowedProfileSlugs.filter((slug) => activePersonaPackIdsByProfile[slug] === pack.id),
+        isLegacyActive: config.activePersonaPackId === pack.id,
       })),
     };
   },
@@ -732,54 +752,6 @@ export const installPersonaPack = mutation({
     }
 
     const now = Date.now();
-    const styleProfile = await ctx.db
-      .query("styleProfiles")
-      .withIndex("by_scope", (q) => q.eq("scope", "global"))
-      .first();
-
-    if (styleProfile) {
-      const nextCommonPhrases = mergeUniqueLimited(styleProfile.commonPhrases || [], pack.styleTraits.commonPhrases, 40);
-      const nextPunctuationStyle = mergeUniqueLimited(styleProfile.punctuationStyle || [], pack.styleTraits.punctuationStyle, 30);
-      const nextHumorNotes = mergeUniqueLimited(styleProfile.humorNotes || [], pack.styleTraits.humorNotes, 30);
-      const nextSpellingNotes = mergeUniqueLimited(styleProfile.spellingNotes || [], pack.styleTraits.spellingNotes, 30);
-
-      const styleChanged =
-        JSON.stringify(nextCommonPhrases) !== JSON.stringify(styleProfile.commonPhrases || []) ||
-        JSON.stringify(nextPunctuationStyle) !== JSON.stringify(styleProfile.punctuationStyle || []) ||
-        JSON.stringify(nextHumorNotes) !== JSON.stringify(styleProfile.humorNotes || []) ||
-        JSON.stringify(nextSpellingNotes) !== JSON.stringify(styleProfile.spellingNotes || []);
-
-      if (styleChanged) {
-        await ctx.db.insert("styleProfileHistory", {
-          scope: styleProfile.scope,
-          threadId: styleProfile.threadId,
-          mimicryLevel: styleProfile.mimicryLevel,
-          commonPhrases: styleProfile.commonPhrases || [],
-          punctuationStyle: styleProfile.punctuationStyle || [],
-          humorNotes: styleProfile.humorNotes || [],
-          spellingNotes: styleProfile.spellingNotes || [],
-          reason: `pre-persona-pack-install:${pack.id}`,
-          createdAt: now,
-        });
-        await ctx.db.patch(styleProfile._id, {
-          commonPhrases: nextCommonPhrases,
-          punctuationStyle: nextPunctuationStyle,
-          humorNotes: nextHumorNotes,
-          spellingNotes: nextSpellingNotes,
-          updatedAt: now,
-        });
-      }
-    } else {
-      await ctx.db.insert("styleProfiles", {
-        scope: "global",
-        mimicryLevel: 0.72,
-        commonPhrases: mergeUniqueLimited([], pack.styleTraits.commonPhrases, 40),
-        punctuationStyle: mergeUniqueLimited([], pack.styleTraits.punctuationStyle, 30),
-        humorNotes: mergeUniqueLimited([], pack.styleTraits.humorNotes, 30),
-        spellingNotes: mergeUniqueLimited([], pack.styleTraits.spellingNotes, 30),
-        updatedAt: now,
-      });
-    }
 
     let profileUpdates = 0;
     for (const slug of pack.personalityPatch.appendToSlugs) {
@@ -822,7 +794,14 @@ export const installPersonaPack = mutation({
 
     const autoActivate = args.autoActivate ?? true;
     if (autoActivate) {
-      await setConfigValue(ctx, "activePersonaPackId", pack.id);
+      const config = await getConfig(ctx);
+      const nextActiveByProfile = {
+        ...(config.activePersonaPackIdsByProfile || {}),
+      };
+      for (const slug of pack.activation.allowedProfileSlugs) {
+        nextActiveByProfile[slug] = pack.id;
+      }
+      await setConfigValue(ctx, "activePersonaPackIdsByProfile", JSON.stringify(nextActiveByProfile));
       await setConfigValue(ctx, "qualityGateMode", "auto_rewrite_once");
       await setConfigValue(ctx, "qualityGateThreshold", String(pack.checklist.passThreshold));
     }
@@ -839,8 +818,77 @@ export const installPersonaPack = mutation({
       packId: pack.id,
       autoActivate,
       profileUpdates,
+      activeForProfileSlugs: autoActivate ? pack.activation.allowedProfileSlugs : [],
       installedAt: now,
     };
+  },
+});
+
+export const cleanupPersonaPackGlobalStyleTraits = mutation({
+  args: {
+    packId: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    const packs = args.packId ? [getPersonaPackById(args.packId)] : PERSONA_PACKS;
+    if (packs.some((pack) => !pack)) {
+      throw new Error("Persona pack not found.");
+    }
+    const resolvedPacks = packs as typeof PERSONA_PACKS;
+
+    const styleProfile = await ctx.db
+      .query("styleProfiles")
+      .withIndex("by_scope", (q) => q.eq("scope", "global"))
+      .first();
+    if (!styleProfile) {
+      return { updated: false, removedCount: 0 };
+    }
+
+    const allTraits = resolvedPacks.reduce(
+      (acc, pack) => ({
+        commonPhrases: [...acc.commonPhrases, ...pack.styleTraits.commonPhrases],
+        punctuationStyle: [...acc.punctuationStyle, ...pack.styleTraits.punctuationStyle],
+        humorNotes: [...acc.humorNotes, ...pack.styleTraits.humorNotes],
+        spellingNotes: [...acc.spellingNotes, ...pack.styleTraits.spellingNotes],
+      }),
+      { commonPhrases: [] as string[], punctuationStyle: [] as string[], humorNotes: [] as string[], spellingNotes: [] as string[] },
+    );
+
+    const nextCommonPhrases = removePackTraitValues(styleProfile.commonPhrases || [], allTraits.commonPhrases);
+    const nextPunctuationStyle = removePackTraitValues(styleProfile.punctuationStyle || [], allTraits.punctuationStyle);
+    const nextHumorNotes = removePackTraitValues(styleProfile.humorNotes || [], allTraits.humorNotes);
+    const nextSpellingNotes = removePackTraitValues(styleProfile.spellingNotes || [], allTraits.spellingNotes);
+    const removedCount =
+      (styleProfile.commonPhrases || []).length -
+      nextCommonPhrases.length +
+      ((styleProfile.punctuationStyle || []).length - nextPunctuationStyle.length) +
+      ((styleProfile.humorNotes || []).length - nextHumorNotes.length) +
+      ((styleProfile.spellingNotes || []).length - nextSpellingNotes.length);
+
+    if (removedCount <= 0) {
+      return { updated: false, removedCount: 0 };
+    }
+
+    await ctx.db.insert("styleProfileHistory", {
+      scope: styleProfile.scope,
+      threadId: styleProfile.threadId,
+      mimicryLevel: styleProfile.mimicryLevel,
+      commonPhrases: styleProfile.commonPhrases || [],
+      punctuationStyle: styleProfile.punctuationStyle || [],
+      humorNotes: styleProfile.humorNotes || [],
+      spellingNotes: styleProfile.spellingNotes || [],
+      reason: `persona-pack-global-trait-cleanup:${args.packId || "all"}`,
+      createdAt: now,
+    });
+    await ctx.db.patch(styleProfile._id, {
+      commonPhrases: nextCommonPhrases,
+      punctuationStyle: nextPunctuationStyle,
+      humorNotes: nextHumorNotes,
+      spellingNotes: nextSpellingNotes,
+      updatedAt: now,
+    });
+
+    return { updated: true, removedCount };
   },
 });
 

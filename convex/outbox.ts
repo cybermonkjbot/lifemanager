@@ -3,10 +3,10 @@ import { makeFunctionReference } from "convex/server";
 import { internal } from "./_generated/api";
 import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import type { Doc } from "./_generated/dataModel";
-import { detectFutureCommitment, hasRecentFollowupDuplicate } from "./lib/commitments";
+import { detectFutureCommitment, hasRecentFollowupDuplicate, judgeActualFollowupCandidate } from "./lib/commitments";
 import { DEFAULT_LEASE_MS, DEFAULT_RETRY_LIMIT } from "./lib/constants";
 import { getConfig } from "./lib/config";
-import { detectTodoCandidate } from "./lib/heuristics";
+import { detectTodoCandidate, judgeActualTodoCandidate } from "./lib/heuristics";
 import {
   NEUTRAL_EVALUATION_HORIZON_MS,
   contextPackValidator,
@@ -39,10 +39,23 @@ const MANUAL_INTERVENTION_GRACE_MS = 5_000;
 const MANUAL_INTERVENTION_SCAN_LIMIT = 48;
 const refStyleLearnFromOutboundEmoji = makeFunctionReference<"mutation">("style:learnFromOutboundEmoji");
 const refChatRebuildThreadStyleProfile = makeFunctionReference<"mutation">("chatTools:rebuildThreadStyleProfile");
+const refConversationIntelligenceIngestMessageSignals = makeFunctionReference<"mutation">(
+  "conversationIntelligence:ingestMessageSignals",
+);
 type MessageProvider = "whatsapp" | "instagram";
 const OUTBOUND_DUPLICATE_WINDOW_MS = 6 * 60 * 60 * 1000;
 const OUTBOUND_DUPLICATE_MIN_KEY_LENGTH = 16;
 const IGNORE_CONTACT_FALLBACK_SCAN_LIMIT = 1000;
+const MAX_RATE_SCAN_THREAD = 1200;
+const MAX_RATE_SCAN_GLOBAL = 3200;
+const MAX_LEASE_RECOVERY_COUNT = 4;
+
+function clamp01(value: number) {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.max(0, Math.min(value, 1));
+}
 
 async function findExplicitIgnoreRule(args: {
   ctx: MutationCtx | QueryCtx;
@@ -162,12 +175,12 @@ function normalizeOutboundDuplicateKey(text: string | undefined) {
 }
 
 function buildOutboundDuplicateKey(args: {
-  sendKind?: "text" | "reaction" | "sticker" | "meme";
+  sendKind?: "text" | "reaction" | "sticker" | "meme" | "voice_note";
   messageText?: string;
   mediaCaption?: string;
 }) {
   const sendKind = args.sendKind || "text";
-  if (sendKind !== "text" && sendKind !== "meme") {
+  if (sendKind !== "text" && sendKind !== "meme" && sendKind !== "voice_note") {
     return "";
   }
   const candidate = sendKind === "meme" ? args.mediaCaption || args.messageText || "" : args.messageText || "";
@@ -225,8 +238,70 @@ function normalizeTimestampMs(raw: number | undefined, fallbackMs: number) {
   return parsed;
 }
 
+function stableHash(input: string) {
+  let hash = 0;
+  for (let index = 0; index < input.length; index += 1) {
+    hash = (hash * 31 + input.charCodeAt(index)) >>> 0;
+  }
+  return hash >>> 0;
+}
+
+function classifyRetryError(error: string) {
+  const normalized = error.toLowerCase();
+  if (
+    /blocked by eligibility|blocked by .*blocklist|unsupported|missing|cannot send empty|manual review|duplicate outbound|stale inbound|skip/i.test(
+      normalized,
+    )
+  ) {
+    return "permanent" as const;
+  }
+  if (/rate|429|too many|retry-after/i.test(normalized)) {
+    return "rate_limit" as const;
+  }
+  if (/auth|401|403|forbidden|unauthorized|session/i.test(normalized)) {
+    return "auth" as const;
+  }
+  if (/network|timeout|timed out|econn|socket|fetch|temporary/i.test(normalized)) {
+    return "transient" as const;
+  }
+  return "unknown" as const;
+}
+
+function computeRetryDelayMs(args: {
+  attempts: number;
+  outboxId: string;
+  error: string;
+}) {
+  const retryClass = classifyRetryError(args.error);
+  const attempt = Math.max(1, Math.round(args.attempts));
+  const baseByClass =
+    retryClass === "rate_limit"
+      ? 30_000
+      : retryClass === "auth"
+        ? 45_000
+        : retryClass === "transient"
+          ? 12_000
+          : retryClass === "unknown"
+            ? 15_000
+            : 0;
+  if (baseByClass <= 0) {
+    return 0;
+  }
+  const exp = Math.min(attempt - 1, 5);
+  const baseDelay = Math.min(baseByClass * 2 ** exp, 8 * 60_000);
+  const jitterFraction = (stableHash(`${args.outboxId}:${attempt}`) % 1000) / 1000;
+  const jitter = Math.round(baseDelay * (0.2 + jitterFraction * 0.5));
+  return Math.max(2_000, Math.min(baseDelay + jitter, 10 * 60_000));
+}
+
 function toStyleEmojiSendKind(messageType: string | undefined) {
-  if (messageType === "text" || messageType === "reaction" || messageType === "sticker" || messageType === "meme") {
+  if (
+    messageType === "text" ||
+    messageType === "reaction" ||
+    messageType === "sticker" ||
+    messageType === "meme" ||
+    messageType === "voice_note"
+  ) {
     return messageType;
   }
   return undefined;
@@ -323,7 +398,7 @@ export const claimDue = mutation({
   handler: async (ctx, args) => {
     const now = Date.now();
     const messageProvider = normalizeMessageProvider(args.messageProvider);
-    const leaseMs = args.leaseMs ?? DEFAULT_LEASE_MS;
+    const leaseMs = Math.max(15_000, Math.min(args.leaseMs ?? DEFAULT_LEASE_MS, 10 * 60_000));
     const max = Math.min(args.limit ?? 5, 20);
     const config = await getConfig(ctx);
     const sendRateLimits = resolveSendRateLimits(config, messageProvider);
@@ -336,13 +411,28 @@ export const claimDue = mutation({
       .take(max);
 
     for (const item of expiredClaims) {
+      const nextRecoveryCount = (item.leaseRecoveryCount || 0) + 1;
+      const quarantine = nextRecoveryCount >= MAX_LEASE_RECOVERY_COUNT;
       await ctx.db.patch(item._id, {
-        status: "pending",
+        status: quarantine ? "failed" : "pending",
         workerId: undefined,
         leaseExpiresAt: undefined,
-        sendAt: Math.min(item.sendAt, now),
+        sendAt: quarantine ? item.sendAt : Math.min(item.sendAt, now),
+        error: quarantine ? "Outbox item quarantined after repeated lease expiries." : item.error,
+        leaseRecoveryCount: nextRecoveryCount,
+        lastLeaseRecoveredAt: now,
         updatedAt: now,
       });
+      if (quarantine) {
+        await ctx.db.insert("systemEvents", {
+          source: "convex",
+          eventType: "outbox.quarantined.lease_expiry",
+          threadId: item.threadId,
+          outboxId: item._id,
+          detail: `Quarantined after ${nextRecoveryCount} lease recoveries.`,
+          createdAt: now,
+        });
+      }
     }
 
     const due = await ctx.db
@@ -365,7 +455,7 @@ export const claimDue = mutation({
       idempotencyKey: string;
       messageProvider: "whatsapp" | "instagram";
       provider: "azure" | "codex" | "heuristic";
-      sendKind: "text" | "reaction" | "sticker" | "meme";
+      sendKind: "text" | "reaction" | "sticker" | "meme" | "voice_note";
       isStatusPost?: boolean;
       statusAudienceJids?: string[];
       statusTrendTheme?: string;
@@ -640,14 +730,19 @@ export const claimDue = mutation({
       const duplicateWindowMs = Math.max(windowMs, OUTBOUND_DUPLICATE_WINDOW_MS);
       const duplicateCutoff = now - duplicateWindowMs;
 
+      const threadScanLimit = Math.min(Math.max(sendRateLimits.maxPerThread + 40, 120), MAX_RATE_SCAN_THREAD);
       const recentThread = await ctx.db
         .query("messages")
         .withIndex("by_thread_messageAt", (q) => q.eq("threadId", thread._id).gte("messageAt", duplicateCutoff))
         .order("desc")
-        .take(Math.min(Math.max(sendRateLimits.maxPerThread + 24, 80), 220));
+        .take(threadScanLimit);
       const recentThreadOutbound = recentThread.filter(
         (message) => message.direction === "outbound" && message.messageAt >= cutoff,
       );
+      if (recentThread.length >= threadScanLimit && recentThreadOutbound.length >= sendRateLimits.maxPerThread) {
+        deferUntil = Math.max(deferUntil, now + 30_000);
+        deferReasons.push("thread-rate-limit-scan-cap");
+      }
       if (recentThreadOutbound.length >= sendRateLimits.maxPerThread) {
         const oldestThreadWindow = Math.min(...recentThreadOutbound.slice(0, sendRateLimits.maxPerThread).map((message) => message.messageAt));
         deferUntil = Math.max(deferUntil, oldestThreadWindow + windowMs + 1_000);
@@ -660,7 +755,13 @@ export const claimDue = mutation({
             return false;
           }
           const outboundSendKind =
-            message.messageType === "meme" ? "meme" : message.messageType === undefined || message.messageType === "text" ? "text" : undefined;
+            message.messageType === "meme"
+              ? "meme"
+              : message.messageType === "voice_note"
+                ? "voice_note"
+                : message.messageType === undefined || message.messageType === "text"
+                  ? "text"
+                  : undefined;
           if (!outboundSendKind) {
             return false;
           }
@@ -707,17 +808,22 @@ export const claimDue = mutation({
         }
       }
 
+      const globalScanLimit = Math.min(sendRateLimits.maxGlobal + 240, MAX_RATE_SCAN_GLOBAL);
       const recentGlobal = await ctx.db
         .query("messages")
         .withIndex("by_createdAt", (q) => q.gte("createdAt", cutoff))
         .order("desc")
-        .take(Math.min(sendRateLimits.maxGlobal + 80, 800));
+        .take(globalScanLimit);
       const recentGlobalOutbound = recentGlobal.filter(
         (message) =>
           message.direction === "outbound" &&
           message.messageAt >= cutoff &&
           (message.provider || "whatsapp") === messageProvider,
       );
+      if (recentGlobal.length >= globalScanLimit && recentGlobalOutbound.length >= sendRateLimits.maxGlobal) {
+        deferUntil = Math.max(deferUntil, now + 30_000);
+        deferReasons.push("global-rate-limit-scan-cap");
+      }
       if (recentGlobalOutbound.length >= sendRateLimits.maxGlobal) {
         const oldestGlobalWindow = Math.min(...recentGlobalOutbound.slice(0, sendRateLimits.maxGlobal).map((message) => message.messageAt));
         deferUntil = Math.max(deferUntil, oldestGlobalWindow + windowMs + 1_000);
@@ -1151,6 +1257,7 @@ export const suppressForManualIntervention = mutation({
         v.literal("reaction"),
         v.literal("sticker"),
         v.literal("meme"),
+        v.literal("voice_note"),
         v.literal("image"),
         v.literal("video"),
         v.literal("audio"),
@@ -1246,31 +1353,49 @@ export const suppressForManualIntervention = mutation({
       recordedMessageId = inserted;
     }
 
-    await ctx
-      .runMutation(refStyleLearnFromOutboundEmoji, {
+    try {
+      await ctx.runMutation(refStyleLearnFromOutboundEmoji, {
         threadId: thread._id,
         sendKind: toStyleEmojiSendKind(args.messageType),
         text: args.text,
         mediaCaption: args.mediaCaption,
         reactionEmoji: args.reactionEmoji,
         messageAt,
-      })
-      .catch(() => undefined);
-
-    if (threadKind === "direct" && !args.isStatus && args.messageType !== "reaction") {
-      await ctx.scheduler
-        .runAfter(0, refChatRebuildThreadStyleProfile, {
-          threadId: thread._id,
-          lookbackMessages: 220,
-        })
-        .catch(() => undefined);
+      });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
       await ctx.db.insert("systemEvents", {
         source: "worker",
-        eventType: "style.thread.manual_rebuild_queued",
+        eventType: "style.emoji.learn_failed",
         threadId: thread._id,
-        detail: "Queued thread-style refresh after manual outbound intervention.",
+        detail: `Failed to learn outbound emoji usage: ${reason}`.slice(0, 280),
         createdAt: now,
       });
+    }
+
+    if (threadKind === "direct" && !args.isStatus && args.messageType !== "reaction") {
+      try {
+        await ctx.scheduler.runAfter(0, refChatRebuildThreadStyleProfile, {
+          threadId: thread._id,
+          lookbackMessages: 220,
+        });
+        await ctx.db.insert("systemEvents", {
+          source: "worker",
+          eventType: "style.thread.manual_rebuild_queued",
+          threadId: thread._id,
+          detail: "Queued thread-style refresh after manual outbound intervention.",
+          createdAt: now,
+        });
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        await ctx.db.insert("systemEvents", {
+          source: "worker",
+          eventType: "style.thread.manual_rebuild_queue_failed",
+          threadId: thread._id,
+          detail: `Failed to queue thread-style refresh: ${reason}`.slice(0, 280),
+          createdAt: now,
+        });
+      }
     }
 
     const pending = await ctx.db
@@ -1347,7 +1472,9 @@ export const suppressForManualIntervention = mutation({
         detail: `Suppressed ${suppressedOutbox} active outbox item(s) after manual intervention.`,
         createdAt: now,
       });
+    }
 
+    if (!args.isStatus) {
       await ctx.scheduler.runAfter(0, internal.backlog.refreshThread, {
         threadId: thread._id,
       });
@@ -1667,6 +1794,13 @@ export const markSent = mutation({
       createdAt: now,
     });
 
+    await ctx.scheduler
+      .runAfter(0, refConversationIntelligenceIngestMessageSignals, {
+        threadId: item.threadId,
+        messageId: insertedMessageId,
+      })
+      .catch(() => undefined);
+
     if (item.mediaAssetId) {
       const asset = await ctx.db.get(item.mediaAssetId);
       if (asset) {
@@ -1721,7 +1855,7 @@ export const markSent = mutation({
       }
     }
 
-    if ((item.sendKind || "text") === "text" && !item.followUpId) {
+    if (((item.sendKind || "text") === "text" || (item.sendKind || "text") === "voice_note") && !item.followUpId) {
       const commitment = detectFutureCommitment({
         text: item.messageText,
         direction: "outbound",
@@ -1745,32 +1879,49 @@ export const markSent = mutation({
             createdAt: now,
           });
         } else {
-          await ctx.db.insert("followUps", {
-            threadId: item.threadId,
-            sourceMessageId: insertedMessageId,
-            reason: commitment.candidate.reason,
-            draftText:
-              commitment.candidate.kind === "plan"
-                ? "Quick check-in on the plan we agreed."
-                : "Quick reminder from my earlier promise.",
-            dueAt: commitment.candidate.dueAt,
-            kind: commitment.candidate.kind,
-            direction: commitment.candidate.direction,
-            confidence: commitment.candidate.confidence,
-            normalizedKey: commitment.candidate.normalizedKey,
-            sourceSnippet: commitment.candidate.sourceSnippet,
-            status: "suggested",
-            createdAt: now,
-            updatedAt: now,
+          const followupJudge = judgeActualFollowupCandidate({
+            text: item.messageText,
+            candidate: commitment.candidate,
+            now,
           });
-          await ctx.db.insert("systemEvents", {
-            source: "worker",
-            eventType: "followup.detected",
-            threadId: item.threadId,
-            outboxId: item._id,
-            detail: `${commitment.candidate.reason} [${Math.round(commitment.candidate.confidence * 100)}%]`,
-            createdAt: now,
-          });
+          if (followupJudge.decision === "reject") {
+            await ctx.db.insert("systemEvents", {
+              source: "worker",
+              eventType: "followup.detected.judge_rejected",
+              threadId: item.threadId,
+              outboxId: item._id,
+              detail: `${followupJudge.reasonCode} · ${commitment.candidate.reason}`.slice(0, 240),
+              createdAt: now,
+            });
+          } else {
+            const judgedConfidence = clamp01(commitment.candidate.confidence * followupJudge.confidenceScale);
+            await ctx.db.insert("followUps", {
+              threadId: item.threadId,
+              sourceMessageId: insertedMessageId,
+              reason: commitment.candidate.reason,
+              draftText:
+                commitment.candidate.kind === "plan"
+                  ? "Quick check-in on the plan we agreed."
+                  : "Quick reminder from my earlier promise.",
+              dueAt: commitment.candidate.dueAt,
+              kind: commitment.candidate.kind,
+              direction: commitment.candidate.direction,
+              confidence: judgedConfidence,
+              normalizedKey: commitment.candidate.normalizedKey,
+              sourceSnippet: commitment.candidate.sourceSnippet,
+              status: "suggested",
+              createdAt: now,
+              updatedAt: now,
+            });
+            await ctx.db.insert("systemEvents", {
+              source: "worker",
+              eventType: "followup.detected",
+              threadId: item.threadId,
+              outboxId: item._id,
+              detail: `${commitment.candidate.reason} [${Math.round(judgedConfidence * 100)}%]`,
+              createdAt: now,
+            });
+          }
         }
       } else if (commitment.outcome === "non_actionable") {
         await ctx.db.insert("systemEvents", {
@@ -1790,28 +1941,46 @@ export const markSent = mutation({
         contextText: sourceMessage?.direction === "inbound" ? sourceMessage.text : undefined,
       });
       if (todo) {
-        await ctx.db.insert("todoCandidates", {
-          threadId: item.threadId,
-          sourceMessageId: insertedMessageId,
-          title: todo.title,
-          suggestedDueAt: todo.suggestedDueAt,
-          status: "suggested",
-          createdAt: now,
-          updatedAt: now,
+        const todoJudge = judgeActualTodoCandidate({
+          sourceText: item.messageText,
+          contextText: sourceMessage?.direction === "inbound" ? sourceMessage.text : undefined,
+          candidate: todo,
         });
-        await ctx.db.insert("systemEvents", {
-          source: "worker",
-          eventType: "todo.detected",
-          threadId: item.threadId,
-          outboxId: item._id,
-          detail: todo.title.slice(0, 240),
-          createdAt: now,
-        });
+        if (todoJudge.decision === "reject") {
+          await ctx.db.insert("systemEvents", {
+            source: "worker",
+            eventType: "todo.detected.judge_rejected",
+            threadId: item.threadId,
+            outboxId: item._id,
+            detail: `${todoJudge.reasonCode} · ${todo.title}`.slice(0, 240),
+            createdAt: now,
+          });
+        } else {
+          await ctx.db.insert("todoCandidates", {
+            threadId: item.threadId,
+            sourceMessageId: insertedMessageId,
+            title: todoJudge.title,
+            suggestedDueAt: todoJudge.suggestedDueAt,
+            status: "suggested",
+            createdAt: now,
+            updatedAt: now,
+          });
+          await ctx.db.insert("systemEvents", {
+            source: "worker",
+            eventType: "todo.detected",
+            threadId: item.threadId,
+            outboxId: item._id,
+            detail: todoJudge.title.slice(0, 240),
+            createdAt: now,
+          });
+        }
       }
     }
 
     if (
-      ((item.sendKind || "text") === "reaction" || (item.sendKind || "text") === "text") &&
+      ((item.sendKind || "text") === "reaction" ||
+        (item.sendKind || "text") === "text" ||
+        (item.sendKind || "text") === "voice_note") &&
       (item.reactionTargetProviderMessageId || item.reactionTargetWhatsAppMessageId) &&
       item.reactionEmoji
     ) {
@@ -1892,7 +2061,10 @@ export const markFailed = mutation({
     }
 
     const now = Date.now();
-    const exhausted = Boolean(args.forceFinal) || item.attempts >= DEFAULT_RETRY_LIMIT;
+    const retryClass = classifyRetryError(args.error);
+    const permanentFailure = retryClass === "permanent";
+    const exhausted = Boolean(args.forceFinal) || permanentFailure || item.attempts >= DEFAULT_RETRY_LIMIT;
+    const retryDelayMs = exhausted ? 0 : computeRetryDelayMs({ attempts: item.attempts, outboxId: String(item._id), error: args.error });
 
     await ctx.db.patch(item._id, {
       status: exhausted ? "failed" : "pending",
@@ -1900,7 +2072,7 @@ export const markFailed = mutation({
       updatedAt: now,
       leaseExpiresAt: undefined,
       workerId: undefined,
-      sendAt: exhausted ? item.sendAt : now + Math.min(item.attempts * 15_000, 120_000),
+      sendAt: exhausted ? item.sendAt : now + retryDelayMs,
     });
 
     if (item.followUpId && exhausted) {
@@ -1926,7 +2098,7 @@ export const markFailed = mutation({
       eventType: exhausted ? "outbox.failed.final" : "outbox.failed.retry",
       threadId: item.threadId,
       outboxId: item._id,
-      detail: args.error.slice(0, 400),
+      detail: `${args.error.slice(0, 320)} [retryClass=${retryClass}; delayMs=${retryDelayMs}]`,
       createdAt: now,
     });
 

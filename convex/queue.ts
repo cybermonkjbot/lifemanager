@@ -4,6 +4,27 @@ import { internal } from "./_generated/api";
 import { internalMutation, mutation, query } from "./_generated/server";
 import { isQueueDraftStale, isTodoCandidateStale } from "./lib/staleness";
 
+const UNSENT_DRAFT_CLEANUP_MIN_AGE_MS = 20 * 60 * 1000;
+const GUARDRAIL_REASON_PATTERNS = [
+  /guardrail/i,
+  /manual review/i,
+  /blocked/i,
+  /hard\s*stop/i,
+  /do not text/i,
+  /leave (it )?here/i,
+];
+
+function looksLikeUnsentHardStopOrGuardrailDraft(args: {
+  reason?: string;
+  text?: string;
+}) {
+  const haystack = `${args.reason || ""}\n${args.text || ""}`.trim();
+  if (!haystack) {
+    return false;
+  }
+  return GUARDRAIL_REASON_PATTERNS.some((pattern) => pattern.test(haystack));
+}
+
 export const list = query({
   args: {
     provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("all"))),
@@ -212,13 +233,15 @@ export const removeStaleQueueEntries = internalMutation({
   args: {
     draftLimit: v.optional(v.number()),
     todoLimit: v.optional(v.number()),
+    guardrailLimit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const now = Date.now();
     const draftLimit = Math.min(Math.max(5, Math.round(args.draftLimit ?? 40)), 200);
     const todoLimit = Math.min(Math.max(5, Math.round(args.todoLimit ?? 40)), 200);
+    const guardrailLimit = Math.min(Math.max(10, Math.round(args.guardrailLimit ?? 80)), 240);
 
-    const [pendingDrafts, suggestedTodos] = await Promise.all([
+    const [pendingDrafts, suggestedTodos, unresolvedGuardrails] = await Promise.all([
       ctx.db
         .query("replyDrafts")
         .withIndex("by_status", (q) => q.eq("status", "pending"))
@@ -229,11 +252,19 @@ export const removeStaleQueueEntries = internalMutation({
         .withIndex("by_status", (q) => q.eq("status", "suggested"))
         .order("desc")
         .take(todoLimit),
+      ctx.db
+        .query("guardrailEvents")
+        .withIndex("by_resolvedAt_and_createdAt", (q) => q.eq("resolvedAt", undefined))
+        .order("desc")
+        .take(guardrailLimit),
     ]);
 
     let staleDrafts = 0;
     let staleTodoCandidates = 0;
+    let cleanedUnsentDrafts = 0;
+    let resolvedGuardrailEvents = 0;
     const touchedThreads = new Set<Id<"threads">>();
+    const touchedDrafts = new Set<Id<"replyDrafts">>();
 
     for (const draft of pendingDrafts) {
       const [thread, sourceMessage] = await Promise.all([ctx.db.get(draft.threadId), ctx.db.get(draft.sourceMessageId)]);
@@ -244,16 +275,35 @@ export const removeStaleQueueEntries = internalMutation({
         sourceMessage,
         now,
       });
-      if (!stale) {
+      if (stale) {
+        await ctx.db.patch(draft._id, {
+          status: "rejected",
+          reason: draft.reason || "Auto-removed as stale from queue.",
+          updatedAt: now,
+        });
+        staleDrafts += 1;
+        touchedThreads.add(draft.threadId);
+        touchedDrafts.add(draft._id);
         continue;
       }
-      await ctx.db.patch(draft._id, {
-        status: "rejected",
-        reason: draft.reason || "Auto-removed as stale from queue.",
-        updatedAt: now,
-      });
-      staleDrafts += 1;
-      touchedThreads.add(draft.threadId);
+
+      const draftAgeMs = now - Math.max(draft.updatedAt || 0, draft.createdAt || 0);
+      if (
+        draftAgeMs >= UNSENT_DRAFT_CLEANUP_MIN_AGE_MS &&
+        looksLikeUnsentHardStopOrGuardrailDraft({
+          reason: draft.reason,
+          text: draft.text,
+        })
+      ) {
+        await ctx.db.patch(draft._id, {
+          status: "rejected",
+          reason: draft.reason || "Auto-cleaned: generated but intentionally unsent.",
+          updatedAt: now,
+        });
+        cleanedUnsentDrafts += 1;
+        touchedThreads.add(draft.threadId);
+        touchedDrafts.add(draft._id);
+      }
     }
 
     for (const candidate of suggestedTodos) {
@@ -276,28 +326,55 @@ export const removeStaleQueueEntries = internalMutation({
       touchedThreads.add(candidate.threadId);
     }
 
+    for (const event of unresolvedGuardrails) {
+      if (!event.draftId) {
+        continue;
+      }
+      const draft = await ctx.db.get(event.draftId);
+      const eventAgeMs = now - Math.max(event.createdAt || 0, 0);
+      const draftStillActionable = Boolean(draft && draft.status === "pending");
+      if (draftStillActionable && eventAgeMs < UNSENT_DRAFT_CLEANUP_MIN_AGE_MS) {
+        continue;
+      }
+      if (draft && !touchedDrafts.has(draft._id) && draft.status === "pending") {
+        continue;
+      }
+      await ctx.db.patch(event._id, {
+        resolvedAt: now,
+        resolvedBy: "system",
+        resolutionNote: "Auto-resolved after unsent draft cleanup.",
+      });
+      resolvedGuardrailEvents += 1;
+      if (event.threadId) {
+        touchedThreads.add(event.threadId);
+      }
+    }
+
     for (const threadId of touchedThreads) {
       await ctx.scheduler.runAfter(0, internal.backlog.refreshThread, {
         threadId,
       });
     }
 
-    const removed = staleDrafts + staleTodoCandidates;
-    if (removed > 0) {
+    const removed = staleDrafts + cleanedUnsentDrafts + staleTodoCandidates;
+    if (removed > 0 || resolvedGuardrailEvents > 0) {
       await ctx.db.insert("systemEvents", {
         source: "convex",
         eventType: "queue.stale.cleaned",
-        detail: `Auto-removed ${staleDrafts} stale draft(s) and ${staleTodoCandidates} stale TODO candidate(s).`,
+        detail: `Auto-removed ${staleDrafts} stale draft(s), ${cleanedUnsentDrafts} unsent guardrail/hard-stop draft(s), ${staleTodoCandidates} stale TODO candidate(s), and resolved ${resolvedGuardrailEvents} guardrail event(s).`,
         createdAt: now,
       });
     }
 
     return {
       staleDrafts,
+      cleanedUnsentDrafts,
       staleTodoCandidates,
+      resolvedGuardrailEvents,
       removed,
       scannedDrafts: pendingDrafts.length,
       scannedTodoCandidates: suggestedTodos.length,
+      scannedGuardrailEvents: unresolvedGuardrails.length,
     };
   },
 });

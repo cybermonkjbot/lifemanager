@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { detectFutureCommitment } from "./commitments";
+import { detectFutureCommitment, judgeActualFollowupCandidate } from "./commitments";
 
 test("detectFutureCommitment flags outbound promise with explicit time", () => {
   const detection = detectFutureCommitment({
@@ -87,4 +87,62 @@ test("detectFutureCommitment ignores time-specific statements without conversati
   });
 
   assert.equal(detection.outcome, "none");
+});
+
+test("judgeActualFollowupCandidate rejects weak confidence candidates", () => {
+  const judged = judgeActualFollowupCandidate({
+    text: "I'll send the proposal tomorrow.",
+    now: Date.parse("2026-04-07T10:00:00.000Z"),
+    candidate: {
+      kind: "promise",
+      direction: "outbound",
+      reason: "You promised to follow up tomorrow.",
+      dueAt: Date.parse("2026-04-08T10:00:00.000Z"),
+      confidence: 0.75,
+      normalizedKey: "send proposal",
+      sourceSnippet: "I'll send the proposal tomorrow.",
+    },
+  });
+
+  assert.equal(judged.decision, "reject");
+  assert.equal(judged.reasonCode, "low_confidence");
+});
+
+test("judgeActualFollowupCandidate rejects acknowledgement-only followups", () => {
+  const judged = judgeActualFollowupCandidate({
+    text: "alright.",
+    now: Date.parse("2026-04-07T10:00:00.000Z"),
+    candidate: {
+      kind: "promise",
+      direction: "outbound",
+      reason: "You promised to follow up tomorrow.",
+      dueAt: Date.parse("2026-04-08T10:00:00.000Z"),
+      confidence: 0.9,
+      normalizedKey: "send proposal",
+      sourceSnippet: "alright.",
+    },
+  });
+
+  assert.equal(judged.decision, "reject");
+  assert.equal(judged.reasonCode, "ack_only");
+});
+
+test("judgeActualFollowupCandidate accepts clear plan commitments with confidence scaling", () => {
+  const judged = judgeActualFollowupCandidate({
+    text: "Let's sync tomorrow evening and I will send the notes.",
+    now: Date.parse("2026-04-07T10:00:00.000Z"),
+    candidate: {
+      kind: "plan",
+      direction: "outbound",
+      reason: "You planned to follow up tomorrow.",
+      dueAt: Date.parse("2026-04-08T18:00:00.000Z"),
+      confidence: 0.9,
+      normalizedKey: "sync send notes",
+      sourceSnippet: "Let's sync tomorrow evening and I will send the notes.",
+    },
+  });
+
+  assert.equal(judged.decision, "accept");
+  assert.equal(judged.reasonCode, "accepted_plan_commitment");
+  assert.ok(judged.confidenceScale < 1);
 });

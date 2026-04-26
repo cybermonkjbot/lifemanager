@@ -1057,7 +1057,7 @@ export const update = action({
 export const learnFromOutboundEmoji = internalMutation({
   args: {
     threadId: v.id("threads"),
-    sendKind: v.optional(v.union(v.literal("text"), v.literal("reaction"), v.literal("sticker"), v.literal("meme"))),
+    sendKind: v.optional(v.union(v.literal("text"), v.literal("reaction"), v.literal("sticker"), v.literal("meme"), v.literal("voice_note"))),
     text: v.optional(v.string()),
     mediaCaption: v.optional(v.string()),
     reactionEmoji: v.optional(v.string()),

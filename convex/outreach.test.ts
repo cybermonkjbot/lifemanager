@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Id } from "./_generated/dataModel";
-import { hasRecentComplimentDraft, shouldPauseOutreachForQuietHours, shouldQueueRandomCompliment } from "./outreach";
+import {
+  compareOutreachPriority,
+  hasRecentComplimentDraft,
+  shouldPauseOutreachForQuietHours,
+  shouldQueueRandomCompliment,
+} from "./outreach";
 
 test("shouldPauseOutreachForQuietHours respects quiet-hours toggle", () => {
   const paused = shouldPauseOutreachForQuietHours({
@@ -94,4 +99,48 @@ test("shouldQueueRandomCompliment is deterministic and respects cooldown gate", 
 
   assert.equal(first, second);
   assert.equal(blocked, false);
+});
+
+test("compareOutreachPriority prioritizes threads with due or missing mutual check-ins", () => {
+  const dueMissing = {
+    jid: "a@s.whatsapp.net",
+    lastActivityAt: 200,
+    lastMutualCheckInAt: undefined,
+    mutualCheckInDue: true,
+  };
+  const notDueRecent = {
+    jid: "b@s.whatsapp.net",
+    lastActivityAt: 10,
+    lastMutualCheckInAt: 900,
+    mutualCheckInDue: false,
+  };
+  const result = compareOutreachPriority({
+    left: dueMissing,
+    right: notDueRecent,
+  });
+  assert.equal(result < 0, true);
+});
+
+test("compareOutreachPriority breaks ties by older mutual check-in then older activity", () => {
+  const olderMutual = {
+    jid: "a@s.whatsapp.net",
+    lastActivityAt: 900,
+    lastMutualCheckInAt: 100,
+    mutualCheckInDue: true,
+  };
+  const newerMutual = {
+    jid: "b@s.whatsapp.net",
+    lastActivityAt: 100,
+    lastMutualCheckInAt: 300,
+    mutualCheckInDue: true,
+  };
+  assert.equal(compareOutreachPriority({ left: olderMutual, right: newerMutual }) < 0, true);
+
+  const equalMutualOlderActivity = {
+    jid: "c@s.whatsapp.net",
+    lastActivityAt: 50,
+    lastMutualCheckInAt: 300,
+    mutualCheckInDue: true,
+  };
+  assert.equal(compareOutreachPriority({ left: equalMutualOlderActivity, right: newerMutual }) < 0, true);
 });

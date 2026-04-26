@@ -37,6 +37,39 @@ function safeJsonParse(raw: string | undefined) {
   }
 }
 
+function summarizeMessagePreview(args: {
+  text?: string;
+  mediaCaption?: string;
+  reactionEmoji?: string;
+  messageType?: "text" | "reaction" | "sticker" | "meme" | "image" | "video" | "audio" | "voice_note" | "document";
+}) {
+  const text = args.text?.trim();
+  if (text) {
+    return text;
+  }
+
+  const caption = args.mediaCaption?.trim();
+  if (caption) {
+    return caption;
+  }
+
+  const emoji = args.reactionEmoji?.trim();
+  if (emoji) {
+    return `Reacted ${emoji}`;
+  }
+
+  if (args.messageType === "image") return "[Image]";
+  if (args.messageType === "video") return "[Video]";
+  if (args.messageType === "audio") return "[Audio]";
+  if (args.messageType === "voice_note") return "[Voice note]";
+  if (args.messageType === "document") return "[Document]";
+  if (args.messageType === "sticker") return "[Sticker]";
+  if (args.messageType === "meme") return "[Meme]";
+  if (args.messageType === "reaction") return "[Reaction]";
+
+  return null;
+}
+
 const IGNORE_CONTACT_FALLBACK_SCAN_LIMIT = 1000;
 
 async function findExplicitIgnoreRule(args: {
@@ -121,12 +154,33 @@ export const list = query({
           .withIndex("by_thread", (q) => q.eq("threadId", thread._id))
           .order("desc")
           .take(1);
+        const messages = await ctx.db
+          .query("messages")
+          .withIndex("by_thread_messageAt", (q) => q.eq("threadId", thread._id))
+          .order("desc")
+          .take(1);
+        const latestMessage = messages[0] ?? null;
+        const latestMessageText = latestMessage
+          ? summarizeMessagePreview({
+              text: latestMessage.text,
+              mediaCaption: latestMessage.mediaCaption,
+              reactionEmoji: latestMessage.reactionEmoji,
+              messageType: latestMessage.messageType,
+            })
+          : null;
 
         return {
           ...thread,
           isGroup: threadKind === "group",
           threadKind,
           latestDraft: drafts[0] ?? null,
+          latestMessage: latestMessage
+            ? {
+                direction: latestMessage.direction,
+                messageAt: latestMessage.messageAt,
+                text: latestMessageText,
+              }
+            : null,
         };
       }),
     );
@@ -451,6 +505,150 @@ export const setNightPause = mutation({
     });
 
     return thread._id;
+  },
+});
+
+export const deleteThread = mutation({
+  args: {
+    threadId: v.id("threads"),
+  },
+  handler: async (ctx, args) => {
+    const thread = await ctx.db.get(args.threadId);
+    if (!thread) {
+      return {
+        deleted: false,
+        threadId: args.threadId,
+      };
+    }
+
+    const BATCH_SIZE = 200;
+    const deleteAll = async (nextBatch: () => Promise<Array<{ _id: Parameters<typeof ctx.db.delete>[0] }>>) => {
+      for (;;) {
+        const rows = await nextBatch();
+        if (rows.length === 0) {
+          break;
+        }
+        for (const row of rows) {
+          await ctx.db.delete(row._id);
+        }
+      }
+    };
+
+    await deleteAll(() =>
+      ctx.db
+        .query("callSessions")
+        .withIndex("by_threadId_and_updatedAt", (q) => q.eq("threadId", args.threadId))
+        .take(BATCH_SIZE),
+    );
+    await deleteAll(() =>
+      ctx.db
+        .query("messageEmbeddings")
+        .withIndex("by_thread_and_updatedAt", (q) => q.eq("threadId", args.threadId))
+        .take(BATCH_SIZE),
+    );
+    await deleteAll(() =>
+      ctx.db.query("messages").withIndex("by_thread", (q) => q.eq("threadId", args.threadId)).take(BATCH_SIZE),
+    );
+    await deleteAll(() =>
+      ctx.db.query("threadMemory").withIndex("by_thread", (q) => q.eq("threadId", args.threadId)).take(BATCH_SIZE),
+    );
+    await deleteAll(() =>
+      ctx.db
+        .query("contactMemoryFacts")
+        .withIndex("by_thread_and_updatedAt", (q) => q.eq("threadId", args.threadId))
+        .take(BATCH_SIZE),
+    );
+    await deleteAll(() =>
+      ctx.db.query("replyDrafts").withIndex("by_thread", (q) => q.eq("threadId", args.threadId)).take(BATCH_SIZE),
+    );
+    await deleteAll(() =>
+      ctx.db
+        .query("outbox")
+        .withIndex("by_thread_and_status", (q) => q.eq("threadId", args.threadId))
+        .take(BATCH_SIZE),
+    );
+    await deleteAll(() =>
+      ctx.db
+        .query("aiFeedbackSignals")
+        .withIndex("by_threadId_and_createdAt", (q) => q.eq("threadId", args.threadId))
+        .take(BATCH_SIZE),
+    );
+    await deleteAll(() =>
+      ctx.db
+        .query("aiOutcomes")
+        .withIndex("by_threadId_and_updatedAt", (q) => q.eq("threadId", args.threadId))
+        .take(BATCH_SIZE),
+    );
+    await deleteAll(() =>
+      ctx.db
+        .query("aiCandidateEvals")
+        .withIndex("by_threadId_and_createdAt", (q) => q.eq("threadId", args.threadId))
+        .take(BATCH_SIZE),
+    );
+    await deleteAll(() =>
+      ctx.db.query("followUps").withIndex("by_thread", (q) => q.eq("threadId", args.threadId)).take(BATCH_SIZE),
+    );
+    await deleteAll(() =>
+      ctx.db.query("todoCandidates").withIndex("by_thread", (q) => q.eq("threadId", args.threadId)).take(BATCH_SIZE),
+    );
+    await deleteAll(() =>
+      ctx.db.query("styleProfiles").withIndex("by_thread", (q) => q.eq("threadId", args.threadId)).take(BATCH_SIZE),
+    );
+    await deleteAll(() =>
+      ctx.db
+        .query("threadPersonalitySettings")
+        .withIndex("by_thread", (q) => q.eq("threadId", args.threadId))
+        .take(BATCH_SIZE),
+    );
+    await deleteAll(() =>
+      ctx.db
+        .query("relationshipThreadState")
+        .withIndex("by_thread", (q) => q.eq("threadId", args.threadId))
+        .take(BATCH_SIZE),
+    );
+    await deleteAll(() =>
+      ctx.db
+        .query("toolRuns")
+        .withIndex("by_threadId_and_createdAt", (q) => q.eq("threadId", args.threadId))
+        .take(BATCH_SIZE),
+    );
+    await deleteAll(() =>
+      ctx.db
+        .query("systemEvents")
+        .withIndex("by_threadId_and_createdAt", (q) => q.eq("threadId", args.threadId))
+        .take(BATCH_SIZE),
+    );
+    await deleteAll(() =>
+      ctx.db
+        .query("messageReactions")
+        .withIndex("by_threadId", (q) => q.eq("threadId", args.threadId))
+        .take(BATCH_SIZE),
+    );
+    await deleteAll(() =>
+      ctx.db
+        .query("threadGrounding")
+        .withIndex("by_threadId", (q) => q.eq("threadId", args.threadId))
+        .take(BATCH_SIZE),
+    );
+    await deleteAll(() =>
+      ctx.db
+        .query("backlogThreadState")
+        .withIndex("by_threadId", (q) => q.eq("threadId", args.threadId))
+        .take(BATCH_SIZE),
+    );
+    await deleteAll(() =>
+      ctx.db
+        .query("romanceMorningState")
+        .withIndex("by_threadId", (q) => q.eq("threadId", args.threadId))
+        .take(BATCH_SIZE),
+    );
+
+    await ctx.db.delete(args.threadId);
+
+    return {
+      deleted: true,
+      threadId: args.threadId,
+    };
   },
 });
 
@@ -846,6 +1044,45 @@ export const get = query({
       .query("threadGrounding")
       .withIndex("by_threadId", (q) => q.eq("threadId", args.threadId))
       .first();
+    const conversationState = await ctx.db
+      .query("threadConversationState")
+      .withIndex("by_threadId", (q) => q.eq("threadId", args.threadId))
+      .first();
+    const activeTopicLanes = await ctx.db
+      .query("threadTopicLanes")
+      .withIndex("by_threadId_and_status_and_lastMessageAt", (q) =>
+        q.eq("threadId", args.threadId).eq("status", "active"),
+      )
+      .order("desc")
+      .take(3);
+    const coolingTopicLanes = await ctx.db
+      .query("threadTopicLanes")
+      .withIndex("by_threadId_and_status_and_lastMessageAt", (q) =>
+        q.eq("threadId", args.threadId).eq("status", "cooling"),
+      )
+      .order("desc")
+      .take(2);
+    const checkInPromptSignals = await ctx.db
+      .query("conversationSignals")
+      .withIndex("by_threadId_and_signalType_and_createdAt", (q) =>
+        q.eq("threadId", args.threadId).eq("signalType", "checkin_prompt"),
+      )
+      .order("desc")
+      .take(60);
+    const checkInResponseSignals = await ctx.db
+      .query("conversationSignals")
+      .withIndex("by_threadId_and_signalType_and_createdAt", (q) =>
+        q.eq("threadId", args.threadId).eq("signalType", "checkin_response"),
+      )
+      .order("desc")
+      .take(60);
+    const checkInMutualUpdateEvents = await ctx.db
+      .query("systemEvents")
+      .withIndex("by_threadId_and_eventType_and_createdAt", (q) =>
+        q.eq("threadId", args.threadId).eq("eventType", "conversation.checkin.mutual_updated"),
+      )
+      .order("desc")
+      .take(30);
 
     const reviewQueue = {
       needsReply: pendingDrafts.map((draft) => {
@@ -911,6 +1148,61 @@ export const get = query({
       }),
     };
 
+    const systemEvents = await ctx.db
+      .query("systemEvents")
+      .withIndex("by_threadId_and_createdAt", (q) => q.eq("threadId", args.threadId))
+      .order("desc")
+      .take(320);
+
+    const pendingOutbox = await ctx.db
+      .query("outbox")
+      .withIndex("by_thread_and_status", (q) => q.eq("threadId", args.threadId).eq("status", "pending"))
+      .take(60);
+    const claimedOutbox = await ctx.db
+      .query("outbox")
+      .withIndex("by_thread_and_status", (q) => q.eq("threadId", args.threadId).eq("status", "claimed"))
+      .take(60);
+    const pendingDraftRows = draftRows.filter((row) => row.status === "pending").slice(0, 60);
+
+    const livePipelineActivity = [
+      ...pendingDraftRows.map((draft) => ({
+        _id: `live:draft:${draft._id}`,
+        createdAt: draft.updatedAt || draft.createdAt,
+        source: "convex" as const,
+        eventType: "draft.pending.active",
+        detail: `Pending draft active${draft.reason ? ` (${draft.reason})` : ""}: ${compactDetail(draft.text || "", 180)}`,
+        outboxId: undefined,
+      })),
+      ...pendingOutbox.map((item) => ({
+        _id: `live:outbox-pending:${item._id}`,
+        createdAt: item.updatedAt || item.createdAt,
+        source: "convex" as const,
+        eventType: "outbox.pending.active",
+        detail: `Queued for send (${item.sendKind || "text"}) at ${new Date(item.sendAt).toISOString()}.`,
+        outboxId: item._id,
+      })),
+      ...claimedOutbox.map((item) => ({
+        _id: `live:outbox-claimed:${item._id}`,
+        createdAt: item.updatedAt || item.createdAt,
+        source: "convex" as const,
+        eventType: "outbox.claimed.active",
+        detail: `Worker is sending now (attempt ${Math.max(1, item.attempts || 0)}).`,
+        outboxId: item._id,
+      })),
+    ];
+
+    const timelineActivity = [...systemEvents, ...livePipelineActivity]
+      .sort((left, right) => left.createdAt - right.createdAt)
+      .slice(-360)
+      .map((event) => ({
+        _id: String(event._id),
+        createdAt: event.createdAt,
+        source: event.source,
+        eventType: event.eventType,
+        detail: compactDetail(event.detail || "", 300),
+        outboxId: event.outboxId ? String(event.outboxId) : undefined,
+      }));
+
     return {
       thread: {
         ...thread,
@@ -926,7 +1218,20 @@ export const get = query({
       reactions,
       memory,
       grounding: grounding || null,
+      conversationState: conversationState || null,
+      topicLanes: [...activeTopicLanes, ...coolingTopicLanes].slice(0, 5),
+      checkInDiagnostics: {
+        promptDetectionsRecent: checkInPromptSignals.length,
+        responseDetectionsRecent: checkInResponseSignals.length,
+        mutualUpdatesRecent: checkInMutualUpdateEvents.length,
+        lastPromptAt: checkInPromptSignals[0]?.messageAt,
+        lastResponseAt: checkInResponseSignals[0]?.messageAt,
+        lastMutualUpdateAt: checkInMutualUpdateEvents[0]?.createdAt,
+        lastMutualUpdateDetail: checkInMutualUpdateEvents[0]?.detail,
+        lastMutualCheckInAt: conversationState?.lastMutualCheckInAt,
+      },
       reviewQueue,
+      timelineActivity,
     };
   },
 });

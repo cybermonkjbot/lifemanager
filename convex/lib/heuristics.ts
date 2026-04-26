@@ -8,6 +8,14 @@ export type GuardrailResult = {
   reason: string;
 };
 
+export type TodoCandidateJudgeDecision = "accept" | "reject";
+export type TodoCandidateJudgeResult = {
+  decision: TodoCandidateJudgeDecision;
+  reasonCode: string;
+  title: string;
+  suggestedDueAt?: number;
+};
+
 const HIGH_RISK_PATTERNS = [
   /password/i,
   /otp/i,
@@ -23,6 +31,9 @@ const TODO_ACTION_VERB_REGEX =
   /\b(send|share|call|text|reply|update|follow[\s-]?up|check|confirm|review|deliver|pay|transfer|book|schedule|remind|bring|drop|submit|finish|complete|handle)\b/i;
 const TODO_REQUEST_PREFIX_REGEX =
   /^(can you|could you|will you|would you|please|remember to|don(?:'|’)t forget to|make sure you)\s+/i;
+const TODO_GENERIC_TITLE_REGEX =
+  /^(?:on it|sure|okay|ok|alright|got it|noted|deal|follow[\s-]?up|check in|reminder|done)[.!]*$/i;
+const TODO_PLAYFUL_NOISE_REGEX = /\b(lol|lmao|haha|hehe|meme|banter|joke)\b/i;
 
 export function evaluateGuardrail(text: string): GuardrailResult {
   if (HIGH_RISK_PATTERNS.some((p) => p.test(text))) {
@@ -154,6 +165,66 @@ export function detectTodoCandidate(args: {
     title,
     suggestedDueAt,
   };
+}
+
+export function judgeActualTodoCandidate(args: {
+  sourceText: string;
+  contextText?: string;
+  candidate: { title: string; suggestedDueAt?: number };
+}) {
+  const title = compactText(args.candidate.title).slice(0, 110);
+  if (!title || title.length < 6) {
+    return {
+      decision: "reject" as TodoCandidateJudgeDecision,
+      reasonCode: "title_too_short",
+      title,
+      suggestedDueAt: args.candidate.suggestedDueAt,
+    } satisfies TodoCandidateJudgeResult;
+  }
+
+  if (TODO_GENERIC_TITLE_REGEX.test(title)) {
+    return {
+      decision: "reject" as TodoCandidateJudgeDecision,
+      reasonCode: "generic_title",
+      title,
+      suggestedDueAt: args.candidate.suggestedDueAt,
+    } satisfies TodoCandidateJudgeResult;
+  }
+
+  if (TODO_PLAYFUL_NOISE_REGEX.test(title)) {
+    return {
+      decision: "reject" as TodoCandidateJudgeDecision,
+      reasonCode: "playful_noise",
+      title,
+      suggestedDueAt: args.candidate.suggestedDueAt,
+    } satisfies TodoCandidateJudgeResult;
+  }
+
+  const corpus = `${title} ${compactText(args.sourceText)} ${compactText(args.contextText)}`.trim();
+  if (!TODO_ACTION_VERB_REGEX.test(corpus)) {
+    return {
+      decision: "reject" as TodoCandidateJudgeDecision,
+      reasonCode: "missing_action_verb",
+      title,
+      suggestedDueAt: args.candidate.suggestedDueAt,
+    } satisfies TodoCandidateJudgeResult;
+  }
+
+  if (/\?\s*$/.test(title) && !TODO_ACTION_VERB_REGEX.test(title)) {
+    return {
+      decision: "reject" as TodoCandidateJudgeDecision,
+      reasonCode: "question_not_task",
+      title,
+      suggestedDueAt: args.candidate.suggestedDueAt,
+    } satisfies TodoCandidateJudgeResult;
+  }
+
+  return {
+    decision: "accept" as TodoCandidateJudgeDecision,
+    reasonCode: "accepted_actionable_todo",
+    title,
+    suggestedDueAt: args.candidate.suggestedDueAt,
+  } satisfies TodoCandidateJudgeResult;
 }
 
 export function estimateHumanTiming(text: string) {

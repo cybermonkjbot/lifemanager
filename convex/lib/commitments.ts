@@ -29,12 +29,25 @@ export type CommitmentDetection =
       outcome: "none";
     };
 
+export type FollowupCandidateJudgeDecision = "accept" | "reject";
+
+export type FollowupCandidateJudgeResult = {
+  decision: FollowupCandidateJudgeDecision;
+  reasonCode: string;
+  confidenceScale: number;
+};
+
 const ACTION_VERB_REGEX =
   /\b(send|share|call|text|reply|update|follow[\s-]?up|check|confirm|review|deliver|pay|transfer|book|schedule|remind|bring|drop|submit)\b/i;
 const OUTBOUND_INTENT_REGEX = /\b(i(?:'|’)ll|i will|let me|i can|i(?:'|’)m going to)\b/i;
 const INBOUND_REQUEST_REGEX = /\b(can you|could you|will you|would you|please|don(?:'|’)t forget|remember to|make sure you)\b/i;
 const PLAN_REGEX = /\b(let(?:'|’)s|lets)\b/i;
 const VAGUE_FUTURE_REGEX = /\b(soon|later|sometime|eventually|next time)\b/i;
+const FOLLOWUP_ACK_ONLY_REGEX =
+  /^(?:ok(?:ay)?|sure|alright|fine|deal|cool|noted|got it|on it|thanks|thank you|lol|lmao|haha|hehe)[.!]*$/i;
+const FOLLOWUP_PLAYFUL_NOISE_REGEX = /\b(lol|lmao|haha|hehe|meme|banter|joke)\b/i;
+const FOLLOWUP_STRONG_COMMITMENT_REGEX =
+  /\b(i(?:'|’)ll|i will|let me|can you|could you|will you|would you|remember to|don(?:'|’)t forget|follow[\s-]?up|check(?:ing)? in|remind|send|share|call|text|reply|update|deliver|submit|book|schedule)\b/i;
 const TIME_SPECIFIC_CONVERSATION_REGEX =
   /\b(still on|as discussed|as planned|check(?:ing)? in|catch(?:ing)? up|sync(?:ing)? up|see you|meet(?:ing)?|call|chat|talk)\b/i;
 const TIME_SPECIFIC_CONFIRMATION_REGEX = /\?\s*$|\b(works?|okay|ok|good|fine|still)\b/i;
@@ -345,6 +358,70 @@ export function detectFutureCommitment(args: {
       normalizedKey: key,
       sourceSnippet: trimmedSnippet(text),
     },
+  };
+}
+
+export function judgeActualFollowupCandidate(args: {
+  text: string;
+  candidate: CommitmentCandidate;
+  now?: number;
+}): FollowupCandidateJudgeResult {
+  const now = args.now ?? Date.now();
+  const text = args.text.trim().replace(/\s+/g, " ");
+  if (!text || text.length < 8) {
+    return {
+      decision: "reject",
+      reasonCode: "too_short",
+      confidenceScale: 0,
+    };
+  }
+
+  if (FOLLOWUP_ACK_ONLY_REGEX.test(text)) {
+    return {
+      decision: "reject",
+      reasonCode: "ack_only",
+      confidenceScale: 0,
+    };
+  }
+
+  if (args.candidate.confidence < 0.78) {
+    return {
+      decision: "reject",
+      reasonCode: "low_confidence",
+      confidenceScale: 0,
+    };
+  }
+
+  if (FOLLOWUP_PLAYFUL_NOISE_REGEX.test(text) && !FOLLOWUP_STRONG_COMMITMENT_REGEX.test(text)) {
+    return {
+      decision: "reject",
+      reasonCode: "playful_noise",
+      confidenceScale: 0,
+    };
+  }
+
+  if (args.candidate.kind === "plan" && /\?\s*$/.test(text) && !FOLLOWUP_STRONG_COMMITMENT_REGEX.test(text)) {
+    return {
+      decision: "reject",
+      reasonCode: "ambiguous_plan_question",
+      confidenceScale: 0,
+    };
+  }
+
+  const daysAhead = Math.max(0, args.candidate.dueAt - now) / (24 * 60 * 60 * 1000);
+  if (daysAhead > 35) {
+    return {
+      decision: "reject",
+      reasonCode: "too_far_out",
+      confidenceScale: 0,
+    };
+  }
+
+  const confidenceScale = args.candidate.kind === "plan" ? 0.95 : 1;
+  return {
+    decision: "accept",
+    reasonCode: args.candidate.kind === "plan" ? "accepted_plan_commitment" : "accepted_clear_commitment",
+    confidenceScale,
   };
 }
 

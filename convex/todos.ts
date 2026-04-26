@@ -1,5 +1,6 @@
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
+import { judgeActualTodoCandidate } from "./lib/heuristics";
 import { isTodoCandidateStale } from "./lib/staleness";
 
 function parseIsoDate(value: string) {
@@ -99,6 +100,29 @@ export const fromCandidate = mutation({
     }
 
     const now = Date.now();
+    const todoJudge = judgeActualTodoCandidate({
+      sourceText: sourceMessage?.text || candidate.title,
+      contextText: undefined,
+      candidate: {
+        title: candidate.title,
+        suggestedDueAt: candidate.suggestedDueAt,
+      },
+    });
+    if (todoJudge.decision === "reject") {
+      await ctx.db.patch(candidate._id, {
+        status: "dismissed",
+        updatedAt: now,
+      });
+      await ctx.db.insert("systemEvents", {
+        source: "convex",
+        eventType: "todo.detected.judge_rejected",
+        threadId: candidate.threadId,
+        detail: `${todoJudge.reasonCode} · ${candidate.title}`.slice(0, 240),
+        createdAt: now,
+      });
+      throw new Error("Candidate failed TODO quality judge and was dismissed.");
+    }
+
     await ctx.db.patch(candidate._id, {
       status: "accepted",
       updatedAt: now,
@@ -107,8 +131,8 @@ export const fromCandidate = mutation({
     const todoId = await ctx.db.insert("todos", {
       threadId: candidate.threadId,
       sourceMessageId: candidate.sourceMessageId,
-      title: candidate.title,
-      dueAt: candidate.suggestedDueAt,
+      title: todoJudge.title,
+      dueAt: todoJudge.suggestedDueAt,
       status: "open",
       createdAt: now,
       updatedAt: now,
