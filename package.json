@@ -1,7 +1,51 @@
 {
-  "name": "lifemanager",
+  "name": "odogwuhq",
   "version": "0.1.0",
-  "private": true,
+  "description": "Local-first social orchestration system for WhatsApp and Instagram.",
+  "private": false,
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cybermonkjbot/lifemanager.git"
+  },
+  "bugs": {
+    "url": "https://github.com/cybermonkjbot/lifemanager/issues"
+  },
+  "homepage": "https://github.com/cybermonkjbot/lifemanager#readme",
+  "bin": {
+    "OdogwuHQ": "./scripts/lifemanager-installer.mjs",
+    "odogwuhq": "./scripts/lifemanager-installer.mjs",
+    "lifemanager": "./scripts/lifemanager-installer.mjs"
+  },
+  "files": [
+    ".env.example",
+    "AGENTS.md",
+    "CHANGELOG.md",
+    "CODE_OF_CONDUCT.md",
+    "CONTRIBUTING.md",
+    "LICENSE",
+    "README.md",
+    "RELEASE.md",
+    "SECURITY.md",
+    "SUPPORT.md",
+    "bun.lock",
+    "convex",
+    "convex.json",
+    "data",
+    "docs",
+    "!docs/linkedin-opensource-social-life-manager.md",
+    "eslint.config.mjs",
+    "next.config.ts",
+    "package.json",
+    "postcss.config.mjs",
+    "proxy.ts",
+    "public",
+    "scripts",
+    "self-improvement.config.json",
+    "shared",
+    "src",
+    "tsconfig.json"
+  ],
   "scripts": {
     "dev": "bun run dev:next",
     "dev:next": "mkdir -p .slm && sh -lc 'echo $$ > .slm/app.pid; exec next dev'",

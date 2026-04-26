@@ -1,70 +1,151 @@
 # Social Life Manager
 
-Local-first WhatsApp brain built with Bun, Next.js, TypeScript, Convex, and Baileys.
+Local-first social orchestration system for WhatsApp and Instagram, built with Bun, Next.js (App Router), Convex, and long-running channel workers.
 
-## What It Does
+This project combines:
+- a real-time operator dashboard
+- autonomous and review-first messaging workflows
+- context-aware AI reply generation with fallback providers
+- follow-up / todo extraction and scheduling
+- media and meme workflows
+- channel setup, runtime controls, and health telemetry
 
-- Runs a dashboard for queue triage, conversations, follow-ups, style controls, rules, and system health.
-- Stores backend state in Convex (threads, messages, drafts, outbox, follow-ups, todos, style memory, logs).
-- Keeps a persistent Baileys worker for WhatsApp socket handling.
-- Uses Azure AI Foundry for reply generation with local `codex exec` fallback.
-- Ingests historical WhatsApp messages (when available) for context search.
-- Simulates human behavior with delay + typing windows before outbound messages.
-- Detects future commitments and creates follow-up candidates and TODO candidates.
+If you are preparing this repo for open source, this document is the entrypoint. Deep references live in `docs/reference`.
 
-## Stack
+## Table of Contents
 
-- `Bun` runtime and package manager
-- `Next.js` App Router for dashboard UI + action routes
-- `Convex` for storage, backend functions, and scheduled jobs
-- `Baileys` worker for WhatsApp connection + message I/O
-- `Azure AI Foundry` primary generation
-- `Codex CLI` fallback generation
+- [What This Project Does](#what-this-project-does)
+- [System Architecture](#system-architecture)
+- [Feature Surface](#feature-surface)
+- [Quick Start](#quick-start)
+- [Configuration](#configuration)
+- [Runtime Scripts](#runtime-scripts)
+- [OpenAI-Compatible Gateway](#openai-compatible-gateway)
+- [Repository Layout](#repository-layout)
+- [Testing](#testing)
+- [License](#license)
+- [Contributing](#contributing)
+- [Support and Security](#support-and-security)
+- [Open-Source Readiness Checklist](#open-source-readiness-checklist)
+- [Reference Docs](#reference-docs)
+
+## What This Project Does
+
+Social Life Manager is a local-first personal automation system for social messaging.
+
+Core capabilities:
+- Ingests inbound activity from WhatsApp and Instagram workers.
+- Persists messages, thread state, drafts, outbox jobs, follow-ups, todos, media assets, and telemetry in Convex.
+- Generates replies with Azure AI first and Codex CLI fallback.
+- Applies guardrails, quality checks, mimicry controls, and conversation steering rules.
+- Supports review-first and autonomous send modes.
+- Supports a setup/onboarding flow with local instance security (PIN + unlock session).
+- Exposes an OpenAI-style chat completion endpoint powered by the same internal reply pipeline.
+- Includes a local self-improvement loop (`codex exec`) with run history and dashboard visibility.
+
+## System Architecture
+
+High-level runtime topology:
+
+1. `Next.js` app (`src/app/*`) renders the dashboard and serves route handlers under `/api/*`.
+2. `Convex` backend (`convex/*`) stores state and executes queries/mutations/actions/crons.
+3. `WhatsApp` worker (`src/worker/index.ts` via supervisor) handles socket events, ingestion, drafting, and outbox sends.
+4. `Instagram` worker (`src/worker/instagram.ts` via supervisor) handles IG inbox/outbox flow.
+5. `Azure AI` is the primary generation provider (text + optional image/video meme generation).
+6. `Codex CLI` is used as fallback generation and for local self-improvement runs.
+7. Optional local ML/audio tooling:
+   - local embeddings via `@xenova/transformers`
+   - local voice transcription via `whisper.cpp`
+   - optional cloned voice note generation via VoxCPM setup flow
+
+Automations are split between:
+- worker-side loops (polling/claiming/sending/maintenance)
+- Convex cron jobs (follow-up promotion, outreach, retention, stale cleanup, AI tuning jobs)
+
+## Feature Surface
+
+The dashboard is organized into product areas in `src/lib/ui/dashboard-nav.ts`.
+
+Primary areas:
+- `Home` (`/`): command-style home surface and navigation helper.
+- `Queue` (`/queue`): draft approvals, snoozes/rejections, follow-up/todo actions, guardrail resolution.
+- `Conversations` (`/conversations`): thread timeline, draft edits, grounding, personality overrides, per-thread ops.
+- `Status` (`/status`): status drafts/posts pipeline and status automation controls.
+- `Media` (`/media`): unified media stream with source-thread linkage.
+- `Memes` (`/memes`): meme generation and meme asset review.
+- `Backlog` (`/backlog`): stale/unread thread triage, importance/relationship overrides, snoozing, reconnect drafts.
+- `Follow-ups` (`/followups`): follow-up timeline, confirm/snooze/cancel, agenda todo creation.
+- `Activity Core` (`/activity-core`): live activity and media signal stream.
+- `Systems Design` (`/systems-design`): runtime/system event visibility.
+
+Secondary areas:
+- `Setup` (`/setup`): onboarding, channel pairing, worker runtime checks.
+- `Style Lab` (`/style-lab`): mimicry, learned traits, style rollback, persona packs.
+- `Rules` (`/rules`): ignore target controls and boundary rules.
+- `Settings` (`/settings`): full runtime tuning surface.
+- `System` (`/system`): health metrics, provider traces, telemetry feed.
+- `Spending` (`/spending`): Azure usage + spend analytics with optional env pricing.
+- `Self Improvement` (`/self-improvement`): local Codex run history/report views.
+
+Additional feature domains:
+- Self-chat runtime commands (`pause/resume/restart/status` for worker/app/both).
+- Smart self-control routing and manager planning for self-chat intents.
+- Contact memory extraction and retrieval tools.
+- Conversation intelligence signals (check-ins, topic lanes, pivot/close guidance).
+- Relationship state tracking and adaptive romantic morning/outreach flows.
+- Voice note STT and optional TTS cloning flow.
+
+For complete capability mapping, see [docs/reference/feature-catalog.md](docs/reference/feature-catalog.md).
 
 ## Quick Start
 
-1. Install deps:
+### Option A: one-command installer (recommended)
+
+From local checkout:
+
+```bash
+npx --yes . -- --in-place --system --serve
+```
+
+From npm after publish:
+
+```bash
+npx --yes odogwuhq -- --system --serve
+```
+
+From GitHub directly:
+
+```bash
+npx --yes github:cybermonkjbot/lifemanager -- --system --serve
+```
+
+Installer supports flags such as:
+- `--no-system`
+- `--with-voice`
+- `--no-serve`
+- `--no-config`
+- `--yes`
+- `--dir <path>`
+
+### Option B: manual local setup
+
+1. Install dependencies:
 
 ```bash
 bun install
 ```
 
-2. Create env file:
+2. Create local env file:
 
 ```bash
 cp .env.example .env.local
 ```
 
-3. Fill in at least:
+3. Set required values at minimum:
 - `CONVEX_URL` (or `NEXT_PUBLIC_CONVEX_URL`)
 - `AZURE_AI_ENDPOINT`
 - `AZURE_AI_API_KEY`
-- `AZURE_AI_MODEL` (for example `gpt-5.4`)
-- `SLM_HISTORY_SYNC_ENABLED=true` (full history sync for direct chats; group + broadcast/status JIDs are ignored)
-- `SLM_EMBEDDINGS_LOCAL_ENABLED=true` (semantic context rerank)
-
-If you use an Azure AI Foundry `.../responses` URI, set `AZURE_AI_API_STYLE=responses` (or keep `auto` and it will be inferred).
-
-Optional instance gate override:
-- the default flow is to create the instance PIN during the full-screen `/setup` onboarding
-- `SLM_INSTANCE_PIN=2468` overrides the setup-managed PIN and forces a fixed env-managed PIN for this instance
-- `SLM_INSTANCE_PIN_TTL_DAYS=30` controls how long the local unlock cookie stays valid
-- `SLM_INSTANCE_COOKIE_SECRET=...` lets you sign the cookie with a secret separate from the PIN
-
-Optional meme-image generation config:
-- `AZURE_AI_IMAGE_ENDPOINT` (dedicated image endpoint; if omitted, derived from `AZURE_AI_ENDPOINT`)
-- `AZURE_AI_IMAGE_API_KEY` (if image endpoint uses a different key)
-- `AZURE_AI_IMAGE_MODEL` (for example `gpt-image-1`; do not use text models like `gpt-5.4` here)
-
-Optional history/context tuning:
-- `SLM_HISTORY_FETCH_ON_DEMAND=true`
-- `SLM_HISTORY_FETCH_MAX_BATCH=50`
-- `SLM_HISTORY_FETCH_MAX_ROUNDS=3`
-- `SLM_CALL_FALLBACK_GRACE_MS=2000` (delay before call fallback text sends, so answered calls can suppress it)
-- `SLM_VISION_FILTER_MODE=smart` (`smart` | `all` | `none`)
-- `SLM_VISION_FILTER_UNCAPTIONED_COOLDOWN_MS=5400000` (used in `smart` mode)
-- `SLM_EMBEDDINGS_MODEL=all-MiniLM-L6-v2`
-- `SLM_EMBEDDINGS_CACHE_DIR=/path/to/cache`
+- `AZURE_AI_MODEL`
 
 4. Start all services:
 
@@ -72,52 +153,63 @@ Optional history/context tuning:
 bun run dev:all
 ```
 
-This runs:
+This starts:
 - `next dev`
 - `convex dev`
-- `bun run worker`
+- `whatsapp worker supervisor`
+- `instagram worker supervisor`
 
-On first run, the app now redirects into a full-screen `/setup` onboarding flow where you set the per-instance PIN, choose runtime defaults, and connect channels. After setup completes, PIN-protected instances redirect to `/unlock` until the local PIN is entered.
+5. Open the app and complete setup:
+- `http://localhost:3000`
+- first run routes to `/setup`
+- create/confirm instance security and connect channels
 
-## Setup Onboarding
+## Configuration
 
-1. Open `http://localhost:3000/setup` on first run, or just visit the app root and let it redirect there.
-2. Move through the onboarding stages:
-   - create the local instance PIN
-   - choose behavior defaults like autonomy mode, reply pace, mimicry, memes, and quiet hours
-   - connect WhatsApp and optionally Instagram
-3. Finish setup and keep the unlock session for immediate access to the dashboard.
+Primary configuration sources:
+- `.env.local` (runtime environment)
+- Convex `appConfig` values (mutable runtime config via Settings page)
+- local instance setup state (`.slm/instance-config.json`)
 
-The onboarding flow persists its local state in `.slm/instance-config.json`. This is intentional: it keeps the gate per-instance and local-first instead of introducing SaaS-style multi-user auth.
+Key references:
+- Full env var reference: [docs/reference/environment.md](docs/reference/environment.md)
+- Convex function/module map: [docs/reference/feature-catalog.md](docs/reference/feature-catalog.md)
+- HTTP route reference: [docs/reference/http-api.md](docs/reference/http-api.md)
 
-If QR pairing keeps disconnecting, use `Get Pairing Code` in the wizard and enter your phone number in international format (for example `2348012345678`).
+## Runtime Scripts
 
-The setup wizard uses API routes:
-- `POST /api/setup/whatsapp/start`
-- `GET /api/setup/whatsapp/status`
-- `POST /api/setup/whatsapp/stop`
-- `POST /api/setup/whatsapp/reset`
+From `package.json`:
 
-## OpenAI-Compatible API Gateway
+- `bun run dev` / `bun run dev:next`: dashboard only
+- `bun run dev:convex`: Convex backend only
+- `bun run worker`: WhatsApp worker supervisor
+- `bun run worker:instagram`: Instagram worker supervisor
+- `bun run worker:raw`: direct WhatsApp worker entry
+- `bun run worker:instagram:raw`: direct Instagram worker entry
+- `bun run dev:all`: run next + convex + whatsapp worker + instagram worker concurrently
+- `bun run build`: Next.js production build
+- `bun run start`: production Next.js start
+- `bun run lint`: ESLint checks
+- `bun run pidgin:refresh`: refresh pidgin lexicon candidates
+- `bun run pidgin:promote`: promote approved pidgin lexicon entries
+- `bun run pidgin:refresh-and-promote`: run both lexicon stages
+- `bun run self-improve`: run one local self-improvement cycle
+- `bun run self-improve:daemon`: recurring self-improvement daemon
 
-This app now exposes an OpenAI-style chat endpoint for external tools:
+## OpenAI-Compatible Gateway
 
+Endpoint:
 - `POST /api/gateway/v1/chat/completions`
 
-It routes requests through the same `generateReplyWithFallback` pipeline used by the product, so runtime settings, guardrails, persona/style logic, and tool-routing behavior are preserved.
+Behavior:
+- OpenAI-style request/response shape.
+- Uses the same internal generation pipeline as dashboard + workers.
+- Requires `SLM_API_GATEWAY_KEY` and `Authorization: Bearer ...` (or `X-API-Key`).
+- `stream: true` is rejected.
+- Optional thread scoping via `threadId`, `thread_id`, or metadata aliases.
+- Adds an `slm` object in response with provider/model/quality/guardrail/context metadata.
 
-### Auth
-
-- If `SLM_API_GATEWAY_KEY` is set, send `Authorization: Bearer <SLM_API_GATEWAY_KEY>` (or `X-API-Key`).
-- If no gateway key is set, the existing instance PIN/unlock gate still applies.
-
-### Request compatibility
-
-- Accepts OpenAI-style `messages`, `model`, `temperature`, and `max_tokens`/`max_completion_tokens`.
-- `stream: true` is currently rejected (set `stream: false` or omit it).
-- Optional thread scoping can be passed via `threadId`, `thread_id`, or `metadata.threadId`.
-
-### Example
+Example:
 
 ```bash
 curl -sS http://localhost:3000/api/gateway/v1/chat/completions \
@@ -127,164 +219,89 @@ curl -sS http://localhost:3000/api/gateway/v1/chat/completions \
     "model": "slm-gateway",
     "messages": [
       { "role": "system", "content": "Respect all house rules." },
-      { "role": "user", "content": "Write a short reply to: hey, are you free this evening?" }
+      { "role": "user", "content": "Draft a short check-in text for this evening." }
     ]
   }'
 ```
 
-## WhatsApp Runtime Commands (Self Chat)
+## Repository Layout
 
-Send a message to your own WhatsApp chat to control runtime without opening the dashboard:
+- `src/app/*`: Next.js pages and API route handlers
+- `src/components/*`: client/server dashboard components
+- `src/lib/*`: shared runtime helpers, auth/gate helpers, setup managers, UI helpers
+- `src/worker/*`: WhatsApp/Instagram workers and AI orchestration logic
+- `convex/*`: schema, backend modules, actions, and crons
+- `scripts/*`: installer, lexicon tooling, self-improvement runner, voice utility script
+- `docs/*`: design docs, reports, and reference material
+- `data/*`: lexicon approval/candidate inputs
+- `shared/*`: shared constants/generated lexicon payloads
 
-- `pause worker`
-- `resume worker`
-- `restart worker`
-- `pause app`
-- `resume app`
-- `restart app`
-- `pause both`
-- `resume both`
-- `restart both`
-- `status worker`
-- `status app`
-- `status both`
+## Testing
 
-Notes:
-- Commands only execute from your self chat (your own JID).
-- Shortcuts are supported for worker control: `pause`, `resume`, `restart`, `status` (and `/slm pause`, etc.).
-- Send `help` anytime to get the full command list in chat.
-- Optional hard gate: set `SLM_SELF_CONTROL_MESSAGE_PREFIX` (for example `slm`) to require prefixed commands like `slm help`.
-- Implicit self-chat routing is enabled by default, so plain messages can trigger manager/smart routing without `openclaw` or `codex` mentions.
-- Plain self-chat requests are also auto-routed by a model router (OpenClaw vs Codex improve), so explicit prefixes are no longer required.
-- Natural language requests for conversation ops are supported, e.g. "run a reach out campaign", "start conversations with dormant contacts", "draft follow-up agenda for this week".
-- A manager planner now runs first for self-chat requests and can orchestrate multiple in-system tools (runtime control, outreach run, agenda scheduling, settings/contacts snapshots, OpenClaw, Codex improve).
-- Manager is now the primary self-chat control plane: it is evaluated before direct `openclaw`, `improve`, and runtime command handlers (which remain as compatibility fallback).
-- Manager now sends live progress updates in self chat (plan ready, tools selected, per-step start/completion/failure, final summary).
-- Manager tool registry and telemetry reference: `docs/self-control-manager-tool-registry.md`.
-- `pause worker` pauses automation while keeping the listener alive, so `resume worker` still works.
-- App controls use `.slm/app.pid` and start with `SLM_APP_START_CMD` (default `bun run dev:next`).
+The repo includes extensive `*.test.ts` coverage in both:
+- `src/worker`
+- `convex`
 
-## Local Codex Self-Improve Commands (Self Chat)
-
-You can also trigger a local Codex improvement run with project context from your self chat:
-
-- `improve <prompt>` (or `/slm improve <prompt>`)
-- `improve status`
-- `improve latest`
-
-Examples:
-- `improve tighten self-message command handling and add tests`
-- `improve status`
-
-Notes:
-- Runs execute in the background via `bun run self-improve -- --prompt "<prompt>"`.
-- Latest report path: `.slm/self-improvement/latest.md`.
-
-## OpenClaw CLI Commands (Self Chat)
-
-Your current WhatsApp workflow stays intact. These commands trigger your local OpenClaw CLI from self chat (no OpenClaw WhatsApp channel required):
-
-- `openclaw <instruction>`
-- `openclaw status`
-- `openclaw help`
-- `@openclaw <instruction>`
-- `anything @openclaw <instruction>`
-- `anything openclaw: <instruction>`
-
-Example:
-- `openclaw summarize inbox and suggest top 3 follow-ups`
-- `yo @openclaw summarize inbox and give me next actions`
-
-Environment variables:
-- `SLM_OPENCLAW_CLI_PATH` (optional, default `openclaw`)
-- `SLM_OPENCLAW_AGENT_ID` (optional, default `main`)
-- `SLM_OPENCLAW_AGENT_TIMEOUT_MS` (optional, default `21600000` = 6h)
-- `SLM_SELF_CONTROL_SMART_ROUTING_ENABLED` (optional, default `true`)
-- `SLM_SELF_CONTROL_ROUTER_MODEL` (optional, default `gpt-5.2`)
-- `SLM_SELF_CONTROL_ROUTER_TIMEOUT_MS` (optional, default `45000`)
-- `SLM_SELF_CONTROL_MANAGER_ENABLED` (optional, default `true`)
-- `SLM_SELF_CONTROL_MANAGER_MODEL` (optional, default `gpt-5.2`)
-- `SLM_SELF_CONTROL_MANAGER_TIMEOUT_MS` (optional, default `60000`)
-- `SLM_SELF_CONTROL_MANAGER_MAX_STEPS` (optional, default `3`, max `5`)
-- `SLM_SELF_CONTROL_IMPLICIT_ROUTING_ENABLED` (optional, default `true`; set `false` to enforce strict prefix-only command handling)
-
-Long-running behavior:
-- `openclaw <instruction>` and `@openclaw <instruction>` are queued and run in background.
-- You get an immediate queued confirmation, then a final completion/failure message when OpenClaw finishes (supports multi-hour jobs).
-
-## Useful Commands
-
-- `bun run dev:next` - Next.js dashboard only
-- `bun run dev:convex` - Convex backend only
-- `bun run worker` - WhatsApp worker only
-- `bun run self-improve --dry-run` - build improvement context and prompt without calling Codex
-- `bun run self-improve` - run one Codex self-improvement cycle
-- `bun run self-improve:daemon` - run recurring self-improvement cycles locally
-- `bun run lint` - lint checks
-
-## Self-Improvement Cycle (Local Codex Job)
-
-This repo includes a local recurring job runner that feeds project context/logs into `codex exec` and writes actionable improvement reports.
-
-- Config file: `self-improvement.config.json`
-- Runner: `scripts/self-improvement-cycle.ts`
-- Reports output: `.slm/self-improvement/runs/<run-id>/report.md`
-- Latest report shortcut: `.slm/self-improvement/latest.md`
-- UI workspace: `/self-improvement` (history, status, errors, and full run reports)
-
-Run one cycle:
+Run all tests:
 
 ```bash
-bun run self-improve
+bun test
 ```
 
-Run continuously (default every 240 minutes, configurable):
+Run targeted tests (examples):
 
 ```bash
-bun run self-improve:daemon
+bun test src/worker
+bun test convex
 ```
 
-Use system cron (example: every 6 hours):
+## License
 
-```bash
-0 */6 * * * cd /Users/joshua/Documents/lifemanager && /opt/homebrew/bin/bun run self-improve >> .slm/self-improvement/cron.log 2>&1
-```
+This repository is **source-available** under the [PolyForm Noncommercial 1.0.0 license](./LICENSE).
 
-More setup/tuning details: `docs/self-improvement-cycle.md`
+- Personal and other non-commercial use is permitted.
+- Commercial use is not permitted under the default license.
+- Because commercial use is restricted, this license does not meet OSI open source criteria.
 
-## Voice Notes (whisper.cpp, No API Key)
+If you need commercial usage rights, contact the maintainers to discuss a separate commercial license.
 
-Incoming WhatsApp voice notes/audio can be transcribed locally and fed into the same AI reply flow.
+## Contributing
 
-1. Build/install `whisper.cpp` locally so `whisper-cli` is available.
-2. Download a Whisper GGML model file (for example `ggml-base.en.bin`).
-3. Set env vars in `.env.local`:
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for contribution workflow and contribution license terms.
 
-```bash
-SLM_WHISPER_ENABLED=true
-SLM_WHISPER_CLI_PATH=whisper-cli
-SLM_WHISPER_MODEL_PATH=/absolute/path/to/ggml-base.en.bin
-SLM_WHISPER_LANGUAGE=auto
-SLM_WHISPER_THREADS=4
-SLM_WHISPER_TIMEOUT_MS=120000
-SLM_FFMPEG_PATH=ffmpeg
-```
+## Support and Security
 
-Notes:
-- `SLM_WHISPER_MODEL_PATH` is required.
-- `ffmpeg` is optional but recommended; when available, audio is converted to 16k mono WAV before transcription for better compatibility.
-- When transcription fails or is not configured, the worker still ingests the message and marks transcription as unavailable in logs/events.
+- Support policy: [SUPPORT.md](./SUPPORT.md)
+- Security policy and disclosure process: [SECURITY.md](./SECURITY.md)
+- Community behavior standards: [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md)
 
-## Project Map
+## Open-Source Readiness Checklist
 
-- `src/app/*` dashboard pages + route handlers
-- `src/worker/*` Baileys worker and AI fallback pipeline
-- `src/lib/*` Convex client refs and server helpers
-- `convex/*` schema, functions, actions, and cron jobs
+Implemented in this repository:
 
-## Notes
+1. Distribution license and package metadata are aligned (`LICENSE`, `package.json`).
+2. Community and governance docs are present (`CONTRIBUTING`, `CODE_OF_CONDUCT`, `SUPPORT`, `SECURITY`).
+3. Contributor workflows are present (`.github/ISSUE_TEMPLATE/*`, `.github/pull_request_template.md`, `.github/CODEOWNERS`).
+4. Automation is present (`.github/workflows/ci.yml`, `.github/workflows/codeql.yml`, `.github/dependabot.yml`).
+5. Release process docs are present (`CHANGELOG.md`, `RELEASE.md`).
 
-- The worker stores WhatsApp auth at `WHATSAPP_AUTH_PATH` (default `.wa_auth`).
-- `SLM_HISTORY_SYNC_ENABLED` defaults to `true`; group + broadcast/system JIDs are ignored at the socket layer so sync stays direct-chat only.
-- Group chats are ignored by default unless rules override behavior.
-- High-risk inbound content is guardrail-blocked for manual review.
+Manual GitHub repo settings still required:
+
+1. Enable branch protection on `main` and require CI + CodeQL checks.
+2. Enable private vulnerability reporting and GitHub security features (secret scanning, Dependabot alerts, push protection).
+3. Decide whether to enable GitHub Discussions for support questions.
+4. Scrub full git history for secrets before public launch (if not already done).
+
+## Reference Docs
+
+- Feature catalog: [docs/reference/feature-catalog.md](docs/reference/feature-catalog.md)
+- HTTP API reference: [docs/reference/http-api.md](docs/reference/http-api.md)
+- Environment variables: [docs/reference/environment.md](docs/reference/environment.md)
+- Dependencies and stack inventory: [docs/reference/dependencies.md](docs/reference/dependencies.md)
+- Release process: [RELEASE.md](./RELEASE.md)
+- Changelog: [CHANGELOG.md](./CHANGELOG.md)
+
+Project-specific implementation docs already present in this repo:
+- [docs/self-control-manager-tool-registry.md](docs/self-control-manager-tool-registry.md)
+- [docs/self-improvement-cycle.md](docs/self-improvement-cycle.md)
+- [docs/whatsapp-autopilot-technical-gap.md](docs/whatsapp-autopilot-technical-gap.md)
