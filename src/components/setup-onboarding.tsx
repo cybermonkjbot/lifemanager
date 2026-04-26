@@ -101,8 +101,8 @@ function resolveReplyPacePreview(preset: InstanceReplyPacePreset) {
 
 function resolveAutonomyPreview(mode: InstanceAutonomyMode) {
   return mode === "autopilot"
-    ? "Approved drafts can send automatically when allowed."
-    : "Nothing sends automatically until you approve it.";
+    ? "Allowed drafts may send without another review."
+    : "Every generated draft waits for your approval.";
 }
 
 function cloneDefaultPreferences(): InstanceSetupPreferences {
@@ -164,7 +164,7 @@ function summarizeSoulDefaults(preferences: InstanceSetupPreferences) {
     resolveAutonomyPreview(preferences.autonomyMode),
     resolveReplyPacePreview(preferences.replyPace),
     resolveMimicryPreview(preferences.mimicryPreset),
-    preferences.memesEnabled ? "Meme tools start visible." : "Meme tools stay tucked away.",
+    preferences.memesEnabled ? "Meme tools are available from launch." : "Meme tools stay hidden at launch.",
   ];
 }
 
@@ -189,8 +189,8 @@ type SoulFieldKey = keyof InstanceSoulProfile;
 
 const soulPrivacyOptions: Array<{ value: InstanceSoulPrivacyLevel; label: string }> = [
   { value: "setup_only", label: "Setup only" },
-  { value: "ai_usable", label: "AI usable" },
-  { value: "never_mention", label: "Never mention" },
+  { value: "ai_usable", label: "May guide AI" },
+  { value: "never_mention", label: "Do not mention" },
 ];
 
 const soulReviewFields: Array<{ key: SoulFieldKey; label: string }> = [
@@ -212,10 +212,10 @@ const soulReviewFields: Array<{ key: SoulFieldKey; label: string }> = [
 
 function formatPrivacyLabel(value: InstanceSoulPrivacyLevel) {
   if (value === "ai_usable") {
-    return "AI usable";
+    return "May guide AI";
   }
   if (value === "never_mention") {
-    return "Never mention";
+    return "Do not mention";
   }
   return "Setup only";
 }
@@ -243,8 +243,8 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
   const pinRequiredCopy = envManagedPin
     ? "Your PIN is already managed by environment variables."
     : filePinExists
-      ? "A local PIN already exists. Leave fields empty to keep it, or enter a new PIN."
-      : "Create a PIN now to lock this dashboard.";
+      ? "A local PIN already exists. Leave both fields empty to keep it, or enter a new PIN."
+      : "Create a local PIN before opening the control surface.";
   const pinValidationMessage = useMemo(() => {
     if (envManagedPin) {
       return "";
@@ -351,7 +351,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
           setPinConfirm("");
         }
         if (payload.preferences && body.preferencesSynced === false) {
-          pushNotice("info", "Preferences were saved locally, but sync failed. Some settings may still use older values.");
+          pushNotice("info", "Preferences were saved locally, but sync failed. Some runtime settings may still use older values.");
         }
         if (options?.nextStage) {
           setStage(options.nextStage);
@@ -363,7 +363,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
         return body;
       },
       {
-        pendingLabel: "Saving setup state...",
+        pendingLabel: "Saving setup...",
         successMessage: options?.successMessage,
       },
     );
@@ -394,13 +394,13 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
         setInstanceState(body.state);
         setPreferences(body.preferences);
         if (body.preferencesSynced === false) {
-          pushNotice("info", "AI settings were saved locally, but sync failed. Some settings may still use older values.");
+          pushNotice("info", "AI-fit settings were saved locally, but sync failed. Some runtime settings may still use older values.");
         }
         return body;
       },
       {
-        pendingLabel: "Running setup AI settings tool...",
-        successMessage: "AI settings applied. Tool disabled for this setup run.",
+        pendingLabel: "Fitting defaults from profile...",
+        successMessage: "AI-fit defaults applied. Tool disabled for this setup run.",
       },
     );
   };
@@ -446,13 +446,13 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
               <p className="queue-meta">{pinRequiredCopy}</p>
 
               <details className="setup-advanced">
-                <summary>Remote setup secret</summary>
+                <summary>Remote setup access</summary>
                 <label className="setup-input-group">
                   <span className="queue-meta">Setup secret</span>
                   <input
                     type="password"
                     value={setupSecret}
-                    placeholder="Only needed when SLM_SETUP_SECRET is set"
+                    placeholder="Required only when SLM_SETUP_SECRET is set"
                     onChange={(event) => setSetupSecret(event.target.value)}
                     autoComplete="off"
                   />
@@ -500,7 +500,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                         issueSession: !envManagedPin,
                       },
                       {
-                        successMessage: "PIN settings saved.",
+                        successMessage: "Local PIN settings saved.",
                         nextStage: "preferences",
                       },
                     );
@@ -517,7 +517,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
               <div className="setup-poster-block setup-preference-hero">
                 <h3>Recommended defaults</h3>
                 <p className="queue-meta">
-                  Answer the soul profile questions to shape the first AI personality profile and setup defaults.
+                  Add only the personal context you want this system to use when shaping replies and defaults.
                 </p>
                 <div className="wizard-actions">
                   <button
@@ -533,8 +533,8 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
               <div className="setup-soul-panel">
                 <div className="setup-soul-head">
                   <div>
-                    <p className="queue-meta">Soul profile</p>
-                    <h3>Who are you underneath the logistics?</h3>
+                    <p className="queue-meta">Guidance profile</p>
+                    <h3>What context should guide the system?</h3>
                   </div>
                   <button
                     className="btn btn-primary"
@@ -545,7 +545,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                       void runSetupAiSettingsTool();
                     }}
                   >
-                    {setupAiRecord.pending ? "Applying..." : setupAiToolAvailable ? "AI-fit defaults" : "AI tool used"}
+                    {setupAiRecord.pending ? "Applying..." : setupAiToolAvailable ? "Fit defaults with AI" : "AI fit already used"}
                   </button>
                   <button
                     className="btn btn-ghost"
@@ -554,7 +554,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                     aria-disabled={!soulProfileHasContent || setupAiRecord.pending}
                     onClick={() => setPreferences((current) => derivePreferencesFromSoulProfile(current.soulProfile, current))}
                   >
-                    Rule-fit defaults
+                    Fit defaults locally
                   </button>
                 </div>
 
@@ -649,7 +649,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                         <textarea
                           value={preferences.soulProfile.romanticInterests}
                           rows={3}
-                          placeholder="Names, situations, boundaries, or what the assistant should know."
+                          placeholder="Names, situations, boundaries, or what the system should know."
                           onChange={(event) => updateSoulField("romanticInterests", event.target.value)}
                         />
                       </label>
@@ -663,7 +663,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                     <textarea
                       value={preferences.soulProfile.selfDescription}
                       rows={4}
-                      placeholder="The version of you the assistant should stay loyal to."
+                      placeholder="The version of you this system should stay loyal to."
                       onChange={(event) => updateSoulField("selfDescription", event.target.value)}
                     />
                   </label>
@@ -764,7 +764,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                         className={`setup-choice-card ${preferences.autonomyMode === value ? "setup-choice-card-active" : ""}`}
                         onClick={() => setPreferences((current) => ({ ...current, autonomyMode: value }))}
                       >
-                        <strong>{value === "review_first" ? "Review first" : "Automatic send"}</strong>
+                        <strong>{value === "review_first" ? "Review first" : "Autopilot"}</strong>
                         <span>{resolveAutonomyPreview(value)}</span>
                       </button>
                     ))}
@@ -814,7 +814,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                     />
                     <span>
                       <strong>Enable meme tools</strong>
-                      <span>Show meme features from the start.</span>
+                      <span>Show meme creation and review features from the start.</span>
                     </span>
                   </label>
                   <label className="setup-toggle-card">
@@ -825,7 +825,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                     />
                     <span>
                       <strong>Enable Instagram setup</strong>
-                      <span>Show Instagram setup as an option.</span>
+                      <span>Show Instagram connection steps and runtime controls.</span>
                     </span>
                   </label>
                 </div>
@@ -838,7 +838,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                   />
                   <span>
                     <strong>Quiet hours</strong>
-                    <span>Prevent automatic actions during overnight hours.</span>
+                    <span>Defer automatic sends during overnight hours.</span>
                   </span>
                 </label>
 
@@ -895,7 +895,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                         preferences,
                       },
                       {
-                        successMessage: "Defaults saved.",
+                        successMessage: "Launch defaults saved.",
                         nextStage: "connect",
                       },
                     );
@@ -917,7 +917,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
               <SetupWizard realtimeEnabled={realtimeEnabled} embedded initialScreen="whatsapp" setupSecret={setupSecret.trim()} />
               <div className="wizard-actions">
                 <button className="btn btn-primary" type="button" onClick={() => setStage("finish")}>
-                  Skip for now
+                  Continue without connecting
                 </button>
                 <button className="btn btn-ghost" type="button" onClick={() => setStage("preferences")}>
                   Back
@@ -932,7 +932,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                 <p className="setup-poster-kicker">Review</p>
                 <h3>Check the profile and defaults before launch.</h3>
                 <p>
-                  Privacy choices decide what stays setup-only and what can shape future AI replies.
+                  Privacy choices decide what stays in setup, what can guide replies, and what must never be mentioned.
                 </p>
               </div>
 
@@ -950,7 +950,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                   <p className="setup-summary-value">{preferences.mimicryPreset}</p>
                 </div>
                 <div className="setup-summary-card">
-                  <p className="queue-meta">Soul fields</p>
+                  <p className="queue-meta">Profile fields</p>
                   <p className="setup-summary-value">{visibleSoulReviewFields.length || 0} saved</p>
                 </div>
               </div>
@@ -958,7 +958,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
               <div className="setup-review-panel">
                 <div className="setup-review-head">
                   <div>
-                    <p className="queue-meta">Soul profile</p>
+                    <p className="queue-meta">Guidance profile</p>
                     <p className="queue-title">Saved fields and privacy</p>
                   </div>
                   <button className="btn btn-ghost" type="button" onClick={() => setStage("preferences")}>
@@ -978,7 +978,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                     ))}
                   </div>
                 ) : (
-                  <p className="empty-line">No soul profile fields filled yet.</p>
+                  <p className="empty-line">No guidance profile fields filled yet.</p>
                 )}
               </div>
 
