@@ -350,7 +350,7 @@ function FollowupsContent() {
 
   const onClearAll = () => {
     const confirmed = window.confirm(
-      "Clear all open follow-ups? This dismisses suggested, confirmed, and queued follow-ups across providers.",
+      "Dismiss every open follow-up? Suggested, confirmed, and queued follow-ups across providers will be closed.",
     );
     if (!confirmed) {
       return;
@@ -376,7 +376,7 @@ function FollowupsContent() {
           return totalCleared;
         },
         {
-          pendingLabel: "Clearing follow-ups…",
+          pendingLabel: "Dismissing follow-ups…",
           suppressSuccessNotice: true,
         },
       );
@@ -387,10 +387,10 @@ function FollowupsContent() {
 
       const totalCleared = result.value ?? 0;
       if (totalCleared > 0) {
-        pushNotice("success", `Cleared ${totalCleared} follow-up${totalCleared === 1 ? "" : "s"}.`);
+        pushNotice("success", `Dismissed ${totalCleared} follow-up${totalCleared === 1 ? "" : "s"}.`);
         return;
       }
-      pushNotice("info", "No open follow-ups to clear.");
+      pushNotice("info", "No open follow-ups to dismiss.");
     })();
   };
 

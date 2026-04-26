@@ -531,7 +531,7 @@ function formatQueueSnapshot(snapshot: unknown) {
   const guardrails = asArray(data.guardrailFlags);
   const topDrafts = needsReply.slice(0, 3).map((item, index) => `${index + 1}. ${getThreadLabel(item)}`);
   return [
-    `Queue: ${needsReply.length} replies, ${followups.length} follow-up confirmations, ${todos.length} todo candidates, ${guardrails.length} guardrails.`,
+    `Queue: ${needsReply.length} replies, ${followups.length} follow-up confirmations, ${todos.length} task suggestions, ${guardrails.length} safety flags.`,
     topDrafts.length ? `Top reply threads:\n${topDrafts.join("\n")}` : "No reply drafts are currently waiting.",
   ].join("\n");
 }
@@ -559,7 +559,7 @@ function formatSystemHealth(health: unknown) {
     `System: ${alerts.length ? `${alerts.length} alert(s)` : "no active alerts"}.`,
     `Provider errors: ${readNumber(metrics.providerErrors)}/${readNumber(metrics.providerRunsWindow)}. Due outbox: ${readNumber(
       metrics.dueOutbox,
-    )}. Open guardrails: ${readNumber(metrics.openGuardrails)}. Follow-up overdue: ${readNumber(metrics.followupOverdueCount)}.`,
+    )}. Open safety flags: ${readNumber(metrics.openGuardrails)}. Follow-up overdue: ${readNumber(metrics.followupOverdueCount)}.`,
     alerts.length ? `Alerts:\n${alerts.slice(0, 4).map((alert, index) => `${index + 1}. ${alert}`).join("\n")}` : "",
   ]
     .filter(Boolean)

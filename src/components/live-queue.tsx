@@ -323,7 +323,7 @@ function QueueContent() {
         await createTodoFromCandidate({ candidateId: item._id as Id<"todoCandidates"> });
       },
       {
-        pendingLabel: "Adding TODO...",
+        pendingLabel: "Adding task...",
         successMessage: "Task added.",
       },
     ).then((outcome) => closeReviewOnSuccess("todos", item._id, outcome));
@@ -337,8 +337,8 @@ function QueueContent() {
         await rejectDraft({ draftId: draftId as Id<"replyDrafts"> });
       },
       {
-        pendingLabel: "Rejecting...",
-        successMessage: "Draft rejected.",
+        pendingLabel: "Discarding draft...",
+        successMessage: "Draft discarded.",
       },
     ).then((outcome) => closeReviewOnSuccess("needsReply", draftId, outcome));
   };

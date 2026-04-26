@@ -1341,8 +1341,8 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
         await rejectDraft({ draftId: draftId as Id<"replyDrafts"> });
       },
       {
-        pendingLabel: "Rejecting...",
-        successMessage: "Draft rejected.",
+        pendingLabel: "Discarding draft...",
+        successMessage: "Draft discarded.",
       },
     );
   };
@@ -1402,7 +1402,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
         };
 
         if (payload.guardrailBlocked) {
-          throw new Error(payload.guardrailReason?.trim() || "AI improvement was blocked by guardrail.");
+          throw new Error(payload.guardrailReason?.trim() || "AI improvement was blocked by a safety rule.");
         }
 
         const improvedText = typeof payload.replyText === "string" ? payload.replyText.trim() : "";
@@ -1494,8 +1494,8 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
         await createTodoFromCandidate({ candidateId: item._id as Id<"todoCandidates"> });
       },
       {
-        pendingLabel: "Adding TODO...",
-        successMessage: "TODO added.",
+        pendingLabel: "Adding task...",
+        successMessage: "Task added.",
       },
     );
   };
@@ -1512,8 +1512,8 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
         });
       },
       {
-        pendingLabel: "Resolving guardrail...",
-        successMessage: "Guardrail resolved.",
+        pendingLabel: "Resolving safety flag...",
+        successMessage: "Safety flag resolved.",
       },
     );
   };
@@ -1839,7 +1839,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
       const actionPending = sendOrSnoozePending || savePending || improvePending || rejectPending;
       return (
         <div key={`review:draft:${item._id}`} className="thread-review-item" aria-busy={actionPending}>
-          <p className="thread-review-title">Needs Reply Review</p>
+          <p className="thread-review-title">Reply draft review</p>
           <p className="queue-body">{trim(item.sourceMessage?.text || item.text || "", 240)}</p>
           <SharedMediaPreview preview={item.sourceMessage?.mediaPreview} mediaAssetId={item.sourceMessage?.mediaAssetId} />
           <label className="setup-input-group">
@@ -1853,7 +1853,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
                   [draftEditKey(item._id)]: event.target.value,
                 }))
               }
-              placeholder="Write your response, then optionally click AI Improve."
+              placeholder="Write your response, then optionally improve it with AI."
               disabled={sendOrSnoozePending || improvePending}
               aria-disabled={sendOrSnoozePending || improvePending}
             />
@@ -1899,7 +1899,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
               disabled={improvePending || sendOrSnoozePending || savePending || !hasDraftText}
               aria-disabled={improvePending || sendOrSnoozePending || savePending || !hasDraftText}
             >
-              {improvePending ? "Improving..." : "AI Improve"}
+              {improvePending ? "Improving..." : "Improve with AI"}
             </button>
             <button
               type="button"
@@ -1908,7 +1908,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
               disabled={actionPending}
               aria-disabled={actionPending}
             >
-              Reject
+              Discard
             </button>
           </div>
           {getRecord(`send:${item._id}`).error || getRecord(`snooze:${item._id}`).error ? (
@@ -1940,7 +1940,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
       const reasonText = autoFollowupReasons[item._id] || item.reason;
       return (
         <div key={`review:followup:${item._id}`} className="thread-review-item">
-          <p className="thread-review-title">Follow-up Confirmation</p>
+          <p className="thread-review-title">Follow-up confirmation</p>
           <p className="queue-meta">Due: {formatDateTimeWithRelative(item.dueAt)}</p>
           <p className="queue-body">{reasonText}</p>
           {item.sourceSnippet?.trim() || item.sourceMessage?.text?.trim() ? (
@@ -2016,7 +2016,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
       const titleText = autoTodoTitles[item._id] || item.title;
       return (
         <div key={`review:todo:${item._id}`} className="thread-review-item">
-          <p className="thread-review-title">TODO Candidate</p>
+          <p className="thread-review-title">Task suggestion</p>
           <p className="queue-body">{titleText}</p>
           <p className="queue-meta">Suggested due: {formatDateTime(item.suggestedDueAt)}</p>
           {item.sourceMessage?.text?.trim() ? <p className="queue-meta">Context: {trim(item.sourceMessage.text.trim(), 220)}</p> : null}
@@ -2028,7 +2028,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
               disabled={isPending(`todo:${item._id}`)}
               aria-disabled={isPending(`todo:${item._id}`)}
             >
-              {isPending(`todo:${item._id}`) ? "Adding..." : "Add TODO"}
+              {isPending(`todo:${item._id}`) ? "Adding..." : "Add task"}
             </button>
           </div>
           {getRecord(`todo:${item._id}`).error ? (
@@ -2043,7 +2043,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
     const item = entry.item;
     return (
       <div key={`review:guardrail:${item._id}`} className="thread-review-item">
-        <p className="thread-review-title">Guardrail Flag</p>
+        <p className="thread-review-title">Safety flag</p>
         <p className="queue-meta">Severity: {item.severity}</p>
         <p className="queue-body">{item.reason}</p>
         <div className="queue-actions">
@@ -2367,7 +2367,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
                             <p className="queue-meta message-tool-summary-meta">
                               {messageToolSummary?.contextWindows.length ? `${messageToolSummary.contextWindows.length} context window` : "No context window"}
                               {messageToolSummary?.styleGuardrails.length
-                                ? ` · ${messageToolSummary.styleGuardrails.length} style guardrail`
+                                ? ` · ${messageToolSummary.styleGuardrails.length} style check`
                                 : ""}
                             </p>
                             {plannerSummary ? (
@@ -2545,7 +2545,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
                         </strong>
                       </div>
                       <div className="tool-evidence-stat">
-                        <span>Guardrail</span>
+                        <span>Style check</span>
                         <strong>
                           {failedGuardrails > 0
                             ? `${failedGuardrails} failed`
@@ -2634,9 +2634,9 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
               </div>
 
               <div className="queue-item">
-                <p className="queue-title">Context Window + Guardrail</p>
+                <p className="queue-title">Context Window + Style Check</p>
                 {selectedToolSummary.contextWindows.length === 0 && selectedToolSummary.styleGuardrails.length === 0 ? (
-                  <p className="empty-line">No context-window or style-guardrail events captured.</p>
+                  <p className="empty-line">No context-window or style-check events captured.</p>
                 ) : (
                   <div className="stack compact">
                     {selectedToolSummary.contextWindows.map((event) => (
@@ -2665,7 +2665,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
                             aria-hidden="true"
                           />
                           <div className="tool-evidence-title-block">
-                            <p className="queue-title">Style guardrail {event.passed ? "passed" : "failed"}</p>
+                            <p className="queue-title">Style check {event.passed ? "passed" : "failed"}</p>
                             <p className="queue-meta">
                               Score {Number(event.score || 0).toFixed(2)} / {Number(event.threshold || 0).toFixed(2)} ·{" "}
                               {formatDateTime(event.createdAt)}

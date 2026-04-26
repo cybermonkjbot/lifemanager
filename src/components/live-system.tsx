@@ -241,7 +241,7 @@ function AiTestBench() {
                 ))}
               </div>
             ) : null}
-            {result.guardrailBlocked ? <p className="queue-meta">Guardrail: {result.guardrailReason || "Manual review required."}</p> : null}
+            {result.guardrailBlocked ? <p className="queue-meta">Safety rule: {result.guardrailReason || "Manual review required."}</p> : null}
           </div>
 
           {result.attempts.map((attempt, index) => (
@@ -417,7 +417,7 @@ function SystemContent() {
                 <p className="queue-meta">
                   Estimated AI cost (window): ${metrics.providerEstimatedCostUsd.toFixed(6)} ({metrics.providerPricedRuns} priced runs)
                 </p>
-                <p className="queue-meta">Open guardrails: {metrics.openGuardrails}</p>
+                <p className="queue-meta">Open safety flags: {metrics.openGuardrails}</p>
                 <p className="queue-meta">Outbox pending/due: {metrics.pendingOutbox}/{metrics.dueOutbox}</p>
                 <p className="queue-meta">Recent failed outbox items: {metrics.failedOutboxRecent}</p>
                 <p className="queue-meta">Follow-up detections: {metrics.followupDetections}</p>
@@ -427,7 +427,7 @@ function SystemContent() {
                 <p className="queue-meta">Overdue follow-ups: {metrics.followupOverdueCount}</p>
               </div>
             ) : (
-              <p className="empty-line">No metrics yet.</p>
+              <p className="empty-line">No runtime metrics captured yet.</p>
             )}
           </article>
         ) : null}
@@ -442,7 +442,7 @@ function SystemContent() {
                   <p className="queue-body">{alert}</p>
                 </div>
               ))}
-              {!healthLoading && alerts.length === 0 ? <p className="empty-line">No active alerts.</p> : null}
+              {!healthLoading && alerts.length === 0 ? <p className="empty-line">No active system alerts.</p> : null}
             </div>
           </article>
         ) : null}
@@ -471,7 +471,7 @@ function SystemContent() {
                   {run.error ? <p className="queue-body">{trim(run.error, 180)}</p> : null}
                 </div>
               ))}
-              {!healthLoading && providerRuns.length === 0 ? <p className="empty-line">No provider runs logged yet.</p> : null}
+              {!healthLoading && providerRuns.length === 0 ? <p className="empty-line">No provider attempts logged yet.</p> : null}
             </div>
           </article>
         ) : null}
@@ -489,7 +489,7 @@ function SystemContent() {
                 </div>
               ))}
               {!healthLoading && latestTranscriptions.length === 0 ? (
-                <p className="empty-line">No transcription runs captured yet.</p>
+                <p className="empty-line">No transcription attempts captured yet.</p>
               ) : null}
             </div>
           </article>
@@ -509,7 +509,7 @@ function SystemContent() {
                   <p className="queue-meta">{formatDateTime(event.createdAt)}</p>
                 </div>
               ))}
-              {!healthLoading && latestEvents.length === 0 ? <p className="empty-line">No events captured yet.</p> : null}
+              {!healthLoading && latestEvents.length === 0 ? <p className="empty-line">No system events captured yet.</p> : null}
             </div>
           </article>
         ) : null}

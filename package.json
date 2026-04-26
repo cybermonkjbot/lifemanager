@@ -13,9 +13,9 @@
   },
   "homepage": "https://github.com/cybermonkjbot/lifemanager#readme",
   "bin": {
-    "OdogwuHQ": "./scripts/lifemanager-installer.mjs",
-    "odogwuhq": "./scripts/lifemanager-installer.mjs",
-    "lifemanager": "./scripts/lifemanager-installer.mjs"
+    "OdogwuHQ": "scripts/lifemanager-installer.mjs",
+    "odogwuhq": "scripts/lifemanager-installer.mjs",
+    "lifemanager": "scripts/lifemanager-installer.mjs"
   },
   "files": [
     ".env.example",
