@@ -423,12 +423,13 @@ function romanticTargetsFromText(value: string, ownGender: UserRomanticContext["
 async function getUserRomanticContext(message: string): Promise<UserRomanticContext> {
   const config = await readLocalInstanceConfig().catch(() => null);
   const soul = config?.preferences?.soulProfile;
-  const profileText = [soul?.genderIdentity, soul?.pronouns, soul?.romanticPreference, soul?.relationshipStatus, soul?.romanticInterests]
-    .filter(Boolean)
-    .join(" ");
+  const identityText = [soul?.genderIdentity, soul?.pronouns].filter(Boolean).join(" ");
+  const preferenceText = [soul?.romanticPreference, soul?.relationshipStatus, soul?.romanticInterests].filter(Boolean).join(" ");
+  const profileText = [identityText, preferenceText].filter(Boolean).join(" ");
   const messageGender = normalizeGenderFromText(message);
-  const ownGender = normalizeGenderFromText(profileText) !== "unknown" ? normalizeGenderFromText(profileText) : messageGender;
-  const romanticTargets = romanticTargetsFromText(profileText, ownGender);
+  const profileGender = normalizeGenderFromText(identityText);
+  const ownGender = profileGender !== "unknown" ? profileGender : messageGender;
+  const romanticTargets = romanticTargetsFromText(preferenceText, ownGender);
   const messageTargets = romanticTargetsFromText(message, ownGender);
   const targets = messageTargets.length ? messageTargets : romanticTargets;
 

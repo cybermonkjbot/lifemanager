@@ -2231,7 +2231,7 @@ export function LiveSettings() {
           </label>
 
           <label className="stack compact">
-            <span className="queue-meta">Status reply mode</span>
+            <span className="queue-meta">Status auto-reply scope</span>
             <select
               value={draft.statusReplyRequireFunny ? "true" : "false"}
               onChange={(event) =>
@@ -2269,7 +2269,7 @@ export function LiveSettings() {
           </label>
 
           <label className="stack compact">
-            <span className="queue-meta">Status retention (ms)</span>
+            <span className="queue-meta">Status retention window (ms)</span>
             <input
               type="number"
               min={300000}
@@ -2280,7 +2280,7 @@ export function LiveSettings() {
               disabled={record.pending}
               aria-disabled={record.pending}
             />
-            <span className="queue-meta">Older status entries are removed.</span>
+            <span className="queue-meta">Older status context is removed from local storage.</span>
           </label>
 
           <label className="stack compact">
@@ -2413,7 +2413,7 @@ export function LiveSettings() {
               disabled={record.pending}
               aria-disabled={record.pending}
             />
-            <span className="queue-meta">Leave empty to apply to all recent groups.</span>
+            <span className="queue-meta">Leave empty to apply the cleanup policy to all recent groups.</span>
           </label>
 
           <label className="stack compact">
@@ -2452,7 +2452,7 @@ export function LiveSettings() {
           </label>
 
           <label className="stack compact">
-            <span className="queue-meta">Delay min (ms)</span>
+            <span className="queue-meta">Send delay min (ms)</span>
             <input
               type="number"
               min={500}
@@ -2466,7 +2466,7 @@ export function LiveSettings() {
           </label>
 
           <label className="stack compact">
-            <span className="queue-meta">Delay max (ms)</span>
+            <span className="queue-meta">Send delay max (ms)</span>
             <input
               type="number"
               min={500}
@@ -2555,7 +2555,7 @@ export function LiveSettings() {
           </label>
 
           <label className="stack compact">
-            <span className="queue-meta">Manual interruption cooldown (ms)</span>
+            <span className="queue-meta">Manual reply cooldown (ms)</span>
             <input
               type="number"
               min={0}
@@ -2572,12 +2572,12 @@ export function LiveSettings() {
               aria-disabled={record.pending}
             />
             <span className="queue-meta">
-              After a manual WhatsApp reply, auto-replies pause for this duration in that chat.
+              After you reply manually in WhatsApp, auto-replies pause for this duration in that chat.
             </span>
           </label>
 
           <label className="stack compact">
-            <span className="queue-meta">Quiet hours</span>
+            <span className="queue-meta">Quiet hours for automatic sends</span>
             <select
               value={draft.quietHoursEnabled ? "true" : "false"}
               onChange={(event) =>
@@ -2624,7 +2624,7 @@ export function LiveSettings() {
               disabled={record.pending || !draft.quietHoursEnabled}
               aria-disabled={record.pending || !draft.quietHoursEnabled}
             />
-            <span className="queue-meta">Server-local time window where sends are deferred.</span>
+            <span className="queue-meta">Server-local time window where automatic sends are deferred.</span>
           </label>
 
           <label className="stack compact">
@@ -2719,7 +2719,7 @@ export function LiveSettings() {
           </label>
 
           <label className="stack compact">
-            <span className="queue-meta">Automate WhatsApp About text</span>
+            <span className="queue-meta">Allow WhatsApp About text updates</span>
             <select
               value={draft.aboutAutomationEnabled ? "true" : "false"}
               onChange={(event) =>
@@ -2822,14 +2822,14 @@ export function LiveSettings() {
           </label>
 
           <div className="queue-item">
-            <p className="queue-title">Auto voice notes (VoxCPM)</p>
+            <p className="queue-title">Automatic voice notes (VoxCPM)</p>
             <p className="queue-meta">
-              Automatically switch some outbound text replies to cloned voice notes when intent matches your configured cues.
+              Convert some outbound text drafts to cloned voice notes when intent matches your configured cues.
             </p>
           </div>
 
           <label className="stack compact">
-            <span className="queue-meta">Enable automatic voice note replies</span>
+            <span className="queue-meta">Allow automatic voice note replies</span>
             <select
               value={draft.voiceNotesAutoEnabled ? "true" : "false"}
               onChange={(event) =>
@@ -2845,7 +2845,7 @@ export function LiveSettings() {
               <option value="true">Enabled</option>
             </select>
             <span className="queue-meta">
-              Explicit `/vn` directives always send voice notes, even when this is disabled.
+              Explicit `/vn` directives still send voice notes when you request them.
             </span>
           </label>
 
@@ -2898,15 +2898,15 @@ export function LiveSettings() {
               disabled={record.pending || !draft.voiceNotesAutoEnabled}
               aria-disabled={record.pending || !draft.voiceNotesAutoEnabled}
             />
-            <span className="queue-meta">Auto mode only considers replies that contain at least one keyword.</span>
+            <span className="queue-meta">Automatic mode only considers replies that contain at least one keyword.</span>
           </label>
 
           {instagramConnected ? (
             <>
               <div className="queue-item">
-                <p className="queue-title">Instagram DM + Story Runtime</p>
+                <p className="queue-title">Instagram DM and Story Runtime</p>
                 <p className="queue-meta">
-                  Separate pacing for Instagram outbound DMs and story posting. WhatsApp settings above remain unchanged.
+                  Separate pacing for Instagram outbound DMs and story posting. WhatsApp settings stay unchanged.
                 </p>
               </div>
 
@@ -3071,7 +3071,7 @@ export function LiveSettings() {
             </>
           ) : null}
 
-          <p className="queue-meta">Most values apply live. Restart the worker after changing poll interval.</p>
+          <p className="queue-meta">Most values apply live. Restart the worker after changing the poll interval.</p>
 
           {record.error ? (
             <p className="queue-meta action-inline-error" role="alert">
@@ -3086,10 +3086,10 @@ export function LiveSettings() {
         {showAutomation ? (
           <>
             <article className="panel-card">
-        <h3>Romantic Partners</h3>
+        <h3>Romantic Contacts</h3>
         <div className="stack compact">
           <div className="stack compact">
-            <span className="queue-meta">Partner contacts (WhatsApp JIDs)</span>
+            <span className="queue-meta">Romantic contacts (WhatsApp JIDs)</span>
             <select
               value=""
               onChange={(event) => {
@@ -3126,12 +3126,12 @@ export function LiveSettings() {
             <span className="queue-meta">Select from contacts or paste one WhatsApp JID per line.</span>
             {draft.romanticMorningEnabled && draft.romanticPartnerJids.length === 0 ? (
               <p className="queue-meta">
-                Good-morning automation is enabled, but no romantic partner JIDs are configured. Add at least one
-                target so the protocol can queue messages.
+                Good-morning automation is enabled, but no romantic contacts are configured. Add at least one
+                target so the protocol can prepare messages.
               </p>
             ) : null}
             <label className="stack compact">
-              <span className="queue-meta">Enable adaptive good-morning protocol</span>
+              <span className="queue-meta">Allow adaptive good-morning drafts</span>
               <select
                 value={draft.romanticMorningEnabled ? "true" : "false"}
                 onChange={(event) =>
@@ -3223,7 +3223,7 @@ export function LiveSettings() {
               />
             </label>
             <label className="stack compact">
-              <span className="queue-meta">Max good-morning messages per thread/day</span>
+              <span className="queue-meta">Max good-morning drafts per thread/day</span>
               <input
                 type="number"
                 min={1}
@@ -3271,7 +3271,7 @@ export function LiveSettings() {
         <h3>Proactive Outreach</h3>
         <div className="stack compact">
           <label className="stack compact">
-            <span className="queue-meta">Enable proactive check-ins</span>
+            <span className="queue-meta">Allow proactive check-in drafts</span>
             <select
               value={draft.outreachEnabled ? "true" : "false"}
               onChange={(event) =>
@@ -3362,7 +3362,7 @@ export function LiveSettings() {
             {draft.outreachEnabled && draft.outreachContactJids.length === 0 ? (
               <p className="queue-meta">
                 Proactive outreach is enabled, but no fixed contacts are configured. Add at least one JID to activate
-                scheduled outreach.
+                scheduled outreach drafts.
               </p>
             ) : null}
             {draft.outreachContactJids.length > 0 ? (
@@ -3410,7 +3410,7 @@ export function LiveSettings() {
         <h3>Conversation Intelligence</h3>
         <div className="stack compact">
           <label className="stack compact">
-            <span className="queue-meta">Enable conversation intelligence</span>
+            <span className="queue-meta">Enable conversation signal tracking</span>
             <select
               value={draft.conversationIntelligenceEnabled ? "true" : "false"}
               onChange={(event) =>
@@ -3466,7 +3466,7 @@ export function LiveSettings() {
           </label>
 
           <label className="stack compact">
-            <span className="queue-meta">Topic dying ACK streak threshold</span>
+            <span className="queue-meta">Topic-ending acknowledgement threshold</span>
             <input
               type="number"
               min={1}
@@ -3503,7 +3503,7 @@ export function LiveSettings() {
           </label>
 
           <label className="stack compact">
-            <span className="queue-meta">Endgame close cooldown (minutes)</span>
+            <span className="queue-meta">Conversation-close cooldown (minutes)</span>
             <input
               type="number"
               min={5}
@@ -3560,11 +3560,11 @@ export function LiveSettings() {
               disabled={record.pending || !draft.conversationIntelligenceEnabled || !draft.antiDwellingEnabled}
               aria-disabled={record.pending || !draft.conversationIntelligenceEnabled || !draft.antiDwellingEnabled}
             />
-            <span className="queue-meta">Hard limit should be greater than soft limit. Backend clamps invalid ranges.</span>
+            <span className="queue-meta">Hard limit should be greater than soft limit. Invalid ranges are clamped before use.</span>
           </label>
 
           <label className="stack compact">
-            <span className="queue-meta">Enable pivot replies</span>
+            <span className="queue-meta">Allow pivot replies</span>
             <select
               value={draft.pivotReplyEnabled ? "true" : "false"}
               onChange={(event) =>
@@ -3582,7 +3582,7 @@ export function LiveSettings() {
           </label>
 
           <label className="stack compact">
-            <span className="queue-meta">Enable lead-pivot mode</span>
+            <span className="queue-meta">Allow lead-pivot mode</span>
             <select
               value={draft.topicLeadPivotEnabled ? "true" : "false"}
               onChange={(event) =>
@@ -3663,7 +3663,7 @@ export function LiveSettings() {
         <h3>Auto Status Builder</h3>
         <div className="stack compact">
           <label className="stack compact">
-            <span className="queue-meta">Enable auto status posting</span>
+            <span className="queue-meta">Allow automatic status posting</span>
             <select
               value={draft.statusBuilderEnabled ? "true" : "false"}
               onChange={(event) =>
@@ -3737,12 +3737,12 @@ export function LiveSettings() {
               disabled={record.pending || !draft.statusBuilderEnabled}
               aria-disabled={record.pending || !draft.statusBuilderEnabled}
             />
-            <span className="queue-meta">Lower = more meme-image statuses; text share is capped so memes stay the majority.</span>
+            <span className="queue-meta">Lower values favor meme-image statuses; text share is capped so memes stay the majority.</span>
           </label>
 
           <label className="stack compact">
             <span className="queue-meta">
-              Manual-review sampling: {Math.round(draft.statusBuilderReviewRatio * 100)}%
+              Manual review sampling: {Math.round(draft.statusBuilderReviewRatio * 100)}%
             </span>
             <input
               type="range"
@@ -3759,7 +3759,7 @@ export function LiveSettings() {
               disabled={record.pending || !draft.statusBuilderEnabled}
               aria-disabled={record.pending || !draft.statusBuilderEnabled}
             />
-            <span className="queue-meta">Sampled share of auto-statuses routed to manual approval.</span>
+            <span className="queue-meta">Share of generated statuses routed to manual approval before posting.</span>
           </label>
 
           <label className="stack compact">
@@ -3779,7 +3779,7 @@ export function LiveSettings() {
               <option value="manual_allowlist">Manual allowlist (configured audience JIDs)</option>
             </select>
             <span className="queue-meta">
-              Privacy mode posts to My Status using your WhatsApp privacy setting. Manual allowlist mode sends only to configured JIDs, and skips posting when the allowlist is empty.
+              Privacy mode posts to My Status using your WhatsApp privacy setting. Manual allowlist mode sends only to configured JIDs and skips posting when the allowlist is empty.
             </span>
           </label>
 
