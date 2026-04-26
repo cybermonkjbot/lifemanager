@@ -43,3 +43,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# local launch drafts
+docs/linkedin-opensource-social-life-manager.md
