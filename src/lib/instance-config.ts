@@ -6,9 +6,13 @@ import {
   type InstancePinSource,
   type InstanceSetupPreferences,
   type InstanceSetupState,
+  type InstanceSoulPrivacy,
+  type InstanceSoulPrivacyLevel,
+  type InstanceSoulProfile,
 } from "./instance-setup-types";
 
 const INSTANCE_CONFIG_PATH = join(process.cwd(), ".slm", "instance-config.json");
+const SOUL_PROFILE_PATH = join(process.cwd(), ".slm", "soul.md");
 
 type LocalPinRecord = {
   salt: string;
@@ -25,6 +29,7 @@ export type LocalInstanceConfig = {
   updatedAt: number;
   pin: LocalPinRecord | null;
   preferences: InstanceSetupPreferences;
+  setupAiSettingsToolConsumedAt?: number | null;
 };
 
 function clampHour(value: number | undefined, fallback: number) {
@@ -43,6 +48,53 @@ function normalizeStringUnion<T extends string>(value: unknown, allowed: readonl
   return typeof value === "string" && allowed.includes(value as T) ? (value as T) : fallback;
 }
 
+function normalizeSoulText(value: unknown, maxChars = 1200) {
+  return typeof value === "string" ? value.replace(/\s+/g, " ").trim().slice(0, maxChars) : "";
+}
+
+function normalizeSoulPrivacyLevel(value: unknown, fallback: InstanceSoulPrivacyLevel): InstanceSoulPrivacyLevel {
+  return value === "setup_only" || value === "ai_usable" || value === "never_mention" ? value : fallback;
+}
+
+export function sanitizeInstanceSoulProfile(value: Partial<InstanceSoulProfile> | null | undefined): InstanceSoulProfile {
+  return {
+    useCase: normalizeSoulText(value?.useCase, 80),
+    genderIdentity: normalizeSoulText(value?.genderIdentity, 120),
+    pronouns: normalizeSoulText(value?.pronouns, 80),
+    romanticPreference: normalizeSoulText(value?.romanticPreference, 160),
+    relationshipStatus: normalizeSoulText(value?.relationshipStatus, 180),
+    romanticInterests: normalizeSoulText(value?.romanticInterests, 1800),
+    cultureLocation: normalizeSoulText(value?.cultureLocation, 800),
+    selfDescription: normalizeSoulText(value?.selfDescription, 1800),
+    values: normalizeSoulText(value?.values),
+    communicationStyle: normalizeSoulText(value?.communicationStyle),
+    boundaries: normalizeSoulText(value?.boundaries),
+    relationships: normalizeSoulText(value?.relationships),
+    goals: normalizeSoulText(value?.goals),
+    dailyRhythm: normalizeSoulText(value?.dailyRhythm),
+  };
+}
+
+export function sanitizeInstanceSoulPrivacy(value: Partial<InstanceSoulPrivacy> | null | undefined): InstanceSoulPrivacy {
+  const defaults = DEFAULT_INSTANCE_SETUP_PREFERENCES.soulPrivacy;
+  return {
+    useCase: normalizeSoulPrivacyLevel(value?.useCase, defaults.useCase),
+    genderIdentity: normalizeSoulPrivacyLevel(value?.genderIdentity, defaults.genderIdentity),
+    pronouns: normalizeSoulPrivacyLevel(value?.pronouns, defaults.pronouns),
+    romanticPreference: normalizeSoulPrivacyLevel(value?.romanticPreference, defaults.romanticPreference),
+    relationshipStatus: normalizeSoulPrivacyLevel(value?.relationshipStatus, defaults.relationshipStatus),
+    romanticInterests: normalizeSoulPrivacyLevel(value?.romanticInterests, defaults.romanticInterests),
+    cultureLocation: normalizeSoulPrivacyLevel(value?.cultureLocation, defaults.cultureLocation),
+    selfDescription: normalizeSoulPrivacyLevel(value?.selfDescription, defaults.selfDescription),
+    values: normalizeSoulPrivacyLevel(value?.values, defaults.values),
+    communicationStyle: normalizeSoulPrivacyLevel(value?.communicationStyle, defaults.communicationStyle),
+    boundaries: normalizeSoulPrivacyLevel(value?.boundaries, defaults.boundaries),
+    relationships: normalizeSoulPrivacyLevel(value?.relationships, defaults.relationships),
+    goals: normalizeSoulPrivacyLevel(value?.goals, defaults.goals),
+    dailyRhythm: normalizeSoulPrivacyLevel(value?.dailyRhythm, defaults.dailyRhythm),
+  };
+}
+
 export function sanitizeInstanceSetupPreferences(
   value: Partial<InstanceSetupPreferences> | null | undefined,
 ): InstanceSetupPreferences {
@@ -55,6 +107,8 @@ export function sanitizeInstanceSetupPreferences(
     quietHoursStartHour: clampHour(value?.quietHoursStartHour, DEFAULT_INSTANCE_SETUP_PREFERENCES.quietHoursStartHour),
     quietHoursEndHour: clampHour(value?.quietHoursEndHour, DEFAULT_INSTANCE_SETUP_PREFERENCES.quietHoursEndHour),
     instagramEnabled: normalizeBoolean(value?.instagramEnabled, DEFAULT_INSTANCE_SETUP_PREFERENCES.instagramEnabled),
+    soulProfile: sanitizeInstanceSoulProfile(value?.soulProfile || DEFAULT_INSTANCE_SETUP_PREFERENCES.soulProfile),
+    soulPrivacy: sanitizeInstanceSoulPrivacy(value?.soulPrivacy || DEFAULT_INSTANCE_SETUP_PREFERENCES.soulPrivacy),
   };
 }
 
@@ -64,6 +118,7 @@ export async function readLocalInstanceConfig(): Promise<LocalInstanceConfig | n
     const parsed = JSON.parse(raw) as Partial<LocalInstanceConfig>;
     const createdAt = Number(parsed.createdAt);
     const updatedAt = Number(parsed.updatedAt);
+    const setupAiSettingsToolConsumedAt = Number(parsed.setupAiSettingsToolConsumedAt);
 
     return {
       version: 1,
@@ -84,6 +139,7 @@ export async function readLocalInstanceConfig(): Promise<LocalInstanceConfig | n
             }
           : null,
       preferences: sanitizeInstanceSetupPreferences(parsed.preferences),
+      setupAiSettingsToolConsumedAt: Number.isFinite(setupAiSettingsToolConsumedAt) ? setupAiSettingsToolConsumedAt : null,
     };
   } catch {
     return null;
@@ -93,6 +149,55 @@ export async function readLocalInstanceConfig(): Promise<LocalInstanceConfig | n
 export async function writeLocalInstanceConfig(config: LocalInstanceConfig) {
   await mkdir(dirname(INSTANCE_CONFIG_PATH), { recursive: true });
   await writeFile(INSTANCE_CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+}
+
+export function hasInstanceSoulProfileContent(profile: InstanceSoulProfile) {
+  return Object.values(profile).some((value) => value.trim().length > 0);
+}
+
+export function buildSoulMarkdown(
+  profile: InstanceSoulProfile,
+  privacy: InstanceSoulPrivacy = DEFAULT_INSTANCE_SETUP_PREFERENCES.soulPrivacy,
+) {
+  const rows: Array<[string, string]> = [
+    ["Use case", profile.useCase],
+    ["Gender identity", profile.genderIdentity],
+    ["Pronouns", profile.pronouns],
+    ["Romantic preference", profile.romanticPreference],
+    ["Relationship status", profile.relationshipStatus],
+    ["Romantic interests", profile.romanticInterests],
+    ["Culture and location", profile.cultureLocation],
+    ["Who I am", profile.selfDescription],
+    ["Values", profile.values],
+    ["How I communicate", profile.communicationStyle],
+    ["Boundaries", profile.boundaries],
+    ["My people", profile.relationships],
+    ["Goals", profile.goals],
+    ["Rhythm", profile.dailyRhythm],
+  ];
+
+  const body = rows
+    .filter(([, value]) => value.trim().length > 0)
+    .map(([label, value]) => `## ${label}\n${value.trim()}`)
+    .join("\n\n");
+
+  const privacyBody = Object.entries(privacy)
+    .map(([key, value]) => `- ${key}: ${value}`)
+    .join("\n");
+
+  return `# Soul\n\n${body || "No soul profile has been written yet."}\n\n## Privacy choices\n${privacyBody}\n`;
+}
+
+export async function writeLocalSoulMarkdown(
+  profile: InstanceSoulProfile,
+  privacy: InstanceSoulPrivacy = DEFAULT_INSTANCE_SETUP_PREFERENCES.soulPrivacy,
+) {
+  if (!hasInstanceSoulProfileContent(profile)) {
+    return false;
+  }
+  await mkdir(dirname(SOUL_PROFILE_PATH), { recursive: true });
+  await writeFile(SOUL_PROFILE_PATH, buildSoulMarkdown(profile, privacy), "utf8");
+  return true;
 }
 
 function normalizePin(value: string | undefined | null) {
@@ -137,12 +242,16 @@ export async function resolveInstanceSetupState(): Promise<InstanceSetupState> {
   const config = await readLocalInstanceConfig();
   const envPinSource = resolveEnvPinSource();
   const pinSource: InstancePinSource = envPinSource === "env" ? "env" : config?.pin ? "file" : "none";
+  const setupCompleted = config?.setupCompleted === true;
+  const setupAiSettingsToolConsumedAt = config?.setupAiSettingsToolConsumedAt ?? null;
 
   return {
-    setupCompleted: config?.setupCompleted === true,
+    setupCompleted,
     pinEnabled: pinSource !== "none",
     pinSource,
     preferences: config?.preferences || DEFAULT_INSTANCE_SETUP_PREFERENCES,
+    setupAiSettingsToolAvailable: !setupCompleted && !setupAiSettingsToolConsumedAt,
+    setupAiSettingsToolConsumedAt,
     updatedAt: config?.updatedAt ?? null,
   };
 }

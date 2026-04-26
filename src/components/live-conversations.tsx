@@ -5,7 +5,7 @@ import { LoadingBlock, LoadingIndicator } from "@/components/loading-state";
 import { SharedMediaPreview } from "@/components/media-preview";
 import { ProviderFilter, type ProviderFilterValue } from "@/components/provider-filter";
 import { UIModal } from "@/components/ui-modal";
-import { followupRescheduleDueAt } from "@/lib/ui/followups";
+import { followupRescheduleDueAt, generateFollowupReasonWithAi } from "@/lib/ui/followups";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
 import type { MediaPreviewResource } from "@/lib/ui/media";
 import { generateTodoTitleWithAi } from "@/lib/ui/todos";
@@ -21,6 +21,26 @@ type LiveConversationsProps = {
 };
 
 const MAX_THREAD_PROMPT_PROFILE_CHARS = 8000;
+const CONVERSATIONS_SEARCH_STORAGE_KEY = "slm.conversations.thread_search";
+const CONVERSATIONS_PROVIDER_STORAGE_KEY = "slm.conversations.provider_filter";
+
+function readStoredThreadSearch() {
+  if (typeof window === "undefined") {
+    return "";
+  }
+  return window.localStorage.getItem(CONVERSATIONS_SEARCH_STORAGE_KEY) || "";
+}
+
+function readStoredProviderFilter(): ProviderFilterValue {
+  if (typeof window === "undefined") {
+    return "all";
+  }
+  const saved = window.localStorage.getItem(CONVERSATIONS_PROVIDER_STORAGE_KEY);
+  if (saved === "whatsapp" || saved === "instagram" || saved === "all") {
+    return saved;
+  }
+  return "all";
+}
 
 type PersonalityProfile = {
   slug: string;
@@ -105,7 +125,16 @@ type ThreadGrounding = {
 
 type MessageMediaPreview = MediaPreviewResource;
 
-type ConversationMessageType = "text" | "reaction" | "sticker" | "meme" | "image" | "video" | "audio" | "document";
+type ConversationMessageType =
+  | "text"
+  | "reaction"
+  | "sticker"
+  | "meme"
+  | "image"
+  | "video"
+  | "audio"
+  | "voice_note"
+  | "document";
 
 type ThreadMessage = {
   _id: string;
@@ -129,7 +158,7 @@ type ThreadReviewNeedsReplyItem = {
   delayMs: number;
   typingMs: number;
   text: string;
-  sendKind?: "text" | "reaction" | "sticker" | "meme";
+  sendKind?: "text" | "reaction" | "sticker" | "meme" | "voice_note";
   mediaAssetId?: string;
   mediaCaption?: string;
   mediaPreview?: MessageMediaPreview | null;
@@ -221,6 +250,17 @@ type ThreadToolEvent = {
   score?: number;
   threshold?: number;
   hints?: string[];
+  status?: string;
+  errorCode?: string;
+};
+
+type ThreadTimelineActivity = {
+  _id: string;
+  createdAt: number;
+  source: string;
+  eventType: string;
+  detail: string;
+  outboxId?: string;
 };
 
 type MessageToolSummary = {
@@ -246,6 +286,30 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     return null;
   }
   return value as Record<string, unknown>;
+}
+
+function safePrettyJson(value: unknown) {
+  if (value === undefined || value === null || value === "") {
+    return "";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function numberField(record: Record<string, unknown> | null, key: string) {
+  const value = record?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function stringField(record: Record<string, unknown> | null, key: string) {
+  const value = record?.[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
 function parsePlannerSummary(value: unknown): PlannerSummary | null {
@@ -288,6 +352,112 @@ function plannerModeLabel(mode: PlannerSummary["replyMode"]) {
   return "Close";
 }
 
+function formatLatencyMs(value?: number) {
+  if (!Number.isFinite(value)) {
+    return "0ms";
+  }
+  const rounded = Math.max(0, Math.round(value as number));
+  if (rounded >= 1000) {
+    return `${(rounded / 1000).toFixed(1)}s`;
+  }
+  return `${rounded}ms`;
+}
+
+function toolDisplayName(toolName?: string) {
+  if (toolName === "conversation_history_search") return "Conversation search";
+  if (toolName === "context_window_cleaning") return "Context cleanup";
+  if (toolName === "context_window_detection") return "Context window";
+  if (toolName === "contact_memory_fact_selection") return "Memory facts";
+  if (toolName === "model_tool_router_plan") return "Tool router";
+  if (toolName === "response_workbench") return "Response planner";
+  return toolName || "Tool call";
+}
+
+function toolTone(event: ThreadToolEvent) {
+  const output = asRecord(event.parsedOutput);
+  const status = stringField(output, "status") || event.status || "";
+  if (status === "error" || status === "timeout" || event.errorCode || stringField(output, "errorCode")) {
+    return "danger";
+  }
+  return "ok";
+}
+
+function toolOutcomeText(event: ThreadToolEvent) {
+  const output = asRecord(event.parsedOutput);
+  const status = stringField(output, "status") || event.status || "";
+  const errorMessage = stringField(output, "errorMessage");
+  if (status === "error" || status === "timeout" || event.errorCode || stringField(output, "errorCode")) {
+    return errorMessage ? `Needs attention: ${trim(errorMessage, 140)}` : "Needs attention before trusting this context.";
+  }
+
+  if (event.toolName === "conversation_history_search") {
+    const hits = numberField(output, "hits");
+    const source = stringField(output, "source") || stringField(asRecord(event.parsedInput), "source");
+    const stage = stringField(output, "retrievalStage");
+    const sourceText = source === "external" ? " from external retrieval" : "";
+    const stageText = stage ? ` (${stage.replaceAll("_", " ")})` : "";
+    return `Found ${hits ?? 0} relevant history ${hits === 1 ? "hit" : "hits"}${sourceText}${stageText}.`;
+  }
+
+  if (event.toolName === "contact_memory_fact_selection") {
+    const selectedFacts = numberField(output, "selectedFacts");
+    const matchedFacts = numberField(output, "matchedFacts");
+    return `Selected ${selectedFacts ?? 0} contact ${selectedFacts === 1 ? "fact" : "facts"} from ${matchedFacts ?? 0} matches.`;
+  }
+
+  if (event.toolName === "context_window_cleaning") {
+    const cleaned = numberField(output, "cleanedHistoryLines");
+    const removed = numberField(output, "removedCount");
+    return `Kept ${cleaned ?? 0} clean history ${cleaned === 1 ? "line" : "lines"} and removed ${removed ?? 0}.`;
+  }
+
+  if (event.toolName === "context_window_detection") {
+    const overflow = numberField(output, "overflowTokens");
+    const promptTokens = numberField(output, "estimatedPromptTokens");
+    return overflow && overflow > 0
+      ? `Context exceeded budget by ${Math.round(overflow)} tokens.`
+      : `Context fit inside the window${promptTokens ? ` at about ${Math.round(promptTokens)} tokens` : ""}.`;
+  }
+
+  if (event.toolName === "model_tool_router_plan") {
+    const preview = stringField(output, "preview");
+    return preview ? trim(preview, 160) : `Router finished with status ${status || "ok"}.`;
+  }
+
+  return event.outputText ? trim(event.outputText, 180) : "Completed with captured output.";
+}
+
+function toolMetricChips(event: ThreadToolEvent) {
+  const input = asRecord(event.parsedInput);
+  const output = asRecord(event.parsedOutput);
+  const chips: string[] = [];
+  const status = stringField(output, "status") || event.status;
+  if (status) {
+    chips.push(status);
+  }
+  const hits = numberField(output, "hits");
+  if (hits !== null) {
+    chips.push(`${hits} ${hits === 1 ? "hit" : "hits"}`);
+  }
+  const selectedFacts = numberField(output, "selectedFacts");
+  if (selectedFacts !== null) {
+    chips.push(`${selectedFacts} facts`);
+  }
+  const searchedHistoryLines = numberField(input, "searchedHistoryLines");
+  if (searchedHistoryLines !== null) {
+    chips.push(`${searchedHistoryLines} searched`);
+  }
+  const confidence = numberField(output, "confidence");
+  if (confidence !== null) {
+    chips.push(`${Math.round(clamp01(confidence) * 100)}% confidence`);
+  }
+  const overflowTokens = numberField(output, "overflowTokens");
+  if (overflowTokens !== null) {
+    chips.push(overflowTokens > 0 ? `${Math.round(overflowTokens)} overflow tokens` : "fits context");
+  }
+  return chips.slice(0, 4);
+}
+
 function messageKindLabel(kind?: string) {
   if (kind === "reaction") {
     return "Reaction";
@@ -320,6 +490,39 @@ function isStatusPostMessage(message: Pick<ThreadMessage, "isStatus">, threadJid
   return Boolean(threadJid && STATUS_THREAD_JIDS.has(threadJid));
 }
 
+function timelineEventLabel(eventType: string) {
+  if (eventType === "draft.pending.active") return "Draft pending";
+  if (eventType === "outbox.pending.active") return "Queued";
+  if (eventType === "outbox.claimed.active") return "Sending";
+  if (eventType === "draft.approved") return "Draft approved";
+  if (eventType === "draft.pending.cleared") return "Draft cleared";
+  if (eventType === "outbox.sent") return "Sent";
+  if (eventType === "outbox.failed.retry") return "Send failed (retry)";
+  if (eventType === "outbox.failed.final") return "Send failed";
+  if (eventType.startsWith("outbox.suppressed.")) return "Suppressed";
+  if (eventType.startsWith("outbox.deferred.")) return "Deferred";
+  if (eventType.startsWith("guardrail.")) return "Guardrail";
+  if (eventType.startsWith("followup.")) return "Follow-up";
+  if (eventType.startsWith("todo.")) return "TODO";
+  if (eventType.startsWith("ai.context.tool.")) return "Tool call";
+  if (eventType === "ai.context.window") return "Context window";
+  if (eventType.startsWith("ai.style_guardrail.")) return "Style guardrail";
+  return eventType.replaceAll(".", " ");
+}
+
+function timelineEventTone(eventType: string) {
+  if (eventType.includes(".failed") || eventType.includes(".blocked") || eventType.includes(".rejected")) {
+    return "danger";
+  }
+  if (eventType.includes(".suppressed") || eventType.includes(".deferred") || eventType.includes(".ignored")) {
+    return "warn";
+  }
+  if (eventType.includes(".sent") || eventType.includes(".approved") || eventType.includes(".confirmed")) {
+    return "ok";
+  }
+  return "neutral";
+}
+
 function messageDisplayText(message: {
   text: string;
   messageType?: ConversationMessageType;
@@ -346,6 +549,9 @@ function messageDisplayText(message: {
   }
   if (message.messageType === "audio") {
     return "Sent audio";
+  }
+  if (message.messageType === "voice_note") {
+    return "Sent a voice note";
   }
   if (message.messageType === "document") {
     return "Sent a document";
@@ -715,30 +921,62 @@ function GroundingForm({ initialMyName, initialTheirName, initialVibeNotes, auto
 }
 
 function ConversationsContent({ initialThreadId }: { initialThreadId?: string }) {
-  const [threadLimit, setThreadLimit] = useState(80);
-  const [threadSearch, setThreadSearch] = useState("");
-  const [providerFilter, setProviderFilter] = useState<ProviderFilterValue>("all");
-  const threads = useQuery(api.threads.list, { limit: threadLimit, provider: providerFilter }) as
-    | Array<{
-        _id: string;
-        provider?: "whatsapp" | "instagram";
-        title?: string;
-        jid: string;
-        threadKind?: "direct" | "group" | "broadcast_or_system";
-        isArchived?: boolean;
-        lastMessageAt: number;
-        latestDraft?: { text?: string } | null;
-      }>
+  type ThreadListItem = {
+    _id: string;
+    provider?: "whatsapp" | "instagram";
+    title?: string;
+    jid: string;
+    threadKind?: "direct" | "group" | "broadcast_or_system";
+    isArchived?: boolean;
+    lastMessageAt: number;
+    latestDraft?: { text?: string } | null;
+    latestMessage?: { text?: string | null; direction?: "inbound" | "outbound"; messageAt?: number } | null;
+  };
+
+  const [threadVisibleCount, setThreadVisibleCount] = useState(80);
+  const [threadSearch, setThreadSearch] = useState(() => readStoredThreadSearch());
+  const [providerFilter, setProviderFilter] = useState<ProviderFilterValue>(() => readStoredProviderFilter());
+  const [isMobileViewport, setIsMobileViewport] = useState(false);
+  const threads = useQuery(api.threads.list, { limit: 500, provider: providerFilter }) as
+    | ThreadListItem[]
     | undefined;
+  const visibleThreads = threads || [];
   const threadsLoading = threads === undefined;
   const normalizedThreadSearch = threadSearch.trim().toLowerCase();
-  const threadList = (threads || []).filter((thread) => {
+  const filteredThreadList = visibleThreads.filter((thread) => {
     if (!normalizedThreadSearch) {
       return true;
     }
     const haystack = `${thread.title || ""}\n${thread.jid}`.toLowerCase();
     return haystack.includes(normalizedThreadSearch);
   });
+  const threadList = filteredThreadList.slice(0, threadVisibleCount);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem(CONVERSATIONS_SEARCH_STORAGE_KEY, threadSearch);
+  }, [threadSearch]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem(CONVERSATIONS_PROVIDER_STORAGE_KEY, providerFilter);
+  }, [providerFilter]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const mediaQuery = window.matchMedia("(max-width: 980px)");
+    const syncViewport = () => setIsMobileViewport(mediaQuery.matches);
+    syncViewport();
+    mediaQuery.addEventListener("change", syncViewport);
+    return () => mediaQuery.removeEventListener("change", syncViewport);
+  }, []);
 
   const profilesQuery = useQuery(api.personality.listProfiles, {}) as PersonalityProfile[] | undefined;
   const profilesLoading = profilesQuery === undefined;
@@ -759,11 +997,13 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
   const autoBuildThreadPromptProfile = useMutation(api.personality.autoBuildThreadPromptProfile);
   const saveGroundingMutation = useMutation(api.grounding.saveThreadGrounding);
   const ignoreThreadMutation = useMutation(api.backlog.ignoreThread);
+  const deleteThreadMutation = useMutation(api.threads.deleteThread);
   const recordEvent = useMutation(api.system.recordEvent);
   const { runAction, getRecord, isPending, notices, dismissNotice } = useActionStateRegistry();
 
   const selectedThreadId =
-    (initialThreadId && threadList.some((thread) => thread._id === initialThreadId) ? initialThreadId : undefined) || threadList[0]?._id;
+    (initialThreadId && threadList.some((thread) => thread._id === initialThreadId) ? initialThreadId : undefined) ||
+    (!isMobileViewport ? threadList[0]?._id : undefined);
   const thread = useQuery(
     api.threads.get,
     selectedThreadId ? { threadId: selectedThreadId as Id<"threads"> } : "skip",
@@ -772,9 +1012,11 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
         thread: {
           title?: string;
           jid: string;
+          provider?: "whatsapp" | "instagram";
           threadKind?: "direct" | "group" | "broadcast_or_system";
           isArchived?: boolean;
           isIgnored?: boolean;
+          lastMessageAt?: number;
         };
         messages: ThreadMessage[];
         reactions: Array<{
@@ -783,6 +1025,39 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
           emoji: string;
           direction: "inbound" | "outbound";
         }>;
+        conversationState?: {
+          lastMutualCheckInAt?: number;
+          lastInboundCheckInAt?: number;
+          lastOutboundCheckInAt?: number;
+          currentPrimaryTopicKey?: string;
+          topicDyingScore?: number;
+          nextMove?: "none" | "check_in" | "pivot" | "close";
+          conversationEndImminent?: boolean;
+          topicDwellScore?: number;
+          lastPivotAt?: number;
+          lastCloseAt?: number;
+          lastLeadQuestionAt?: number;
+        } | null;
+        topicLanes?: Array<{
+          topicKey: string;
+          topicLabel: string;
+          status: "active" | "cooling" | "closed";
+          lastMessageAt?: number;
+          inboundTurns?: number;
+          outboundTurns?: number;
+          dyingScore?: number;
+        }>;
+        checkInDiagnostics?: {
+          promptDetectionsRecent?: number;
+          responseDetectionsRecent?: number;
+          mutualUpdatesRecent?: number;
+          lastPromptAt?: number;
+          lastResponseAt?: number;
+          lastMutualUpdateAt?: number;
+          lastMutualUpdateDetail?: string;
+          lastMutualCheckInAt?: number;
+        } | null;
+        timelineActivity?: ThreadTimelineActivity[];
         grounding?: ThreadGrounding | null;
         reviewQueue?: ThreadReviewQueue;
       }
@@ -804,27 +1079,34 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
     api.threads.getToolEvents,
     selectedThreadId ? { threadId: selectedThreadId as Id<"threads">, limit: 260 } : "skip",
   ) as ThreadToolEvent[] | undefined;
-  const relationshipStateQueryRef = (
-    (api as unknown as Record<string, unknown>).relationshipState as { getThreadState?: unknown } | undefined
-  )?.getThreadState;
   const relationshipState = useQuery(
-    relationshipStateQueryRef ? (relationshipStateQueryRef as never) : "skip",
-    relationshipStateQueryRef && selectedThreadId ? { threadId: selectedThreadId as Id<"threads"> } : "skip",
+    api.relationshipState.getThreadState,
+    selectedThreadId ? { threadId: selectedThreadId as Id<"threads"> } : "skip",
   ) as RelationshipThreadState | null | undefined;
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
   const [toolSummaryMessageId, setToolSummaryMessageId] = useState<string | null>(null);
   const [mediaPreviewModal, setMediaPreviewModal] = useState<MessageMediaPreview | null>(null);
   const [draftEdits, setDraftEdits] = useState<Record<string, string>>({});
+  const [autoTodoTitles, setAutoTodoTitles] = useState<Record<string, string>>({});
+  const [autoFollowupReasons, setAutoFollowupReasons] = useState<Record<string, string>>({});
+  const messageRowRefs = useRef(new Map<string, HTMLDivElement>());
+  const conversationWindowRef = useRef<HTMLDivElement | null>(null);
+  const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const autoTodoAttemptedRef = useRef<Set<string>>(new Set());
+  const autoFollowupAttemptedRef = useRef<Set<string>>(new Set());
 
   const settingsKey = selectedThreadId ? `personality:thread:${selectedThreadId}` : "personality:thread:none";
   const promptProfileKey = selectedThreadId ? `personality:promptprofile:${selectedThreadId}` : "personality:promptprofile:none";
   const groundingKey = selectedThreadId ? `grounding:thread:${selectedThreadId}` : "grounding:thread:none";
   const ignoreThreadKey = selectedThreadId ? `conversation:ignore:${selectedThreadId}` : "conversation:ignore:none";
+  const deleteThreadKey = selectedThreadId ? `conversation:delete:${selectedThreadId}` : "conversation:delete:none";
 
   const settingsRecord = getRecord(settingsKey);
   const promptProfileRecord = getRecord(promptProfileKey);
   const groundingRecord = getRecord(groundingKey);
   const ignoreThreadRecord = getRecord(ignoreThreadKey);
+  const deleteThreadRecord = getRecord(deleteThreadKey);
   const lastLoadStartedThreadRef = useRef<string | null>(null);
   const lastLoadedThreadRef = useRef<string | null>(null);
 
@@ -991,6 +1273,32 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
       {
         pendingLabel: enableIgnore ? "Disabling auto-respond..." : "Enabling auto-respond...",
         successMessage: enableIgnore ? "Conversation set to do-not-auto-respond." : "Conversation restored for auto-respond.",
+      },
+    );
+  };
+
+  const deleteSelectedThread = () => {
+    if (!selectedThreadId || !thread) {
+      return;
+    }
+    const threadLabel = thread.thread.title || thread.thread.jid;
+    const confirmed = window.confirm(
+      `Delete this thread?\n\n${threadLabel}\n\nThis permanently removes the thread and its related conversation data.`,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    void runAction(
+      deleteThreadKey,
+      async () => {
+        await deleteThreadMutation({
+          threadId: selectedThreadId as Id<"threads">,
+        });
+      },
+      {
+        pendingLabel: "Deleting conversation thread...",
+        successMessage: "Conversation thread deleted.",
       },
     );
   };
@@ -1178,11 +1486,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
     void runAction(
       key,
       async () => {
-        const generatedTitle = await generateTodoTitleWithAi({
-          currentTitle: item.title,
-          sourceText: item.sourceMessage?.text,
-          threadId: selectedThreadId,
-        });
+        const generatedTitle = (autoTodoTitles[item._id] || item.title).trim();
         await updateTodoCandidateTitle({
           candidateId: item._id as Id<"todoCandidates">,
           title: generatedTitle,
@@ -1190,8 +1494,8 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
         await createTodoFromCandidate({ candidateId: item._id as Id<"todoCandidates"> });
       },
       {
-        pendingLabel: "Generating TODO...",
-        successMessage: "TODO generated with AI and added.",
+        pendingLabel: "Adding TODO...",
+        successMessage: "TODO added.",
       },
     );
   };
@@ -1262,6 +1566,25 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
     }
     return map;
   }, [thread?.messages]);
+  const timelineRows = useMemo(() => {
+    const messageRows = (thread?.messages || []).map((message) => ({
+      key: `message:${message._id}`,
+      at: message.messageAt,
+      priority: 1,
+      kind: "message" as const,
+      message,
+    }));
+    const activityRows = (thread?.timelineActivity || []).map((activity) => ({
+      key: `activity:${activity._id}`,
+      at: activity.createdAt,
+      priority: 0,
+      kind: "activity" as const,
+      activity,
+    }));
+    return [...messageRows, ...activityRows]
+      .sort((left, right) => (left.at === right.at ? left.priority - right.priority : left.at - right.at))
+      .slice(-600);
+  }, [thread?.messages, thread?.timelineActivity]);
   const selectedToolSummary = toolSummaryMessageId ? toolEventSummary.byMessageId.get(toolSummaryMessageId) || null : null;
   const selectedToolSummaryMessage = toolSummaryMessageId ? threadMessagesById.get(toolSummaryMessageId) || null : null;
 
@@ -1271,12 +1594,104 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
     todoCandidates: [],
     guardrailFlags: [],
   };
+  const mutualCheckInAgeDays = useMemo(() => {
+    const at = thread?.conversationState?.lastMutualCheckInAt;
+    if (!Number.isFinite(at) || (at || 0) <= 0) {
+      return undefined;
+    }
+    const referenceAt = Math.max(
+      Number(thread?.thread?.lastMessageAt || 0),
+      Number(thread?.messages?.[thread.messages.length - 1]?.messageAt || 0),
+      Number(at),
+    );
+    return Math.max(0, Math.floor((referenceAt - Number(at)) / (24 * 60 * 60 * 1000)));
+  }, [thread?.conversationState?.lastMutualCheckInAt, thread?.messages, thread?.thread?.lastMessageAt]);
+  const laneSummary = useMemo(() => {
+    return (thread?.topicLanes || [])
+      .slice(0, 3)
+      .map((lane) => {
+        const turnCount = Math.max(0, lane.inboundTurns || 0) + Math.max(0, lane.outboundTurns || 0);
+        return `${lane.topicLabel} (${lane.status}, ${turnCount} turns)`;
+      })
+      .join(" · ");
+  }, [thread?.topicLanes]);
 
-  const reviewCount =
-    threadReviewQueue.needsReply.length +
-    threadReviewQueue.followupConfirmations.length +
-    threadReviewQueue.todoCandidates.length +
-    threadReviewQueue.guardrailFlags.length;
+  useEffect(() => {
+    if (!selectedThreadId) {
+      return;
+    }
+    let cancelled = false;
+    const run = async () => {
+      for (const item of threadReviewQueue.todoCandidates) {
+        if (autoTodoAttemptedRef.current.has(item._id)) {
+          continue;
+        }
+        autoTodoAttemptedRef.current.add(item._id);
+        try {
+          const generatedTitle = await generateTodoTitleWithAi({
+            currentTitle: item.title,
+            sourceText: item.sourceMessage?.text,
+            threadId: selectedThreadId,
+          });
+          if (cancelled) {
+            return;
+          }
+          setAutoTodoTitles((current) => ({
+            ...current,
+            [item._id]: generatedTitle,
+          }));
+          if (generatedTitle.trim() !== item.title.trim()) {
+            await updateTodoCandidateTitle({
+              candidateId: item._id as Id<"todoCandidates">,
+              title: generatedTitle,
+            });
+          }
+        } catch {
+          // Best-effort background enhancement.
+        }
+      }
+    };
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedThreadId, threadReviewQueue.todoCandidates, updateTodoCandidateTitle]);
+
+  useEffect(() => {
+    if (!selectedThreadId) {
+      return;
+    }
+    let cancelled = false;
+    const run = async () => {
+      for (const item of threadReviewQueue.followupConfirmations) {
+        if (autoFollowupAttemptedRef.current.has(item._id)) {
+          continue;
+        }
+        autoFollowupAttemptedRef.current.add(item._id);
+        try {
+          const generatedReason = await generateFollowupReasonWithAi({
+            currentReason: item.reason,
+            sourceText: item.sourceSnippet || item.sourceMessage?.text,
+            dueAt: item.dueAt,
+            threadId: selectedThreadId,
+          });
+          if (cancelled) {
+            return;
+          }
+          setAutoFollowupReasons((current) => ({
+            ...current,
+            [item._id]: generatedReason,
+          }));
+        } catch {
+          // Best-effort background enhancement.
+        }
+      }
+    };
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedThreadId, threadReviewQueue.followupConfirmations]);
 
   const threadReviewBySourceMessageId = useMemo(() => {
     type ReviewEntry =
@@ -1313,6 +1728,97 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
 
     return { bySource, unanchored };
   }, [threadMessagesById, threadReviewQueue.followupConfirmations, threadReviewQueue.guardrailFlags, threadReviewQueue.needsReply, threadReviewQueue.todoCandidates]);
+  const lastInboundMessageId = useMemo(() => {
+    const rows = thread?.messages || [];
+    for (let i = rows.length - 1; i >= 0; i -= 1) {
+      if (rows[i].direction === "inbound") {
+        return rows[i]._id;
+      }
+    }
+    return null;
+  }, [thread?.messages]);
+  const lastMessageId = useMemo(() => {
+    const rows = thread?.messages || [];
+    return rows.length > 0 ? rows[rows.length - 1]._id : null;
+  }, [thread?.messages]);
+  const inboundMessageIds = useMemo(
+    () => (thread?.messages || []).filter((message) => message.direction === "inbound").map((message) => message._id),
+    [thread?.messages],
+  );
+
+  const jumpToMessage = (messageId: string | null) => {
+    if (!messageId) {
+      return;
+    }
+    const element = messageRowRefs.current.get(messageId);
+    if (!element) {
+      return;
+    }
+    element.scrollIntoView({ behavior: "smooth", block: "center" });
+    setHighlightedMessageId(messageId);
+    window.setTimeout(() => {
+      setHighlightedMessageId((current) => (current === messageId ? null : current));
+    }, 1400);
+  };
+  const jumpToLastMessage = () => jumpToMessage(lastMessageId);
+
+  useEffect(() => {
+    const container = conversationWindowRef.current;
+    if (!container) {
+      return;
+    }
+
+    const updateVisibility = () => {
+      const nearBottom = container.scrollHeight - container.scrollTop - container.clientHeight <= 48;
+      setShowJumpToLatest(Boolean(lastMessageId) && !nearBottom);
+    };
+
+    updateVisibility();
+    container.addEventListener("scroll", updateVisibility, { passive: true });
+    return () => {
+      container.removeEventListener("scroll", updateVisibility);
+    };
+  }, [lastMessageId, selectedThreadId, thread?.messages]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable)
+      ) {
+        return;
+      }
+
+      if (!selectedThreadId || inboundMessageIds.length === 0) {
+        return;
+      }
+
+      if (event.altKey && event.key.toLowerCase() === "i") {
+        event.preventDefault();
+        jumpToMessage(lastInboundMessageId);
+        return;
+      }
+
+      if (event.altKey && event.key.toLowerCase() === "j") {
+        event.preventDefault();
+        const currentIndex = highlightedMessageId ? inboundMessageIds.indexOf(highlightedMessageId) : -1;
+        const nextIndex = currentIndex <= 0 ? inboundMessageIds.length - 1 : currentIndex - 1;
+        jumpToMessage(inboundMessageIds[nextIndex] || null);
+        return;
+      }
+
+      if (event.altKey && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        const currentIndex = highlightedMessageId ? inboundMessageIds.indexOf(highlightedMessageId) : -1;
+        const nextIndex = currentIndex < 0 || currentIndex >= inboundMessageIds.length - 1 ? 0 : currentIndex + 1;
+        jumpToMessage(inboundMessageIds[nextIndex] || null);
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [highlightedMessageId, inboundMessageIds, lastInboundMessageId, selectedThreadId]);
 
   const renderThreadReviewEntry = (
     entry:
@@ -1431,11 +1937,12 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
 
     if (entry.kind === "followup") {
       const item = entry.item;
+      const reasonText = autoFollowupReasons[item._id] || item.reason;
       return (
         <div key={`review:followup:${item._id}`} className="thread-review-item">
           <p className="thread-review-title">Follow-up Confirmation</p>
           <p className="queue-meta">Due: {formatDateTimeWithRelative(item.dueAt)}</p>
-          <p className="queue-body">{item.reason}</p>
+          <p className="queue-body">{reasonText}</p>
           {item.sourceSnippet?.trim() || item.sourceMessage?.text?.trim() ? (
             <p className="queue-meta">Source: {trim(item.sourceSnippet?.trim() || item.sourceMessage?.text?.trim() || "", 220)}</p>
           ) : null}
@@ -1506,11 +2013,13 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
 
     if (entry.kind === "todo") {
       const item = entry.item;
+      const titleText = autoTodoTitles[item._id] || item.title;
       return (
         <div key={`review:todo:${item._id}`} className="thread-review-item">
           <p className="thread-review-title">TODO Candidate</p>
-          <p className="queue-body">{item.title}</p>
+          <p className="queue-body">{titleText}</p>
           <p className="queue-meta">Suggested due: {formatDateTime(item.suggestedDueAt)}</p>
+          {item.sourceMessage?.text?.trim() ? <p className="queue-meta">Context: {trim(item.sourceMessage.text.trim(), 220)}</p> : null}
           <div className="queue-actions">
             <button
               type="button"
@@ -1519,7 +2028,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
               disabled={isPending(`todo:${item._id}`)}
               aria-disabled={isPending(`todo:${item._id}`)}
             >
-              {isPending(`todo:${item._id}`) ? "Generating..." : "Generate TODO with AI"}
+              {isPending(`todo:${item._id}`) ? "Adding..." : "Add TODO"}
             </button>
           </div>
           {getRecord(`todo:${item._id}`).error ? (
@@ -1558,7 +2067,8 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
   };
 
   return (
-    <section className="panel-grid split-view">
+    <section className="panel-grid split-view conversations-split-view">
+      {!isMobileViewport || !selectedThreadId ? (
       <article className="panel-card">
         <h3>Threads</h3>
         <ProviderFilter
@@ -1567,7 +2077,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
           label="Conversations provider filter"
         />
         <div className="queue-actions">
-          <label className="setup-input-group inline">
+          <label className="setup-input-group inline search-field-group">
             <span className="queue-meta">Search</span>
             <input
               type="text"
@@ -1579,178 +2089,322 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
         </div>
         <div className="stack thread-list">
           {threadsLoading ? <LoadingBlock label="Loading threads…" rows={5} compact /> : null}
-          {threadList.map((item) => (
-            <Link
-              key={item._id}
-              href={`/conversations?threadId=${item._id}`}
-              className={`thread-row${item._id === selectedThreadId ? " active" : ""}`}
-              aria-current={item._id === selectedThreadId ? "page" : undefined}
-            >
-              <p className="queue-title">{item.title || item.jid}</p>
-              <p className="queue-meta">
-                {(item.provider || "whatsapp") === "instagram" ? "Instagram" : "WhatsApp"} ·{" "}
-                {item.threadKind === "broadcast_or_system" ? "Broadcast/System" : item.threadKind === "group" ? "Group" : "Direct"}
-                {item.isArchived ? " · Archived" : ""}
-              </p>
-              <p className="queue-body">{trim(item.latestDraft?.text || "No draft yet")}</p>
-              <p className="queue-meta">Last activity: {formatDateTime(item.lastMessageAt)}</p>
-            </Link>
-          ))}
+          {threadList.map((item) => {
+            const previewBase = item.latestMessage?.text?.trim() || "No messages yet";
+            const previewText =
+              item.latestMessage?.direction === "outbound" && previewBase !== "No messages yet" ? `You: ${previewBase}` : previewBase;
+
+            return (
+              <Link
+                key={item._id}
+                href={`/conversations?threadId=${item._id}`}
+                className={`thread-row${item._id === selectedThreadId ? " active" : ""}`}
+                aria-current={item._id === selectedThreadId ? "page" : undefined}
+              >
+                <div className="thread-row-header">
+                  <p className="queue-title">{item.title || item.jid}</p>
+                  <p className="queue-meta">Last activity: {formatDateTime(item.lastMessageAt)}</p>
+                </div>
+                <p className="queue-meta">
+                  {(item.provider || "whatsapp") === "instagram" ? "Instagram" : "WhatsApp"} ·{" "}
+                  {item.threadKind === "broadcast_or_system" ? "Broadcast/System" : item.threadKind === "group" ? "Group" : "Direct"}
+                  {item.isArchived ? " · Archived" : ""}
+                </p>
+                <p className="queue-body">{trim(previewText)}</p>
+              </Link>
+            );
+          })}
           {!threadsLoading && threadList.length === 0 ? <p className="empty-line">No threads yet.</p> : null}
           {!threadsLoading ? (
             <div className="thread-list-footer">
-              <button type="button" className="btn btn-ghost" onClick={() => setThreadLimit((prev) => Math.min(prev + 80, 500))}>
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={() => setThreadVisibleCount((prev) => Math.min(prev + 80, 500))}
+                disabled={threadList.length >= filteredThreadList.length}
+                aria-disabled={threadList.length >= filteredThreadList.length}
+              >
                 Load More
               </button>
             </div>
           ) : null}
         </div>
       </article>
+      ) : null}
 
+      {!isMobileViewport || selectedThreadId ? (
       <article className="panel-card" aria-busy={threadLoading}>
         <ActionNotices notices={notices} onDismiss={dismissNotice} />
+        {isMobileViewport && selectedThreadId ? (
+          <div className="conversation-mobile-back-row">
+            <Link href="/conversations" className="btn btn-ghost">
+              Back to Threads
+            </Link>
+          </div>
+        ) : null}
         <h3>Timeline</h3>
-        <div className="queue-actions">
-          <button type="button" className="btn btn-ghost" onClick={() => setSettingsModalOpen(true)}>
-            Thread Settings
-          </button>
-        </div>
         {threadLoading ? (
           <LoadingBlock label="Loading timeline..." rows={4} />
         ) : thread ? (
           <div className="conversation-chat">
             <header className="conversation-chat-header">
-              <p className="queue-title">{thread.thread.title || thread.thread.jid}</p>
-              <p className="queue-meta">
-                {thread.thread.threadKind === "broadcast_or_system"
-                  ? "Broadcast/System thread (automation blocked)"
-                  : thread.thread.threadKind === "group"
-                    ? "Group thread"
-                    : "Direct thread"}
-                {thread.thread.isArchived ? " · Archived (read-only automation)" : ""}
-              </p>
-              <p className="queue-meta">{thread.thread.jid}</p>
-              <p className="queue-meta">
-                Auto-respond: {thread.thread.isIgnored ? "Disabled (ignored)" : "Enabled"}
-              </p>
-              <p className="queue-meta">
-                Relationship tier: {relationshipState?.priorityTier || "general"} · Trust {(Math.round((relationshipState?.trustScore || 0.5) * 100))}%
-              </p>
-              <p className="queue-meta">
-                Conflict: {relationshipState?.conflictFlag ? "Active" : "Clear"} · Repair: {relationshipState?.repairNeeded ? "Needed" : "Not needed"}
-              </p>
-              {relationshipState?.lastReason ? <p className="queue-meta">Last policy reason: {relationshipState.lastReason}</p> : null}
-              <p className="queue-meta">Needs review in this thread: {reviewCount}</p>
-              <div className="queue-actions">
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  onClick={toggleIgnoreFromConversation}
-                  disabled={ignoreThreadRecord.pending}
-                  aria-disabled={ignoreThreadRecord.pending}
-                >
-                  {ignoreThreadRecord.pending
-                    ? thread.thread.isIgnored
-                      ? "Enabling..."
-                      : "Disabling..."
-                    : thread.thread.isIgnored
-                      ? "Allow Auto-Respond"
-                      : "Do Not Auto-Respond"}
-                </button>
+              <div className="conversation-chat-header-main">
+                <div className="conversation-chat-header-top">
+                  <p className="queue-title">{thread.thread.title || thread.thread.jid}</p>
+                  <p className="queue-meta">{thread.thread.jid}</p>
+                </div>
+                <div className="conversation-chat-header-actions">
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    onClick={toggleIgnoreFromConversation}
+                    disabled={ignoreThreadRecord.pending}
+                    aria-disabled={ignoreThreadRecord.pending}
+                  >
+                    {ignoreThreadRecord.pending
+                      ? thread.thread.isIgnored
+                        ? "Enabling..."
+                        : "Disabling..."
+                      : thread.thread.isIgnored
+                        ? "Allow Auto-Respond"
+                        : "Do Not Auto-Respond"}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-icon"
+                    onClick={() => setSettingsModalOpen(true)}
+                    aria-label="Thread settings"
+                    title="Thread settings"
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                      <path
+                        fill="currentColor"
+                        d="M19.14 12.94a7.8 7.8 0 0 0 .05-.94 7.8 7.8 0 0 0-.05-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.17 7.17 0 0 0-1.63-.94l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.58.22-1.12.54-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.7 8.84a.5.5 0 0 0 .12.64l2.03 1.58a7.8 7.8 0 0 0-.05.94 7.8 7.8 0 0 0 .05.94L2.82 14.52a.5.5 0 0 0-.12.64l1.92 3.32a.5.5 0 0 0 .6.22l2.39-.96c.5.4 1.05.72 1.63.94l.36 2.54a.5.5 0 0 0 .5.42h3.84a.5.5 0 0 0 .5-.42l.36-2.54c.58-.22 1.12-.54 1.63-.94l2.39.96a.5.5 0 0 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58ZM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7Z"
+                      />
+                    </svg>
+                    <span className="sr-only">Thread settings</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-danger-ghost btn-icon"
+                    onClick={deleteSelectedThread}
+                    disabled={!selectedThreadId || !thread || deleteThreadRecord.pending}
+                    aria-disabled={!selectedThreadId || !thread || deleteThreadRecord.pending}
+                    aria-label={deleteThreadRecord.pending ? "Deleting thread" : "Delete thread"}
+                    title={deleteThreadRecord.pending ? "Deleting thread..." : "Delete thread"}
+                  >
+                    {deleteThreadRecord.pending ? (
+                      <span aria-hidden="true">...</span>
+                    ) : (
+                      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                        <path
+                          fill="currentColor"
+                          d="M9 3h6l1 2h4v2H4V5h4l1-2Zm-3 6h12l-1 11a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L6 9Zm3 2v8h2v-8H9Zm4 0v8h2v-8h-2Z"
+                        />
+                      </svg>
+                    )}
+                    <span className="sr-only">{deleteThreadRecord.pending ? "Deleting thread..." : "Delete thread"}</span>
+                  </button>
+                </div>
               </div>
+              <div className="conversation-chat-chip-row" aria-label="Thread status">
+                <span className="conversation-chip">{(thread.thread.provider || "whatsapp") === "instagram" ? "Instagram" : "WhatsApp"}</span>
+                <span className="conversation-chip">
+                  {thread.thread.threadKind === "broadcast_or_system"
+                    ? "Broadcast/System"
+                    : thread.thread.threadKind === "group"
+                      ? "Group"
+                      : "Direct"}
+                </span>
+                <span className={`conversation-chip ${thread.thread.isIgnored ? "warn" : "ok"}`}>
+                  Auto-respond {thread.thread.isIgnored ? "Off" : "On"}
+                </span>
+                {thread.thread.isArchived ? <span className="conversation-chip muted">Archived</span> : null}
+                <span className={`conversation-chip ${relationshipState?.conflictFlag ? "warn" : "ok"}`}>
+                  Conflict {relationshipState?.conflictFlag ? "Active" : "Clear"}
+                </span>
+                {relationshipState?.repairNeeded ? <span className="conversation-chip warn">Repair Needed</span> : null}
+                {thread.conversationState?.nextMove ? (
+                  <span className="conversation-chip muted">
+                    Next move {thread.conversationState.nextMove.replace("_", " ")}
+                  </span>
+                ) : null}
+                {thread.conversationState?.conversationEndImminent ? (
+                  <span className="conversation-chip warn">Endgame Signal</span>
+                ) : null}
+                {typeof thread.conversationState?.topicDwellScore === "number" ? (
+                  <span
+                    className={`conversation-chip ${
+                      thread.conversationState.topicDwellScore >= 0.65 ? "warn" : "muted"
+                    }`}
+                  >
+                    Dwell {thread.conversationState.topicDwellScore.toFixed(2)}
+                  </span>
+                ) : null}
+                {mutualCheckInAgeDays === undefined ? (
+                  <span className="conversation-chip warn">Mutual Check-in None</span>
+                ) : (
+                  <span className={`conversation-chip ${mutualCheckInAgeDays >= 7 ? "warn" : "ok"}`}>
+                    Mutual Check-in {mutualCheckInAgeDays}d
+                  </span>
+                )}
+              </div>
+              {relationshipState?.lastReason ? <p className="queue-meta">Last policy reason: {relationshipState.lastReason}</p> : null}
+              {thread.checkInDiagnostics ? (
+                <p className="queue-meta">
+                  Check-in diagnostics: prompts {thread.checkInDiagnostics.promptDetectionsRecent || 0} · responses{" "}
+                  {thread.checkInDiagnostics.responseDetectionsRecent || 0} · mutual updates{" "}
+                  {thread.checkInDiagnostics.mutualUpdatesRecent || 0}
+                </p>
+              ) : null}
+              {laneSummary ? <p className="queue-meta">Topic lanes: {laneSummary}</p> : null}
               {ignoreThreadRecord.error ? (
                 <p className="queue-meta action-inline-error" role="alert">
                   {ignoreThreadRecord.error}
                 </p>
               ) : null}
+              {deleteThreadRecord.error ? (
+                <p className="queue-meta action-inline-error" role="alert">
+                  {deleteThreadRecord.error}
+                </p>
+              ) : null}
             </header>
-            <div className="conversation-chat-window" role="log" aria-live="polite">
-              {(thread.messages || []).length === 0 ? (
-                <p className="empty-line">No messages in this thread yet.</p>
-              ) : null}
-              {threadReviewBySourceMessageId.unanchored.length > 0 ? (
-                <div className="thread-review-stack thread-review-floating">
-                  <p className="thread-review-group-title">Review items from older messages</p>
-              {threadReviewBySourceMessageId.unanchored.map((entry) => renderThreadReviewEntry(entry))}
-                </div>
-              ) : null}
-              {(thread.messages || []).map((message) => {
-                const isAutomatedSelfChatReply =
-                  isSelfChatSystemThread && message.direction === "outbound" && Boolean(message.toolRunId);
-                const outbound = message.direction === "outbound" && !isAutomatedSelfChatReply;
-                const isStatusPost = isStatusPostMessage(message, thread.thread.jid);
-                const senderName = outbound
-                  ? threadGrounding?.myName?.trim() || "You"
-                  : isAutomatedSelfChatReply
-                    ? "System"
-                    : threadGrounding?.theirName?.trim() || thread.thread.title || "Contact";
-                const senderBadge = senderName.charAt(0).toUpperCase();
-                const displayText = messageDisplayText(message);
-                const mediaCaption = message.mediaCaption?.trim();
-                const showMediaCaption = Boolean(mediaCaption && mediaCaption !== displayText);
-                const messageToolSummary = message.direction === "outbound" ? toolEventSummary.byMessageId.get(message._id) : undefined;
-                const toolSummaryCount = messageToolSummary
-                  ? messageToolSummary.toolCalls.length + messageToolSummary.contextWindows.length + messageToolSummary.styleGuardrails.length
-                  : 0;
-                const plannerEvent = messageToolSummary?.toolCalls.find((event) => event.toolName === "response_workbench");
-                const plannerSummary = parsePlannerSummary(plannerEvent?.parsedOutput);
-                const reviewEntries = threadReviewBySourceMessageId.bySource.get(message._id) || [];
-
-                return (
-                  <div key={message._id} className={`chat-row ${outbound ? "outbound" : "inbound"}`}>
-                    <span className={`chat-avatar ${outbound ? "outbound" : "inbound"}`} aria-hidden="true">
-                      {senderBadge || (outbound ? "Y" : "C")}
-                    </span>
-                    <div className={`message-bubble ${outbound ? "outbound" : "inbound"}`}>
-                      <p className="message-sender">{senderName}</p>
-                      <p className="message-text">{displayText}</p>
-                      {renderMessageMediaPreview(message, (preview) => setMediaPreviewModal(preview))}
-                      {showMediaCaption ? <p className="message-media-caption">{mediaCaption}</p> : null}
-                      <p className="queue-meta">{messageKindLabel(message.messageType)}</p>
-                      {isStatusPost ? <p className="message-status-chip">Status Post</p> : null}
-                      {(reactionsByMessage.get(message._id) || []).length > 0 ? (
-                        <div className="queue-actions">
-                          {(reactionsByMessage.get(message._id) || []).map((reaction, index) => (
-                            <span key={`${reaction.actorJid}:${index}`} className="queue-meta">
-                              {reaction.emoji} {reaction.direction === "outbound" ? "me" : "them"}
-                            </span>
-                          ))}
-                        </div>
-                      ) : null}
-                      {message.direction === "outbound" && toolSummaryCount > 0 ? (
-                        <div className="queue-actions">
-                          <button
-                            type="button"
-                            className="btn btn-ghost message-tool-summary-trigger"
-                            onClick={() => setToolSummaryMessageId(message._id)}
-                          >
-                            Tools used ({messageToolSummary?.toolCalls.length || 0})
-                          </button>
-                          <p className="queue-meta message-tool-summary-meta">
-                            {messageToolSummary?.contextWindows.length ? `${messageToolSummary.contextWindows.length} context window` : "No context window"}
-                            {messageToolSummary?.styleGuardrails.length
-                              ? ` · ${messageToolSummary.styleGuardrails.length} style guardrail`
-                              : ""}
-                          </p>
-                          {plannerSummary ? (
-                            <p className="queue-meta message-tool-summary-meta">
-                              Planner {plannerModeLabel(plannerSummary.replyMode).toLowerCase()} · {plannerSummary.intentLabel} ·{" "}
-                              {Math.round(plannerSummary.confidence * 100)}%
-                            </p>
-                          ) : null}
-                        </div>
-                      ) : null}
-                      {reviewEntries.length > 0 ? (
-                        <div className="thread-review-stack">
-                          <p className="thread-review-group-title">Needs review ({reviewEntries.length})</p>
-                          {reviewEntries.map((entry) => renderThreadReviewEntry(entry))}
-                        </div>
-                      ) : null}
-                      <span>{formatDateTime(message.messageAt)}</span>
-                    </div>
+            <div className="conversation-chat-window-frame">
+              <div className="conversation-chat-window" role="log" aria-live="polite" ref={conversationWindowRef}>
+                {(thread.messages || []).length === 0 ? (
+                  <p className="empty-line">No messages in this thread yet.</p>
+                ) : null}
+                {threadReviewBySourceMessageId.unanchored.length > 0 ? (
+                  <div className="thread-review-stack thread-review-floating">
+                    <p className="thread-review-group-title">Review items from older messages</p>
+                    {threadReviewBySourceMessageId.unanchored.map((entry) => renderThreadReviewEntry(entry))}
                   </div>
-                );
-              })}
+                ) : null}
+                {timelineRows.map((row) => {
+                  if (row.kind === "activity") {
+                    const activity = row.activity;
+                    const tone = timelineEventTone(activity.eventType);
+                    const level = tone === "danger" ? "ERR" : tone === "warn" ? "WRN" : tone === "ok" ? "OK " : "INF";
+                    return (
+                      <div key={row.key} className={`timeline-cli-row ${tone}`} role="status" aria-live="polite">
+                        <p className="timeline-cli-line">
+                          <span className="timeline-cli-time">{formatDateTime(activity.createdAt)}</span>
+                          <span className="timeline-cli-level">[{level}]</span>
+                          <span className="timeline-cli-event">{timelineEventLabel(activity.eventType)}</span>
+                          <span className="timeline-cli-detail">{activity.detail || "Status updated."}</span>
+                          <span className="timeline-cli-meta">
+                            ({activity.source}
+                            {activity.outboxId ? ` · outbox ${activity.outboxId}` : ""})
+                          </span>
+                        </p>
+                        <p className="timeline-cli-raw">{activity.eventType}</p>
+                      </div>
+                    );
+                  }
+
+                  const message = row.message;
+                  const isAutomatedSelfChatReply =
+                    isSelfChatSystemThread && message.direction === "outbound" && Boolean(message.toolRunId);
+                  const outbound = message.direction === "outbound" && !isAutomatedSelfChatReply;
+                  const isStatusPost = isStatusPostMessage(message, thread.thread.jid);
+                  const senderName = outbound
+                    ? threadGrounding?.myName?.trim() || "You"
+                    : isAutomatedSelfChatReply
+                      ? "System"
+                      : threadGrounding?.theirName?.trim() || thread.thread.title || "Contact";
+                  const senderBadge = senderName.charAt(0).toUpperCase();
+                  const displayText = messageDisplayText(message);
+                  const mediaCaption = message.mediaCaption?.trim();
+                  const showMediaCaption = Boolean(mediaCaption && mediaCaption !== displayText);
+                  const messageToolSummary = message.direction === "outbound" ? toolEventSummary.byMessageId.get(message._id) : undefined;
+                  const toolSummaryCount = messageToolSummary
+                    ? messageToolSummary.toolCalls.length + messageToolSummary.contextWindows.length + messageToolSummary.styleGuardrails.length
+                    : 0;
+                  const plannerEvent = messageToolSummary?.toolCalls.find((event) => event.toolName === "response_workbench");
+                  const plannerSummary = parsePlannerSummary(plannerEvent?.parsedOutput);
+                  const reviewEntries = threadReviewBySourceMessageId.bySource.get(message._id) || [];
+
+                  return (
+                    <div
+                      key={message._id}
+                      ref={(element) => {
+                        if (element) {
+                          messageRowRefs.current.set(message._id, element);
+                        } else {
+                          messageRowRefs.current.delete(message._id);
+                        }
+                      }}
+                      className={`chat-row ${outbound ? "outbound" : "inbound"}${highlightedMessageId === message._id ? " highlight" : ""}`}
+                    >
+                      <span className={`chat-avatar ${outbound ? "outbound" : "inbound"}`} aria-hidden="true">
+                        {senderBadge || (outbound ? "Y" : "C")}
+                      </span>
+                      <div className={`message-bubble ${outbound ? "outbound" : "inbound"}`}>
+                        <p className="message-sender">{senderName}</p>
+                        <p className="message-text">{displayText}</p>
+                        {renderMessageMediaPreview(message, (preview) => setMediaPreviewModal(preview))}
+                        {showMediaCaption ? <p className="message-media-caption">{mediaCaption}</p> : null}
+                        <p className="queue-meta">{messageKindLabel(message.messageType)}</p>
+                        {isStatusPost ? <p className="message-status-chip">Status Post</p> : null}
+                        {(reactionsByMessage.get(message._id) || []).length > 0 ? (
+                          <div className="queue-actions">
+                            {(reactionsByMessage.get(message._id) || []).map((reaction, index) => (
+                              <span key={`${reaction.actorJid}:${index}`} className="queue-meta">
+                                {reaction.emoji} {reaction.direction === "outbound" ? "me" : "them"}
+                              </span>
+                            ))}
+                          </div>
+                        ) : null}
+                        {message.direction === "outbound" && toolSummaryCount > 0 ? (
+                          <div className="queue-actions">
+                            <button
+                              type="button"
+                              className="btn btn-ghost message-tool-summary-trigger"
+                              onClick={() => setToolSummaryMessageId(message._id)}
+                            >
+                              Tools used ({messageToolSummary?.toolCalls.length || 0})
+                            </button>
+                            <p className="queue-meta message-tool-summary-meta">
+                              {messageToolSummary?.contextWindows.length ? `${messageToolSummary.contextWindows.length} context window` : "No context window"}
+                              {messageToolSummary?.styleGuardrails.length
+                                ? ` · ${messageToolSummary.styleGuardrails.length} style guardrail`
+                                : ""}
+                            </p>
+                            {plannerSummary ? (
+                              <p className="queue-meta message-tool-summary-meta">
+                                Planner {plannerModeLabel(plannerSummary.replyMode).toLowerCase()} · {plannerSummary.intentLabel} ·{" "}
+                                {Math.round(plannerSummary.confidence * 100)}%
+                              </p>
+                            ) : null}
+                          </div>
+                        ) : null}
+                        {reviewEntries.length > 0 ? (
+                          <div className="thread-review-stack">
+                            <p className="thread-review-group-title">Needs review ({reviewEntries.length})</p>
+                            {reviewEntries.map((entry) => renderThreadReviewEntry(entry))}
+                          </div>
+                        ) : null}
+                        <span>{formatDateTime(message.messageAt)}</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <button
+                type="button"
+                className="timeline-jump-latest"
+                onClick={jumpToLastMessage}
+                aria-label="Jump to latest message"
+                title="Jump to latest message"
+                disabled={!lastMessageId}
+                aria-hidden={!showJumpToLatest}
+                tabIndex={showJumpToLatest ? 0 : -1}
+                style={{ opacity: showJumpToLatest ? 1 : 0, pointerEvents: showJumpToLatest ? "auto" : "none" }}
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path fill="currentColor" d="M12 18a1 1 0 0 1-.7-.29l-6-6a1 1 0 1 1 1.4-1.42L12 15.58l5.3-5.3a1 1 0 1 1 1.4 1.42l-6 6A1 1 0 0 1 12 18Z" />
+                </svg>
+              </button>
             </div>
           </div>
         ) : threadMissing ? (
@@ -1764,7 +2418,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
         <UIModal
           open={settingsModalOpen}
           onClose={() => setSettingsModalOpen(false)}
-          title={selectedThreadId ? "Conversation Settings" : "Workspace Settings"}
+          title={selectedThreadId ? "Conversation Settings" : "Page Settings"}
           description="Adjust personality, prompt profile, and grounding."
         >
           <div className="conversation-controls">
@@ -1861,6 +2515,51 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
               </div>
 
               <div className="queue-item">
+                <p className="queue-title">Trust Snapshot</p>
+                {(() => {
+                  const plannerEvent = selectedToolSummary.toolCalls.find((event) => event.toolName === "response_workbench");
+                  const plannerSummary = parsePlannerSummary(plannerEvent?.parsedOutput);
+                  const toolCalls = selectedToolSummary.toolCalls.filter((event) => event.toolName !== "response_workbench");
+                  const failedToolCount = toolCalls.filter((event) => toolTone(event) === "danger").length;
+                  const passedGuardrails = selectedToolSummary.styleGuardrails.filter((event) => event.passed).length;
+                  const failedGuardrails = selectedToolSummary.styleGuardrails.filter((event) => event.passed === false).length;
+                  return (
+                    <div className="tool-evidence-grid">
+                      <div className="tool-evidence-stat">
+                        <span>Planner</span>
+                        <strong>
+                          {plannerSummary
+                            ? `${plannerModeLabel(plannerSummary.replyMode)} · ${Math.round(plannerSummary.confidence * 100)}%`
+                            : "Not captured"}
+                        </strong>
+                      </div>
+                      <div className="tool-evidence-stat">
+                        <span>Tool calls</span>
+                        <strong>{failedToolCount > 0 ? `${failedToolCount} need attention` : `${toolCalls.length} completed`}</strong>
+                      </div>
+                      <div className="tool-evidence-stat">
+                        <span>Context</span>
+                        <strong>
+                          {selectedToolSummary.contextWindows.length} window
+                          {selectedToolSummary.contextWindows.length === 1 ? "" : "s"}
+                        </strong>
+                      </div>
+                      <div className="tool-evidence-stat">
+                        <span>Guardrail</span>
+                        <strong>
+                          {failedGuardrails > 0
+                            ? `${failedGuardrails} failed`
+                            : passedGuardrails > 0
+                              ? `${passedGuardrails} passed`
+                              : "Not captured"}
+                        </strong>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+
+              <div className="queue-item">
                 <p className="queue-title">Response Planner</p>
                 {(() => {
                   const plannerEvent = selectedToolSummary.toolCalls.find((event) => event.toolName === "response_workbench");
@@ -1888,26 +2587,50 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
 
               <div className="queue-item">
                 <p className="queue-title">Tool Calls</p>
-                {selectedToolSummary.toolCalls.length === 0 ? (
-                  <p className="empty-line">No tool calls captured for this response.</p>
-                ) : (
-                  <div className="stack compact">
-                    {selectedToolSummary.toolCalls
-                      .filter((event) => event.toolName !== "response_workbench")
-                      .map((event) => (
-                      <div key={event._id} className="tool-summary-item">
-                        <p className="queue-meta">
-                          {event.phase === "outreach" ? "Outreach" : "Reply"} · {event.toolName || event.eventType} · {event.latencyMs || 0}ms ·{" "}
-                          {formatDateTime(event.createdAt)}
-                        </p>
-                        <p className="queue-meta">Input</p>
-                        <pre className="tool-summary-json">{event.inputText || "(not captured)"}</pre>
-                        <p className="queue-meta">Output</p>
-                        <pre className="tool-summary-json">{event.outputText || "(not captured)"}</pre>
-                      </div>
-                    ))}
-                  </div>
-                )}
+                {(() => {
+                  const toolCalls = selectedToolSummary.toolCalls.filter((event) => event.toolName !== "response_workbench");
+                  if (toolCalls.length === 0) {
+                    return <p className="empty-line">No tool calls captured for this response.</p>;
+                  }
+                  return (
+                    <div className="stack compact">
+                      {toolCalls.map((event) => {
+                        const chips = toolMetricChips(event);
+                        const inputPayload = safePrettyJson(event.parsedInput) || event.inputText || "(not captured)";
+                        const outputPayload = safePrettyJson(event.parsedOutput) || event.outputText || "(not captured)";
+                        return (
+                          <div key={event._id} className="tool-summary-item tool-evidence-item">
+                            <div className="tool-evidence-head">
+                              <span className={`tool-evidence-dot tool-evidence-dot-${toolTone(event)}`} aria-hidden="true" />
+                              <div className="tool-evidence-title-block">
+                                <p className="queue-title">{toolDisplayName(event.toolName)}</p>
+                                <p className="queue-meta">
+                                  {event.phase === "outreach" ? "Outreach" : "Reply"} · {event.toolName || event.eventType} ·{" "}
+                                  {formatLatencyMs(event.latencyMs)} · {formatDateTime(event.createdAt)}
+                                </p>
+                              </div>
+                            </div>
+                            <p className="queue-body">{toolOutcomeText(event)}</p>
+                            {chips.length > 0 ? (
+                              <div className="tool-evidence-chips" aria-label="Tool metrics">
+                                {chips.map((chip) => (
+                                  <span key={chip}>{chip}</span>
+                                ))}
+                              </div>
+                            ) : null}
+                            <details className="tool-technical-details">
+                              <summary>Technical details</summary>
+                              <p className="queue-meta">Input</p>
+                              <pre className="tool-summary-json">{inputPayload}</pre>
+                              <p className="queue-meta">Output</p>
+                              <pre className="tool-summary-json">{outputPayload}</pre>
+                            </details>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
               </div>
 
               <div className="queue-item">
@@ -1917,22 +2640,49 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
                 ) : (
                   <div className="stack compact">
                     {selectedToolSummary.contextWindows.map((event) => (
-                      <div key={event._id} className="tool-summary-item">
-                        <p className="queue-meta">
-                          {event.phase === "outreach" ? "Outreach" : "Reply"} context window · {formatDateTime(event.createdAt)}
-                        </p>
-                        <pre className="tool-summary-json">{event.detail || "(no detail)"}</pre>
+                      <div key={event._id} className="tool-summary-item tool-evidence-item">
+                        <div className="tool-evidence-head">
+                          <span className="tool-evidence-dot tool-evidence-dot-ok" aria-hidden="true" />
+                          <div className="tool-evidence-title-block">
+                            <p className="queue-title">Context window</p>
+                            <p className="queue-meta">
+                              {event.phase === "outreach" ? "Outreach" : "Reply"} · {formatDateTime(event.createdAt)}
+                            </p>
+                          </div>
+                        </div>
+                        <p className="queue-body">{trim(event.detail || "No detail captured.", 220)}</p>
+                        <details className="tool-technical-details">
+                          <summary>Technical details</summary>
+                          <pre className="tool-summary-json">{event.detail || "(no detail)"}</pre>
+                        </details>
                       </div>
                     ))}
                     {selectedToolSummary.styleGuardrails.map((event) => (
-                      <div key={event._id} className="tool-summary-item">
-                        <p className="queue-meta">
-                          Style guardrail {event.passed ? "passed" : "failed"} · score {Number(event.score || 0).toFixed(2)} /{" "}
-                          {Number(event.threshold || 0).toFixed(2)} · {formatDateTime(event.createdAt)}
+                      <div key={event._id} className="tool-summary-item tool-evidence-item">
+                        <div className="tool-evidence-head">
+                          <span
+                            className={`tool-evidence-dot ${event.passed ? "tool-evidence-dot-ok" : "tool-evidence-dot-danger"}`}
+                            aria-hidden="true"
+                          />
+                          <div className="tool-evidence-title-block">
+                            <p className="queue-title">Style guardrail {event.passed ? "passed" : "failed"}</p>
+                            <p className="queue-meta">
+                              Score {Number(event.score || 0).toFixed(2)} / {Number(event.threshold || 0).toFixed(2)} ·{" "}
+                              {formatDateTime(event.createdAt)}
+                            </p>
+                          </div>
+                        </div>
+                        <p className="queue-body">
+                          {(event.hints || []).length > 0
+                            ? trim((event.hints || []).join(" · "), 220)
+                            : trim(event.detail || "No hints captured.", 220)}
                         </p>
-                        <pre className="tool-summary-json">
-                          {(event.hints || []).length > 0 ? (event.hints || []).join("\n") : event.detail || "(no hints captured)"}
-                        </pre>
+                        <details className="tool-technical-details">
+                          <summary>Technical details</summary>
+                          <pre className="tool-summary-json">
+                            {(event.hints || []).length > 0 ? (event.hints || []).join("\n") : event.detail || "(no hints captured)"}
+                          </pre>
+                        </details>
                       </div>
                     ))}
                   </div>
@@ -1949,6 +2699,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
           ) : null}
         </UIModal>
       </article>
+      ) : null}
     </section>
   );
 }

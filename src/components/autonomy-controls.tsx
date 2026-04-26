@@ -38,7 +38,7 @@ function ControlsView({
   return (
     <div className="topbar-controls" aria-busy={pending}>
       <span className={`status-pill ${autonomyPaused ? "status-paused" : "status-active"}`}>
-        {statusLabel || (autonomyPaused ? "Autonomy Paused" : "Autonomy Active")}
+        {statusLabel || (autonomyPaused ? "Automation Paused" : "Automation Active")}
       </span>
 
       {onToggle ? (
@@ -159,7 +159,7 @@ function ControlsRealtime({ fallbackPaused }: { fallbackPaused?: boolean }) {
         error={record.error}
         onToggle={healthLoading ? undefined : toggle}
         onRestartWorker={setupLoading ? undefined : restartWorker}
-        statusLabel={healthLoading ? "Loading Autonomy..." : undefined}
+        statusLabel={healthLoading ? "Loading..." : undefined}
       />
       <ActionNotices notices={notices} onDismiss={dismissNotice} />
     </div>

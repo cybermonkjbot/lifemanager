@@ -3,7 +3,7 @@ import { LiveSystemsDesign } from "@/components/live-systems-design";
 
 export default async function SystemsDesignPage() {
   return (
-    <DashboardPage title="Systems Design" subtitle="Inspect runtime topology, service links, and recent logs." showLogWatcher>
+    <DashboardPage title="Systems Design" subtitle="Trace service links, dependencies, and recent logs." showLogWatcher logWatcherDefaultExpanded={false}>
       <LiveSystemsDesign />
     </DashboardPage>
   );

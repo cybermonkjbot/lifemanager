@@ -5,7 +5,7 @@ export default async function HomePage() {
   return (
     <DashboardPage
       title="Home"
-      subtitle="Start with queue triage, conversation review, and follow-up tracking."
+      subtitle="Ask for a read on chats, drafts, follow-ups, and system state."
       hideViewHeader
     >
       <HomeScreen />

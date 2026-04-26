@@ -39,6 +39,7 @@ type SettingsState = {
   aiReplyPolicy: string;
   aiSystemInstruction: string;
   activePersonaPackId: string;
+  activePersonaPackIdsByProfile?: Record<string, string>;
   qualityGateMode: "auto_rewrite_once" | "manual_review" | "log_only";
   qualityGateThreshold: number;
   humanDelayMinMs: number;
@@ -72,6 +73,10 @@ type SettingsState = {
   sendRateWindowMinutes: number;
   sendMaxPerThreadInWindow: number;
   sendMaxGlobalInWindow: number;
+  voiceNotesAutoEnabled: boolean;
+  voiceNotesAutoProbability: number;
+  voiceNotesAutoMaxPerThreadPerDay: number;
+  voiceNotesAutoNeedKeywords: string[];
   romanticPartnerJids: string[];
   romanticMorningEnabled: boolean;
   romanticMorningStartHour: number;
@@ -93,6 +98,18 @@ type SettingsState = {
   outreachMaxContactsPerRun: number;
   outreachContactJids: string[];
   outreachStarterTemplate: string;
+  conversationIntelligenceEnabled: boolean;
+  checkInRecencyTargetDays: number;
+  topicDyingAckStreakThreshold: number;
+  topicLaneMaxActive: number;
+  pivotReplyEnabled: boolean;
+  antiDwellingEnabled: boolean;
+  antiDwellingEndgameCloseCooldownMinutes: number;
+  antiDwellingTopicTurnSoftLimit: number;
+  antiDwellingTopicTurnHardLimit: number;
+  topicLeadPivotEnabled: boolean;
+  topicLeadPivotMinVibeScore: number;
+  topicLeadPivotCooldownMinutes: number;
   statusBuilderEnabled: boolean;
   statusBuilderCadenceHours: number;
   statusBuilderDailyMaxPosts: number;
@@ -134,6 +151,7 @@ type PersonalityProfileVersion = {
 
 type PersonaPacksPayload = {
   activePersonaPackId: string;
+  activePersonaPackIdsByProfile?: Record<string, string>;
   qualityGateMode: "auto_rewrite_once" | "manual_review" | "log_only";
   qualityGateThreshold: number;
   packs: Array<{
@@ -142,6 +160,8 @@ type PersonaPacksPayload = {
     version: string;
     description: string;
     allowedProfileSlugs: string[];
+    activeForProfileSlugs?: string[];
+    isLegacyActive?: boolean;
     cohorts?: string[];
     scenarioCount?: number;
   }>;
@@ -205,6 +225,149 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string }> = [
   { id: "personality", label: "Personality" },
   { id: "media", label: "Media" },
 ];
+const SETTINGS_TAB_KEYWORDS: Record<SettingsTab, string[]> = {
+  runtime: ["ai", "temperature", "tokens", "confidence", "quality gate", "reply", "instruction", "runtime"],
+  automation: [
+    "quiet",
+    "outreach",
+    "status",
+    "instagram",
+    "romantic",
+    "pacing",
+    "rate",
+    "automation",
+    "check in",
+    "conversation",
+    "anti dwelling",
+    "pivot",
+    "topic",
+    "voice note",
+    "voice",
+    "voxcpm",
+  ],
+  personality: ["profile", "persona", "intensity", "prompt", "tone", "personality"],
+  media: ["media", "meme", "sticker", "asset", "merge", "context", "library"],
+};
+const SETTINGS_TAB_FIELDS: Record<SettingsTab, Array<keyof SettingsState>> = {
+  runtime: [
+    "aiFallbackMode",
+    "aiModelFirstEnabled",
+    "aiDeterministicModes",
+    "aiAckRoutingEnabled",
+    "aiTemperature",
+    "aiMaxOutputTokens",
+    "aiMaxReplyChars",
+    "aiHistoryLineLimit",
+    "aiPrimaryConfidence",
+    "aiFallbackConfidence",
+    "aiReplyPolicy",
+    "aiSystemInstruction",
+    "activePersonaPackId",
+    "qualityGateMode",
+    "qualityGateThreshold",
+  ],
+  automation: [
+    "ignoreGroupsByDefault",
+    "reactionsEnabled",
+    "stickersEnabled",
+    "memesEnabled",
+    "generatedMemesEnabled",
+    "generatedMemesAutoSendEnabled",
+    "memeThreadCooldownMs",
+    "memeSendProbability",
+    "soulModeEnabled",
+    "humorLearningEnabled",
+    "selfRoastModeEnabled",
+    "statusAutoReplyEnabled",
+    "statusReplyRequireFunny",
+    "captureGroupMediaEnabled",
+    "funnyStatusKeywords",
+    "funnyStatusEmojis",
+    "humanDelayMinMs",
+    "humanDelayMaxMs",
+    "humanTypingMinMs",
+    "humanTypingMaxMs",
+    "outboxClaimLimit",
+    "outboxPollMs",
+    "inboundMergeWindowMs",
+    "manualInterventionCooldownMs",
+    "statusRetentionMs",
+    "statusCleanupIntervalMs",
+    "statusCleanupBatchLimit",
+    "statusContextKeepPerThread",
+    "groupContextKeepPerThread",
+    "contextCompactionIntervalMs",
+    "contextCompactionMaxThreads",
+    "contextCompactionMaxDeletes",
+    "compactContextGroupJids",
+    "quietHoursEnabled",
+    "quietHoursStartHour",
+    "quietHoursEndHour",
+    "autoMarkReadEnabled",
+    "autoMarkReadGroups",
+    "autoMarkReadStatus",
+    "presenceSubscribeEnabled",
+    "chatModifyQuietHoursEnabled",
+    "aboutAutomationEnabled",
+    "aboutAutomationIntervalMinutes",
+    "aboutAutomationTemplate",
+    "sendRateWindowMinutes",
+    "sendMaxPerThreadInWindow",
+    "sendMaxGlobalInWindow",
+    "voiceNotesAutoEnabled",
+    "voiceNotesAutoProbability",
+    "voiceNotesAutoMaxPerThreadPerDay",
+    "voiceNotesAutoNeedKeywords",
+    "romanticPartnerJids",
+    "romanticMorningEnabled",
+    "romanticMorningStartHour",
+    "romanticMorningEndHour",
+    "romanticMorningLeadRatio",
+    "romanticMorningCollisionCooldownHours",
+    "romanticMorningMaxPerThreadPerDay",
+    "instagramDmDelayMinMs",
+    "instagramDmDelayMaxMs",
+    "instagramTypingMinMs",
+    "instagramTypingMaxMs",
+    "instagramSendRateWindowMinutes",
+    "instagramSendMaxPerThreadInWindow",
+    "instagramSendMaxGlobalInWindow",
+    "instagramStoryCadenceHours",
+    "instagramStoryDailyMaxPosts",
+    "outreachEnabled",
+    "outreachCadenceHours",
+    "outreachMaxContactsPerRun",
+    "outreachContactJids",
+    "outreachStarterTemplate",
+    "conversationIntelligenceEnabled",
+    "checkInRecencyTargetDays",
+    "topicDyingAckStreakThreshold",
+    "topicLaneMaxActive",
+    "pivotReplyEnabled",
+    "antiDwellingEnabled",
+    "antiDwellingEndgameCloseCooldownMinutes",
+    "antiDwellingTopicTurnSoftLimit",
+    "antiDwellingTopicTurnHardLimit",
+    "topicLeadPivotEnabled",
+    "topicLeadPivotMinVibeScore",
+    "topicLeadPivotCooldownMinutes",
+    "statusBuilderEnabled",
+    "statusBuilderCadenceHours",
+    "statusBuilderDailyMaxPosts",
+    "statusBuilderTextPostRatio",
+    "statusBuilderReviewRatio",
+    "statusPostAudienceMode",
+    "statusBuilderAudienceJids",
+    "statusBuilderAudienceSampleSize",
+  ],
+  personality: [],
+  media: [],
+};
+const SETTINGS_SEARCH_STORAGE_KEY = "slm.settings.search";
+
+function fieldValueChanged<T extends keyof SettingsState>(field: T, draft: SettingsState, remote: SettingsState) {
+  return JSON.stringify(draft[field]) !== JSON.stringify(remote[field]);
+}
 
 const STATUS_BUILDER_MAX_TEXT_POST_RATIO = 0.45;
 const HEX_CHAR_TO_INT: Record<string, number> = {
@@ -259,6 +422,7 @@ function toState(source: Partial<SettingsState> | undefined): SettingsState {
     aiReplyPolicy: source?.aiReplyPolicy ?? "",
     aiSystemInstruction: source?.aiSystemInstruction ?? "",
     activePersonaPackId: source?.activePersonaPackId ?? "",
+    activePersonaPackIdsByProfile: source?.activePersonaPackIdsByProfile ?? {},
     qualityGateMode: source?.qualityGateMode ?? "auto_rewrite_once",
     qualityGateThreshold: source?.qualityGateThreshold ?? 0.76,
     humanDelayMinMs: source?.humanDelayMinMs ?? 22000,
@@ -292,6 +456,12 @@ function toState(source: Partial<SettingsState> | undefined): SettingsState {
     sendRateWindowMinutes: source?.sendRateWindowMinutes ?? 60,
     sendMaxPerThreadInWindow: source?.sendMaxPerThreadInWindow ?? 4,
     sendMaxGlobalInWindow: source?.sendMaxGlobalInWindow ?? 40,
+    voiceNotesAutoEnabled: source?.voiceNotesAutoEnabled ?? false,
+    voiceNotesAutoProbability: source?.voiceNotesAutoProbability ?? 0.35,
+    voiceNotesAutoMaxPerThreadPerDay: source?.voiceNotesAutoMaxPerThreadPerDay ?? 1,
+    voiceNotesAutoNeedKeywords:
+      source?.voiceNotesAutoNeedKeywords ??
+      ["voice note", "voice", "call", "explain", "walk you through", "hear me out", "quick update", "sorry", "miss you", "love you"],
     romanticPartnerJids: source?.romanticPartnerJids ?? [],
     romanticMorningEnabled: source?.romanticMorningEnabled ?? true,
     romanticMorningStartHour: source?.romanticMorningStartHour ?? 6,
@@ -313,6 +483,18 @@ function toState(source: Partial<SettingsState> | undefined): SettingsState {
     outreachMaxContactsPerRun: source?.outreachMaxContactsPerRun ?? 3,
     outreachContactJids: source?.outreachContactJids ?? [],
     outreachStarterTemplate: source?.outreachStarterTemplate ?? "Hey {{name}}, checking in on you today.",
+    conversationIntelligenceEnabled: source?.conversationIntelligenceEnabled ?? true,
+    checkInRecencyTargetDays: source?.checkInRecencyTargetDays ?? 7,
+    topicDyingAckStreakThreshold: source?.topicDyingAckStreakThreshold ?? 3,
+    topicLaneMaxActive: source?.topicLaneMaxActive ?? 4,
+    pivotReplyEnabled: source?.pivotReplyEnabled ?? true,
+    antiDwellingEnabled: source?.antiDwellingEnabled ?? true,
+    antiDwellingEndgameCloseCooldownMinutes: source?.antiDwellingEndgameCloseCooldownMinutes ?? 45,
+    antiDwellingTopicTurnSoftLimit: source?.antiDwellingTopicTurnSoftLimit ?? 6,
+    antiDwellingTopicTurnHardLimit: source?.antiDwellingTopicTurnHardLimit ?? 10,
+    topicLeadPivotEnabled: source?.topicLeadPivotEnabled ?? true,
+    topicLeadPivotMinVibeScore: source?.topicLeadPivotMinVibeScore ?? 0.6,
+    topicLeadPivotCooldownMinutes: source?.topicLeadPivotCooldownMinutes ?? 180,
     statusBuilderEnabled: source?.statusBuilderEnabled ?? true,
     statusBuilderCadenceHours: source?.statusBuilderCadenceHours ?? 2,
     statusBuilderDailyMaxPosts: source?.statusBuilderDailyMaxPosts ?? 10,
@@ -359,6 +541,7 @@ function stateEquals(a: SettingsState, b: SettingsState) {
     a.aiReplyPolicy === b.aiReplyPolicy &&
     a.aiSystemInstruction === b.aiSystemInstruction &&
     a.activePersonaPackId === b.activePersonaPackId &&
+    JSON.stringify(a.activePersonaPackIdsByProfile || {}) === JSON.stringify(b.activePersonaPackIdsByProfile || {}) &&
     a.qualityGateMode === b.qualityGateMode &&
     nearlyEqual(a.qualityGateThreshold, b.qualityGateThreshold) &&
     nearlyEqual(a.humanDelayMinMs, b.humanDelayMinMs) &&
@@ -392,6 +575,10 @@ function stateEquals(a: SettingsState, b: SettingsState) {
     nearlyEqual(a.sendRateWindowMinutes, b.sendRateWindowMinutes) &&
     nearlyEqual(a.sendMaxPerThreadInWindow, b.sendMaxPerThreadInWindow) &&
     nearlyEqual(a.sendMaxGlobalInWindow, b.sendMaxGlobalInWindow) &&
+    a.voiceNotesAutoEnabled === b.voiceNotesAutoEnabled &&
+    nearlyEqual(a.voiceNotesAutoProbability, b.voiceNotesAutoProbability) &&
+    nearlyEqual(a.voiceNotesAutoMaxPerThreadPerDay, b.voiceNotesAutoMaxPerThreadPerDay) &&
+    a.voiceNotesAutoNeedKeywords.join("\n") === b.voiceNotesAutoNeedKeywords.join("\n") &&
     a.romanticPartnerJids.join("\n") === b.romanticPartnerJids.join("\n") &&
     a.romanticMorningEnabled === b.romanticMorningEnabled &&
     nearlyEqual(a.romanticMorningStartHour, b.romanticMorningStartHour) &&
@@ -413,6 +600,18 @@ function stateEquals(a: SettingsState, b: SettingsState) {
     nearlyEqual(a.outreachMaxContactsPerRun, b.outreachMaxContactsPerRun) &&
     a.outreachStarterTemplate === b.outreachStarterTemplate &&
     a.outreachContactJids.join("\n") === b.outreachContactJids.join("\n") &&
+    a.conversationIntelligenceEnabled === b.conversationIntelligenceEnabled &&
+    nearlyEqual(a.checkInRecencyTargetDays, b.checkInRecencyTargetDays) &&
+    nearlyEqual(a.topicDyingAckStreakThreshold, b.topicDyingAckStreakThreshold) &&
+    nearlyEqual(a.topicLaneMaxActive, b.topicLaneMaxActive) &&
+    a.pivotReplyEnabled === b.pivotReplyEnabled &&
+    a.antiDwellingEnabled === b.antiDwellingEnabled &&
+    nearlyEqual(a.antiDwellingEndgameCloseCooldownMinutes, b.antiDwellingEndgameCloseCooldownMinutes) &&
+    nearlyEqual(a.antiDwellingTopicTurnSoftLimit, b.antiDwellingTopicTurnSoftLimit) &&
+    nearlyEqual(a.antiDwellingTopicTurnHardLimit, b.antiDwellingTopicTurnHardLimit) &&
+    a.topicLeadPivotEnabled === b.topicLeadPivotEnabled &&
+    nearlyEqual(a.topicLeadPivotMinVibeScore, b.topicLeadPivotMinVibeScore) &&
+    nearlyEqual(a.topicLeadPivotCooldownMinutes, b.topicLeadPivotCooldownMinutes) &&
     a.statusBuilderEnabled === b.statusBuilderEnabled &&
     nearlyEqual(a.statusBuilderCadenceHours, b.statusBuilderCadenceHours) &&
     nearlyEqual(a.statusBuilderDailyMaxPosts, b.statusBuilderDailyMaxPosts) &&
@@ -815,6 +1014,7 @@ export function LiveSettings() {
   const profiles = profilesQuery || [];
   const availablePersonaPacks = personaPacks?.packs || [];
   const [tab, setTab] = useState<SettingsTab>("runtime");
+  const [settingsSearch, setSettingsSearch] = useState("");
   const [draft, setDraft] = useState<SettingsState>(remoteState);
   const [editorSlug, setEditorSlug] = useState("");
   const [assetKind, setAssetKind] = useState<"sticker" | "meme">("sticker");
@@ -840,6 +1040,16 @@ export function LiveSettings() {
   useEffect(() => {
     setDraft(remoteState);
   }, [remoteState]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const savedSearch = window.localStorage.getItem(SETTINGS_SEARCH_STORAGE_KEY) || "";
+    if (savedSearch) {
+      setSettingsSearch(savedSearch);
+    }
+  }, []);
 
   useEffect(() => {
     const missing = curatedMediaAssets.filter((asset) => {
@@ -903,6 +1113,48 @@ export function LiveSettings() {
   const showAutomation = tab === "automation";
   const showPersonality = tab === "personality";
   const showMedia = tab === "media";
+  const tabDirtyMap = useMemo<Record<SettingsTab, boolean>>(() => {
+    return {
+      runtime: SETTINGS_TAB_FIELDS.runtime.some((field) => fieldValueChanged(field, draft, remoteState)),
+      automation: SETTINGS_TAB_FIELDS.automation.some((field) => fieldValueChanged(field, draft, remoteState)),
+      personality: false,
+      media: false,
+    };
+  }, [draft, remoteState]);
+  const dirtyTabCount = useMemo(
+    () => SETTINGS_TABS.filter((tabItem) => tabDirtyMap[tabItem.id]).length,
+    [tabDirtyMap],
+  );
+  const activeTabLabel = useMemo(
+    () => SETTINGS_TABS.find((tabItem) => tabItem.id === tab)?.label || "Runtime",
+    [tab],
+  );
+  const normalizedSettingsSearch = settingsSearch.trim().toLowerCase();
+  const visibleTabs = useMemo(() => {
+    if (!normalizedSettingsSearch) {
+      return SETTINGS_TABS;
+    }
+    return SETTINGS_TABS.filter((tabItem) => {
+      const haystack = `${tabItem.label} ${(SETTINGS_TAB_KEYWORDS[tabItem.id] || []).join(" ")}`.toLowerCase();
+      return haystack.includes(normalizedSettingsSearch);
+    });
+  }, [normalizedSettingsSearch]);
+
+  useEffect(() => {
+    if (!normalizedSettingsSearch || visibleTabs.length !== 1) {
+      return;
+    }
+    if (visibleTabs[0].id !== tab) {
+      setTab(visibleTabs[0].id);
+    }
+  }, [normalizedSettingsSearch, tab, visibleTabs]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem(SETTINGS_SEARCH_STORAGE_KEY, settingsSearch);
+  }, [settingsSearch]);
 
   const saveDraft = () => {
     if (!hasChanged) {
@@ -942,6 +1194,7 @@ export function LiveSettings() {
           aiReplyPolicy: draft.aiReplyPolicy,
           aiSystemInstruction: draft.aiSystemInstruction,
           activePersonaPackId: draft.activePersonaPackId,
+          activePersonaPackIdsByProfile: draft.activePersonaPackIdsByProfile || {},
           qualityGateMode: draft.qualityGateMode,
           qualityGateThreshold: draft.qualityGateThreshold,
           humanDelayMinMs: Math.round(draft.humanDelayMinMs),
@@ -975,6 +1228,10 @@ export function LiveSettings() {
           sendRateWindowMinutes: Math.round(draft.sendRateWindowMinutes),
           sendMaxPerThreadInWindow: Math.round(draft.sendMaxPerThreadInWindow),
           sendMaxGlobalInWindow: Math.round(draft.sendMaxGlobalInWindow),
+          voiceNotesAutoEnabled: draft.voiceNotesAutoEnabled,
+          voiceNotesAutoProbability: draft.voiceNotesAutoProbability,
+          voiceNotesAutoMaxPerThreadPerDay: Math.round(draft.voiceNotesAutoMaxPerThreadPerDay),
+          voiceNotesAutoNeedKeywords: draft.voiceNotesAutoNeedKeywords,
           romanticPartnerJids: draft.romanticPartnerJids,
           romanticMorningEnabled: draft.romanticMorningEnabled,
           romanticMorningStartHour: Math.round(draft.romanticMorningStartHour),
@@ -996,6 +1253,18 @@ export function LiveSettings() {
           outreachMaxContactsPerRun: Math.round(draft.outreachMaxContactsPerRun),
           outreachContactJids: draft.outreachContactJids,
           outreachStarterTemplate: draft.outreachStarterTemplate,
+          conversationIntelligenceEnabled: draft.conversationIntelligenceEnabled,
+          checkInRecencyTargetDays: Math.round(draft.checkInRecencyTargetDays),
+          topicDyingAckStreakThreshold: Math.round(draft.topicDyingAckStreakThreshold),
+          topicLaneMaxActive: Math.round(draft.topicLaneMaxActive),
+          pivotReplyEnabled: draft.pivotReplyEnabled,
+          antiDwellingEnabled: draft.antiDwellingEnabled,
+          antiDwellingEndgameCloseCooldownMinutes: Math.round(draft.antiDwellingEndgameCloseCooldownMinutes),
+          antiDwellingTopicTurnSoftLimit: Math.round(draft.antiDwellingTopicTurnSoftLimit),
+          antiDwellingTopicTurnHardLimit: Math.round(draft.antiDwellingTopicTurnHardLimit),
+          topicLeadPivotEnabled: draft.topicLeadPivotEnabled,
+          topicLeadPivotMinVibeScore: draft.topicLeadPivotMinVibeScore,
+          topicLeadPivotCooldownMinutes: Math.round(draft.topicLeadPivotCooldownMinutes),
           statusBuilderEnabled: draft.statusBuilderEnabled,
           statusBuilderCadenceHours: Math.round(draft.statusBuilderCadenceHours),
           statusBuilderDailyMaxPosts: Math.round(draft.statusBuilderDailyMaxPosts),
@@ -1425,32 +1694,62 @@ export function LiveSettings() {
   }
 
   return (
-    <section className="stack">
-      <div className="queue-focus-tabs" role="tablist" aria-label="Settings sections">
-        {SETTINGS_TABS.map((item) => (
-          <button
-            key={item.id}
-            type="button"
-            role="tab"
-            aria-selected={tab === item.id}
-            className={`btn ${tab === item.id ? "btn-primary" : "btn-ghost"}`}
-            onClick={() => setTab(item.id)}
-          >
-            {item.label}
-          </button>
-        ))}
-      </div>
+    <section className="stack settings-workspace">
+      <article className="panel-card settings-control-deck">
+        <div className="settings-control-topline">
+          <div className="queue-focus-tabs settings-tab-strip" role="tablist" aria-label="Settings sections">
+            {visibleTabs.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                role="tab"
+                aria-selected={tab === item.id}
+                className={`btn ${tab === item.id ? "btn-primary" : "btn-ghost"}`}
+                onClick={() => setTab(item.id)}
+              >
+                {item.label}
+                {tabDirtyMap[item.id] ? " *" : ""}
+              </button>
+            ))}
+          </div>
+          <p className="queue-meta settings-control-meta">
+            Active: {activeTabLabel} ·{" "}
+            {dirtyTabCount > 0
+              ? `${dirtyTabCount} section${dirtyTabCount === 1 ? "" : "s"} with unsaved edits`
+              : "No unsaved edits"}
+          </p>
+        </div>
+        <div className="settings-control-row">
+          <label className="setup-input-group inline search-field-group settings-search-field">
+            <span className="queue-meta">Find settings section</span>
+            <input
+              type="search"
+              value={settingsSearch}
+              onChange={(event) => setSettingsSearch(event.target.value)}
+              placeholder="Search sections: quiet hours, persona, media..."
+            />
+          </label>
+          <div className="topbar-controls settings-primary-actions">
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={saveDraft}
+              disabled={record.pending || !hasChanged}
+              aria-disabled={record.pending || !hasChanged}
+            >
+              {record.pending ? "Saving..." : "Save Settings"}
+            </button>
+            <button type="button" className="btn" onClick={restoreDefaults} disabled={record.pending} aria-disabled={record.pending}>
+              Restore Defaults
+            </button>
+          </div>
+        </div>
+        {normalizedSettingsSearch && visibleTabs.length === 0 ? (
+          <p className="queue-meta">No settings section matches this search.</p>
+        ) : null}
+      </article>
 
-      <div className="topbar-controls">
-        <button type="button" className="btn btn-primary" onClick={saveDraft} disabled={record.pending || !hasChanged} aria-disabled={record.pending || !hasChanged}>
-          {record.pending ? "Saving..." : "Save Settings"}
-        </button>
-        <button type="button" className="btn" onClick={restoreDefaults} disabled={record.pending} aria-disabled={record.pending}>
-          Restore Defaults
-        </button>
-      </div>
-
-      <div className="panel-grid two-col">
+      <div className="panel-grid two-col settings-panel-grid">
         {showRuntime ? (
           <>
             <article className="panel-card">
@@ -2522,6 +2821,86 @@ export function LiveSettings() {
             />
           </label>
 
+          <div className="queue-item">
+            <p className="queue-title">Auto voice notes (VoxCPM)</p>
+            <p className="queue-meta">
+              Automatically switch some outbound text replies to cloned voice notes when intent matches your configured cues.
+            </p>
+          </div>
+
+          <label className="stack compact">
+            <span className="queue-meta">Enable automatic voice note replies</span>
+            <select
+              value={draft.voiceNotesAutoEnabled ? "true" : "false"}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  voiceNotesAutoEnabled: event.target.value === "true",
+                }))
+              }
+              disabled={record.pending}
+              aria-disabled={record.pending}
+            >
+              <option value="false">Disabled</option>
+              <option value="true">Enabled</option>
+            </select>
+            <span className="queue-meta">
+              Explicit `/vn` directives always send voice notes, even when this is disabled.
+            </span>
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Auto voice-note probability (0-1)</span>
+            <input
+              type="number"
+              min={0}
+              max={1}
+              step={0.01}
+              value={draft.voiceNotesAutoProbability}
+              onChange={(event) =>
+                setDraft((prev) => ({ ...prev, voiceNotesAutoProbability: parseNumber(event.target.value, prev.voiceNotesAutoProbability) }))
+              }
+              disabled={record.pending || !draft.voiceNotesAutoEnabled}
+              aria-disabled={record.pending || !draft.voiceNotesAutoEnabled}
+            />
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Max auto voice notes per thread/day</span>
+            <input
+              type="number"
+              min={1}
+              max={12}
+              step={1}
+              value={draft.voiceNotesAutoMaxPerThreadPerDay}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  voiceNotesAutoMaxPerThreadPerDay: parseNumber(event.target.value, prev.voiceNotesAutoMaxPerThreadPerDay),
+                }))
+              }
+              disabled={record.pending || !draft.voiceNotesAutoEnabled}
+              aria-disabled={record.pending || !draft.voiceNotesAutoEnabled}
+            />
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Voice-note intent keywords (comma or new line)</span>
+            <textarea
+              rows={3}
+              value={draft.voiceNotesAutoNeedKeywords.join("\n")}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  voiceNotesAutoNeedKeywords: parseSimpleList(event.target.value, true),
+                }))
+              }
+              disabled={record.pending || !draft.voiceNotesAutoEnabled}
+              aria-disabled={record.pending || !draft.voiceNotesAutoEnabled}
+            />
+            <span className="queue-meta">Auto mode only considers replies that contain at least one keyword.</span>
+          </label>
+
           {instagramConnected ? (
             <>
               <div className="queue-item">
@@ -3023,6 +3402,259 @@ export function LiveSettings() {
               aria-disabled={record.pending}
             />
             <span className="queue-meta">Supports {"{{name}}"} and optional {"{{icebreaker}}"}.</span>
+          </label>
+        </div>
+      </article>
+
+            <article className="panel-card">
+        <h3>Conversation Intelligence</h3>
+        <div className="stack compact">
+          <label className="stack compact">
+            <span className="queue-meta">Enable conversation intelligence</span>
+            <select
+              value={draft.conversationIntelligenceEnabled ? "true" : "false"}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  conversationIntelligenceEnabled: event.target.value === "true",
+                }))
+              }
+              disabled={record.pending}
+              aria-disabled={record.pending}
+            >
+              <option value="true">Yes</option>
+              <option value="false">No</option>
+            </select>
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Mutual check-in recency target (days)</span>
+            <input
+              type="number"
+              min={1}
+              max={60}
+              step={1}
+              value={draft.checkInRecencyTargetDays}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  checkInRecencyTargetDays: parseNumber(event.target.value, prev.checkInRecencyTargetDays),
+                }))
+              }
+              disabled={record.pending || !draft.conversationIntelligenceEnabled}
+              aria-disabled={record.pending || !draft.conversationIntelligenceEnabled}
+            />
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Max active topic lanes per thread</span>
+            <input
+              type="number"
+              min={1}
+              max={12}
+              step={1}
+              value={draft.topicLaneMaxActive}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  topicLaneMaxActive: parseNumber(event.target.value, prev.topicLaneMaxActive),
+                }))
+              }
+              disabled={record.pending || !draft.conversationIntelligenceEnabled}
+              aria-disabled={record.pending || !draft.conversationIntelligenceEnabled}
+            />
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Topic dying ACK streak threshold</span>
+            <input
+              type="number"
+              min={1}
+              max={12}
+              step={1}
+              value={draft.topicDyingAckStreakThreshold}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  topicDyingAckStreakThreshold: parseNumber(event.target.value, prev.topicDyingAckStreakThreshold),
+                }))
+              }
+              disabled={record.pending || !draft.conversationIntelligenceEnabled}
+              aria-disabled={record.pending || !draft.conversationIntelligenceEnabled}
+            />
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Enable anti-dwelling guards</span>
+            <select
+              value={draft.antiDwellingEnabled ? "true" : "false"}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  antiDwellingEnabled: event.target.value === "true",
+                }))
+              }
+              disabled={record.pending || !draft.conversationIntelligenceEnabled}
+              aria-disabled={record.pending || !draft.conversationIntelligenceEnabled}
+            >
+              <option value="true">Yes</option>
+              <option value="false">No</option>
+            </select>
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Endgame close cooldown (minutes)</span>
+            <input
+              type="number"
+              min={5}
+              max={1440}
+              step={1}
+              value={draft.antiDwellingEndgameCloseCooldownMinutes}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  antiDwellingEndgameCloseCooldownMinutes: parseNumber(
+                    event.target.value,
+                    prev.antiDwellingEndgameCloseCooldownMinutes,
+                  ),
+                }))
+              }
+              disabled={record.pending || !draft.conversationIntelligenceEnabled || !draft.antiDwellingEnabled}
+              aria-disabled={record.pending || !draft.conversationIntelligenceEnabled || !draft.antiDwellingEnabled}
+            />
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Topic turn soft limit</span>
+            <input
+              type="number"
+              min={2}
+              max={20}
+              step={1}
+              value={draft.antiDwellingTopicTurnSoftLimit}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  antiDwellingTopicTurnSoftLimit: parseNumber(event.target.value, prev.antiDwellingTopicTurnSoftLimit),
+                }))
+              }
+              disabled={record.pending || !draft.conversationIntelligenceEnabled || !draft.antiDwellingEnabled}
+              aria-disabled={record.pending || !draft.conversationIntelligenceEnabled || !draft.antiDwellingEnabled}
+            />
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Topic turn hard limit</span>
+            <input
+              type="number"
+              min={3}
+              max={30}
+              step={1}
+              value={draft.antiDwellingTopicTurnHardLimit}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  antiDwellingTopicTurnHardLimit: parseNumber(event.target.value, prev.antiDwellingTopicTurnHardLimit),
+                }))
+              }
+              disabled={record.pending || !draft.conversationIntelligenceEnabled || !draft.antiDwellingEnabled}
+              aria-disabled={record.pending || !draft.conversationIntelligenceEnabled || !draft.antiDwellingEnabled}
+            />
+            <span className="queue-meta">Hard limit should be greater than soft limit. Backend clamps invalid ranges.</span>
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Enable pivot replies</span>
+            <select
+              value={draft.pivotReplyEnabled ? "true" : "false"}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  pivotReplyEnabled: event.target.value === "true",
+                }))
+              }
+              disabled={record.pending || !draft.conversationIntelligenceEnabled}
+              aria-disabled={record.pending || !draft.conversationIntelligenceEnabled}
+            >
+              <option value="true">Yes</option>
+              <option value="false">No</option>
+            </select>
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Enable lead-pivot mode</span>
+            <select
+              value={draft.topicLeadPivotEnabled ? "true" : "false"}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  topicLeadPivotEnabled: event.target.value === "true",
+                }))
+              }
+              disabled={record.pending || !draft.conversationIntelligenceEnabled || !draft.pivotReplyEnabled}
+              aria-disabled={record.pending || !draft.conversationIntelligenceEnabled || !draft.pivotReplyEnabled}
+            >
+              <option value="true">Yes</option>
+              <option value="false">No</option>
+            </select>
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Lead-pivot minimum vibe score</span>
+            <input
+              type="number"
+              min={0}
+              max={1}
+              step={0.01}
+              value={draft.topicLeadPivotMinVibeScore}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  topicLeadPivotMinVibeScore: parseNumber(event.target.value, prev.topicLeadPivotMinVibeScore),
+                }))
+              }
+              disabled={
+                record.pending ||
+                !draft.conversationIntelligenceEnabled ||
+                !draft.pivotReplyEnabled ||
+                !draft.topicLeadPivotEnabled
+              }
+              aria-disabled={
+                record.pending ||
+                !draft.conversationIntelligenceEnabled ||
+                !draft.pivotReplyEnabled ||
+                !draft.topicLeadPivotEnabled
+              }
+            />
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Lead-pivot cooldown (minutes)</span>
+            <input
+              type="number"
+              min={5}
+              max={1440}
+              step={1}
+              value={draft.topicLeadPivotCooldownMinutes}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  topicLeadPivotCooldownMinutes: parseNumber(event.target.value, prev.topicLeadPivotCooldownMinutes),
+                }))
+              }
+              disabled={
+                record.pending ||
+                !draft.conversationIntelligenceEnabled ||
+                !draft.pivotReplyEnabled ||
+                !draft.topicLeadPivotEnabled
+              }
+              aria-disabled={
+                record.pending ||
+                !draft.conversationIntelligenceEnabled ||
+                !draft.pivotReplyEnabled ||
+                !draft.topicLeadPivotEnabled
+              }
+            />
           </label>
         </div>
       </article>

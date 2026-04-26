@@ -1,3 +1,4 @@
+import { ConvexAppProvider } from "@/components/convex-app-provider";
 import { SetupOnboarding } from "@/components/setup-onboarding";
 import { resolveInstanceSetupState } from "@/lib/instance-config";
 import { getConvexUrl } from "@/lib/runtime-env";
@@ -9,9 +10,11 @@ export default async function SetupPage() {
   const initialInstanceState = await resolveInstanceSetupState();
 
   return (
-    <SetupOnboarding
-      realtimeEnabled={Boolean(convexUrl)}
-      initialInstanceState={initialInstanceState}
-    />
+    <ConvexAppProvider convexUrl={convexUrl}>
+      <SetupOnboarding
+        realtimeEnabled={Boolean(convexUrl)}
+        initialInstanceState={initialInstanceState}
+      />
+    </ConvexAppProvider>
   );
 }

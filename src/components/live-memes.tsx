@@ -229,7 +229,7 @@ export function LiveMemes() {
             </div>
           </div>
         ) : (
-          <p className="empty-line">Generate a meme to preview the latest output here.</p>
+          <p className="empty-line">Generate a meme to preview the latest output before using it.</p>
         )}
       </article>
 
@@ -240,7 +240,7 @@ export function LiveMemes() {
         </p>
 
         {loading ? <LoadingBlock label="Loading generated memes..." rows={4} /> : null}
-        {!loading && generatedMemes.length === 0 ? <p className="empty-line">No generated memes found yet.</p> : null}
+        {!loading && generatedMemes.length === 0 ? <p className="empty-line">No generated meme assets have been saved yet.</p> : null}
 
         <div className="stack">
           {generatedMemes.map((asset) => {

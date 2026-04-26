@@ -8,7 +8,7 @@ import type { UnifiedMediaItem } from "@/lib/ui/media";
 import { api } from "../../convex/_generated/api";
 import { useQuery } from "convex/react";
 import Link from "next/link";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
 type MediaFilter = "all" | "stickers" | "memes" | "images" | "video" | "audio" | "documents";
 
@@ -32,6 +32,7 @@ const FILTERS: Array<{ id: MediaFilter; label: string }> = [
 export function LiveMedia() {
   const [filter, setFilter] = useState<MediaFilter>("all");
   const [limit, setLimit] = useState(240);
+  const [search, setSearch] = useState("");
   const [mediaPreview, setMediaPreview] = useState<MediaPreview | null>(null);
 
   const mediaItems = useQuery(api.media.listUnifiedMedia, {
@@ -40,6 +41,34 @@ export function LiveMedia() {
   }) as UnifiedMediaItem[] | undefined;
 
   const loading = mediaItems === undefined;
+  const normalizedSearch = search.trim().toLowerCase();
+  const visibleItems = useMemo(() => {
+    const rows = mediaItems || [];
+    if (!normalizedSearch) {
+      return rows;
+    }
+    return rows.filter((item) => {
+      const haystack = [
+        item.label,
+        item.kind,
+        item.mimeType,
+        item.source,
+        item.thread?.title,
+        item.thread?.jid,
+        item.message?.text,
+        item.message?.mediaCaption,
+        item.contextSummary,
+        item.tags?.join(" "),
+        item.contextTags?.join(" "),
+        item.contextTriggers?.join(" "),
+        item.contextAvoid?.join(" "),
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(normalizedSearch);
+    });
+  }, [mediaItems, normalizedSearch]);
 
   return (
     <section className="panel-grid">
@@ -63,16 +92,27 @@ export function LiveMedia() {
         </div>
 
         <div className="thread-list-footer">
+          <input
+            type="search"
+            className="input"
+            placeholder="Search media, tags, thread, or context..."
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            aria-label="Search media library"
+          />
           <button type="button" className="btn btn-ghost" onClick={() => setLimit((prev) => Math.min(prev + 160, 400))}>
-            Load More
+            Load more
           </button>
         </div>
+        <p className="queue-meta">
+          Showing {visibleItems.length} of {(mediaItems || []).length} item{(mediaItems || []).length === 1 ? "" : "s"}
+        </p>
 
         {loading ? <LoadingBlock label="Loading media…" rows={4} /> : null}
-        {!loading && (mediaItems || []).length === 0 ? <p className="empty-line">No media found for this filter yet.</p> : null}
+        {!loading && visibleItems.length === 0 ? <p className="empty-line">No captured media matches this filter or search.</p> : null}
 
         <div className="stack">
-          {(mediaItems || []).map((item) => {
+          {visibleItems.map((item) => {
             const caption = item.message?.mediaCaption?.trim();
             const messageText = item.message?.text?.trim();
             const showMessageText = Boolean(messageText && messageText !== caption);

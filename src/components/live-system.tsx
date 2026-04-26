@@ -17,8 +17,8 @@ type TestAttempt = {
     | "codex_cli"
     | "heuristic_guardrail"
     | "heuristic_fallback"
-    | "humor_judge_azure"
-    | "humor_judge_codex";
+    | `${string}_judge_azure`
+    | `${string}_judge_codex`;
   model: string;
   status: "success" | "error";
   latencyMs: number;
@@ -40,6 +40,12 @@ type TestResult = {
   guardrailBlocked: boolean;
   guardrailReason?: string;
   attempts: TestAttempt[];
+  contextToolCalls?: Array<{
+    name: string;
+    latencyMs: number;
+    input?: Record<string, unknown>;
+    output?: Record<string, unknown>;
+  }>;
   qualityScore?: number;
   qualityChecks?: Array<{
     id: string;
@@ -50,6 +56,20 @@ type TestResult = {
   }>;
   qualityRewriteApplied?: boolean;
   activePersonaPackId?: string | null;
+  activeDynamicStylePackIds?: string[];
+  conversationStyleMatrix?: {
+    relationship: string;
+    register: string;
+    politeness: string;
+    energy: string;
+    localeDialect: string;
+    interactionMove: string;
+    riskSensitivity: string;
+    confidence: number;
+    reasonCodes: string[];
+    dynamicStylePackIds: string[];
+    emojiTextPolicy: string;
+  } | null;
   createdAt: number;
   usedThreadContext: boolean;
 };
@@ -197,6 +217,16 @@ function AiTestBench() {
             </p>
             <p className="queue-meta">{result.usedThreadContext ? "Used conversation context." : "No conversation context used."}</p>
             {result.activePersonaPackId ? <p className="queue-meta">Persona pack: {result.activePersonaPackId}</p> : null}
+            {result.conversationStyleMatrix ? (
+              <p className="queue-meta">
+                Style matrix: {result.conversationStyleMatrix.relationship} · {result.conversationStyleMatrix.register} ·{" "}
+                {result.conversationStyleMatrix.interactionMove} · {result.conversationStyleMatrix.riskSensitivity} · emoji{" "}
+                {result.conversationStyleMatrix.emojiTextPolicy}
+              </p>
+            ) : null}
+            {result.activeDynamicStylePackIds?.length ? (
+              <p className="queue-meta">Dynamic packs: {result.activeDynamicStylePackIds.join(", ")}</p>
+            ) : null}
             {typeof result.qualityScore === "number" ? (
               <p className="queue-meta">
                 Quality score: {(result.qualityScore * 100).toFixed(0)}%{result.qualityRewriteApplied ? " · rewritten once" : ""}
@@ -235,6 +265,33 @@ function AiTestBench() {
               {attempt.error ? <p className="queue-body">{trim(attempt.error, 220)}</p> : null}
             </div>
           ))}
+
+          {Array.isArray(result.contextToolCalls) && result.contextToolCalls.length > 0 ? (
+            <div className="queue-item">
+              <p className="queue-title">Tool Calls</p>
+              <div className="stack compact">
+                {result.contextToolCalls.map((call, index) => {
+                  const toolRationale =
+                    call.input && typeof call.input.toolRationale === "string" ? call.input.toolRationale : "";
+                  const reasoningSummary =
+                    call.input && typeof call.input.reasoningSummary === "string" ? call.input.reasoningSummary : "";
+                  const safeInput = JSON.stringify(call.input || {});
+                  const safeOutput = JSON.stringify(call.output || {});
+                  return (
+                    <div key={`${call.name}:${index}`} className="stack compact">
+                      <p className="queue-meta">
+                        {index + 1}. {call.name} · {call.latencyMs}ms
+                      </p>
+                      {toolRationale ? <p className="queue-meta">Rationale: {trim(toolRationale, 220)}</p> : null}
+                      {reasoningSummary ? <p className="queue-meta">Reasoning summary: {trim(reasoningSummary, 220)}</p> : null}
+                      <p className="queue-meta">Input: {trim(safeInput, 260)}</p>
+                      <p className="queue-meta">Output: {trim(safeOutput, 260)}</p>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ) : null}
         </div>
       ) : (
         <p className="empty-line">Run a test to inspect provider attempts and generated text.</p>

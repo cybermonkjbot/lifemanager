@@ -1,13 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
-import { convexRefs } from "@/lib/convex-refs";
-import { createConvexClient, getConvexUrl } from "@/lib/convex-server";
 import {
   createLocalPinRecord,
   readLocalInstanceConfig,
   resolveInstanceSetupState,
   sanitizeInstanceSetupPreferences,
+  writeLocalSoulMarkdown,
   writeLocalInstanceConfig,
 } from "@/lib/instance-config";
+import { syncInstancePreferencesToConvex } from "@/lib/instance-setup-sync";
 import {
   buildInstancePinSessionToken,
   getInstancePinCookieName,
@@ -34,6 +34,7 @@ type SetupInstancePayload = {
   setupSecret?: unknown;
   preferences?: Partial<InstanceSetupPreferences> | null;
   setupCompleted?: unknown;
+  beginFullSetup?: unknown;
   issueSession?: unknown;
 };
 
@@ -42,37 +43,6 @@ function getErrorMessage(error: unknown) {
     return error.message;
   }
   return "Failed to save setup state.";
-}
-
-function resolveMimicryLevel(preset: InstanceSetupPreferences["mimicryPreset"]) {
-  if (preset === "light") {
-    return 0.56;
-  }
-  if (preset === "close") {
-    return 0.84;
-  }
-  return 0.72;
-}
-
-async function syncPreferencesToConvex(preferences: InstanceSetupPreferences) {
-  const url = getConvexUrl();
-  if (!url) {
-    return false;
-  }
-
-  const client = createConvexClient();
-  await client.mutation(convexRefs.settingsSaveOnboardingPreset, {
-    autonomyMode: preferences.autonomyMode,
-    replyPace: preferences.replyPace,
-    quietHoursEnabled: preferences.quietHoursEnabled,
-    quietHoursStartHour: preferences.quietHoursStartHour,
-    quietHoursEndHour: preferences.quietHoursEndHour,
-    memesEnabled: preferences.memesEnabled,
-  });
-  await client.mutation(convexRefs.styleSetMimicry, {
-    mimicryLevel: resolveMimicryLevel(preferences.mimicryPreset),
-  });
-  return true;
 }
 
 export async function GET() {
@@ -108,6 +78,7 @@ export async function POST(request: NextRequest) {
       ...(payload.preferences || {}),
     });
     const wantsCompletion = payload.setupCompleted === true;
+    const beginsFullSetup = payload.beginFullSetup === true;
     const shouldIssueSession = payload.issueSession === true;
 
     if (pinSource === "env" && requestedPin && !(await matchesInstancePin(requestedPin))) {
@@ -132,18 +103,20 @@ export async function POST(request: NextRequest) {
 
     const nextConfig = {
       version: 1 as const,
-      setupCompleted: wantsCompletion ? true : current?.setupCompleted === true,
+      setupCompleted: beginsFullSetup ? false : wantsCompletion ? true : current?.setupCompleted === true,
       createdAt: current?.createdAt ?? now,
       updatedAt: now,
       pin: pinRecord,
       preferences: nextPreferences,
+      setupAiSettingsToolConsumedAt: beginsFullSetup ? null : current?.setupAiSettingsToolConsumedAt ?? null,
     };
 
     await writeLocalInstanceConfig(nextConfig);
+    await writeLocalSoulMarkdown(nextPreferences.soulProfile, nextPreferences.soulPrivacy);
 
     let preferencesSynced = false;
     try {
-      preferencesSynced = await syncPreferencesToConvex(nextPreferences);
+      preferencesSynced = await syncInstancePreferencesToConvex(nextPreferences);
     } catch {
       preferencesSynced = false;
     }

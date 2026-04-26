@@ -150,8 +150,8 @@ export function LiveSelfImprovement() {
   }, [payload?.runs, selectedRunId]);
 
   return (
-    <section className="panel-grid two-col">
-      <article className="panel-card">
+    <section className="panel-grid two-col self-improvement-view">
+      <article className="panel-card self-improvement-panel">
         <h3>Self-Improvement Runs</h3>
         <p className="queue-meta">
           Track both manual (`once`) and automatic (`daemon`) cycles with success/error visibility.
@@ -171,7 +171,7 @@ export function LiveSelfImprovement() {
         {loading ? (
           <LoadingBlock label="Loading self-improvement runs…" rows={4} />
         ) : payload && payload.runs.length > 0 ? (
-          <div className="stack">
+          <div className="stack self-improvement-scroll">
             {payload.runs.map((run) => {
               const active = selectedSummary?.runId === run.runId;
               return (
@@ -216,12 +216,12 @@ export function LiveSelfImprovement() {
         )}
       </article>
 
-      <article className="panel-card">
+      <article className="panel-card self-improvement-panel">
         <h3>Run Details</h3>
         {!payload?.detail || !selectedSummary ? (
           <p className="empty-line">Select a run to inspect full details.</p>
         ) : (
-          <div className="stack">
+          <div className="stack self-improvement-scroll">
             <p className="queue-meta">
               Status: {statusLabel(selectedSummary.status)} · Mode: {modeLabel(selectedSummary.runMode)} · Duration:{" "}
               {durationLabel(selectedSummary.durationMs)}
@@ -244,19 +244,19 @@ export function LiveSelfImprovement() {
             ) : null}
             <details className="queue-item" open>
               <summary className="queue-title">Codex Response</summary>
-              <pre className="queue-body" style={{ whiteSpace: "pre-wrap", marginTop: 12 }}>
+              <pre className="queue-body self-improvement-preview">
                 {payload.detail.codexResponse || payload.detail.report || "No response content."}
               </pre>
             </details>
             <details className="queue-item">
               <summary className="queue-title">Prompt Sent To Codex</summary>
-              <pre className="queue-body" style={{ whiteSpace: "pre-wrap", marginTop: 12 }}>
+              <pre className="queue-body self-improvement-preview">
                 {payload.detail.prompt || "No prompt saved."}
               </pre>
             </details>
             <details className="queue-item">
               <summary className="queue-title">Context Preview</summary>
-              <pre className="queue-body" style={{ whiteSpace: "pre-wrap", marginTop: 12 }}>
+              <pre className="queue-body self-improvement-preview">
                 {payload.detail.contextPreview || "No context snapshot available."}
               </pre>
             </details>

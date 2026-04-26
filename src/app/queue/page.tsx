@@ -3,7 +3,7 @@ import { LiveQueue } from "@/components/live-queue";
 
 export default async function QueuePage() {
   return (
-    <DashboardPage title="Queue" subtitle="Review pending replies, follow-up confirmations, todos, and guardrails.">
+    <DashboardPage title="Queue" subtitle="Review drafts, follow-ups, tasks, and safety flags before anything moves.">
       <LiveQueue />
     </DashboardPage>
   );

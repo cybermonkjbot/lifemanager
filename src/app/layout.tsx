@@ -14,7 +14,7 @@ const displayFont = Space_Grotesk({
 
 export const metadata: Metadata = {
   title: "Social Life Manager",
-  description: "Local-first WhatsApp brain dashboard with Convex orchestration.",
+  description: "Private console for social messaging review, follow-ups, and automation control.",
 };
 
 export default function RootLayout({

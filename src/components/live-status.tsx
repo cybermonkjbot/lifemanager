@@ -1,9 +1,11 @@
 "use client";
 
+import { ActionNotices } from "@/components/action-notices";
 import { LoadingBlock } from "@/components/loading-state";
 import { SharedMediaPreview } from "@/components/media-preview";
 import { ProviderFilter, type ProviderFilterValue } from "@/components/provider-filter";
 import { formatDateTime, trim } from "@/lib/format";
+import { useActionStateRegistry } from "@/lib/ui/action-state";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { useMutation, useQuery } from "convex/react";
@@ -25,7 +27,7 @@ type ThreadMessage = {
   direction: "inbound" | "outbound";
   isStatus?: boolean;
   text: string;
-  messageType?: "text" | "reaction" | "sticker" | "meme" | "image" | "video" | "audio" | "document";
+  messageType?: "text" | "reaction" | "sticker" | "meme" | "image" | "video" | "audio" | "voice_note" | "document";
   mediaAssetId?: string;
   mediaCaption?: string;
   mediaPreview?: {
@@ -53,7 +55,7 @@ type QueueNeedsReplyItem = {
   provider: string;
   messageProvider?: "whatsapp" | "instagram";
   isStatusPost?: boolean;
-  sendKind?: "text" | "reaction" | "sticker" | "meme";
+  sendKind?: "text" | "reaction" | "sticker" | "meme" | "voice_note";
   mediaCaption?: string;
   mediaPreview?: {
     assetId: string;
@@ -88,6 +90,9 @@ function statusMessageText(message: ThreadMessage) {
   if (message.messageType === "image") {
     return "Posted an image status";
   }
+  if (message.messageType === "voice_note" || message.messageType === "audio") {
+    return "Posted a voice note status";
+  }
   return "Posted a status";
 }
 
@@ -108,7 +113,11 @@ export function LiveStatus() {
   const [providerFilter, setProviderFilter] = useState<ProviderFilterValue>("all");
   const [statusPostingPending, setStatusPostingPending] = useState(false);
   const [statusPostingError, setStatusPostingError] = useState<string | null>(null);
+  const approveDraft = useMutation(api.draft.approve);
+  const snoozeDraft = useMutation(api.draft.snooze);
+  const rejectDraft = useMutation(api.draft.reject);
   const setStatusPostingEnabled = useMutation(api.settings.setStatusBuilderEnabled);
+  const { runAction, getRecord, notices, dismissNotice } = useActionStateRegistry();
   const statusSettings = useQuery(api.settings.get, {}) as StatusSettingsPayload | undefined;
 
   const threads = useQuery(api.threads.list, { limit: 260, provider: providerFilter }) as ThreadSummary[] | undefined;
@@ -156,10 +165,52 @@ export function LiveStatus() {
     try {
       await setStatusPostingEnabled({ enabled });
     } catch (error) {
-      setStatusPostingError(error instanceof Error ? error.message : "Failed to update auto status posting.");
+      setStatusPostingError(error instanceof Error ? error.message : "Could not update auto status posting.");
     } finally {
       setStatusPostingPending(false);
     }
+  };
+
+  const onApproveStatusDraft = (draftId: string) => {
+    const key = `status:approve:${draftId}`;
+    void runAction(
+      key,
+      async () => {
+        await approveDraft({ draftId: draftId as Id<"replyDrafts">, sendImmediately: true });
+      },
+      {
+        pendingLabel: "Approving status draft...",
+        successMessage: "Status draft approved and queued for posting.",
+      },
+    );
+  };
+
+  const onSnoozeStatusDraft = (draftId: string) => {
+    const key = `status:snooze:${draftId}`;
+    void runAction(
+      key,
+      async () => {
+        await snoozeDraft({ draftId: draftId as Id<"replyDrafts">, minutes: 60 });
+      },
+      {
+        pendingLabel: "Snoozing status draft...",
+        successMessage: "Status draft snoozed for 60 minutes.",
+      },
+    );
+  };
+
+  const onRejectStatusDraft = (draftId: string) => {
+    const key = `status:reject:${draftId}`;
+    void runAction(
+      key,
+      async () => {
+        await rejectDraft({ draftId: draftId as Id<"replyDrafts"> });
+      },
+      {
+        pendingLabel: "Discarding status draft...",
+        successMessage: "Status draft discarded.",
+      },
+    );
   };
 
   const pendingStatusDrafts = useMemo(
@@ -199,6 +250,7 @@ export function LiveStatus() {
 
   return (
     <section className="status-surface">
+      <ActionNotices notices={notices} onDismiss={dismissNotice} />
       <div className="status-overview" aria-live="polite">
         <p className="status-overview-item">
           <span className="status-overview-label">Pending review</span>
@@ -223,7 +275,7 @@ export function LiveStatus() {
         </div>
         <div className="stack compact">
           <label className="stack compact">
-            <span className="queue-meta">Enable auto status posting</span>
+            <span className="queue-meta">Allow approved status drafts to post automatically</span>
             <select
               value={statusPostingEnabled ? "true" : "false"}
               onChange={(event) => void onStatusPostingToggle(event.target.value === "true")}
@@ -236,8 +288,8 @@ export function LiveStatus() {
           </label>
           <p className="queue-meta">
             {statusAudienceMode === "manual_allowlist"
-              ? "Auto status posts are currently in manual allowlist mode (empty allowlist skips posting)."
-              : "Auto status posts currently follow your WhatsApp status privacy setting."}
+              ? "Only allowlisted recipients can receive auto status posts. An empty allowlist skips posting."
+              : "Posting uses your current WhatsApp status privacy setting."}
           </p>
           {statusPostingError ? (
             <p className="queue-meta" role="alert">
@@ -261,7 +313,7 @@ export function LiveStatus() {
           <div className="stack compact">
             <div className="queue-actions">
               <Link href="/queue" className="btn btn-primary">
-                Open Action Queue
+                Open Queue
               </Link>
               {statusThreadId ? (
                 <Link href={`/conversations?threadId=${statusThreadId}`} className="btn btn-ghost">
@@ -273,7 +325,7 @@ export function LiveStatus() {
             {queueLoading ? (
               <LoadingBlock label="Loading status queue…" rows={2} compact />
             ) : pendingStatusDrafts.length === 0 ? (
-              <p className="empty-line">No pending status drafts.</p>
+              <p className="empty-line">No status drafts waiting for approval.</p>
             ) : (
               <div className="stack compact">
                 {pendingStatusDrafts.map((item) => (
@@ -287,6 +339,50 @@ export function LiveStatus() {
                       <p className="queue-meta">
                         Model: {item.provider} · Type: {item.sendKind || "text"}
                       </p>
+                      <div className="queue-actions">
+                        <button
+                          type="button"
+                          className="btn btn-primary"
+                          onClick={() => onApproveStatusDraft(item._id)}
+                          disabled={getRecord(`status:approve:${item._id}`).pending}
+                          aria-disabled={getRecord(`status:approve:${item._id}`).pending}
+                        >
+                          {getRecord(`status:approve:${item._id}`).pending ? "Approving..." : "Approve"}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-ghost"
+                          onClick={() => onSnoozeStatusDraft(item._id)}
+                          disabled={getRecord(`status:snooze:${item._id}`).pending}
+                          aria-disabled={getRecord(`status:snooze:${item._id}`).pending}
+                        >
+                          {getRecord(`status:snooze:${item._id}`).pending ? "Snoozing..." : "Snooze 60m"}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-ghost"
+                          onClick={() => onRejectStatusDraft(item._id)}
+                          disabled={getRecord(`status:reject:${item._id}`).pending}
+                          aria-disabled={getRecord(`status:reject:${item._id}`).pending}
+                        >
+                          {getRecord(`status:reject:${item._id}`).pending ? "Discarding..." : "Discard"}
+                        </button>
+                      </div>
+                      {getRecord(`status:approve:${item._id}`).error ? (
+                        <p className="queue-meta action-inline-error" role="alert">
+                          {getRecord(`status:approve:${item._id}`).error}
+                        </p>
+                      ) : null}
+                      {getRecord(`status:snooze:${item._id}`).error ? (
+                        <p className="queue-meta action-inline-error" role="alert">
+                          {getRecord(`status:snooze:${item._id}`).error}
+                        </p>
+                      ) : null}
+                      {getRecord(`status:reject:${item._id}`).error ? (
+                        <p className="queue-meta action-inline-error" role="alert">
+                          {getRecord(`status:reject:${item._id}`).error}
+                        </p>
+                      ) : null}
                     </div>
                   </div>
                 ))}
@@ -304,13 +400,13 @@ export function LiveStatus() {
             <LoadingBlock label="Loading statuses..." rows={3} />
           ) : !statusThread ? (
             <div className="status-empty-shell">
-              <p className="empty-line">No status thread yet.</p>
-              <p className="queue-meta">Post your first update and timeline history will appear here.</p>
+              <p className="empty-line">No status thread has been captured yet.</p>
+              <p className="queue-meta">Once a status post is detected, its history will appear here.</p>
             </div>
           ) : timeline.length === 0 ? (
             <div className="status-empty-shell">
-              <p className="empty-line">No outbound status posts yet.</p>
-              <p className="queue-meta">Approve one draft to start building timeline history.</p>
+              <p className="empty-line">No posted status updates yet.</p>
+              <p className="queue-meta">Approve a status draft to start building timeline history.</p>
               <div className="queue-actions">
                 <Link href="/queue" className="btn btn-ghost">
                   Review pending drafts

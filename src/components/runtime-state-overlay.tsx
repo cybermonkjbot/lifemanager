@@ -50,7 +50,7 @@ function evaluateProviderState(provider: "whatsapp" | "instagram", setup: SetupS
     return provider === "whatsapp"
       ? {
           state: "offline" as const,
-          detail: `${label} worker is not configured.`,
+          detail: `${label} is not connected yet.`,
         }
       : null;
   }
@@ -69,7 +69,7 @@ function evaluateProviderState(provider: "whatsapp" | "instagram", setup: SetupS
     }
     return {
       state: "error" as const,
-      detail: combinedMessage || `${label} setup is reporting an error.`,
+      detail: combinedMessage || `${label} has a setup error.`,
     };
   }
 
@@ -87,7 +87,7 @@ function evaluateProviderState(provider: "whatsapp" | "instagram", setup: SetupS
 
   return {
     state: "offline" as const,
-    detail: combinedMessage || `${label} worker listener is offline.`,
+    detail: combinedMessage || `${label} is currently offline.`,
   };
 }
 
@@ -121,10 +121,10 @@ export function RuntimeStateOverlay() {
     return null;
   }
 
-  const title = state === "error" ? "Runtime Error" : state === "offline" ? "Worker Offline" : "Autonomy Paused";
+  const title = state === "error" ? "Connection Error" : state === "offline" ? "Connection Offline" : "Automation Paused";
   const detail =
     state === "paused"
-      ? "Automation is paused. Resume autonomy to restore active sending."
+      ? "Automation is paused. Resume it when you are ready to send automatically."
       : compactMessage(issues.map((issue) => issue.detail).join(" | "), 260);
 
   return (

@@ -7,7 +7,7 @@ import { useActionStateRegistry } from "@/lib/ui/action-state";
 import { api } from "../../convex/_generated/api";
 import { useQuery } from "convex/react";
 import Image from "next/image";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type SetupStatus =
   | "idle"
@@ -21,6 +21,7 @@ type SetupStatus =
   | "error";
 type SetupMode = "qr" | "pairing_code" | "password" | "challenge_code";
 type WhatsAppSetupMode = "qr" | "pairing_code";
+type VoiceSetupStatus = "not_installed" | "installing" | "ready" | "error";
 
 type SetupState = {
   status: SetupStatus;
@@ -44,30 +45,38 @@ type SetupWizardProps = {
   setupSecret?: string;
 };
 
-type SetupWizardScreen = "options" | "whatsapp" | "pairing" | "instagram";
+type SetupWizardScreen = "options" | "whatsapp" | "pairing" | "instagram" | "voice";
+
+type VoiceSetupState = {
+  status: VoiceSetupStatus;
+  message: string;
+  modelId: string;
+  hasSample: boolean;
+  samplePromptText?: string;
+  installLog?: string;
+  updatedAt: number;
+};
 
 const setupWizardScreens: Record<
   SetupWizardScreen,
   {
     title: string;
-    description: string;
   }
 > = {
   options: {
     title: "Setup",
-    description: "Choose which connection to configure first. One focused screen is shown at a time.",
   },
   whatsapp: {
-    title: "WhatsApp Setup",
-    description: "Start pairing first, then complete scan/code on the pairing screen.",
+    title: "WhatsApp",
   },
   pairing: {
-    title: "WhatsApp Pairing",
-    description: "Use this screen only to scan QR or copy pairing code.",
+    title: "Pair WhatsApp",
   },
   instagram: {
-    title: "Instagram Setup",
-    description: "Sign in, then submit a challenge code only if Instagram asks for one.",
+    title: "Instagram",
+  },
+  voice: {
+    title: "Voice Notes",
   },
 };
 
@@ -102,6 +111,23 @@ function statusLabel(status: SetupStatus) {
   return "Error";
 }
 
+function voiceStatusToneClass(status?: VoiceSetupStatus) {
+  if (status === "ready") {
+    return "status-active";
+  }
+  if (status === "installing") {
+    return "status-syncing";
+  }
+  return "status-paused";
+}
+
+function voiceStatusLabel(status?: VoiceSetupStatus) {
+  if (status === "ready") return "Ready";
+  if (status === "installing") return "Installing";
+  if (status === "error") return "Error";
+  return "Not Installed";
+}
+
 function simplifySetupMessage(message?: string) {
   if (!message) {
     return "Loading status...";
@@ -126,10 +152,10 @@ function getRetryGuidance(state: SetupState | null) {
   }
 
   if (state.mode === "pairing_code") {
-    return "Pairing code session expired. Auto-retrying now. Keep this page open and enter the newest code as soon as it appears.";
+    return "Pairing code expired. Retrying now. Keep this page open and enter the new code when it appears.";
   }
 
-  return "QR session expired. Auto-retrying now. Keep this page open and scan the next QR as soon as it appears.";
+  return "QR session expired. Retrying now. Keep this page open and scan the next QR code when it appears.";
 }
 
 function getRevokedGuidance(state: SetupState | null) {
@@ -160,7 +186,7 @@ function getRevokedGuidance(state: SetupState | null) {
     return null;
   }
 
-  return "WhatsApp revoked this linked device session. Credentials were invalidated. Run setup again to pair a new session.";
+  return "WhatsApp signed this device out. Run setup again to pair a new session.";
 }
 
 function getFailureChecklist(state: SetupState | null) {
@@ -171,16 +197,16 @@ function getFailureChecklist(state: SetupState | null) {
   const text = `${state.message} ${state.listenerMessage || ""}`.toLowerCase();
   const checks: string[] = [];
   if (text.includes("timed out") || text.includes("expired")) {
-    checks.push("Session expired. Start a fresh QR/pairing session and complete pairing immediately.");
+    checks.push("Session expired. Start a new QR or pairing-code session and complete it right away.");
   }
   if (text.includes("network") || text.includes("socket") || text.includes("connection")) {
-    checks.push("Connection instability detected. Keep this page open and retry once network is stable.");
+    checks.push("Connection issue detected. Keep this page open and retry when your network is stable.");
   }
   if (text.includes("credentials") || text.includes("logged out") || text.includes("signed this device out")) {
-    checks.push("Credentials are invalid. Use Reset Credentials, then pair again.");
+    checks.push("Credentials are no longer valid. Use Reset Credentials, then pair again.");
   }
   if (text.includes("worker") && text.includes("offline")) {
-    checks.push("Worker listener is offline. Restart worker after successful pairing.");
+    checks.push("Worker is offline. Restart it after pairing succeeds.");
   }
   if (checks.length === 0 && state.status === "error") {
     checks.push("Unknown setup error. Refresh status, retry pairing, then restart worker.");
@@ -209,6 +235,27 @@ async function readSetupResponse(response: Response) {
   return body;
 }
 
+async function readVoiceSetupResponse(response: Response) {
+  let body: VoiceSetupState | null = null;
+
+  try {
+    body = (await response.json()) as VoiceSetupState;
+  } catch {
+    // fallback handled below
+  }
+
+  if (!response.ok) {
+    const reason = body?.message || `Voice setup request failed (${response.status})`;
+    throw new Error(reason);
+  }
+
+  if (!body) {
+    throw new Error("Voice setup request returned an empty response.");
+  }
+
+  return body;
+}
+
 function SetupWizardContent({
   liveState,
   instagramLiveState,
@@ -225,6 +272,7 @@ function SetupWizardContent({
   setupSecret?: string;
 }) {
   const [localState, setLocalState] = useState<SetupState | null>(null);
+  const [voiceState, setVoiceState] = useState<VoiceSetupState | null>(null);
   const [phoneNumber, setPhoneNumber] = useState("");
   const [activeScreen, setActiveScreen] = useState<SetupWizardScreen>(initialScreen);
 
@@ -261,6 +309,7 @@ function SetupWizardContent({
   const instagramStatus = instagramLiveState?.status ?? "idle";
   const instagramStatusText = instagramLiveState?.listenerActive ? "Connected" : statusLabel(instagramStatus);
   const whatsappStatusText = state?.listenerActive ? "Connected" : statusLabel(status);
+  const voiceStatusText = voiceStatusLabel(voiceState?.status);
   const activeScreenMeta = setupWizardScreens[activeScreen];
   const setupHeaders = useMemo(
     () =>
@@ -271,7 +320,25 @@ function SetupWizardContent({
         : undefined,
     [setupSecret],
   );
-  const showBackToOptions = activeScreen !== "options";
+  const showBackToOptions = !embedded && activeScreen !== "options";
+
+  const refreshVoiceState = useCallback(async () => {
+    try {
+      const response = await fetch("/api/setup/voice/status", {
+        cache: "no-store",
+        headers: setupHeaders,
+      });
+      const next = await readVoiceSetupResponse(response);
+      setVoiceState((current) => {
+        if (!current) {
+          return next;
+        }
+        return current.updatedAt > next.updatedAt ? current : next;
+      });
+    } catch {
+      // best effort summary status only
+    }
+  }, [setupHeaders]);
 
   const controls = useMemo(() => {
     const isIdleOrError = status === "idle" || status === "error";
@@ -316,11 +383,11 @@ function SetupWizardContent({
 
   const pendingLabel = useMemo(() => {
     if (pendingStartQr) return "Starting QR session...";
-    if (pendingStartCode) return "Starting pairing-code session...";
+    if (pendingStartCode) return "Starting pairing code session...";
     if (pendingRefresh) return "Refreshing status...";
-    if (pendingStop) return "Stopping setup session...";
+    if (pendingStop) return "Stopping session...";
     if (pendingRestart) return "Restarting worker...";
-    if (pendingReset) return "Resetting credentials...";
+    if (pendingReset) return "Resetting connection...";
     return "";
   }, [pendingRefresh, pendingReset, pendingRestart, pendingStartCode, pendingStartQr, pendingStop]);
 
@@ -462,38 +529,46 @@ function SetupWizardContent({
     };
   }, [realtimeEnabled, setupHeaders, state?.listenerActive, state?.pairingCode, state?.qrDataUrl, status]);
 
+  useEffect(() => {
+    void refreshVoiceState();
+  }, [refreshVoiceState]);
+
   return (
     <section className={`setup-wizard ${embedded ? "" : "setup-wizard-fullscreen"}`.trim()} aria-busy={anyPending}>
       <div className="setup-wizard-stage">
-        <header className="setup-flow-header">
-          <div className="setup-flow-topline">
-            <p className="queue-meta">Setup</p>
-            {showBackToOptions ? (
-              <button className="btn btn-ghost" type="button" onClick={() => setActiveScreen("options")}>
-                Back to Options
-              </button>
-            ) : null}
-          </div>
-          <h3 className="setup-flow-title">{activeScreenMeta.title}</h3>
-          <p className="queue-body setup-flow-description">{activeScreenMeta.description}</p>
-        </header>
+        {!embedded ? (
+          <header className="setup-flow-header">
+            <div className="setup-flow-topline">
+              <p className="queue-meta">Setup</p>
+              {showBackToOptions ? (
+                <button className="btn btn-ghost" type="button" onClick={() => setActiveScreen("options")}>
+                  Back
+                </button>
+              ) : null}
+            </div>
+            <h3 className="setup-flow-title">{activeScreenMeta.title}</h3>
+          </header>
+        ) : null}
 
         <div className="setup-flow-panels">
           <section id="setup-panel-options" className="setup-flow-panel" hidden={activeScreen !== "options"}>
             <div className="setup-option-grid">
               <button className="setup-option-card" type="button" onClick={() => setActiveScreen("whatsapp")}>
                 <p className="setup-option-kicker">WhatsApp</p>
-                <h4>Connection Setup</h4>
-                <p className="queue-meta">Recommended first step. Start session and complete pairing in one guided flow.</p>
+                <h4>Connect</h4>
                 <span className={`status-pill ${statusToneClass(status, state?.listenerActive)}`}>{whatsappStatusText}</span>
               </button>
               <button className="setup-option-card" type="button" onClick={() => setActiveScreen("instagram")}>
                 <p className="setup-option-kicker">Instagram</p>
-                <h4>Connection Setup</h4>
-                <p className="queue-meta">Sign in, submit challenge code, and verify listener health.</p>
+                <h4>Connect</h4>
                 <span className={`status-pill ${statusToneClass(instagramStatus, instagramLiveState?.listenerActive)}`}>
                   {instagramStatusText}
                 </span>
+              </button>
+              <button className="setup-option-card" type="button" onClick={() => setActiveScreen("voice")}>
+                <p className="setup-option-kicker">Voice Notes</p>
+                <h4>Set up</h4>
+                <span className={`status-pill ${voiceStatusToneClass(voiceState?.status)}`}>{voiceStatusText}</span>
               </button>
             </div>
           </section>
@@ -501,16 +576,13 @@ function SetupWizardContent({
           <section id="setup-panel-whatsapp" className="setup-flow-panel" hidden={activeScreen !== "whatsapp"}>
             <div className="setup-wizard-card">
               <ActionNotices notices={notices} onDismiss={dismissNotice} />
-              <h3>WhatsApp Connection Setup</h3>
-              <p className="queue-body">
-                Pair WhatsApp and persist worker credentials. If QR drops repeatedly, switch to pairing code mode.
-              </p>
+              <h3>WhatsApp</h3>
 
               <div className="setup-status-row">
                 <span className={`status-pill ${statusToneClass(status, state?.listenerActive)}`}>{whatsappStatusText}</span>
-                <span className="queue-meta">{uiStatusMessage}</span>
+                {status === "error" ? <span className="queue-meta">{uiStatusMessage}</span> : null}
               </div>
-              {liveStateLoading ? <LoadingIndicator label="Connecting to live setup state…" /> : null}
+              {liveStateLoading ? <LoadingIndicator label="Loading live setup status…" /> : null}
 
               {retryGuidance ? (
                 <p className="setup-retry-notice" role="status" aria-live="polite">
@@ -526,7 +598,7 @@ function SetupWizardContent({
 
               {failureChecklist.length > 0 ? (
                 <div className="queue-item">
-                  <p className="queue-title">Failure Diagnosis</p>
+                  <p className="queue-title">Troubleshooting</p>
                   {failureChecklist.map((item) => (
                     <p key={item} className="queue-meta">
                       - {item}
@@ -541,11 +613,6 @@ function SetupWizardContent({
                 </p>
               ) : null}
 
-              <div className="setup-guidance">
-                <p className="queue-title">Recommended Path</p>
-                <p className="queue-meta">1. Start QR session. 2. Open pairing screen and scan. 3. Wait for connected.</p>
-              </div>
-
               <div className="wizard-actions">
                 <button
                   className="btn btn-primary"
@@ -554,24 +621,44 @@ function SetupWizardContent({
                   disabled={!controls.canStartQr}
                   aria-disabled={!controls.canStartQr}
                 >
-                  {pendingStartQr ? "Starting..." : "Start QR Session"}
+                  {pendingStartQr ? "Starting..." : "Start QR session"}
                 </button>
-                <button
-                  className="btn btn-ghost"
-                  type="button"
-                  onClick={() => startSetup("pairing_code")}
-                  disabled={!controls.canStartCode || !hasPhoneForPairing}
-                  aria-disabled={!controls.canStartCode || !hasPhoneForPairing}
-                >
-                  {pendingStartCode ? "Starting..." : "Get Pairing Code"}
-                </button>
-                <button className="btn btn-ghost" type="button" onClick={() => setActiveScreen("pairing")}>
-                  Open Pairing Screen
-                </button>
+                {showQrCode || showPairingCode || isConnected ? (
+                  <button className="btn btn-ghost" type="button" onClick={() => setActiveScreen("pairing")}>
+                    Open pairing screen
+                  </button>
+                ) : null}
               </div>
 
               <details className="setup-advanced">
-                <summary>Advanced actions</summary>
+                <summary>Use pairing code instead</summary>
+                <label className="setup-input-group">
+                  <span className="queue-meta">Phone number</span>
+                  <input
+                    type="text"
+                    inputMode="tel"
+                    placeholder="2348012345678"
+                    value={phoneNumber}
+                    onChange={(event) => setPhoneNumber(event.target.value)}
+                    disabled={!controls.canEditPhone}
+                    aria-disabled={!controls.canEditPhone}
+                  />
+                </label>
+                <div className="wizard-actions">
+                  <button
+                    className="btn btn-ghost"
+                    type="button"
+                    onClick={() => startSetup("pairing_code")}
+                    disabled={!controls.canStartCode || !hasPhoneForPairing}
+                    aria-disabled={!controls.canStartCode || !hasPhoneForPairing}
+                  >
+                    {pendingStartCode ? "Starting..." : "Get pairing code"}
+                  </button>
+                </div>
+              </details>
+
+              <details className="setup-advanced">
+                <summary>More actions</summary>
                 <div className="wizard-actions">
                   <button
                     className="btn btn-ghost"
@@ -588,9 +675,9 @@ function SetupWizardContent({
                     onClick={stopSetup}
                     disabled={!controls.canStop}
                     aria-disabled={!controls.canStop}
-                  >
-                    {pendingStop ? "Stopping..." : "Stop Session"}
-                  </button>
+                >
+                  {pendingStop ? "Stopping..." : "Stop session"}
+                </button>
                   <button
                     className="btn btn-ghost"
                     type="button"
@@ -598,7 +685,7 @@ function SetupWizardContent({
                     disabled={!controls.canRestartWorker}
                     aria-disabled={!controls.canRestartWorker}
                   >
-                    {pendingRestart ? "Restarting..." : "Restart Worker"}
+                    {pendingRestart ? "Restarting..." : "Restart worker"}
                   </button>
                   <button
                     className="btn btn-ghost"
@@ -606,24 +693,11 @@ function SetupWizardContent({
                     onClick={resetSetup}
                     disabled={!controls.canReset}
                     aria-disabled={!controls.canReset}
-                  >
-                    {pendingReset ? "Resetting..." : "Reset Credentials"}
-                  </button>
-                </div>
-              </details>
-
-              <label className="setup-input-group">
-                <span className="queue-meta">Phone Number (for pairing code mode)</span>
-                <input
-                  type="text"
-                  inputMode="tel"
-                  placeholder="2348012345678"
-                  value={phoneNumber}
-                  onChange={(event) => setPhoneNumber(event.target.value)}
-                  disabled={!controls.canEditPhone}
-                  aria-disabled={!controls.canEditPhone}
-                />
-              </label>
+                >
+                  {pendingReset ? "Resetting..." : "Reset credentials"}
+                </button>
+              </div>
+            </details>
             </div>
           </section>
 
@@ -631,11 +705,10 @@ function SetupWizardContent({
             <div className="setup-wizard-card">
               <p className="queue-meta">Pairing</p>
               <h3>{state?.mode === "pairing_code" ? "Pairing Code" : "QR Code"}</h3>
-              <p className="queue-meta">Scan this QR from WhatsApp linked devices, or enter pairing code in WhatsApp.</p>
 
               <div className="wizard-actions">
                 <button className="btn btn-ghost" type="button" onClick={() => setActiveScreen("whatsapp")}>
-                  Back to WhatsApp Controls
+                  Back
                 </button>
                 <button
                   className="btn btn-ghost"
@@ -662,8 +735,8 @@ function SetupWizardContent({
               ) : (
                 <p className="empty-line">
                   {state?.mode === "pairing_code"
-                    ? "Pairing code will appear here after requesting it."
-                    : "QR code will appear here after starting setup."}
+                    ? "Request a pairing code first."
+                    : "Start QR setup first."}
                 </p>
               )}
             </div>
@@ -672,9 +745,418 @@ function SetupWizardContent({
           <section id="setup-panel-instagram" className="setup-flow-panel" hidden={activeScreen !== "instagram"}>
             <InstagramSetupPanel liveState={instagramLiveState} realtimeEnabled={realtimeEnabled} setupSecret={setupSecret} />
           </section>
+
+          <section id="setup-panel-voice" className="setup-flow-panel" hidden={activeScreen !== "voice"}>
+            <VoiceSetupPanel
+              setupSecret={setupSecret}
+              initialState={voiceState}
+              onStateChange={(next) => setVoiceState(next)}
+            />
+          </section>
         </div>
       </div>
     </section>
+  );
+}
+
+function VoiceSetupPanel({
+  setupSecret,
+  initialState,
+  onStateChange,
+}: {
+  setupSecret?: string;
+  initialState?: VoiceSetupState | null;
+  onStateChange?: (next: VoiceSetupState) => void;
+}) {
+  const [state, setState] = useState<VoiceSetupState | null>(initialState || null);
+  const [modelId, setModelId] = useState(initialState?.modelId || "openbmb/VoxCPM-0.5B");
+  const [promptText, setPromptText] = useState(initialState?.samplePromptText || "");
+  const [recordedBlob, setRecordedBlob] = useState<Blob | null>(null);
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingError, setRecordingError] = useState<string | null>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+
+  const { runAction, isPending, anyPending, notices, dismissNotice } = useActionStateRegistry();
+
+  const setupHeaders = useMemo(
+    () =>
+      setupSecret
+        ? {
+            [getSetupBootstrapHeaderName()]: setupSecret,
+          }
+        : undefined,
+    [setupSecret],
+  );
+
+  const previewUrl = useMemo(() => {
+    if (!recordedBlob) {
+      return "";
+    }
+    return URL.createObjectURL(recordedBlob);
+  }, [recordedBlob]);
+
+  useEffect(() => {
+    return () => {
+      if (previewUrl) {
+        URL.revokeObjectURL(previewUrl);
+      }
+    };
+  }, [previewUrl]);
+
+  const stopMediaStream = useCallback(() => {
+    const stream = streamRef.current;
+    streamRef.current = null;
+    if (!stream) {
+      return;
+    }
+    stream.getTracks().forEach((track) => track.stop());
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      try {
+        recorderRef.current?.stop();
+      } catch {
+        // no-op
+      }
+      recorderRef.current = null;
+      stopMediaStream();
+    };
+  }, [stopMediaStream]);
+
+  const applyState = useCallback(
+    (next: VoiceSetupState) => {
+      setState((current) => {
+        if (!current) {
+          return next;
+        }
+        return current.updatedAt > next.updatedAt ? current : next;
+      });
+      if (!promptText && next.samplePromptText) {
+        setPromptText(next.samplePromptText);
+      }
+      if (!modelId && next.modelId) {
+        setModelId(next.modelId);
+      }
+      onStateChange?.(next);
+    },
+    [modelId, onStateChange, promptText],
+  );
+
+  const fetchVoiceState = useCallback(
+    async (includeLog = false) => {
+      const query = includeLog ? "?log=1" : "";
+      const response = await fetch(`/api/setup/voice/status${query}`, {
+        cache: "no-store",
+        headers: setupHeaders,
+      });
+      const next = await readVoiceSetupResponse(response);
+      applyState(next);
+      return next;
+    },
+    [applyState, setupHeaders],
+  );
+
+  const refresh = useCallback(
+    (suppressSuccessNotice = true) => {
+      void runAction(
+        "setup:voice:refresh",
+        async () => {
+          await fetchVoiceState(true);
+        },
+        {
+          pendingLabel: "Refreshing voice setup...",
+          suppressSuccessNotice,
+        },
+      );
+    },
+    [fetchVoiceState, runAction],
+  );
+
+  useEffect(() => {
+    refresh(true);
+  }, [refresh]);
+
+  useEffect(() => {
+    if (state?.status !== "installing") {
+      return;
+    }
+    const interval = setInterval(() => {
+      void fetchVoiceState(false).catch(() => undefined);
+    }, 2200);
+    return () => {
+      clearInterval(interval);
+    };
+  }, [fetchVoiceState, state?.status]);
+
+  const startRecording = async () => {
+    setRecordingError(null);
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setRecordingError("Browser does not support microphone capture in this context.");
+      return;
+    }
+
+    if (typeof MediaRecorder === "undefined") {
+      setRecordingError("Browser does not support MediaRecorder.");
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      chunksRef.current = [];
+      const preferredMimeTypes = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
+      const selectedMimeType = preferredMimeTypes.find((value) => MediaRecorder.isTypeSupported(value));
+      const recorder = selectedMimeType ? new MediaRecorder(stream, { mimeType: selectedMimeType }) : new MediaRecorder(stream);
+      recorderRef.current = recorder;
+
+      recorder.ondataavailable = (event: BlobEvent) => {
+        if (event.data && event.data.size > 0) {
+          chunksRef.current.push(event.data);
+        }
+      };
+      recorder.onerror = () => {
+        setRecordingError("Recording failed. Check microphone permissions and retry.");
+      };
+      recorder.onstop = () => {
+        const nextBlob = new Blob(chunksRef.current, { type: recorder.mimeType || "audio/webm" });
+        if (nextBlob.size > 0) {
+          setRecordedBlob(nextBlob);
+        }
+        setIsRecording(false);
+        recorderRef.current = null;
+        stopMediaStream();
+      };
+
+      recorder.start(250);
+      setIsRecording(true);
+    } catch {
+      setRecordingError("Could not access microphone. Allow permissions and retry.");
+      setIsRecording(false);
+      stopMediaStream();
+    }
+  };
+
+  const stopRecording = () => {
+    const recorder = recorderRef.current;
+    if (!recorder) {
+      return;
+    }
+    if (recorder.state !== "inactive") {
+      recorder.stop();
+    }
+  };
+
+  const uploadSample = () => {
+    void runAction(
+      "setup:voice:upload_sample",
+      async () => {
+        if (!recordedBlob || recordedBlob.size === 0) {
+          throw new Error("Record a voice sample before saving.");
+        }
+        if (!promptText.trim()) {
+          throw new Error("Enter the transcript of the recorded voice sample.");
+        }
+
+        const payload = new FormData();
+        payload.append(
+          "sample",
+          new File([recordedBlob], "voice-sample.webm", {
+            type: recordedBlob.type || "audio/webm",
+          }),
+        );
+        payload.append("promptText", promptText.trim());
+
+        const response = await fetch("/api/setup/voice/sample", {
+          method: "POST",
+          headers: setupHeaders,
+          body: payload,
+        });
+        const next = await readVoiceSetupResponse(response);
+        applyState(next);
+      },
+      {
+        pendingLabel: "Saving sample...",
+      },
+    );
+  };
+
+  const installVoiceModule = () => {
+    void runAction(
+      "setup:voice:install",
+      async () => {
+        const response = await fetch("/api/setup/voice/install", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            ...(setupHeaders || {}),
+          },
+          body: JSON.stringify({
+            modelId: modelId.trim(),
+          }),
+        });
+        const next = await readVoiceSetupResponse(response);
+        applyState(next);
+      },
+      {
+        pendingLabel: "Installing voice tools...",
+      },
+    );
+  };
+
+  const resetVoiceModule = () => {
+    void runAction(
+      "setup:voice:reset",
+      async () => {
+        const response = await fetch("/api/setup/voice/reset", {
+          method: "POST",
+          headers: setupHeaders,
+        });
+        const next = await readVoiceSetupResponse(response);
+        applyState(next);
+      },
+      {
+        pendingLabel: "Resetting voice module...",
+      },
+    );
+  };
+
+  const pendingInstall = isPending("setup:voice:install");
+  const pendingUploadSample = isPending("setup:voice:upload_sample");
+  const pendingReset = isPending("setup:voice:reset");
+  const pendingRefresh = isPending("setup:voice:refresh");
+  const statusText = voiceStatusLabel(state?.status);
+  const canStartRecording = !anyPending && !isRecording;
+  const canStopRecording = isRecording;
+  const canSaveSample = !anyPending && !isRecording && Boolean(recordedBlob) && Boolean(promptText.trim());
+  const canInstall = !anyPending && !isRecording && Boolean(modelId.trim());
+
+  return (
+    <div className="setup-wizard-card" aria-busy={anyPending}>
+      <ActionNotices notices={notices} onDismiss={dismissNotice} />
+      <h3>Voice Notes</h3>
+
+      <div className="setup-status-row">
+        <span className={`status-pill ${voiceStatusToneClass(state?.status)}`}>{statusText}</span>
+        {state?.status === "error" ? <span className="queue-meta">{state.message}</span> : null}
+      </div>
+
+      <label className="setup-input-group">
+        <span className="queue-meta">Sample transcript</span>
+        <textarea
+          value={promptText}
+          onChange={(event) => setPromptText(event.target.value)}
+          rows={3}
+          placeholder="Type the exact words spoken in your recorded sample."
+          disabled={anyPending}
+          aria-disabled={anyPending}
+        />
+      </label>
+
+      <div className="wizard-actions">
+        <button
+          className="btn btn-primary"
+          type="button"
+          onClick={installVoiceModule}
+          disabled={!canInstall}
+          aria-disabled={!canInstall}
+        >
+          {pendingInstall ? "Installing..." : "Install voice tools"}
+        </button>
+        <button
+          className="btn btn-ghost"
+          type="button"
+          onClick={startRecording}
+          disabled={!canStartRecording}
+          aria-disabled={!canStartRecording}
+        >
+          {isRecording ? "Recording..." : "Record sample"}
+        </button>
+        {isRecording ? (
+          <button
+            className="btn btn-ghost"
+            type="button"
+            onClick={stopRecording}
+            disabled={!canStopRecording}
+            aria-disabled={!canStopRecording}
+          >
+            Stop
+          </button>
+        ) : null}
+      </div>
+
+      {recordingError ? <p className="setup-revoked-notice">{recordingError}</p> : null}
+
+      {previewUrl ? (
+        <div className="queue-item">
+          <p className="queue-title">Recorded sample preview</p>
+          <audio controls src={previewUrl} />
+        </div>
+      ) : null}
+
+      {state?.hasSample ? (
+        <p className="queue-meta">Sample saved.</p>
+      ) : (
+        <p className="queue-meta">No sample saved yet.</p>
+      )}
+
+      <div className="wizard-actions">
+        <button
+          className="btn btn-ghost"
+          type="button"
+          onClick={uploadSample}
+          disabled={!canSaveSample}
+          aria-disabled={!canSaveSample}
+        >
+          {pendingUploadSample ? "Saving..." : "Save sample"}
+        </button>
+      </div>
+
+      <details className="setup-advanced">
+        <summary>More actions</summary>
+        <label className="setup-input-group">
+          <span className="queue-meta">Voice model</span>
+          <input
+            type="text"
+            value={modelId}
+            onChange={(event) => setModelId(event.target.value)}
+            placeholder="openbmb/VoxCPM-0.5B"
+            disabled={anyPending || isRecording}
+            aria-disabled={anyPending || isRecording}
+          />
+        </label>
+        <div className="wizard-actions">
+          <button
+            className="btn btn-ghost"
+            type="button"
+            onClick={() => refresh(false)}
+            disabled={pendingRefresh || anyPending}
+            aria-disabled={pendingRefresh || anyPending}
+          >
+            {pendingRefresh ? "Refreshing..." : "Refresh"}
+          </button>
+          <button
+            className="btn btn-ghost"
+            type="button"
+            onClick={resetVoiceModule}
+            disabled={pendingReset || anyPending}
+            aria-disabled={pendingReset || anyPending}
+          >
+            {pendingReset ? "Resetting..." : "Reset"}
+          </button>
+        </div>
+      </details>
+
+      {state?.installLog ? (
+        <details className="setup-advanced">
+          <summary>Installation log</summary>
+          <pre className="queue-meta">{state.installLog}</pre>
+        </details>
+      ) : null}
+    </div>
   );
 }
 
@@ -891,10 +1373,7 @@ function InstagramSetupPanel({
   return (
     <div className="setup-wizard-card" aria-busy={anyPending}>
       <ActionNotices notices={notices} onDismiss={dismissNotice} />
-      <h3>Instagram Connection Setup</h3>
-      <p className="queue-body">
-        Sign in with your personal account session. If Instagram asks for verification, enter the challenge code.
-      </p>
+      <h3>Instagram</h3>
 
       <div className="setup-status-row">
         <span
@@ -908,21 +1387,16 @@ function InstagramSetupPanel({
         >
           {state?.listenerActive ? "Connected" : statusLabel(status)}
         </span>
-        <span className="queue-meta">{uiStatusMessage}</span>
+        {status === "error" ? <span className="queue-meta">{uiStatusMessage}</span> : null}
       </div>
-      {liveStateLoading ? <LoadingIndicator label="Connecting to live setup state…" /> : null}
+      {liveStateLoading ? <LoadingIndicator label="Loading live setup status…" /> : null}
 
       {state?.challengeContactPoint ? (
-        <p className="queue-meta">Challenge destination: {state.challengeContactPoint}</p>
+        <p className="queue-meta">Verification sent to: {state.challengeContactPoint}</p>
       ) : null}
 
-      <div className="setup-guidance">
-        <p className="queue-title">Recommended Path</p>
-        <p className="queue-meta">Enter username and password, start setup, then submit challenge code only if requested.</p>
-      </div>
-
       <label className="setup-input-group">
-        <span className="queue-meta">Instagram Username</span>
+        <span className="queue-meta">Instagram username</span>
         <input
           type="text"
           placeholder="username"
@@ -935,7 +1409,7 @@ function InstagramSetupPanel({
       </label>
 
       <label className="setup-input-group">
-        <span className="queue-meta">Instagram Password</span>
+        <span className="queue-meta">Instagram password</span>
         <input
           type="password"
           placeholder="password"
@@ -955,7 +1429,7 @@ function InstagramSetupPanel({
           disabled={!canStart}
           aria-disabled={!canStart}
         >
-          {pendingStart ? "Signing in..." : "Start Instagram Setup"}
+          {pendingStart ? "Signing in..." : "Start Instagram setup"}
         </button>
         {requiresChallenge ? (
           <button
@@ -965,14 +1439,14 @@ function InstagramSetupPanel({
             disabled={!canChallenge}
             aria-disabled={!canChallenge}
           >
-            {pendingChallenge ? "Submitting..." : "Submit Challenge Code"}
+            {pendingChallenge ? "Submitting..." : "Submit challenge code"}
           </button>
         ) : null}
       </div>
 
       {requiresChallenge ? (
         <label className="setup-input-group">
-          <span className="queue-meta">Challenge Code</span>
+          <span className="queue-meta">Challenge code</span>
           <input
             type="text"
             placeholder="Enter challenge code"
@@ -985,7 +1459,7 @@ function InstagramSetupPanel({
       ) : null}
 
       <details className="setup-advanced">
-        <summary>Advanced actions</summary>
+        <summary>More actions</summary>
         <div className="wizard-actions">
           <button
             className="btn btn-ghost"
@@ -1003,7 +1477,7 @@ function InstagramSetupPanel({
             disabled={!canStop}
             aria-disabled={!canStop}
           >
-            {pendingStop ? "Stopping..." : "Stop Session"}
+            {pendingStop ? "Stopping..." : "Stop session"}
           </button>
           <button
             className="btn btn-ghost"
@@ -1012,7 +1486,7 @@ function InstagramSetupPanel({
             disabled={!canRestart}
             aria-disabled={!canRestart}
           >
-            {pendingRestart ? "Restarting..." : "Restart Worker"}
+            {pendingRestart ? "Restarting..." : "Restart worker"}
           </button>
           <button
             className="btn btn-ghost"
@@ -1021,13 +1495,13 @@ function InstagramSetupPanel({
             disabled={!canReset}
             aria-disabled={!canReset}
           >
-            {pendingReset ? "Resetting..." : "Reset Session"}
+            {pendingReset ? "Resetting..." : "Reset session"}
           </button>
         </div>
       </details>
 
       {isConnected ? (
-        <p className="queue-meta">Instagram worker listener is active and session is connected.</p>
+        <p className="queue-meta">Instagram is connected and active.</p>
       ) : null}
     </div>
   );

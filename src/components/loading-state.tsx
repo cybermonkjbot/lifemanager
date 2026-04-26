@@ -46,8 +46,8 @@ export function SkeletonList({ rows = 3, compact = false, className }: SkeletonL
 
 export function LoadingBlock({ label, rows = 3, compact = false, className }: LoadingBlockProps) {
   return (
-    <div className={joinClasses("loading-block", className)}>
-      <LoadingIndicator label={label} />
+    <div className={joinClasses("loading-block", className)} role="status" aria-live="polite" aria-busy="true">
+      <span className="sr-only">{label}</span>
       <SkeletonList rows={rows} compact={compact} />
     </div>
   );

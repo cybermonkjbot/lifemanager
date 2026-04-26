@@ -4,7 +4,6 @@ import { ActionNotices } from "@/components/action-notices";
 import { SetupWizard } from "@/components/setup-wizard";
 import { getSetupBootstrapHeaderName } from "@/lib/setup-bootstrap-auth";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
-import { api } from "../../convex/_generated/api";
 import {
   DEFAULT_INSTANCE_SETUP_PREFERENCES,
   type InstanceAutonomyMode,
@@ -12,8 +11,9 @@ import {
   type InstanceReplyPacePreset,
   type InstanceSetupPreferences,
   type InstanceSetupState,
+  type InstanceSoulPrivacyLevel,
+  type InstanceSoulProfile,
 } from "@/lib/instance-setup-types";
-import { useQuery } from "convex/react";
 import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
 
@@ -22,51 +22,27 @@ type SetupOnboardingProps = {
   initialInstanceState: InstanceSetupState;
 };
 
-type SetupStage = "welcome" | "security" | "preferences" | "connect" | "finish";
-
-type LiveSetupState = {
-  status?: "idle" | "starting" | "authenticating" | "qr_ready" | "code_ready" | "challenge_required" | "syncing" | "connected" | "error";
-  listenerActive?: boolean;
-  updatedAt?: number;
-  hasAuth?: boolean;
-  message?: string;
-};
+type SetupStage = "security" | "preferences" | "connect" | "finish";
 
 const setupStages: Array<{
   id: SetupStage;
-  kicker: string;
   title: string;
-  description: string;
 }> = [
   {
-    id: "welcome",
-    kicker: "Stage 01",
-    title: "Prepare the instance",
-    description: "Turn this install into a private operator console before any runtime starts sending or learning.",
-  },
-  {
     id: "security",
-    kicker: "Stage 02",
-    title: "Set the instance PIN",
-    description: "Lock this deployment with a local PIN so the open source app does not default into a public SaaS shell.",
+    title: "Secure",
   },
   {
     id: "preferences",
-    kicker: "Stage 03",
-    title: "Choose runtime behavior",
-    description: "Save a small set of first-run defaults so the app starts with your tempo, review posture, and night boundaries.",
+    title: "Defaults",
   },
   {
     id: "connect",
-    kicker: "Stage 04",
-    title: "Connect the channels",
-    description: "Pair WhatsApp, optionally add Instagram, and verify the workers are actually alive.",
+    title: "Connect",
   },
   {
     id: "finish",
-    kicker: "Stage 05",
-    title: "Complete onboarding",
-    description: "Seal the instance, keep the unlock session, and enter the dashboard with the setup state already anchored.",
+    title: "Launch",
   },
 ];
 
@@ -80,100 +56,201 @@ function readSetupStateResponse(response: Response) {
   }>;
 }
 
-function simplifyConnectionStatus(state: LiveSetupState | null | undefined, label: string) {
-  if (!state) {
-    return `${label} not loaded yet.`;
-  }
-  if (state.listenerActive || state.status === "connected") {
-    return `${label} connected.`;
-  }
-  if (state.status === "qr_ready") {
-    return `${label} QR is ready.`;
-  }
-  if (state.status === "code_ready") {
-    return `${label} pairing code is ready.`;
-  }
-  if (state.status === "challenge_required") {
-    return `${label} needs a challenge code.`;
-  }
-  if (state.status === "starting" || state.status === "authenticating" || state.status === "syncing") {
-    return `${label} is still in setup.`;
-  }
-  if (state.status === "error") {
-    return `${label} needs attention.`;
-  }
-  return `${label} has not been connected yet.`;
+function readSetupAiSettingsResponse(response: Response) {
+  return response.json() as Promise<{
+    state?: InstanceSetupState;
+    preferences?: InstanceSetupPreferences;
+    preferencesSynced?: boolean;
+    rationale?: string;
+    provider?: string;
+    model?: string;
+    latencyMs?: number;
+    toolDisabled?: boolean;
+    error?: string;
+  }>;
 }
 
 function setupStageIndex(stage: SetupStage) {
   return setupStages.findIndex((item) => item.id === stage);
 }
 
+function formatSetupStep(stage: SetupStage) {
+  const index = setupStageIndex(stage);
+  return `Step ${index + 1} of ${setupStages.length}`;
+}
+
 function resolveMimicryPreview(preset: InstanceMimicryPreset) {
   if (preset === "light") {
-    return "Light mirror. Keep the voice neutral-first.";
+    return "Small voice matching with a neutral tone.";
   }
   if (preset === "close") {
-    return "Tighter mirror. Match rhythm and phrasing more aggressively.";
+    return "Strong voice matching for closer tone and rhythm.";
   }
-  return "Balanced mirror. Natural adaptation without over-copying.";
+  return "Balanced voice matching for most conversations.";
 }
 
 function resolveReplyPacePreview(preset: InstanceReplyPacePreset) {
   if (preset === "measured") {
-    return "Faster but still human. Best if you want lower latency.";
+    return "Quicker replies with a natural delay.";
   }
   if (preset === "unhurried") {
-    return "Slow and deliberate. Better for a restrained, less online feel.";
+    return "Slower replies with a calm pace.";
   }
-  return "Quality-first default. Enough delay to feel deliberate without dragging.";
+  return "Balanced pace between speed and quality.";
 }
 
 function resolveAutonomyPreview(mode: InstanceAutonomyMode) {
   return mode === "autopilot"
-    ? "Approved drafts can move automatically when the rest of the system allows it."
-    : "Start in review-first mode so nothing moves without manual approval.";
+    ? "Approved drafts can send automatically when allowed."
+    : "Nothing sends automatically until you approve it.";
+}
+
+function cloneDefaultPreferences(): InstanceSetupPreferences {
+  return {
+    ...DEFAULT_INSTANCE_SETUP_PREFERENCES,
+    soulProfile: {
+      ...DEFAULT_INSTANCE_SETUP_PREFERENCES.soulProfile,
+    },
+    soulPrivacy: {
+      ...DEFAULT_INSTANCE_SETUP_PREFERENCES.soulPrivacy,
+    },
+  };
+}
+
+function normalizeSoulText(profile: InstanceSoulProfile) {
+  return Object.values(profile).join(" ").toLowerCase();
+}
+
+function hasSoulProfileContent(profile: InstanceSoulProfile) {
+  return Object.values(profile).some((value) => value.trim().length > 0);
+}
+
+function derivePreferencesFromSoulProfile(
+  profile: InstanceSoulProfile,
+  current: InstanceSetupPreferences,
+): InstanceSetupPreferences {
+  const text = normalizeSoulText(profile);
+  if (!text.trim()) {
+    return current;
+  }
+
+  const wantsFastPace = /\b(fast|quick|busy|urgent|responsive|immediate|on top|efficient)\b/.test(text);
+  const wantsSlowPace = /\b(slow|calm|careful|thoughtful|reflect|deep|peace|quiet|patient)\b/.test(text);
+  const wantsAutopilot = /\b(automatic|autopilot|delegate|handle for me|save time|take over)\b/.test(text);
+  const wantsReview = /\b(boundar|privacy|careful|review|approve|consent|manual|sensitive|cautious)\b/.test(text);
+  const wantsCloseVoice = /\b(my voice|sound like me|pidgin|emoji|banter|expressive|warm|playful|intimate)\b/.test(text);
+  const wantsLightVoice = /\b(professional|minimal|formal|reserved|plain|concise|direct)\b/.test(text);
+  const wantsMemes = /\b(meme|funny|joke|banter|playful|humor|humour)\b/.test(text);
+  const wantsInstagram = /\b(instagram|ig|creator|content|social|status|stories)\b/.test(text);
+  const nightOwl = /\b(night owl|late night|overnight|after midnight)\b/.test(text);
+  const earlyStart = /\b(early|morning|sunrise|5am|6am)\b/.test(text);
+
+  return {
+    ...current,
+    soulProfile: profile,
+    autonomyMode: wantsAutopilot && !wantsReview ? "autopilot" : "review_first",
+    replyPace: wantsFastPace && !wantsSlowPace ? "measured" : wantsSlowPace ? "unhurried" : "deliberate",
+    mimicryPreset: wantsCloseVoice && !wantsLightVoice ? "close" : wantsLightVoice ? "light" : "balanced",
+    memesEnabled: wantsMemes || current.memesEnabled,
+    instagramEnabled: wantsInstagram || current.instagramEnabled,
+    quietHoursEnabled: !nightOwl || current.quietHoursEnabled,
+    quietHoursStartHour: nightOwl ? 1 : current.quietHoursStartHour,
+    quietHoursEndHour: earlyStart ? 6 : current.quietHoursEndHour,
+  };
+}
+
+function summarizeSoulDefaults(preferences: InstanceSetupPreferences) {
+  return [
+    resolveAutonomyPreview(preferences.autonomyMode),
+    resolveReplyPacePreview(preferences.replyPace),
+    resolveMimicryPreview(preferences.mimicryPreset),
+    preferences.memesEnabled ? "Meme tools start visible." : "Meme tools stay tucked away.",
+  ];
+}
+
+const soulUseCaseOptions = [
+  { value: "", label: "Not set" },
+  { value: "personal", label: "Personal" },
+  { value: "professional", label: "Professional" },
+  { value: "mixed", label: "Mixed" },
+] as const;
+
+const romanticPreferenceOptions = [
+  { value: "", label: "Not set" },
+  { value: "men", label: "Men" },
+  { value: "women", label: "Women" },
+  { value: "men_and_women", label: "Men and women" },
+  { value: "any_gender", label: "Any gender" },
+  { value: "not_dating", label: "Not dating" },
+  { value: "prefer_not_to_say", label: "Prefer not to say" },
+] as const;
+
+type SoulFieldKey = keyof InstanceSoulProfile;
+
+const soulPrivacyOptions: Array<{ value: InstanceSoulPrivacyLevel; label: string }> = [
+  { value: "setup_only", label: "Setup only" },
+  { value: "ai_usable", label: "AI usable" },
+  { value: "never_mention", label: "Never mention" },
+];
+
+const soulReviewFields: Array<{ key: SoulFieldKey; label: string }> = [
+  { key: "useCase", label: "Use case" },
+  { key: "genderIdentity", label: "Gender" },
+  { key: "pronouns", label: "Pronouns" },
+  { key: "romanticPreference", label: "Romantic preference" },
+  { key: "relationshipStatus", label: "Relationship status" },
+  { key: "romanticInterests", label: "Romantic interests" },
+  { key: "cultureLocation", label: "Culture / location" },
+  { key: "selfDescription", label: "Identity" },
+  { key: "values", label: "Values" },
+  { key: "communicationStyle", label: "Voice" },
+  { key: "boundaries", label: "Boundaries" },
+  { key: "relationships", label: "People" },
+  { key: "goals", label: "Direction" },
+  { key: "dailyRhythm", label: "Rhythm" },
+];
+
+function formatPrivacyLabel(value: InstanceSoulPrivacyLevel) {
+  if (value === "ai_usable") {
+    return "AI usable";
+  }
+  if (value === "never_mention") {
+    return "Never mention";
+  }
+  return "Setup only";
 }
 
 export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: SetupOnboardingProps) {
   const router = useRouter();
-  const [stage, setStage] = useState<SetupStage>(initialInstanceState.setupCompleted ? "finish" : "welcome");
+  const [stage, setStage] = useState<SetupStage>(initialInstanceState.setupCompleted ? "finish" : "security");
   const [instanceState, setInstanceState] = useState<InstanceSetupState>(initialInstanceState);
   const [preferences, setPreferences] = useState<InstanceSetupPreferences>(
-    initialInstanceState.preferences || DEFAULT_INSTANCE_SETUP_PREFERENCES,
+    initialInstanceState.preferences || cloneDefaultPreferences(),
   );
   const [setupSecret, setSetupSecret] = useState("");
   const [pin, setPin] = useState("");
   const [pinConfirm, setPinConfirm] = useState("");
-  const { runAction, getRecord, notices, dismissNotice } = useActionStateRegistry();
-
-  const whatsappLiveState = useQuery(
-    api.system.setupStatus,
-    realtimeEnabled ? { provider: "whatsapp" } : "skip",
-  ) as LiveSetupState | null | undefined;
-  const instagramLiveState = useQuery(
-    api.system.setupStatus,
-    realtimeEnabled ? { provider: "instagram" } : "skip",
-  ) as LiveSetupState | null | undefined;
+  const { runAction, getRecord, notices, dismissNotice, pushNotice } = useActionStateRegistry();
 
   const activeStage = setupStages[setupStageIndex(stage)] || setupStages[0];
   const securityRecord = getRecord("setup:onboarding:security");
   const preferencesRecord = getRecord("setup:onboarding:preferences");
+  const setupAiRecord = getRecord("setup:onboarding:ai-settings");
   const finishRecord = getRecord("setup:onboarding:finish");
   const pinSource = instanceState.pinSource;
   const envManagedPin = pinSource === "env";
   const filePinExists = pinSource === "file";
   const pinRequiredCopy = envManagedPin
-    ? "This deployment is already pin-managed by environment configuration. Setup will keep that source of truth."
+    ? "Your PIN is already managed by environment variables."
     : filePinExists
-      ? "A local instance PIN already exists. Leave the fields empty to keep it, or enter a new PIN to rotate it now."
-      : "Create the instance PIN now. This becomes the browser gate for this deployment.";
+      ? "A local PIN already exists. Leave fields empty to keep it, or enter a new PIN."
+      : "Create a PIN now to lock this dashboard.";
   const pinValidationMessage = useMemo(() => {
     if (envManagedPin) {
       return "";
     }
     if (!filePinExists && pin.trim().length === 0) {
-      return "PIN is required to complete setup.";
+      return "Enter a PIN to continue.";
     }
     if (pin.trim().length > 0 && pin.trim().length < 4) {
       return "PIN must be at least 4 characters.";
@@ -185,9 +262,51 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
   }, [envManagedPin, filePinExists, pin, pinConfirm]);
 
   const canSaveSecurity = envManagedPin || pinValidationMessage === "";
-  const whatsappReady = Boolean(whatsappLiveState?.listenerActive || whatsappLiveState?.status === "connected");
-  const instagramReady = Boolean(instagramLiveState?.listenerActive || instagramLiveState?.status === "connected");
-  const canFinish = canSaveSecurity && (whatsappReady || !realtimeEnabled);
+  const canFinish = canSaveSecurity;
+  const soulProfileHasContent = hasSoulProfileContent(preferences.soulProfile);
+  const soulDefaults = summarizeSoulDefaults(preferences);
+  const setupAiToolAvailable = instanceState.setupAiSettingsToolAvailable;
+  const showRomanticSetup =
+    preferences.soulProfile.useCase === "personal" ||
+    preferences.soulProfile.useCase === "mixed" ||
+    preferences.soulProfile.romanticPreference.trim().length > 0 ||
+    preferences.soulProfile.romanticInterests.trim().length > 0;
+  const visibleSoulReviewFields = soulReviewFields.filter(({ key }) => preferences.soulProfile[key].trim().length > 0);
+
+  const updateSoulField = (field: SoulFieldKey, value: string) => {
+    setPreferences((current) => ({
+      ...current,
+      soulProfile: {
+        ...current.soulProfile,
+        [field]: value,
+      },
+    }));
+  };
+
+  const updateSoulPrivacy = (field: SoulFieldKey, value: InstanceSoulPrivacyLevel) => {
+    setPreferences((current) => ({
+      ...current,
+      soulPrivacy: {
+        ...current.soulPrivacy,
+        [field]: value,
+      },
+    }));
+  };
+
+  const renderPrivacyControl = (field: SoulFieldKey) => (
+    <select
+      className="setup-privacy-select"
+      value={preferences.soulPrivacy[field]}
+      aria-label={`${field} privacy`}
+      onChange={(event) => updateSoulPrivacy(field, event.target.value as InstanceSoulPrivacyLevel)}
+    >
+      {soulPrivacyOptions.map((option) => (
+        <option key={option.value} value={option.value}>
+          {option.label}
+        </option>
+      ))}
+    </select>
+  );
 
   const saveInstanceSetup = async (
     key: string,
@@ -195,6 +314,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
       pin?: string;
       preferences?: InstanceSetupPreferences;
       setupCompleted?: boolean;
+      beginFullSetup?: boolean;
       issueSession?: boolean;
     },
     options?: {
@@ -230,6 +350,9 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
           setPin("");
           setPinConfirm("");
         }
+        if (payload.preferences && body.preferencesSynced === false) {
+          pushNotice("info", "Preferences were saved locally, but sync failed. Some settings may still use older values.");
+        }
         if (options?.nextStage) {
           setStage(options.nextStage);
         }
@@ -246,16 +369,48 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
     );
   };
 
+  const runSetupAiSettingsTool = async () => {
+    return await runAction(
+      "setup:onboarding:ai-settings",
+      async () => {
+        const response = await fetch("/api/setup/ai-settings", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            ...(setupSecret.trim()
+              ? {
+                  [getSetupBootstrapHeaderName()]: setupSecret.trim(),
+                }
+              : {}),
+          },
+          body: JSON.stringify({ preferences }),
+        });
+
+        const body = await readSetupAiSettingsResponse(response);
+        if (!response.ok || !body.state || !body.preferences) {
+          throw new Error(body.error || `Setup AI settings failed (${response.status})`);
+        }
+
+        setInstanceState(body.state);
+        setPreferences(body.preferences);
+        if (body.preferencesSynced === false) {
+          pushNotice("info", "AI settings were saved locally, but sync failed. Some settings may still use older values.");
+        }
+        return body;
+      },
+      {
+        pendingLabel: "Running setup AI settings tool...",
+        successMessage: "AI settings applied. Tool disabled for this setup run.",
+      },
+    );
+  };
+
   return (
     <main className="setup-onboarding-shell">
       <div className="setup-onboarding-noise" aria-hidden="true" />
       <section className="setup-onboarding-stage">
         <aside className="setup-onboarding-aside">
-          <p className="setup-onboarding-kicker">Social Life Manager</p>
-          <h1 className="setup-onboarding-title">Provision a private life-ops instance.</h1>
-          <p className="setup-onboarding-copy">
-            This setup flow is where the app stops being a generic open source codebase and becomes your own local operator system.
-          </p>
+          <h1 className="setup-onboarding-title">Setup</h1>
 
           <div className="setup-onboarding-checklist">
             {setupStages.map((item, index) => {
@@ -271,86 +426,38 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                   <span className="setup-step-chip-count">{String(index + 1).padStart(2, "0")}</span>
                   <span className="setup-step-chip-copy">
                     <strong>{item.title}</strong>
-                    <span>{item.description}</span>
                   </span>
                 </button>
               );
             })}
           </div>
-
-          <div className="setup-onboarding-signal">
-            <p className="queue-meta">Current state</p>
-            <p className="setup-onboarding-signal-line">{simplifyConnectionStatus(whatsappLiveState, "WhatsApp")}</p>
-            <p className="setup-onboarding-signal-line">{simplifyConnectionStatus(instagramLiveState, "Instagram")}</p>
-            <p className="setup-onboarding-signal-line">
-              {instanceState.pinEnabled ? `Instance PIN source: ${instanceState.pinSource}.` : "Instance PIN not saved yet."}
-            </p>
-          </div>
         </aside>
 
         <section className="setup-onboarding-main">
           <header className="setup-onboarding-head">
-            <p className="queue-meta">{activeStage.kicker}</p>
+            <p className="queue-meta">{formatSetupStep(stage)}</p>
             <h2 className="setup-onboarding-panel-title">{activeStage.title}</h2>
-            <p className="setup-onboarding-panel-copy">{activeStage.description}</p>
           </header>
 
           <ActionNotices notices={notices} onDismiss={dismissNotice} />
 
-          {stage === "welcome" ? (
-            <div className="setup-onboarding-panel">
-              <div className="setup-poster-block">
-                <p className="setup-poster-kicker">First-run path</p>
-                <h3>Set the gate, set the behavior, then pair the channels.</h3>
-                <p>
-                  Keep the first-run sequence opinionated. Security and runtime defaults should exist before the dashboard becomes your daily working surface.
-                </p>
-              </div>
-              <div className="setup-summary-list">
-                <p className="setup-summary-item">The PIN is now part of instance setup, not just environment wiring.</p>
-                <p className="setup-summary-item">Preferences save a real runtime baseline instead of asking you to discover settings later.</p>
-                <p className="setup-summary-item">Channel setup remains live and operational, but it now sits inside a guided onboarding tunnel.</p>
-              </div>
-              <label className="setup-input-group">
-                <span className="queue-meta">Setup bootstrap secret</span>
-                <input
-                  type="password"
-                  value={setupSecret}
-                  placeholder="Only needed for remote first-run when SLM_SETUP_SECRET is configured"
-                  onChange={(event) => setSetupSecret(event.target.value)}
-                  autoComplete="off"
-                />
-              </label>
-              <div className="wizard-actions">
-                <button className="btn btn-primary" type="button" onClick={() => setStage("security")}>
-                  Start setup
-                </button>
-                {instanceState.setupCompleted ? (
-                  <button className="btn btn-ghost" type="button" onClick={() => router.push("/")}>
-                    Go to dashboard
-                  </button>
-                ) : null}
-              </div>
-            </div>
-          ) : null}
-
           {stage === "security" ? (
             <div className="setup-onboarding-panel">
-              <div className="setup-guidance">
-                <p className="queue-title">Security posture</p>
-                <p className="queue-meta">{pinRequiredCopy}</p>
-              </div>
+              <p className="queue-meta">{pinRequiredCopy}</p>
 
-              <label className="setup-input-group">
-                <span className="queue-meta">Setup bootstrap secret</span>
-                <input
-                  type="password"
-                  value={setupSecret}
-                  placeholder="Only needed for remote first-run when SLM_SETUP_SECRET is configured"
-                  onChange={(event) => setSetupSecret(event.target.value)}
-                  autoComplete="off"
-                />
-              </label>
+              <details className="setup-advanced">
+                <summary>Remote setup secret</summary>
+                <label className="setup-input-group">
+                  <span className="queue-meta">Setup secret</span>
+                  <input
+                    type="password"
+                    value={setupSecret}
+                    placeholder="Only needed when SLM_SETUP_SECRET is set"
+                    onChange={(event) => setSetupSecret(event.target.value)}
+                    autoComplete="off"
+                  />
+                </label>
+              </details>
 
               {!envManagedPin ? (
                 <div className="setup-form-grid">
@@ -359,7 +466,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                     <input
                       type="password"
                       value={pin}
-                      placeholder={filePinExists ? "Leave blank to keep current PIN" : "Create PIN"}
+                      placeholder={filePinExists ? "Leave blank to keep your current PIN" : "Create PIN"}
                       onChange={(event) => setPin(event.target.value)}
                       autoComplete="new-password"
                     />
@@ -369,7 +476,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                     <input
                       type="password"
                       value={pinConfirm}
-                      placeholder={filePinExists && pin.trim().length === 0 ? "Only required when rotating PIN" : "Confirm PIN"}
+                      placeholder={filePinExists && pin.trim().length === 0 ? "Only needed when changing PIN" : "Confirm PIN"}
                       onChange={(event) => setPinConfirm(event.target.value)}
                       autoComplete="new-password"
                     />
@@ -393,7 +500,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                         issueSession: !envManagedPin,
                       },
                       {
-                        successMessage: "Instance security saved.",
+                        successMessage: "PIN settings saved.",
                         nextStage: "preferences",
                       },
                     );
@@ -401,143 +508,381 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                 >
                   {securityRecord.pending ? "Saving..." : "Save and continue"}
                 </button>
-                <button className="btn btn-ghost" type="button" onClick={() => setStage("welcome")}>
-                  Back
-                </button>
               </div>
             </div>
           ) : null}
 
           {stage === "preferences" ? (
             <div className="setup-onboarding-panel">
-              <div className="setup-choice-group">
-                <p className="queue-title">Autonomy posture</p>
-                <div className="setup-choice-grid">
-                  {(["review_first", "autopilot"] as const).map((value) => (
-                    <button
-                      key={value}
-                      type="button"
-                      className={`setup-choice-card ${preferences.autonomyMode === value ? "setup-choice-card-active" : ""}`}
-                      onClick={() => setPreferences((current) => ({ ...current, autonomyMode: value }))}
-                    >
-                      <strong>{value === "review_first" ? "Review first" : "Autopilot ready"}</strong>
-                      <span>{resolveAutonomyPreview(value)}</span>
-                    </button>
-                  ))}
+              <div className="setup-poster-block setup-preference-hero">
+                <h3>Recommended defaults</h3>
+                <p className="queue-meta">
+                  Answer the soul profile questions to shape the first AI personality profile and setup defaults.
+                </p>
+                <div className="wizard-actions">
+                  <button
+                    className="btn btn-ghost"
+                    type="button"
+                    onClick={() => setPreferences(cloneDefaultPreferences())}
+                  >
+                    Use recommended defaults
+                  </button>
                 </div>
               </div>
 
-              <div className="setup-choice-group">
-                <p className="queue-title">Reply pace</p>
-                <div className="setup-choice-grid">
-                  {(["measured", "deliberate", "unhurried"] as const).map((value) => (
-                    <button
-                      key={value}
-                      type="button"
-                      className={`setup-choice-card ${preferences.replyPace === value ? "setup-choice-card-active" : ""}`}
-                      onClick={() => setPreferences((current) => ({ ...current, replyPace: value }))}
-                    >
-                      <strong>{value === "measured" ? "Measured" : value === "deliberate" ? "Deliberate" : "Unhurried"}</strong>
-                      <span>{resolveReplyPacePreview(value)}</span>
-                    </button>
-                  ))}
+              <div className="setup-soul-panel">
+                <div className="setup-soul-head">
+                  <div>
+                    <p className="queue-meta">Soul profile</p>
+                    <h3>Who are you underneath the logistics?</h3>
+                  </div>
+                  <button
+                    className="btn btn-primary"
+                    type="button"
+                    disabled={!soulProfileHasContent || !setupAiToolAvailable || setupAiRecord.pending}
+                    aria-disabled={!soulProfileHasContent || !setupAiToolAvailable || setupAiRecord.pending}
+                    onClick={() => {
+                      void runSetupAiSettingsTool();
+                    }}
+                  >
+                    {setupAiRecord.pending ? "Applying..." : setupAiToolAvailable ? "AI-fit defaults" : "AI tool used"}
+                  </button>
+                  <button
+                    className="btn btn-ghost"
+                    type="button"
+                    disabled={!soulProfileHasContent || setupAiRecord.pending}
+                    aria-disabled={!soulProfileHasContent || setupAiRecord.pending}
+                    onClick={() => setPreferences((current) => derivePreferencesFromSoulProfile(current.soulProfile, current))}
+                  >
+                    Rule-fit defaults
+                  </button>
                 </div>
-              </div>
 
-              <div className="setup-choice-group">
-                <p className="queue-title">Voice mimicry</p>
-                <div className="setup-choice-grid">
-                  {(["light", "balanced", "close"] as const).map((value) => (
-                    <button
-                      key={value}
-                      type="button"
-                      className={`setup-choice-card ${preferences.mimicryPreset === value ? "setup-choice-card-active" : ""}`}
-                      onClick={() => setPreferences((current) => ({ ...current, mimicryPreset: value }))}
-                    >
-                      <strong>{value === "light" ? "Light" : value === "balanced" ? "Balanced" : "Close"}</strong>
-                      <span>{resolveMimicryPreview(value)}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="setup-preferences-row">
-                <label className="setup-toggle-card">
-                  <input
-                    type="checkbox"
-                    checked={preferences.memesEnabled}
-                    onChange={(event) => setPreferences((current) => ({ ...current, memesEnabled: event.target.checked }))}
-                  />
-                  <span>
-                    <strong>Enable meme surfaces</strong>
-                    <span>Turn on playful media features from the start.</span>
-                  </span>
-                </label>
-                <label className="setup-toggle-card">
-                  <input
-                    type="checkbox"
-                    checked={preferences.instagramEnabled}
-                    onChange={(event) => setPreferences((current) => ({ ...current, instagramEnabled: event.target.checked }))}
-                  />
-                  <span>
-                    <strong>Plan for Instagram</strong>
-                    <span>Keep the optional Instagram connection visible in setup.</span>
-                  </span>
-                </label>
-              </div>
-
-              <label className="setup-toggle-card">
-                <input
-                  type="checkbox"
-                  checked={preferences.quietHoursEnabled}
-                  onChange={(event) => setPreferences((current) => ({ ...current, quietHoursEnabled: event.target.checked }))}
-                />
-                <span>
-                  <strong>Quiet hours</strong>
-                  <span>Block the app from acting like it lives online all night.</span>
-                </span>
-              </label>
-
-              {preferences.quietHoursEnabled ? (
-                <div className="setup-hours-grid">
+                <div className="setup-soul-grid">
                   <label className="setup-input-group">
-                    <span className="queue-meta">Quiet hours start</span>
+                    <span className="setup-field-head">
+                      <span className="queue-meta">Use case</span>
+                      {renderPrivacyControl("useCase")}
+                    </span>
                     <select
-                      value={preferences.quietHoursStartHour}
-                      onChange={(event) =>
-                        setPreferences((current) => ({
-                          ...current,
-                          quietHoursStartHour: Number(event.target.value),
-                        }))
-                      }
+                      value={preferences.soulProfile.useCase}
+                      onChange={(event) => updateSoulField("useCase", event.target.value)}
                     >
-                      {Array.from({ length: 24 }, (_, hour) => (
-                        <option key={hour} value={hour}>
-                          {String(hour).padStart(2, "0")}:00
+                      {soulUseCaseOptions.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
                         </option>
                       ))}
                     </select>
                   </label>
                   <label className="setup-input-group">
-                    <span className="queue-meta">Quiet hours end</span>
-                    <select
-                      value={preferences.quietHoursEndHour}
-                      onChange={(event) =>
-                        setPreferences((current) => ({
-                          ...current,
-                          quietHoursEndHour: Number(event.target.value),
-                        }))
-                      }
-                    >
-                      {Array.from({ length: 24 }, (_, hour) => (
-                        <option key={hour} value={hour}>
-                          {String(hour).padStart(2, "0")}:00
-                        </option>
-                      ))}
-                    </select>
+                    <span className="setup-field-head">
+                      <span className="queue-meta">Gender</span>
+                      {renderPrivacyControl("genderIdentity")}
+                    </span>
+                    <input
+                      type="text"
+                      value={preferences.soulProfile.genderIdentity}
+                      placeholder="Optional"
+                      onChange={(event) => updateSoulField("genderIdentity", event.target.value)}
+                    />
+                  </label>
+                  <label className="setup-input-group">
+                    <span className="setup-field-head">
+                      <span className="queue-meta">Pronouns</span>
+                      {renderPrivacyControl("pronouns")}
+                    </span>
+                    <input
+                      type="text"
+                      value={preferences.soulProfile.pronouns}
+                      placeholder="Optional"
+                      onChange={(event) => updateSoulField("pronouns", event.target.value)}
+                    />
+                  </label>
+                  <label className="setup-input-group">
+                    <span className="setup-field-head">
+                      <span className="queue-meta">Culture / location</span>
+                      {renderPrivacyControl("cultureLocation")}
+                    </span>
+                    <input
+                      type="text"
+                      value={preferences.soulProfile.cultureLocation}
+                      placeholder="City, language, cultural context"
+                      onChange={(event) => updateSoulField("cultureLocation", event.target.value)}
+                    />
+                  </label>
+                  {showRomanticSetup ? (
+                    <>
+                      <label className="setup-input-group">
+                        <span className="setup-field-head">
+                          <span className="queue-meta">Romantic preference</span>
+                          {renderPrivacyControl("romanticPreference")}
+                        </span>
+                        <select
+                          value={preferences.soulProfile.romanticPreference}
+                          onChange={(event) => updateSoulField("romanticPreference", event.target.value)}
+                        >
+                          {romanticPreferenceOptions.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="setup-input-group">
+                        <span className="setup-field-head">
+                          <span className="queue-meta">Relationship status</span>
+                          {renderPrivacyControl("relationshipStatus")}
+                        </span>
+                        <input
+                          type="text"
+                          value={preferences.soulProfile.relationshipStatus}
+                          placeholder="Single, talking stage, partnered, complicated"
+                          onChange={(event) => updateSoulField("relationshipStatus", event.target.value)}
+                        />
+                      </label>
+                      <label className="setup-input-group setup-soul-wide">
+                        <span className="setup-field-head">
+                          <span className="queue-meta">Romantic interests</span>
+                          {renderPrivacyControl("romanticInterests")}
+                        </span>
+                        <textarea
+                          value={preferences.soulProfile.romanticInterests}
+                          rows={3}
+                          placeholder="Names, situations, boundaries, or what the assistant should know."
+                          onChange={(event) => updateSoulField("romanticInterests", event.target.value)}
+                        />
+                      </label>
+                    </>
+                  ) : null}
+                  <label className="setup-input-group setup-soul-wide">
+                    <span className="setup-field-head">
+                      <span className="queue-meta">Identity</span>
+                      {renderPrivacyControl("selfDescription")}
+                    </span>
+                    <textarea
+                      value={preferences.soulProfile.selfDescription}
+                      rows={4}
+                      placeholder="The version of you the assistant should stay loyal to."
+                      onChange={(event) => updateSoulField("selfDescription", event.target.value)}
+                    />
+                  </label>
+                  <label className="setup-input-group">
+                    <span className="setup-field-head">
+                      <span className="queue-meta">Values</span>
+                      {renderPrivacyControl("values")}
+                    </span>
+                    <textarea
+                      value={preferences.soulProfile.values}
+                      rows={3}
+                      placeholder="What matters most."
+                      onChange={(event) => updateSoulField("values", event.target.value)}
+                    />
+                  </label>
+                  <label className="setup-input-group">
+                    <span className="setup-field-head">
+                      <span className="queue-meta">Voice</span>
+                      {renderPrivacyControl("communicationStyle")}
+                    </span>
+                    <textarea
+                      value={preferences.soulProfile.communicationStyle}
+                      rows={3}
+                      placeholder="How you sound when you mean it."
+                      onChange={(event) => updateSoulField("communicationStyle", event.target.value)}
+                    />
+                  </label>
+                  <label className="setup-input-group">
+                    <span className="setup-field-head">
+                      <span className="queue-meta">Boundaries</span>
+                      {renderPrivacyControl("boundaries")}
+                    </span>
+                    <textarea
+                      value={preferences.soulProfile.boundaries}
+                      rows={3}
+                      placeholder="What should be protected."
+                      onChange={(event) => updateSoulField("boundaries", event.target.value)}
+                    />
+                  </label>
+                  <label className="setup-input-group">
+                    <span className="setup-field-head">
+                      <span className="queue-meta">People</span>
+                      {renderPrivacyControl("relationships")}
+                    </span>
+                    <textarea
+                      value={preferences.soulProfile.relationships}
+                      rows={3}
+                      placeholder="Roles, closeness, family, work, community."
+                      onChange={(event) => updateSoulField("relationships", event.target.value)}
+                    />
+                  </label>
+                  <label className="setup-input-group">
+                    <span className="setup-field-head">
+                      <span className="queue-meta">Direction</span>
+                      {renderPrivacyControl("goals")}
+                    </span>
+                    <textarea
+                      value={preferences.soulProfile.goals}
+                      rows={3}
+                      placeholder="What you are becoming or building."
+                      onChange={(event) => updateSoulField("goals", event.target.value)}
+                    />
+                  </label>
+                  <label className="setup-input-group">
+                    <span className="setup-field-head">
+                      <span className="queue-meta">Rhythm</span>
+                      {renderPrivacyControl("dailyRhythm")}
+                    </span>
+                    <textarea
+                      value={preferences.soulProfile.dailyRhythm}
+                      rows={3}
+                      placeholder="Busy hours, quiet hours, energy patterns."
+                      onChange={(event) => updateSoulField("dailyRhythm", event.target.value)}
+                    />
                   </label>
                 </div>
-              ) : null}
+
+                <div className="setup-soul-summary">
+                  {soulDefaults.map((item) => (
+                    <span key={item}>{item}</span>
+                  ))}
+                  {!setupAiToolAvailable && instanceState.setupAiSettingsToolConsumedAt ? (
+                    <span>Setup AI tool disabled.</span>
+                  ) : null}
+                </div>
+              </div>
+
+              <details className="setup-advanced setup-preference-details">
+                <summary>Customize defaults</summary>
+
+                <div className="setup-choice-group">
+                  <p className="queue-title">Automation mode</p>
+                  <div className="setup-choice-grid">
+                    {(["review_first", "autopilot"] as const).map((value) => (
+                      <button
+                        key={value}
+                        type="button"
+                        className={`setup-choice-card ${preferences.autonomyMode === value ? "setup-choice-card-active" : ""}`}
+                        onClick={() => setPreferences((current) => ({ ...current, autonomyMode: value }))}
+                      >
+                        <strong>{value === "review_first" ? "Review first" : "Automatic send"}</strong>
+                        <span>{resolveAutonomyPreview(value)}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="setup-choice-group">
+                  <p className="queue-title">Reply pace</p>
+                  <div className="setup-choice-grid">
+                    {(["measured", "deliberate", "unhurried"] as const).map((value) => (
+                      <button
+                        key={value}
+                        type="button"
+                        className={`setup-choice-card ${preferences.replyPace === value ? "setup-choice-card-active" : ""}`}
+                        onClick={() => setPreferences((current) => ({ ...current, replyPace: value }))}
+                      >
+                        <strong>{value === "measured" ? "Measured" : value === "deliberate" ? "Deliberate" : "Unhurried"}</strong>
+                        <span>{resolveReplyPacePreview(value)}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="setup-choice-group">
+                  <p className="queue-title">Voice matching</p>
+                  <div className="setup-choice-grid">
+                    {(["light", "balanced", "close"] as const).map((value) => (
+                      <button
+                        key={value}
+                        type="button"
+                        className={`setup-choice-card ${preferences.mimicryPreset === value ? "setup-choice-card-active" : ""}`}
+                        onClick={() => setPreferences((current) => ({ ...current, mimicryPreset: value }))}
+                      >
+                        <strong>{value === "light" ? "Light" : value === "balanced" ? "Balanced" : "Close"}</strong>
+                        <span>{resolveMimicryPreview(value)}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="setup-preferences-row">
+                  <label className="setup-toggle-card">
+                    <input
+                      type="checkbox"
+                      checked={preferences.memesEnabled}
+                      onChange={(event) => setPreferences((current) => ({ ...current, memesEnabled: event.target.checked }))}
+                    />
+                    <span>
+                      <strong>Enable meme tools</strong>
+                      <span>Show meme features from the start.</span>
+                    </span>
+                  </label>
+                  <label className="setup-toggle-card">
+                    <input
+                      type="checkbox"
+                      checked={preferences.instagramEnabled}
+                      onChange={(event) => setPreferences((current) => ({ ...current, instagramEnabled: event.target.checked }))}
+                    />
+                    <span>
+                      <strong>Enable Instagram setup</strong>
+                      <span>Show Instagram setup as an option.</span>
+                    </span>
+                  </label>
+                </div>
+
+                <label className="setup-toggle-card">
+                  <input
+                    type="checkbox"
+                    checked={preferences.quietHoursEnabled}
+                    onChange={(event) => setPreferences((current) => ({ ...current, quietHoursEnabled: event.target.checked }))}
+                  />
+                  <span>
+                    <strong>Quiet hours</strong>
+                    <span>Prevent automatic actions during overnight hours.</span>
+                  </span>
+                </label>
+
+                {preferences.quietHoursEnabled ? (
+                  <div className="setup-hours-grid">
+                    <label className="setup-input-group">
+                      <span className="queue-meta">Quiet hours start</span>
+                      <select
+                        value={preferences.quietHoursStartHour}
+                        onChange={(event) =>
+                          setPreferences((current) => ({
+                            ...current,
+                            quietHoursStartHour: Number(event.target.value),
+                          }))
+                        }
+                      >
+                        {Array.from({ length: 24 }, (_, hour) => (
+                          <option key={hour} value={hour}>
+                            {String(hour).padStart(2, "0")}:00
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="setup-input-group">
+                      <span className="queue-meta">Quiet hours end</span>
+                      <select
+                        value={preferences.quietHoursEndHour}
+                        onChange={(event) =>
+                          setPreferences((current) => ({
+                            ...current,
+                            quietHoursEndHour: Number(event.target.value),
+                          }))
+                        }
+                      >
+                        {Array.from({ length: 24 }, (_, hour) => (
+                          <option key={hour} value={hour}>
+                            {String(hour).padStart(2, "0")}:00
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                ) : null}
+              </details>
 
               <div className="wizard-actions">
                 <button
@@ -550,7 +895,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                         preferences,
                       },
                       {
-                        successMessage: "Preferences saved.",
+                        successMessage: "Defaults saved.",
                         nextStage: "connect",
                       },
                     );
@@ -569,28 +914,10 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
 
           {stage === "connect" ? (
             <div className="setup-onboarding-panel">
-              <div className="setup-guidance">
-                <p className="queue-title">Connection checklist</p>
-                <p className="queue-meta">
-                  Finish WhatsApp first. Instagram is optional, but the core onboarding should not be considered truly complete until WhatsApp is paired.
-                </p>
-              </div>
-              <div className="setup-connection-state-grid">
-                <div className="setup-connection-state-card">
-                  <p className="queue-meta">WhatsApp</p>
-                  <p className="setup-connection-state-value">{whatsappReady ? "Ready" : "Pending"}</p>
-                  <p className="queue-meta">{simplifyConnectionStatus(whatsappLiveState, "WhatsApp")}</p>
-                </div>
-                <div className="setup-connection-state-card">
-                  <p className="queue-meta">Instagram</p>
-                  <p className="setup-connection-state-value">{instagramReady ? "Ready" : "Optional"}</p>
-                  <p className="queue-meta">{simplifyConnectionStatus(instagramLiveState, "Instagram")}</p>
-                </div>
-              </div>
               <SetupWizard realtimeEnabled={realtimeEnabled} embedded initialScreen="whatsapp" setupSecret={setupSecret.trim()} />
               <div className="wizard-actions">
                 <button className="btn btn-primary" type="button" onClick={() => setStage("finish")}>
-                  Continue to finish
+                  Skip for now
                 </button>
                 <button className="btn btn-ghost" type="button" onClick={() => setStage("preferences")}>
                   Back
@@ -602,18 +929,14 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
           {stage === "finish" ? (
             <div className="setup-onboarding-panel">
               <div className="setup-completion-banner">
-                <p className="setup-poster-kicker">Completion check</p>
-                <h3>Seal the instance and enter the workspace.</h3>
+                <p className="setup-poster-kicker">Review</p>
+                <h3>Check the profile and defaults before launch.</h3>
                 <p>
-                  Save the instance as complete once the gate exists and the primary connection state is where you want it. You can revisit setup later from navigation.
+                  Privacy choices decide what stays setup-only and what can shape future AI replies.
                 </p>
               </div>
 
               <div className="setup-summary-grid">
-                <div className="setup-summary-card">
-                  <p className="queue-meta">PIN source</p>
-                  <p className="setup-summary-value">{instanceState.pinEnabled ? instanceState.pinSource : "missing"}</p>
-                </div>
                 <div className="setup-summary-card">
                   <p className="queue-meta">Autonomy</p>
                   <p className="setup-summary-value">{preferences.autonomyMode === "autopilot" ? "autopilot" : "review first"}</p>
@@ -623,16 +946,45 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                   <p className="setup-summary-value">{preferences.replyPace}</p>
                 </div>
                 <div className="setup-summary-card">
-                  <p className="queue-meta">WhatsApp</p>
-                  <p className="setup-summary-value">{whatsappReady ? "connected" : realtimeEnabled ? "pending" : "not verified"}</p>
+                  <p className="queue-meta">Voice matching</p>
+                  <p className="setup-summary-value">{preferences.mimicryPreset}</p>
                 </div>
+                <div className="setup-summary-card">
+                  <p className="queue-meta">Soul fields</p>
+                  <p className="setup-summary-value">{visibleSoulReviewFields.length || 0} saved</p>
+                </div>
+              </div>
+
+              <div className="setup-review-panel">
+                <div className="setup-review-head">
+                  <div>
+                    <p className="queue-meta">Soul profile</p>
+                    <p className="queue-title">Saved fields and privacy</p>
+                  </div>
+                  <button className="btn btn-ghost" type="button" onClick={() => setStage("preferences")}>
+                    Edit profile
+                  </button>
+                </div>
+                {visibleSoulReviewFields.length > 0 ? (
+                  <div className="setup-review-list">
+                    {visibleSoulReviewFields.map(({ key, label }) => (
+                      <div key={key} className="setup-review-row">
+                        <div>
+                          <strong>{label}</strong>
+                          <span>{preferences.soulProfile[key]}</span>
+                        </div>
+                        <em>{formatPrivacyLabel(preferences.soulPrivacy[key])}</em>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="empty-line">No soul profile fields filled yet.</p>
+                )}
               </div>
 
               {!canFinish ? (
                 <p className="instance-lock-error">
-                  {!canSaveSecurity
-                    ? "Save a valid instance PIN before finishing setup."
-                    : "Connect WhatsApp before marking setup complete."}
+                  Save a valid PIN before finishing setup.
                 </p>
               ) : null}
 
@@ -652,17 +1004,40 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                         issueSession: !envManagedPin,
                       },
                       {
-                        successMessage: "Setup completed.",
+                        successMessage: "Setup complete.",
                         redirectOnSuccess: true,
                       },
                     );
                   }}
                 >
-                  {finishRecord.pending ? "Completing..." : instanceState.setupCompleted ? "Return to dashboard" : "Complete setup"}
+                  {finishRecord.pending ? "Finishing..." : instanceState.setupCompleted ? "Open dashboard" : "Finish setup"}
                 </button>
                 <button className="btn btn-ghost" type="button" onClick={() => setStage("connect")}>
                   Back
                 </button>
+                {instanceState.setupCompleted ? (
+                  <button
+                    className="btn btn-ghost"
+                    type="button"
+                    disabled={finishRecord.pending}
+                    aria-disabled={finishRecord.pending}
+                    onClick={() => {
+                      void saveInstanceSetup(
+                        "setup:onboarding:finish",
+                        {
+                          preferences,
+                          beginFullSetup: true,
+                        },
+                        {
+                          successMessage: "Full setup restarted.",
+                          nextStage: "security",
+                        },
+                      );
+                    }}
+                  >
+                    Run setup again
+                  </button>
+                ) : null}
               </div>
             </div>
           ) : null}

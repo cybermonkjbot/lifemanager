@@ -24,6 +24,24 @@ function formatTargetType(targetType: "contact" | "group") {
   return targetType === "group" ? "Group" : "Contact";
 }
 
+function normalizeTarget(value: string) {
+  return value.trim().toLowerCase();
+}
+
+function isLikelyTargetJid(value: string) {
+  const normalized = normalizeTarget(value);
+  if (!normalized.includes("@")) {
+    return false;
+  }
+  if (normalized.endsWith("@s.whatsapp.net") || normalized.endsWith("@g.us")) {
+    return true;
+  }
+  if (normalized === "status@broadcast" || normalized === "ig:story:broadcast") {
+    return true;
+  }
+  return false;
+}
+
 function RulesContent() {
   const upsertIgnoreRule = useMutation(api.rules.upsertIgnoreRule);
   const setIgnoreRuleEnabled = useMutation(api.rules.setIgnoreRuleEnabled);
@@ -31,6 +49,7 @@ function RulesContent() {
   const { runAction, getRecord, notices, dismissNotice } = useActionStateRegistry();
 
   const [targetValue, setTargetValue] = useState("");
+  const [search, setSearch] = useState("");
   const key = "rules:add-ignore";
 
   const rules = useQuery(api.rules.list, {}) as
@@ -52,8 +71,9 @@ function RulesContent() {
     [contacts],
   );
 
-  const normalizedTarget = targetValue.trim();
+  const normalizedTarget = normalizeTarget(targetValue);
   const inferredTargetType = inferTargetType(normalizedTarget);
+  const invalidTarget = normalizedTarget.length > 0 && !isLikelyTargetJid(normalizedTarget);
 
   const duplicateActiveRule = useMemo(() => {
     if (!normalizedTarget) {
@@ -61,16 +81,28 @@ function RulesContent() {
     }
 
     return ignoreRules.some(
-      (rule) => rule.targetType === inferredTargetType && rule.enabled && rule.targetValue === normalizedTarget,
+      (rule) =>
+        rule.targetType === inferredTargetType && rule.enabled && normalizeTarget(rule.targetValue) === normalizedTarget,
     );
   }, [ignoreRules, inferredTargetType, normalizedTarget]);
+  const normalizedSearch = search.trim().toLowerCase();
+  const visibleRules = useMemo(() => {
+    if (!normalizedSearch) {
+      return ignoreRules;
+    }
+    return ignoreRules.filter((rule) => {
+      const haystack = `${rule.targetType} ${rule.targetValue} ${rule.enabled ? "enabled" : "disabled"}`.toLowerCase();
+      return haystack.includes(normalizedSearch);
+    });
+  }, [ignoreRules, normalizedSearch]);
+  const enabledRulesCount = useMemo(() => ignoreRules.filter((rule) => rule.enabled).length, [ignoreRules]);
 
   const record = getRecord(key);
 
   const onSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
 
-    if (!normalizedTarget || duplicateActiveRule) {
+    if (!normalizedTarget || duplicateActiveRule || invalidTarget) {
       return;
     }
 
@@ -91,130 +123,156 @@ function RulesContent() {
   };
 
   return (
-    <section className="panel-grid two-col">
-      <article className="panel-card">
-        <ActionNotices notices={notices} onDismiss={dismissNotice} />
-        <h3>Add Ignore Target</h3>
-        <form onSubmit={onSubmit} className="stack compact" aria-busy={record.pending}>
-          <label className="stack compact">
-            <span className="queue-meta">Select from previous conversations</span>
-            <select
-              value=""
-              onChange={(event) => {
-                if (!event.target.value) {
-                  return;
-                }
-                setTargetValue(event.target.value);
-              }}
-              disabled={record.pending || contactsLoading}
-              aria-disabled={record.pending || contactsLoading}
+    <section className="rules-workspace">
+      <ActionNotices notices={notices} onDismiss={dismissNotice} />
+
+      <div className="panel-grid two-col rules-control-grid">
+        <article className="panel-card rules-add-card">
+          <h3>Add Ignore Target</h3>
+          <p className="queue-meta">Choose an existing conversation or paste a target JID.</p>
+          <form onSubmit={onSubmit} className="stack compact rules-form" aria-busy={record.pending}>
+            <label className="stack compact">
+              <span className="queue-meta">Select from previous conversations</span>
+              <select
+                value=""
+                onChange={(event) => {
+                  if (!event.target.value) {
+                    return;
+                  }
+                  setTargetValue(event.target.value);
+                }}
+                disabled={record.pending || contactsLoading}
+                aria-disabled={record.pending || contactsLoading}
+              >
+                <option value="">{contactsLoading ? "Loading conversations..." : "Choose a conversation"}</option>
+                {knownContacts.map((contact) => (
+                  <option key={contact._id} value={contact.jid}>
+                    {contact.title ? `${contact.title} (${contact.jid})` : contact.jid}
+                    {` · ${formatTargetType(contact.threadKind === "group" ? "group" : "contact")}`}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="stack compact">
+              <span className="queue-meta">Manual target JID</span>
+              <input
+                type="text"
+                name="targetValue"
+                placeholder="12345@s.whatsapp.net or 12345@g.us"
+                value={targetValue}
+                onChange={(event) => setTargetValue(event.target.value)}
+                aria-disabled={record.pending || rulesLoading || contactsLoading}
+                disabled={record.pending || rulesLoading || contactsLoading}
+              />
+            </label>
+
+            <p className="queue-meta">Detected type: {formatTargetType(inferredTargetType)}</p>
+            <button
+              type="submit"
+              className="btn btn-primary"
+              disabled={!normalizedTarget || duplicateActiveRule || invalidTarget || record.pending || rulesLoading || contactsLoading}
+              aria-disabled={!normalizedTarget || duplicateActiveRule || invalidTarget || record.pending || rulesLoading || contactsLoading}
             >
-              <option value="">{contactsLoading ? "Loading conversations..." : "Choose a conversation"}</option>
-              {knownContacts.map((contact) => (
-                <option key={contact._id} value={contact.jid}>
-                  {contact.title ? `${contact.title} (${contact.jid})` : contact.jid}
-                  {` · ${formatTargetType(contact.threadKind === "group" ? "group" : "contact")}`}
-                </option>
-              ))}
-            </select>
+              {record.pending ? "Adding..." : "Add Ignore Rule"}
+            </button>
+          </form>
+          {rulesLoading || contactsLoading ? <LoadingIndicator label="Loading rules…" /> : null}
+
+          {duplicateActiveRule ? (
+            <p className="queue-meta action-inline-error" role="status">
+              This {inferredTargetType === "group" ? "group" : "contact"} is already ignored.
+            </p>
+          ) : null}
+          {invalidTarget ? (
+            <p className="queue-meta action-inline-error" role="status">
+              Enter a valid target JID like `2348012345678@s.whatsapp.net` or `1234567890-123456@g.us`.
+            </p>
+          ) : null}
+
+          {record.error ? (
+            <p className="queue-meta action-inline-error" role="alert">
+              {record.error}
+            </p>
+          ) : null}
+        </article>
+
+        <article className="panel-card rules-list-card">
+          <div className="rules-list-heading">
+            <h3>Active Ignore Rules</h3>
+            <p className="queue-meta">
+              Total: {ignoreRules.length} · Enabled: {enabledRulesCount}
+            </p>
+          </div>
+          <label className="stack compact search-field-group">
+            <span className="queue-meta">Search rules</span>
+            <input
+              type="search"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Search by target or type..."
+            />
           </label>
-
-          <input
-            type="text"
-            name="targetValue"
-            placeholder="12345@s.whatsapp.net or 12345@g.us"
-            value={targetValue}
-            onChange={(event) => setTargetValue(event.target.value)}
-            required
-            aria-disabled={record.pending || rulesLoading || contactsLoading}
-            disabled={record.pending || rulesLoading || contactsLoading}
-          />
-          <p className="queue-meta">Detected type: {formatTargetType(inferredTargetType)}</p>
-          <button
-            type="submit"
-            className="btn btn-primary"
-            disabled={!normalizedTarget || duplicateActiveRule || record.pending || rulesLoading || contactsLoading}
-            aria-disabled={!normalizedTarget || duplicateActiveRule || record.pending || rulesLoading || contactsLoading}
-          >
-            {record.pending ? "Adding..." : "Add Ignore Rule"}
-          </button>
-        </form>
-        {rulesLoading || contactsLoading ? <LoadingIndicator label="Loading rules and previous conversations…" /> : null}
-
-        {duplicateActiveRule ? (
-          <p className="queue-meta action-inline-error" role="status">
-            This {inferredTargetType === "group" ? "group" : "contact"} is already ignored.
-          </p>
-        ) : null}
-
-        {record.error ? (
-          <p className="queue-meta action-inline-error" role="alert">
-            {record.error}
-          </p>
-        ) : null}
-      </article>
-
-      <article className="panel-card">
-        <h3>Active Ignore Rules</h3>
-        <div className="stack">
-          {rulesLoading ? <LoadingBlock label="Loading active ignore rules…" rows={3} compact /> : null}
-          {ignoreRules.map((rule) => (
-            <div key={rule._id} className="queue-item">
-              <p className="queue-title">{rule.targetType}</p>
-              <p className="queue-body">{rule.targetValue}</p>
-              <p className="queue-meta">Enabled: {rule.enabled ? "Yes" : "No"}</p>
-              <div className="queue-actions">
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  onClick={() =>
-                    void runAction(
-                      `rules:toggle:${rule._id}`,
-                      async () => {
-                        await setIgnoreRuleEnabled({
-                          ruleId: rule._id as Id<"ignoreRules">,
-                          enabled: !rule.enabled,
-                        });
-                      },
-                      {
-                        pendingLabel: rule.enabled ? "Disabling..." : "Enabling...",
-                        successMessage: rule.enabled ? "Rule disabled." : "Rule enabled.",
-                      },
-                    )
-                  }
-                  disabled={getRecord(`rules:toggle:${rule._id}`).pending}
-                  aria-disabled={getRecord(`rules:toggle:${rule._id}`).pending}
-                >
-                  {rule.enabled ? "Disable" : "Enable"}
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  onClick={() =>
-                    void runAction(
-                      `rules:delete:${rule._id}`,
-                      async () => {
-                        await deleteIgnoreRule({
-                          ruleId: rule._id as Id<"ignoreRules">,
-                        });
-                      },
-                      {
-                        pendingLabel: "Deleting...",
-                        successMessage: "Rule deleted.",
-                      },
-                    )
-                  }
-                  disabled={getRecord(`rules:delete:${rule._id}`).pending}
-                  aria-disabled={getRecord(`rules:delete:${rule._id}`).pending}
-                >
-                  Delete
-                </button>
+          <div className="stack rules-list">
+            {rulesLoading ? <LoadingBlock label="Loading active ignore rules…" rows={3} compact /> : null}
+            {visibleRules.map((rule) => (
+              <div key={rule._id} className="queue-item rules-row">
+                <p className="queue-title">{rule.targetType}</p>
+                <p className="queue-body">{rule.targetValue}</p>
+                <p className="queue-meta">Enabled: {rule.enabled ? "Yes" : "No"}</p>
+                <div className="queue-actions rules-item-actions">
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    onClick={() =>
+                      void runAction(
+                        `rules:toggle:${rule._id}`,
+                        async () => {
+                          await setIgnoreRuleEnabled({
+                            ruleId: rule._id as Id<"ignoreRules">,
+                            enabled: !rule.enabled,
+                          });
+                        },
+                        {
+                          pendingLabel: rule.enabled ? "Disabling..." : "Enabling...",
+                          successMessage: rule.enabled ? "Rule disabled." : "Rule enabled.",
+                        },
+                      )
+                    }
+                    disabled={getRecord(`rules:toggle:${rule._id}`).pending}
+                    aria-disabled={getRecord(`rules:toggle:${rule._id}`).pending}
+                  >
+                    {rule.enabled ? "Disable" : "Enable"}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    onClick={() =>
+                      void runAction(
+                        `rules:delete:${rule._id}`,
+                        async () => {
+                          await deleteIgnoreRule({
+                            ruleId: rule._id as Id<"ignoreRules">,
+                          });
+                        },
+                        {
+                          pendingLabel: "Deleting...",
+                          successMessage: "Rule deleted.",
+                        },
+                      )
+                    }
+                    disabled={getRecord(`rules:delete:${rule._id}`).pending}
+                    aria-disabled={getRecord(`rules:delete:${rule._id}`).pending}
+                  >
+                    Delete
+                  </button>
+                </div>
               </div>
-            </div>
-          ))}
-          {!rulesLoading && ignoreRules.length === 0 ? <p className="empty-line">No ignore rules yet.</p> : null}
-        </div>
-      </article>
+            ))}
+            {!rulesLoading && visibleRules.length === 0 ? <p className="empty-line">No ignore rules match this search.</p> : null}
+          </div>
+        </article>
+      </div>
     </section>
   );
 }

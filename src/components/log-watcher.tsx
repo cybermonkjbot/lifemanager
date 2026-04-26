@@ -4,6 +4,7 @@ import { LoadingBlock } from "@/components/loading-state";
 import { formatDateTime, trim } from "@/lib/format";
 import { api } from "../../convex/_generated/api";
 import { useQuery } from "convex/react";
+import { useState } from "react";
 
 function sourceLabel(source: string) {
   if (source === "worker") return "Worker";
@@ -13,7 +14,12 @@ function sourceLabel(source: string) {
   return source;
 }
 
-export function LogWatcher() {
+type LogWatcherProps = {
+  defaultExpanded?: boolean;
+};
+
+export function LogWatcher({ defaultExpanded = true }: LogWatcherProps) {
+  const [expanded, setExpanded] = useState(defaultExpanded);
   const logs = useQuery(api.system.logFeed, { limit: 70 }) as
     | Array<{
         id: string;
@@ -28,12 +34,27 @@ export function LogWatcher() {
   const logRows = logs || [];
 
   return (
-    <section className="logwatcher" aria-live="polite">
+    <section className={`logwatcher ${expanded ? "logwatcher-expanded" : "logwatcher-collapsed"}`} aria-live="polite">
       <div className="logwatcher-header">
-        <h3>Runtime Logs</h3>
+        <div className="logwatcher-heading">
+          <h3>Runtime Logs</h3>
+          <p className="logwatcher-summary">
+            {logsLoading ? "Connecting" : `${logRows.length} recent event${logRows.length === 1 ? "" : "s"}`}
+          </p>
+        </div>
+        <button
+          type="button"
+          className="btn btn-icon logwatcher-toggle"
+          aria-controls="runtime-log-list"
+          aria-expanded={expanded}
+          aria-label={expanded ? "Collapse runtime logs" : "Expand runtime logs"}
+          onClick={() => setExpanded((current) => !current)}
+        >
+          <span className={`logwatcher-chevron ${expanded ? "logwatcher-chevron-down" : "logwatcher-chevron-up"}`} aria-hidden="true" />
+        </button>
       </div>
 
-      <div className="logwatcher-list">
+      <div id="runtime-log-list" className="logwatcher-list" hidden={!expanded}>
         {logsLoading ? <LoadingBlock label="Connecting to runtime log stream…" rows={3} compact /> : null}
         {logRows.map((log) => (
           <div key={log.id} className="logwatcher-row">

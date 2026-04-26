@@ -134,6 +134,7 @@ export async function generateTodoTitleWithAi(args: TodoTitleGenerationArgs) {
         sourceText: args.sourceText,
       }),
       threadId: args.threadId,
+      purpose: "todo_title",
     }),
   });
 

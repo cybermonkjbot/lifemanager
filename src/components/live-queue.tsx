@@ -7,14 +7,14 @@ import { ProviderFilter, type ProviderFilterValue } from "@/components/provider-
 import { UIModal } from "@/components/ui-modal";
 import { formatDateTime, formatDateTimeWithRelative, trim } from "@/lib/format";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
-import { followupRescheduleDueAt, type FollowupItem } from "@/lib/ui/followups";
+import { followupRescheduleDueAt, generateFollowupReasonWithAi, type FollowupItem } from "@/lib/ui/followups";
 import type { MediaPreviewResource } from "@/lib/ui/media";
 import { generateTodoTitleWithAi } from "@/lib/ui/todos";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { useMutation, useQuery } from "convex/react";
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 
 type NeedsReplyItem = {
   _id: string;
@@ -23,7 +23,7 @@ type NeedsReplyItem = {
   delayMs: number;
   typingMs: number;
   text: string;
-  sendKind?: "text" | "reaction" | "sticker" | "meme";
+  sendKind?: "text" | "reaction" | "sticker" | "meme" | "voice_note";
   mediaAssetId?: string;
   mediaCaption?: string;
   mediaPreview?: MediaPreviewResource | null;
@@ -53,6 +53,12 @@ type TodoCandidateItem = {
         direction?: "inbound" | "outbound";
       }
     | null;
+};
+
+type OpenTodoItem = {
+  _id: string;
+  title: string;
+  dueAt?: number;
 };
 
 type GuardrailFlagItem = {
@@ -90,6 +96,7 @@ function QueueContent() {
   const cancelFollowup = useMutation(api.followups.cancel);
   const clearAllFollowups = useMutation(api.followups.clearAll);
   const createTodoFromCandidate = useMutation(api.todos.fromCandidate);
+  const setTodoStatus = useMutation(api.todos.setTodoStatus);
   const updateTodoCandidateTitle = useMutation(api.todos.updateCandidateTitle);
   const clearAllTodos = useMutation(api.todos.clearAll);
   const resolveGuardrail = useMutation(api.queue.resolveGuardrail);
@@ -100,22 +107,104 @@ function QueueContent() {
   const [tab, setTab] = useState<QueueTab>("needsReply");
   const [providerFilter, setProviderFilter] = useState<ProviderFilterValue>("all");
   const [reviewState, setReviewState] = useState<QueueReviewState>(null);
+  const [editingDraftId, setEditingDraftId] = useState<string | null>(null);
+  const [editingDraftText, setEditingDraftText] = useState("");
+  const [autoTodoTitles, setAutoTodoTitles] = useState<Record<string, string>>({});
+  const [autoFollowupReasons, setAutoFollowupReasons] = useState<Record<string, string>>({});
+  const autoTodoAttemptedRef = useRef<Set<string>>(new Set());
+  const autoFollowupAttemptedRef = useRef<Set<string>>(new Set());
 
   const queue = useQuery(api.queue.list, { provider: providerFilter }) as QueueData | undefined;
+  const todosData = useQuery(api.todos.list, { todoLimit: 120, candidateLimit: 1 }) as
+    | { todos: OpenTodoItem[]; candidates: TodoCandidateItem[] }
+    | undefined;
   const queueLoading = queue === undefined;
+  const todosLoading = todosData === undefined;
   const needsReply = queue?.needsReply || [];
   const followupConfirmations = queue?.followupConfirmations || [];
   const todoCandidates = queue?.todoCandidates || [];
+  const openTodos = todosData?.todos || [];
   const guardrailFlags = queue?.guardrailFlags || [];
+
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      for (const item of todoCandidates) {
+        if (autoTodoAttemptedRef.current.has(item._id)) {
+          continue;
+        }
+        autoTodoAttemptedRef.current.add(item._id);
+        try {
+          const generatedTitle = await generateTodoTitleWithAi({
+            currentTitle: item.title,
+            sourceText: item.sourceMessage?.text,
+            threadId: item.thread?._id,
+          });
+          if (cancelled) {
+            return;
+          }
+          setAutoTodoTitles((current) => ({
+            ...current,
+            [item._id]: generatedTitle,
+          }));
+          if (generatedTitle.trim() !== item.title.trim()) {
+            await updateTodoCandidateTitle({
+              candidateId: item._id as Id<"todoCandidates">,
+              title: generatedTitle,
+            });
+          }
+        } catch {
+          // Best-effort background enhancement.
+        }
+      }
+    };
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [todoCandidates, updateTodoCandidateTitle]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      for (const item of followupConfirmations) {
+        if (autoFollowupAttemptedRef.current.has(item._id)) {
+          continue;
+        }
+        autoFollowupAttemptedRef.current.add(item._id);
+        try {
+          const generatedReason = await generateFollowupReasonWithAi({
+            currentReason: item.reason,
+            sourceText: item.sourceSnippet || item.sourceMessage?.text,
+            dueAt: item.dueAt,
+            threadId: item.thread?._id,
+          });
+          if (cancelled) {
+            return;
+          }
+          setAutoFollowupReasons((current) => ({
+            ...current,
+            [item._id]: generatedReason,
+          }));
+        } catch {
+          // Best-effort background enhancement.
+        }
+      }
+    };
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [followupConfirmations]);
 
   const counts = useMemo(
     () => ({
       needsReply: needsReply.length,
       followups: followupConfirmations.length,
-      todos: todoCandidates.length,
+      todos: todoCandidates.length + openTodos.length,
       guardrails: guardrailFlags.length,
     }),
-    [followupConfirmations.length, guardrailFlags.length, needsReply.length, todoCandidates.length],
+    [followupConfirmations.length, guardrailFlags.length, needsReply.length, openTodos.length, todoCandidates.length],
   );
 
   const closeReviewOnSuccess = (
@@ -226,11 +315,7 @@ function QueueContent() {
     void runAction(
       key,
       async () => {
-        const generatedTitle = await generateTodoTitleWithAi({
-          currentTitle: item.title,
-          sourceText: item.sourceMessage?.text,
-          threadId: item.thread?._id,
-        });
+        const generatedTitle = (autoTodoTitles[item._id] || item.title).trim();
         await updateTodoCandidateTitle({
           candidateId: item._id as Id<"todoCandidates">,
           title: generatedTitle,
@@ -238,8 +323,8 @@ function QueueContent() {
         await createTodoFromCandidate({ candidateId: item._id as Id<"todoCandidates"> });
       },
       {
-        pendingLabel: "Generating TODO...",
-        successMessage: "TODO generated with AI and added.",
+        pendingLabel: "Adding TODO...",
+        successMessage: "Task added.",
       },
     ).then((outcome) => closeReviewOnSuccess("todos", item._id, outcome));
   };
@@ -258,11 +343,35 @@ function QueueContent() {
     ).then((outcome) => closeReviewOnSuccess("needsReply", draftId, outcome));
   };
 
-  const onEdit = (draftId: string, text: string) => {
-    const edited = window.prompt("Edit draft text", text);
-    if (edited === null || !edited.trim()) {
+  const onMarkTodoDone = (todoId: string) => {
+    const key = `todo:done:${todoId}`;
+    void runAction(
+      key,
+      async () => {
+        await setTodoStatus({
+          todoId: todoId as Id<"todos">,
+          status: "done",
+        });
+      },
+      {
+        pendingLabel: "Marking done...",
+        successMessage: "Marked as done.",
+      },
+    );
+  };
+
+  const openEdit = (draftId: string, text: string) => {
+    setEditingDraftId(draftId);
+    setEditingDraftText(text || "");
+  };
+
+  const onSaveEdit = (draftId: string) => {
+    const edited = editingDraftText.trim();
+    if (!edited) {
+      pushNotice("error", "Draft text cannot be empty.");
       return;
     }
+
     const key = `edit:${draftId}`;
     void runAction(
       key,
@@ -273,7 +382,47 @@ function QueueContent() {
         pendingLabel: "Saving edit...",
         successMessage: "Draft updated.",
       },
-    );
+    ).then((outcome) => {
+      if (!outcome.executed || outcome.error) {
+        return;
+      }
+      setEditingDraftId((current) => (current === draftId ? null : current));
+    });
+  };
+
+  const onCancelEdit = (draftId: string) => {
+    setEditingDraftId((current) => (current === draftId ? null : current));
+  };
+
+  const onNeedsReplyShortcut = (event: KeyboardEvent<HTMLDivElement>, item: NeedsReplyItem) => {
+    const target = event.target as HTMLElement | null;
+    if (
+      target &&
+      (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable)
+    ) {
+      return;
+    }
+
+    const key = event.key.toLowerCase();
+    if (key === "a") {
+      event.preventDefault();
+      onSend(item._id);
+      return;
+    }
+    if (key === "s") {
+      event.preventDefault();
+      onSnooze(item._id);
+      return;
+    }
+    if (key === "r") {
+      event.preventDefault();
+      onReject(item._id);
+      return;
+    }
+    if (key === "e") {
+      event.preventDefault();
+      openEdit(item._id, item.text || "");
+    }
   };
 
   const onResolveGuardrail = (guardrailEventId: string) => {
@@ -288,8 +437,8 @@ function QueueContent() {
         });
       },
       {
-        pendingLabel: "Resolving guardrail...",
-        successMessage: "Guardrail resolved.",
+        pendingLabel: "Resolving safety flag...",
+        successMessage: "Safety flag resolved.",
       },
     ).then((outcome) => closeReviewOnSuccess("guardrails", guardrailEventId, outcome));
   };
@@ -312,14 +461,14 @@ function QueueContent() {
         }
       },
       {
-        pendingLabel: mode === "send" ? "Sending all pending drafts..." : "Snoozing all pending drafts...",
-        successMessage: mode === "send" ? "All pending drafts queued to send." : "All pending drafts snoozed for 30 minutes.",
+        pendingLabel: mode === "send" ? "Sending all review drafts..." : "Snoozing all review drafts...",
+        successMessage: mode === "send" ? "All review drafts queued to send." : "All review drafts snoozed for 30 minutes.",
       },
     );
   };
 
   const onClearNeedsReply = () => {
-    const confirmed = window.confirm("Clear all items in Needs Reply? This will reject all pending drafts.");
+    const confirmed = window.confirm("Discard every draft in Needs reply? This rejects all pending reply drafts.");
     if (!confirmed) {
       return;
     }
@@ -335,17 +484,17 @@ function QueueContent() {
           }
         }
         await clearAllBacklog({});
-        pushNotice("info", `Cleared ${cleared} pending draft(s).`);
+        pushNotice("info", `Discarded ${cleared} pending draft${cleared === 1 ? "" : "s"}.`);
       },
       {
-        pendingLabel: "Clearing needs reply...",
-        successMessage: "Needs Reply cleared.",
+        pendingLabel: "Discarding reply drafts...",
+        successMessage: "Reply drafts discarded.",
       },
     );
   };
 
   const onClearFollowups = () => {
-    const confirmed = window.confirm("Clear all follow-ups? This dismisses all open follow-up items.");
+    const confirmed = window.confirm("Dismiss every open follow-up? Suggested, confirmed, and queued follow-ups will be closed.");
     if (!confirmed) {
       return;
     }
@@ -360,17 +509,17 @@ function QueueContent() {
             break;
           }
         }
-        pushNotice("info", `Cleared ${cleared} follow-up item(s).`);
+        pushNotice("info", `Dismissed ${cleared} follow-up${cleared === 1 ? "" : "s"}.`);
       },
       {
-        pendingLabel: "Clearing follow-ups...",
-        successMessage: "Follow-ups cleared.",
+        pendingLabel: "Dismissing follow-ups...",
+        successMessage: "Follow-ups dismissed.",
       },
     );
   };
 
   const onClearTodos = () => {
-    const confirmed = window.confirm("Clear all TODOs and TODO candidates?");
+    const confirmed = window.confirm("Close every open task and task suggestion?");
     if (!confirmed) {
       return;
     }
@@ -387,17 +536,17 @@ function QueueContent() {
             break;
           }
         }
-        pushNotice("info", `Cleared ${clearedTodos} todo(s) and ${clearedCandidates} candidate(s).`);
+        pushNotice("info", `Closed ${clearedTodos} task${clearedTodos === 1 ? "" : "s"} and ${clearedCandidates} suggestion${clearedCandidates === 1 ? "" : "s"}.`);
       },
       {
-        pendingLabel: "Clearing TODOs...",
-        successMessage: "TODOs cleared.",
+        pendingLabel: "Closing tasks...",
+        successMessage: "Tasks closed.",
       },
     );
   };
 
   const onClearGuardrails = () => {
-    const confirmed = window.confirm("Clear all guardrails? This resolves all active guardrail flags.");
+    const confirmed = window.confirm("Resolve every safety flag? Related blocked drafts will be closed.");
     if (!confirmed) {
       return;
     }
@@ -418,11 +567,11 @@ function QueueContent() {
             break;
           }
         }
-        pushNotice("info", `Cleared ${cleared} guardrail flag(s); closed ${closedDrafts} draft(s).`);
+        pushNotice("info", `Resolved ${cleared} safety flag${cleared === 1 ? "" : "s"}; closed ${closedDrafts} draft${closedDrafts === 1 ? "" : "s"}.`);
       },
       {
-        pendingLabel: "Clearing guardrails...",
-        successMessage: "Guardrails cleared.",
+        pendingLabel: "Resolving safety flags...",
+        successMessage: "Safety flags resolved.",
       },
     );
   };
@@ -450,7 +599,7 @@ function QueueContent() {
           </div>
         );
       })}
-      {!queueLoading && needsReply.length === 0 ? <p className="empty-line">No pending replies.</p> : null}
+      {!queueLoading && needsReply.length === 0 ? <p className="empty-line">No reply drafts waiting for review.</p> : null}
     </div>
   );
 
@@ -463,12 +612,13 @@ function QueueContent() {
         const dismissRecord = getRecord(`followup:cancel:${item._id}`);
         const busy = record.pending || dismissRecord.pending;
         const sourceText = item.sourceSnippet?.trim() || item.sourceMessage?.text?.trim() || "";
+        const reasonText = autoFollowupReasons[item._id] || item.reason;
         return (
           <div key={item._id} className="queue-item queue-item-condensed" aria-busy={busy}>
             <div>
               <p className="queue-title">{item.thread?.title || item.thread?.jid || "Unknown thread"}</p>
               <p className="queue-meta">Due: {formatDateTimeWithRelative(item.dueAt)}</p>
-              <p className="queue-body">{item.reason}</p>
+              <p className="queue-body">{reasonText}</p>
               {sourceText ? <p className="queue-meta">Source: {trim(sourceText, 180)}</p> : null}
             </div>
             <div className="queue-actions">
@@ -497,21 +647,46 @@ function QueueContent() {
           </div>
         );
       })}
-      {!queueLoading && followupConfirmations.length === 0 ? <p className="empty-line">No follow-up confirmations pending.</p> : null}
+      {!queueLoading && followupConfirmations.length === 0 ? <p className="empty-line">No follow-ups waiting for review.</p> : null}
     </div>
   );
 
   const renderTodos = () => (
     <div className="stack">
-      {queueLoading ? <LoadingBlock label="Loading TODO candidates…" rows={2} compact /> : null}
+      <p className="queue-meta">Open tasks ({openTodos.length})</p>
+      {todosLoading ? <LoadingBlock label="Loading open tasks…" rows={2} compact /> : null}
+      {openTodos.map((item) => (
+        <div key={item._id} className="queue-item queue-item-condensed" aria-busy={isPending(`todo:done:${item._id}`)}>
+          <div>
+            <p className="queue-title">{item.title}</p>
+            <p className="queue-meta">Status: Open{item.dueAt ? ` · Due: ${formatDateTime(item.dueAt)}` : ""}</p>
+          </div>
+          <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={() => onMarkTodoDone(item._id)}
+            disabled={isPending(`todo:done:${item._id}`)}
+            aria-disabled={isPending(`todo:done:${item._id}`)}
+          >
+            {isPending(`todo:done:${item._id}`) ? "Marking..." : "Mark done"}
+          </button>
+        </div>
+      ))}
+      {!todosLoading && openTodos.length === 0 ? <p className="empty-line">No open conversation tasks.</p> : null}
+
+      <p className="queue-meta">Suggested tasks ({todoCandidates.length})</p>
+      {queueLoading ? <LoadingBlock label="Loading task suggestions…" rows={2} compact /> : null}
       {todoCandidates.map((item) => {
         const key = `todo:${item._id}`;
         const record = getRecord(key);
+        const title = autoTodoTitles[item._id] || item.title;
+        const sourceText = item.sourceMessage?.text?.trim() || "";
         return (
           <div key={item._id} className="queue-item queue-item-condensed" aria-busy={record.pending}>
             <div>
-              <p className="queue-title">{item.title}</p>
-              <p className="queue-meta">Suggested due: {formatDateTime(item.suggestedDueAt)}</p>
+              <p className="queue-title">{title}</p>
+              <p className="queue-meta">Suggested from conversation context · Due: {formatDateTime(item.suggestedDueAt)}</p>
+              {sourceText ? <p className="queue-meta">Context: {trim(sourceText, 180)}</p> : null}
             </div>
             <button type="button" className="btn btn-primary" onClick={() => setReviewState({ kind: "todos", item })}>
               Review
@@ -519,25 +694,25 @@ function QueueContent() {
           </div>
         );
       })}
-      {!queueLoading && todoCandidates.length === 0 ? <p className="empty-line">No todo candidates.</p> : null}
+      {!queueLoading && todoCandidates.length === 0 ? <p className="empty-line">No task suggestions need review.</p> : null}
     </div>
   );
 
   const renderGuardrails = () => (
     <div className="stack">
-      {queueLoading ? <LoadingBlock label="Loading guardrail flags…" rows={2} compact /> : null}
+      {queueLoading ? <LoadingBlock label="Loading safety flags…" rows={2} compact /> : null}
       {guardrailFlags.map((item) => (
         <div key={item._id} className="queue-item queue-item-condensed">
           <div>
-            <p className="queue-title">Severity: {item.severity}</p>
+            <p className="queue-title">Safety flag: {item.severity}</p>
             <p className="queue-body">{item.reason}</p>
           </div>
           <button type="button" className="btn btn-ghost" onClick={() => setReviewState({ kind: "guardrails", item })}>
-            Inspect
+            Review
           </button>
         </div>
       ))}
-      {!queueLoading && guardrailFlags.length === 0 ? <p className="empty-line">No active safety flags.</p> : null}
+      {!queueLoading && guardrailFlags.length === 0 ? <p className="empty-line">No safety flags need review.</p> : null}
     </div>
   );
 
@@ -545,129 +720,133 @@ function QueueContent() {
     <>
       <ActionNotices notices={notices} onDismiss={dismissNotice} />
 
-      <section className="panel-card">
-        <ProviderFilter
-          value={providerFilter}
-          onChange={setProviderFilter}
-          label="Queue provider filter"
-        />
-        <div className="queue-focus-tabs" role="tablist" aria-label="Action queue categories">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={tab === "needsReply"}
-            className={`btn ${tab === "needsReply" ? "btn-primary" : "btn-ghost"}`}
-            onClick={() => setTab("needsReply")}
-          >
-            Needs Reply ({counts.needsReply})
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={tab === "followups"}
-            className={`btn ${tab === "followups" ? "btn-primary" : "btn-ghost"}`}
-            onClick={() => setTab("followups")}
-          >
-            Follow-ups ({counts.followups})
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={tab === "todos"}
-            className={`btn ${tab === "todos" ? "btn-primary" : "btn-ghost"}`}
-            onClick={() => setTab("todos")}
-          >
-            TODO ({counts.todos})
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={tab === "guardrails"}
-            className={`btn ${tab === "guardrails" ? "btn-primary" : "btn-ghost"}`}
-            onClick={() => setTab("guardrails")}
-          >
-            Guardrails ({counts.guardrails})
-          </button>
+      <section className="panel-card queue-workspace">
+        <div className="queue-control-deck">
+          <ProviderFilter
+            value={providerFilter}
+            onChange={setProviderFilter}
+            label="Queue provider filter"
+          />
+          <div className="queue-focus-tabs" role="tablist" aria-label="Action queue categories">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={tab === "needsReply"}
+              className={`btn ${tab === "needsReply" ? "btn-primary" : "btn-ghost"}`}
+              onClick={() => setTab("needsReply")}
+            >
+              Needs reply ({counts.needsReply})
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={tab === "followups"}
+              className={`btn ${tab === "followups" ? "btn-primary" : "btn-ghost"}`}
+              onClick={() => setTab("followups")}
+            >
+              Follow-ups ({counts.followups})
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={tab === "todos"}
+              className={`btn ${tab === "todos" ? "btn-primary" : "btn-ghost"}`}
+              onClick={() => setTab("todos")}
+            >
+              Tasks ({counts.todos})
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={tab === "guardrails"}
+              className={`btn ${tab === "guardrails" ? "btn-primary" : "btn-ghost"}`}
+              onClick={() => setTab("guardrails")}
+            >
+              Safety ({counts.guardrails})
+            </button>
+          </div>
+
+          {tab === "needsReply" ? (
+            <div className="queue-actions">
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={() => onBulkNeedsReply("send")}
+                disabled={needsReply.length === 0 || getRecord("queue:bulk:send").pending}
+                aria-disabled={needsReply.length === 0 || getRecord("queue:bulk:send").pending}
+              >
+              Send all drafts
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={() => onBulkNeedsReply("snooze")}
+                disabled={needsReply.length === 0 || getRecord("queue:bulk:snooze").pending}
+                aria-disabled={needsReply.length === 0 || getRecord("queue:bulk:snooze").pending}
+              >
+                Snooze all 30m
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost queue-clear-all"
+                onClick={onClearNeedsReply}
+                disabled={getRecord("queue:clear:needsReply").pending}
+                aria-disabled={getRecord("queue:clear:needsReply").pending}
+              >
+                {getRecord("queue:clear:needsReply").pending ? "Discarding..." : "Discard all drafts"}
+              </button>
+            </div>
+          ) : null}
+
+          {tab === "followups" ? (
+            <div className="queue-actions">
+              <button
+                type="button"
+                className="btn btn-ghost queue-clear-all"
+                onClick={onClearFollowups}
+                disabled={getRecord("queue:clear:followups").pending}
+                aria-disabled={getRecord("queue:clear:followups").pending}
+              >
+                {getRecord("queue:clear:followups").pending ? "Dismissing..." : "Dismiss all follow-ups"}
+              </button>
+            </div>
+          ) : null}
+
+          {tab === "todos" ? (
+            <div className="queue-actions">
+              <button
+                type="button"
+                className="btn btn-ghost queue-clear-all"
+                onClick={onClearTodos}
+                disabled={getRecord("queue:clear:todos").pending}
+                aria-disabled={getRecord("queue:clear:todos").pending}
+              >
+                {getRecord("queue:clear:todos").pending ? "Closing..." : "Close all tasks"}
+              </button>
+            </div>
+          ) : null}
+
+          {tab === "guardrails" ? (
+            <div className="queue-actions">
+              <button
+                type="button"
+                className="btn btn-ghost queue-clear-all"
+                onClick={onClearGuardrails}
+                disabled={getRecord("queue:clear:guardrails").pending}
+                aria-disabled={getRecord("queue:clear:guardrails").pending}
+              >
+                {getRecord("queue:clear:guardrails").pending ? "Resolving..." : "Resolve all safety flags"}
+              </button>
+            </div>
+          ) : null}
         </div>
 
-        {tab === "needsReply" ? (
-          <div className="queue-actions">
-            <button
-              type="button"
-              className="btn btn-ghost"
-              onClick={() => onBulkNeedsReply("send")}
-              disabled={needsReply.length === 0 || getRecord("queue:bulk:send").pending}
-              aria-disabled={needsReply.length === 0 || getRecord("queue:bulk:send").pending}
-            >
-              Send All
-            </button>
-            <button
-              type="button"
-              className="btn btn-ghost"
-              onClick={() => onBulkNeedsReply("snooze")}
-              disabled={needsReply.length === 0 || getRecord("queue:bulk:snooze").pending}
-              aria-disabled={needsReply.length === 0 || getRecord("queue:bulk:snooze").pending}
-            >
-              Snooze All 30m
-            </button>
-            <button
-              type="button"
-              className="btn btn-ghost queue-clear-all"
-              onClick={onClearNeedsReply}
-              disabled={getRecord("queue:clear:needsReply").pending}
-              aria-disabled={getRecord("queue:clear:needsReply").pending}
-            >
-              {getRecord("queue:clear:needsReply").pending ? "Clearing..." : "Clear All Needs Reply"}
-            </button>
-          </div>
-        ) : null}
-
-        {tab === "followups" ? (
-          <div className="queue-actions">
-            <button
-              type="button"
-              className="btn btn-ghost queue-clear-all"
-              onClick={onClearFollowups}
-              disabled={getRecord("queue:clear:followups").pending}
-              aria-disabled={getRecord("queue:clear:followups").pending}
-            >
-              {getRecord("queue:clear:followups").pending ? "Clearing..." : "Clear All Follow-ups"}
-            </button>
-          </div>
-        ) : null}
-
-        {tab === "todos" ? (
-          <div className="queue-actions">
-            <button
-              type="button"
-              className="btn btn-ghost queue-clear-all"
-              onClick={onClearTodos}
-              disabled={getRecord("queue:clear:todos").pending}
-              aria-disabled={getRecord("queue:clear:todos").pending}
-            >
-              {getRecord("queue:clear:todos").pending ? "Clearing..." : "Clear All TODOs"}
-            </button>
-          </div>
-        ) : null}
-
-        {tab === "guardrails" ? (
-          <div className="queue-actions">
-            <button
-              type="button"
-              className="btn btn-ghost queue-clear-all"
-              onClick={onClearGuardrails}
-              disabled={getRecord("queue:clear:guardrails").pending}
-              aria-disabled={getRecord("queue:clear:guardrails").pending}
-            >
-              {getRecord("queue:clear:guardrails").pending ? "Clearing..." : "Clear All Guardrails"}
-            </button>
-          </div>
-        ) : null}
-
-        {tab === "needsReply" ? renderNeedsReply() : null}
-        {tab === "followups" ? renderFollowups() : null}
-        {tab === "todos" ? renderTodos() : null}
-        {tab === "guardrails" ? renderGuardrails() : null}
+        <div className="queue-content-panel">
+          {tab === "needsReply" ? renderNeedsReply() : null}
+          {tab === "followups" ? renderFollowups() : null}
+          {tab === "todos" ? renderTodos() : null}
+          {tab === "guardrails" ? renderGuardrails() : null}
+        </div>
       </section>
 
       <UIModal
@@ -675,26 +854,26 @@ function QueueContent() {
         onClose={() => setReviewState(null)}
         title={
           reviewState?.kind === "needsReply"
-            ? "Reply Review"
+            ? "Review reply"
             : reviewState?.kind === "followups"
-              ? "Follow-up Confirmation"
+              ? "Review follow-up"
               : reviewState?.kind === "todos"
-                ? "TODO Candidate"
-                : "Guardrail Detail"
+                ? "Review task"
+                : "Safety flag"
         }
       >
         {reviewState?.kind === "needsReply" ? (
           (() => {
             const sendOrSnoozePending = isPending(`send:${reviewState.item._id}`) || isPending(`snooze:${reviewState.item._id}`);
             return (
-              <div className="stack compact">
+              <div className="stack compact" onKeyDown={(event) => onNeedsReplyShortcut(event, reviewState.item)}>
                 <p className="queue-title">{reviewState.item.thread?.title || reviewState.item.thread?.jid || "Unknown contact"}</p>
                 <p className="queue-body">{trim(reviewState.item.sourceMessage?.text || reviewState.item.text || "")}</p>
                 <SharedMediaPreview
                   preview={reviewState.item.sourceMessage?.mediaPreview}
                   mediaAssetId={reviewState.item.sourceMessage?.mediaAssetId}
                 />
-                <p className="queue-meta">Draft mode: {reviewState.item.sendKind || "text"}</p>
+                <p className="queue-meta">Draft type: {reviewState.item.sendKind || "text"}</p>
                 {reviewState.item.text ? <p className="queue-body">{trim(reviewState.item.text, 240)}</p> : null}
                 <SharedMediaPreview preview={reviewState.item.mediaPreview} mediaAssetId={reviewState.item.mediaAssetId} />
                 {reviewState.item.mediaCaption?.trim() ? (
@@ -703,6 +882,18 @@ function QueueContent() {
                 <p className="queue-meta">
                   Channel: {reviewState.item.messageProvider || "whatsapp"} · Model: {reviewState.item.provider} · Delay: {Math.round(reviewState.item.delayMs / 1000)}s · Typing: {Math.round(reviewState.item.typingMs / 1000)}s
                 </p>
+                <p className="queue-meta">Keyboard shortcuts: A send · S snooze · R discard · E edit</p>
+                {editingDraftId === reviewState.item._id ? (
+                  <label className="stack compact">
+                    <span className="queue-meta">Edit draft text</span>
+                    <textarea
+                      rows={4}
+                      value={editingDraftText}
+                      onChange={(event) => setEditingDraftText(event.target.value)}
+                      aria-label="Edit draft text"
+                    />
+                  </label>
+                ) : null}
                 <div className="queue-actions">
                   <button
                     type="button"
@@ -725,12 +916,34 @@ function QueueContent() {
                   <button
                     type="button"
                     className="btn btn-ghost"
-                    onClick={() => onEdit(reviewState.item._id, reviewState.item.text)}
+                    onClick={() => openEdit(reviewState.item._id, reviewState.item.text)}
                     disabled={isPending(`edit:${reviewState.item._id}`)}
                     aria-disabled={isPending(`edit:${reviewState.item._id}`)}
                   >
                     Edit
                   </button>
+                  {editingDraftId === reviewState.item._id ? (
+                    <>
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        onClick={() => onSaveEdit(reviewState.item._id)}
+                        disabled={isPending(`edit:${reviewState.item._id}`)}
+                        aria-disabled={isPending(`edit:${reviewState.item._id}`)}
+                      >
+                        {isPending(`edit:${reviewState.item._id}`) ? "Saving..." : "Save changes"}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        onClick={() => onCancelEdit(reviewState.item._id)}
+                        disabled={isPending(`edit:${reviewState.item._id}`)}
+                        aria-disabled={isPending(`edit:${reviewState.item._id}`)}
+                      >
+                        Cancel
+                      </button>
+                    </>
+                  ) : null}
                   <button
                     type="button"
                     className="btn btn-ghost"
@@ -738,11 +951,11 @@ function QueueContent() {
                     disabled={isPending(`reject:${reviewState.item._id}`)}
                     aria-disabled={isPending(`reject:${reviewState.item._id}`)}
                   >
-                    Reject
+                    Discard draft
                   </button>
                   {reviewState.item.thread?._id ? (
                     <Link href={`/conversations?threadId=${reviewState.item.thread._id}`} className="btn btn-ghost">
-                      Open Thread
+                      Open conversation
                     </Link>
                   ) : null}
                 </div>
@@ -770,7 +983,7 @@ function QueueContent() {
           <div className="stack compact">
             <p className="queue-title">{reviewState.item.thread?.title || reviewState.item.thread?.jid || "Unknown thread"}</p>
             <p className="queue-meta">Due: {formatDateTimeWithRelative(reviewState.item.dueAt)}</p>
-            <p className="queue-body">{reviewState.item.reason}</p>
+            <p className="queue-body">{autoFollowupReasons[reviewState.item._id] || reviewState.item.reason}</p>
             {reviewState.item.sourceSnippet?.trim() || reviewState.item.sourceMessage?.text?.trim() ? (
               <p className="queue-meta">
                 Source: {trim(reviewState.item.sourceSnippet?.trim() || reviewState.item.sourceMessage?.text?.trim() || "", 260)}
@@ -818,7 +1031,7 @@ function QueueContent() {
               </button>
               {reviewState.item.thread?._id ? (
                 <Link href={`/conversations?threadId=${reviewState.item.thread._id}`} className="btn btn-ghost">
-                  Open Thread
+                  Open conversation
                 </Link>
               ) : null}
             </div>
@@ -847,8 +1060,11 @@ function QueueContent() {
 
         {reviewState?.kind === "todos" ? (
           <div className="stack compact">
-            <p className="queue-title">{reviewState.item.title}</p>
-            <p className="queue-meta">Suggested due: {formatDateTime(reviewState.item.suggestedDueAt)}</p>
+            <p className="queue-title">{autoTodoTitles[reviewState.item._id] || reviewState.item.title}</p>
+            <p className="queue-meta">Suggested due time: {formatDateTime(reviewState.item.suggestedDueAt)}</p>
+            {reviewState.item.sourceMessage?.text?.trim() ? (
+              <p className="queue-meta">Context: {trim(reviewState.item.sourceMessage.text.trim(), 260)}</p>
+            ) : null}
             <button
               type="button"
               className="btn btn-primary"
@@ -856,7 +1072,7 @@ function QueueContent() {
               disabled={getRecord(`todo:${reviewState.item._id}`).pending}
               aria-disabled={getRecord(`todo:${reviewState.item._id}`).pending}
             >
-              {getRecord(`todo:${reviewState.item._id}`).pending ? "Generating..." : "Generate TODO with AI"}
+              {getRecord(`todo:${reviewState.item._id}`).pending ? "Adding..." : "Add task"}
             </button>
             {getRecord(`todo:${reviewState.item._id}`).error ? (
               <p className="queue-meta action-inline-error" role="alert">
@@ -868,7 +1084,7 @@ function QueueContent() {
 
         {reviewState?.kind === "guardrails" ? (
           <div className="stack compact">
-            <p className="queue-title">Severity: {reviewState.item.severity}</p>
+            <p className="queue-title">Safety flag: {reviewState.item.severity}</p>
             <p className="queue-body">{reviewState.item.reason}</p>
             <button
               type="button"

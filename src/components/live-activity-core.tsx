@@ -630,7 +630,7 @@ export function LiveActivityCore({ splineSceneUrl }: LiveActivityCoreProps) {
         </p>
       </div>
 
-      {loading ? <LoadingIndicator label="Streaming activity + media signals and status glow states…" /> : null}
+      {loading ? <LoadingIndicator label="Loading activity…" /> : null}
       {!loading && filteredNodes.length === 0 ? <p className="empty-line">No activity nodes match the current filters yet.</p> : null}
 
       <UIModal

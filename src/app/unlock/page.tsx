@@ -48,10 +48,10 @@ export default async function UnlockPage({ searchParams }: UnlockPageProps) {
   return (
     <main className="instance-lock-shell">
       <section className="instance-lock-card">
-        <p className="instance-lock-kicker">Instance Gate</p>
+        <p className="instance-lock-kicker">Locked</p>
         <h1 className="panel-title">Unlock Social Life Manager</h1>
         <p className="instance-lock-copy">
-          This instance is PIN-protected. Enter the local PIN configured for this deployment to access the dashboard.
+          Enter your PIN to open this dashboard on this device.
         </p>
         <form action="/api/auth/pin" method="post" className="instance-lock-form">
           <input type="hidden" name="next" value={next} />
@@ -62,7 +62,7 @@ export default async function UnlockPage({ searchParams }: UnlockPageProps) {
               name="pin"
               inputMode="numeric"
               autoComplete="current-password"
-              placeholder="Enter instance PIN"
+              placeholder="Enter your PIN"
               autoFocus
               required
             />
@@ -72,7 +72,7 @@ export default async function UnlockPage({ searchParams }: UnlockPageProps) {
             Unlock
           </button>
         </form>
-        <p className="instance-lock-note">This is a per-instance lock for this local deployment, not a multi-user account system.</p>
+        <p className="instance-lock-note">This PIN protects this local app only.</p>
       </section>
     </main>
   );

@@ -3,7 +3,7 @@ import { LiveSystem } from "@/components/live-system";
 
 export default async function SystemPage() {
   return (
-    <DashboardPage title="System" subtitle="Monitor runtime health, provider traces, and event flow." showLogWatcher>
+    <DashboardPage title="System" subtitle="Monitor health, provider attempts, alerts, and event flow." showLogWatcher>
       <LiveSystem />
     </DashboardPage>
   );

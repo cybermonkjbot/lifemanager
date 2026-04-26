@@ -3,7 +3,7 @@ import { LiveStatus } from "@/components/live-status";
 
 export default async function StatusPage() {
   return (
-    <DashboardPage title="Status" subtitle="Review pending drafts and posted status updates in one stream.">
+    <DashboardPage title="Status" subtitle="Approve status drafts and inspect posted updates in one stream.">
       <LiveStatus />
     </DashboardPage>
   );

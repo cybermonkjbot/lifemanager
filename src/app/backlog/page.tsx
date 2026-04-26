@@ -5,7 +5,7 @@ export default async function BacklogPage() {
   return (
     <DashboardPage
       title="Backlog"
-      subtitle="Review unread threads, set priority, and draft reconnect openers."
+      subtitle="Triage stale or unresolved threads before reconnecting."
       hideViewHeader
     >
       <LiveBacklog />

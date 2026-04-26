@@ -5,10 +5,10 @@ export default function NotFound() {
     <div className="app-state-screen">
       <section className="app-state-card">
         <h1>Page not found</h1>
-        <p>The route you requested does not exist in this dashboard.</p>
+        <p>We could not find that page.</p>
         <div className="queue-actions">
           <Link className="btn btn-primary" href="/">
-            Go to Queue
+            Go Home
           </Link>
         </div>
       </section>

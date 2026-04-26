@@ -115,6 +115,36 @@ function buildAgendaEntries(args: {
   return entries;
 }
 
+function parseQuickRescheduleHours(input: string) {
+  const normalized = input.trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+
+  if (normalized === "tomorrow") {
+    return 24;
+  }
+
+  const match = normalized.match(/^(\d+)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)$/);
+  if (!match) {
+    return null;
+  }
+
+  const amount = Number(match[1]);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return null;
+  }
+
+  const unit = match[2];
+  if (unit.startsWith("m")) {
+    return Math.max(1, Math.ceil(amount / 60));
+  }
+  if (unit.startsWith("d")) {
+    return amount * 24;
+  }
+  return amount;
+}
+
 function TimelineCard(args: {
   item: TimelineItem;
   now: number;
@@ -125,6 +155,7 @@ function TimelineCard(args: {
   getRecord: ReturnType<typeof useActionStateRegistry>["getRecord"];
 }) {
   const { item, now, onConfirm, onSnooze, onReschedule, onDismiss, getRecord } = args;
+  const [quickReschedule, setQuickReschedule] = useState("");
   const confirmRecord = getRecord(`followup:${item._id}`);
   const snoozeRecord = getRecord(`followup:snooze:${item._id}`);
   const rescheduleRecord = getRecord(`followup:reschedule:${item._id}`);
@@ -133,6 +164,8 @@ function TimelineCard(args: {
   const closed = item.status === "sent" || item.status === "failed" || item.status === "cancelled";
   const sourceText = item.sourceSnippet?.trim() || item.sourceMessage?.text?.trim() || "";
   const confidence = typeof item.confidence === "number" ? Math.round(item.confidence * 100) : null;
+  const quickRescheduleHours = parseQuickRescheduleHours(quickReschedule);
+  const quickRescheduleInvalid = quickReschedule.trim().length > 0 && quickRescheduleHours === null;
 
   return (
     <div className="queue-item" aria-busy={busy}>
@@ -143,8 +176,13 @@ function TimelineCard(args: {
       <p className="queue-body">{item.reason}</p>
       {sourceText ? <p className="queue-meta">Source: {trim(sourceText, 220)}</p> : null}
       {confidence !== null ? <p className="queue-meta">Detector confidence: {confidence}%</p> : null}
+      {quickRescheduleInvalid ? (
+        <p className="queue-meta action-inline-error" role="status">
+          Use values like `6h`, `2d`, `30m`, or `tomorrow`.
+        </p>
+      ) : null}
 
-      <div className="queue-actions">
+      <div className="queue-actions followups-primary-actions">
         {item.status === "suggested" ? (
           <button
             type="button"
@@ -197,6 +235,36 @@ function TimelineCard(args: {
             Open Thread
           </Link>
         ) : null}
+      </div>
+      <div className="followups-reschedule-inline">
+        <label htmlFor={`followup-reschedule-${item._id}`} className="sr-only">
+          Quick reschedule
+        </label>
+        <input
+          id={`followup-reschedule-${item._id}`}
+          type="text"
+          className="input"
+          value={quickReschedule}
+          onChange={(event) => setQuickReschedule(event.target.value)}
+          placeholder="6h, 2d, tomorrow"
+          aria-label="Quick reschedule"
+          disabled={busy || closed}
+        />
+        <button
+          type="button"
+          className="btn btn-ghost"
+          onClick={() => {
+            if (!quickRescheduleHours) {
+              return;
+            }
+            onReschedule(item._id, quickRescheduleHours);
+            setQuickReschedule("");
+          }}
+          disabled={busy || closed || quickRescheduleHours === null}
+          aria-disabled={busy || closed || quickRescheduleHours === null}
+        >
+          Apply
+        </button>
       </div>
 
       {confirmRecord.error ? (
@@ -373,7 +441,7 @@ function FollowupsContent() {
   };
 
   const renderSection = (title: string, items: TimelineItem[]) => (
-    <article className="panel-card">
+    <article className="panel-card followups-section-card">
       <h3>{title}</h3>
       <div className="stack">
         {loading ? <LoadingBlock label={`Loading ${title.toLowerCase()} follow-ups…`} rows={2} compact /> : null}
@@ -389,180 +457,177 @@ function FollowupsContent() {
             getRecord={getRecord}
           />
         ))}
-        {!loading && items.length === 0 ? <p className="empty-line">No items in this section.</p> : null}
+        {!loading && items.length === 0 ? <p className="empty-line">No follow-ups in this section.</p> : null}
       </div>
     </article>
   );
 
   return (
-    <section className="stack">
+    <section className="followups-workspace">
       <ActionNotices notices={notices} onDismiss={dismissNotice} />
 
-      <article className="panel-card">
-        <h3>Agenda Planner</h3>
-        <p className="queue-meta">Select a calendar range and apply one agenda across the whole span.</p>
-        <form className="stack" onSubmit={onCreateAgenda}>
-          <label className="queue-meta" htmlFor="agenda-title-input">
-            Agenda
-          </label>
-          <input
-            id="agenda-title-input"
-            className="input"
-            placeholder="Morning deep work, outreach, and workout"
-            value={agendaTitle}
-            onChange={(event) => setAgendaTitle(event.target.value)}
-          />
-          <div className="queue-actions">
-            <label className="queue-meta" htmlFor="agenda-start-date">
-              Start
+      <div className="followups-control-deck">
+        <article className="panel-card followups-control-card">
+          <h3>Agenda Planner</h3>
+          <p className="queue-meta">Create repeated agenda tasks across a selected date range.</p>
+          <form className="stack followups-agenda-form" onSubmit={onCreateAgenda}>
+            <label className="stack compact" htmlFor="agenda-title-input">
+              <span className="queue-meta">Agenda</span>
+              <input
+                id="agenda-title-input"
+                className="input"
+                placeholder="Morning deep work, outreach, and workout"
+                value={agendaTitle}
+                onChange={(event) => setAgendaTitle(event.target.value)}
+              />
             </label>
-            <input id="agenda-start-date" className="input" type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} />
-            <label className="queue-meta" htmlFor="agenda-end-date">
-              End
+            <div className="followups-agenda-grid">
+              <label className="stack compact" htmlFor="agenda-start-date">
+                <span className="queue-meta">Start</span>
+                <input id="agenda-start-date" className="input" type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} />
+              </label>
+              <label className="stack compact" htmlFor="agenda-end-date">
+                <span className="queue-meta">End</span>
+                <input id="agenda-end-date" className="input" type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} />
+              </label>
+              <label className="stack compact" htmlFor="agenda-time">
+                <span className="queue-meta">Time</span>
+                <input id="agenda-time" className="input" type="time" value={agendaTime} onChange={(event) => setAgendaTime(event.target.value)} />
+              </label>
+            </div>
+            <label className="followups-weekdays-toggle">
+              <input type="checkbox" checked={weekdaysOnly} onChange={(event) => setWeekdaysOnly(event.target.checked)} />
+              <span>Weekdays only</span>
             </label>
-            <input id="agenda-end-date" className="input" type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} />
-            <label className="queue-meta" htmlFor="agenda-time">
-              Time
-            </label>
-            <input id="agenda-time" className="input" type="time" value={agendaTime} onChange={(event) => setAgendaTime(event.target.value)} />
-          </div>
-          <label className="queue-meta">
-            <input
-              type="checkbox"
-              checked={weekdaysOnly}
-              onChange={(event) => setWeekdaysOnly(event.target.checked)}
-              style={{ marginRight: "0.5rem" }}
-            />
-            Weekdays only
-          </label>
+            <div className="queue-actions">
+              <button
+                type="submit"
+                className="btn btn-primary"
+                disabled={getRecord("agenda:create-range").pending}
+                aria-disabled={getRecord("agenda:create-range").pending}
+              >
+                {getRecord("agenda:create-range").pending ? "Scheduling…" : "Schedule agenda"}
+              </button>
+            </div>
+          </form>
+
+          <details className="followups-control-section">
+            <summary className="followups-control-summary">Open agenda items ({openAgendaTodos.length})</summary>
+            <div className="stack">
+              {openAgendaTodos.slice(0, 20).map((todo) => (
+                <div key={todo._id} className="queue-item">
+                  <p className="queue-title">{todo.title}</p>
+                  <p className="queue-meta">
+                    {todo.dueAt ? `Due ${formatDateTimeWithRelative(todo.dueAt, now)}` : "No due date"}
+                  </p>
+                  <div className="queue-actions">
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      onClick={() => onMarkTodoDone(todo._id)}
+                      disabled={getRecord(`agenda:done:${todo._id}`).pending}
+                      aria-disabled={getRecord(`agenda:done:${todo._id}`).pending}
+                    >
+                      {getRecord(`agenda:done:${todo._id}`).pending ? "Updating…" : "Mark done"}
+                    </button>
+                  </div>
+                </div>
+              ))}
+              {openAgendaTodos.length > 20 ? (
+                <p className="queue-meta">Showing first 20 items. Remaining: {openAgendaTodos.length - 20}.</p>
+              ) : null}
+              {openAgendaTodos.length === 0 ? <p className="empty-line">No open agenda tasks yet.</p> : null}
+            </div>
+          </details>
+        </article>
+
+        <article className="panel-card followups-control-card">
+          <h3>Timeline Overview</h3>
+          <ProviderFilter value={providerFilter} onChange={setProviderFilter} label="Follow-ups provider filter" />
+          <p className="queue-meta">
+            Visible: {headerCounts.visible} · Overdue: {headerCounts.overdue} · Today: {headerCounts.today} · Upcoming: {headerCounts.upcoming}
+          </p>
           <div className="queue-actions">
             <button
-              type="submit"
-              className="btn btn-primary"
-              disabled={getRecord("agenda:create-range").pending}
-              aria-disabled={getRecord("agenda:create-range").pending}
+              type="button"
+              className="btn btn-ghost"
+              onClick={onClearAll}
+              disabled={loading || clearAllRecord.pending}
+              aria-disabled={loading || clearAllRecord.pending}
             >
-              {getRecord("agenda:create-range").pending ? "Scheduling…" : "Schedule Agenda"}
+              {clearAllRecord.pending ? "Dismissing…" : "Dismiss all open"}
             </button>
           </div>
-        </form>
-
-        <div className="stack">
-          <p className="queue-meta">Open agenda items: {openAgendaTodos.length}</p>
-          {openAgendaTodos.slice(0, 20).map((todo) => (
-            <div key={todo._id} className="queue-item">
-              <p className="queue-title">{todo.title}</p>
-              <p className="queue-meta">
-                {todo.dueAt ? `Due ${formatDateTimeWithRelative(todo.dueAt, Date.now())}` : "No due date"}
-              </p>
-              <div className="queue-actions">
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  onClick={() => onMarkTodoDone(todo._id)}
-                  disabled={getRecord(`agenda:done:${todo._id}`).pending}
-                  aria-disabled={getRecord(`agenda:done:${todo._id}`).pending}
-                >
-                  {getRecord(`agenda:done:${todo._id}`).pending ? "Updating…" : "Mark done"}
-                </button>
-              </div>
-            </div>
-          ))}
-          {openAgendaTodos.length > 20 ? (
-            <p className="queue-meta">Showing first 20 items. Remaining: {openAgendaTodos.length - 20}.</p>
+          {clearAllRecord.error ? (
+            <p className="queue-meta action-inline-error" role="alert">
+              {clearAllRecord.error}
+            </p>
           ) : null}
-          {openAgendaTodos.length === 0 ? <p className="empty-line">No open agenda items yet.</p> : null}
-        </div>
-      </article>
+          <div className="queue-focus-tabs followups-tab-row" role="tablist" aria-label="Follow-up timeline filters">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={filter === "needs_review"}
+              className={`btn ${filter === "needs_review" ? "btn-primary" : "btn-ghost"}`}
+              onClick={() => setFilter("needs_review")}
+            >
+              Needs review
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={filter === "confirmed"}
+              className={`btn ${filter === "confirmed" ? "btn-primary" : "btn-ghost"}`}
+              onClick={() => setFilter("confirmed")}
+            >
+              Confirmed
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={filter === "queued_sent"}
+              className={`btn ${filter === "queued_sent" ? "btn-primary" : "btn-ghost"}`}
+              onClick={() => setFilter("queued_sent")}
+            >
+              Queued/Sent
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={filter === "failed"}
+              className={`btn ${filter === "failed" ? "btn-primary" : "btn-ghost"}`}
+              onClick={() => setFilter("failed")}
+            >
+              Failed
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={filter === "dismissed"}
+              className={`btn ${filter === "dismissed" ? "btn-primary" : "btn-ghost"}`}
+              onClick={() => setFilter("dismissed")}
+            >
+              Dismissed
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={filter === "all"}
+              className={`btn ${filter === "all" ? "btn-primary" : "btn-ghost"}`}
+              onClick={() => setFilter("all")}
+            >
+              All
+            </button>
+          </div>
+          {loading ? <LoadingIndicator label="Loading follow-up timeline…" /> : null}
+        </article>
+      </div>
 
-      <article className="panel-card">
-        <h3>Timeline Overview</h3>
-        <ProviderFilter
-          value={providerFilter}
-          onChange={setProviderFilter}
-          label="Follow-ups provider filter"
-        />
-        <p className="queue-meta">
-          Visible: {headerCounts.visible} · Overdue: {headerCounts.overdue} · Today: {headerCounts.today} · Upcoming: {headerCounts.upcoming}
-        </p>
-        <div className="queue-actions">
-          <button
-            type="button"
-            className="btn btn-ghost"
-            onClick={onClearAll}
-            disabled={loading || clearAllRecord.pending}
-            aria-disabled={loading || clearAllRecord.pending}
-          >
-            {clearAllRecord.pending ? "Clearing…" : "Clear all open"}
-          </button>
-        </div>
-        {clearAllRecord.error ? (
-          <p className="queue-meta action-inline-error" role="alert">
-            {clearAllRecord.error}
-          </p>
-        ) : null}
-        <div className="queue-focus-tabs" role="tablist" aria-label="Follow-up timeline filters">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={filter === "needs_review"}
-            className={`btn ${filter === "needs_review" ? "btn-primary" : "btn-ghost"}`}
-            onClick={() => setFilter("needs_review")}
-          >
-            Needs Review
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={filter === "confirmed"}
-            className={`btn ${filter === "confirmed" ? "btn-primary" : "btn-ghost"}`}
-            onClick={() => setFilter("confirmed")}
-          >
-            Confirmed
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={filter === "queued_sent"}
-            className={`btn ${filter === "queued_sent" ? "btn-primary" : "btn-ghost"}`}
-            onClick={() => setFilter("queued_sent")}
-          >
-            Queued/Sent
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={filter === "failed"}
-            className={`btn ${filter === "failed" ? "btn-primary" : "btn-ghost"}`}
-            onClick={() => setFilter("failed")}
-          >
-            Failed
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={filter === "dismissed"}
-            className={`btn ${filter === "dismissed" ? "btn-primary" : "btn-ghost"}`}
-            onClick={() => setFilter("dismissed")}
-          >
-            Dismissed
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={filter === "all"}
-            className={`btn ${filter === "all" ? "btn-primary" : "btn-ghost"}`}
-            onClick={() => setFilter("all")}
-          >
-            All
-          </button>
-        </div>
-        {loading ? <LoadingIndicator label="Loading follow-up timeline…" /> : null}
-      </article>
-
-      {renderSection("Overdue", sections.overdue)}
-      {renderSection("Today", sections.today)}
-      {renderSection("Upcoming", sections.upcoming)}
+      <div className="followups-stream">
+        {renderSection("Overdue", sections.overdue)}
+        {renderSection("Today", sections.today)}
+        {renderSection("Upcoming", sections.upcoming)}
+      </div>
     </section>
   );
 }

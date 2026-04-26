@@ -5,6 +5,7 @@ import { LoadingBlock, LoadingIndicator } from "@/components/loading-state";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
+import { computeConversationStyleMatrix } from "../../shared/conversation-style-matrix";
 import { useMutation, useQuery } from "convex/react";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
@@ -14,7 +15,9 @@ type PhraseCleanupResult = {
   scannedProfiles: number;
   updatedProfiles: number;
   removedPhraseCount: number;
+  isDone: boolean;
 };
+const MAX_SAFE_MIMICRY_LEVEL = 0.82;
 
 const LEARNED_TRAIT_SECTIONS: Array<{ trait: LearnedTraitField; label: string; emptyLabel: string }> = [
   { trait: "commonPhrases", label: "Common phrases", emptyLabel: "Not enough data yet." },
@@ -22,6 +25,15 @@ const LEARNED_TRAIT_SECTIONS: Array<{ trait: LearnedTraitField; label: string; e
   { trait: "spellingNotes", label: "Spelling style", emptyLabel: "No spelling profile yet." },
   { trait: "humorNotes", label: "Humor markers", emptyLabel: "No humor markers yet." },
 ];
+
+const STYLE_MATRIX_PREVIEWS = [
+  { label: "Family", inboundText: "Mum has been sick and I am worried.", profileSlug: "family" },
+  { label: "Grief/support", inboundText: "We lost someone in the family yesterday.", profileSlug: "family" },
+  { label: "Conflict repair", inboundText: "That came off harsh and it hurt me.", profileSlug: "relationship" },
+  { label: "Group/community", inboundText: "Guys can everyone confirm who is coming?", profileSlug: "community_group", threadKind: "group" },
+  { label: "Vendor/service", inboundText: "Please send the receipt for my delivery refund.", profileSlug: "vendor_service" },
+  { label: "Mentorship", inboundText: "Can you mentor me and review my career plan?", profileSlug: "mentorship" },
+] as const;
 
 function StyleLabContent() {
   const setMimicry = useMutation(api.style.setMimicry);
@@ -41,6 +53,8 @@ function StyleLabContent() {
         punctuationStyle: string[];
         spellingNotes: string[];
         humorNotes: string[];
+        learnedEmojiAllowlist?: string[];
+        learnedEmojiCategoryHints?: string[];
       }
     | undefined;
   const profileLoading = profile === undefined;
@@ -55,6 +69,7 @@ function StyleLabContent() {
   const personaPacks = useQuery(api.personality.listPersonaPacks, {}) as
     | {
         activePersonaPackId: string;
+        activePersonaPackIdsByProfile?: Record<string, string>;
         qualityGateMode: "auto_rewrite_once" | "manual_review" | "log_only";
         qualityGateThreshold: number;
         packs: Array<{
@@ -63,6 +78,8 @@ function StyleLabContent() {
           version: string;
           description: string;
           allowedProfileSlugs: string[];
+          activeForProfileSlugs?: string[];
+          isLegacyActive?: boolean;
           cohorts?: string[];
           scenarioCount?: number;
         }>;
@@ -168,7 +185,7 @@ function StyleLabContent() {
             id="mimicry-level"
             type="range"
             min="0"
-            max="1"
+            max={MAX_SAFE_MIMICRY_LEVEL}
             step="0.01"
             name="mimicryLevel"
             value={mimicryLevel}
@@ -177,6 +194,7 @@ function StyleLabContent() {
             aria-disabled={record.pending || profileLoading}
           />
           <p className="queue-meta">Draft value: {Math.round(mimicryLevel * 100)}%</p>
+          <p className="queue-meta">Safety cap: {Math.round(MAX_SAFE_MIMICRY_LEVEL * 100)}%</p>
           <button
             type="submit"
             className="btn btn-primary"
@@ -197,6 +215,34 @@ function StyleLabContent() {
           <p>{previewNeutral}</p>
           <p className="queue-meta">Preview: playful context</p>
           <p>{previewPlayful}</p>
+        </div>
+      </article>
+
+      <article className="panel-card">
+        <h3>Style Matrix Preview</h3>
+        <div className="stack">
+          {STYLE_MATRIX_PREVIEWS.map((preview) => {
+            const matrix = computeConversationStyleMatrix({
+              inboundText: preview.inboundText,
+              profileSlug: preview.profileSlug,
+              threadKind: "threadKind" in preview ? preview.threadKind : undefined,
+              learnedEmojiAllowlist: profile?.learnedEmojiAllowlist,
+              learnedEmojiCategoryHints: profile?.learnedEmojiCategoryHints,
+            });
+            return (
+              <div key={preview.label} className="queue-item">
+                <p className="queue-title">{preview.label}</p>
+                <p className="queue-body">{preview.inboundText}</p>
+                <p className="queue-meta">
+                  {matrix.relationship} · {matrix.register} · {matrix.interactionMove} · {matrix.riskSensitivity}
+                </p>
+                <p className="queue-meta">
+                  Emoji {matrix.emojiTextPolicy} · Confidence {Math.round(matrix.confidence * 100)}%
+                  {matrix.dynamicStylePackIds.length ? ` · Packs ${matrix.dynamicStylePackIds.join(", ")}` : ""}
+                </p>
+              </div>
+            );
+          })}
         </div>
       </article>
 
@@ -241,7 +287,7 @@ function StyleLabContent() {
                   },
                   {
                     pendingLabel: "Cleaning phrases...",
-                    successMessage: "Phrase cleanup complete.",
+                    successMessage: "Cleanup started. Additional batches may continue in background.",
                   },
                 )
               }
@@ -255,6 +301,9 @@ function StyleLabContent() {
             <p className="queue-meta">
               {cleanupSummary.dryRun ? "Preview" : "Applied"}: removed {cleanupSummary.removedPhraseCount} phrases across{" "}
               {cleanupSummary.updatedProfiles}/{cleanupSummary.scannedProfiles} style profiles.
+              {!cleanupSummary.dryRun && !cleanupSummary.isDone
+                ? " Additional batches are still running in background."
+                : ""}
             </p>
           ) : (
             <p className="queue-meta">Run preview to see what will be removed before applying.</p>
@@ -271,6 +320,23 @@ function StyleLabContent() {
           ) : null}
         </div>
         <div className="stack">
+          {!profileLoading ? (
+            <div className="queue-item stack compact">
+              <p className="queue-title">Learned emoji style</p>
+              <p className="queue-meta">
+                Emoji allowlist:{" "}
+                {profile?.learnedEmojiAllowlist && profile.learnedEmojiAllowlist.length > 0
+                  ? profile.learnedEmojiAllowlist.join(" ")
+                  : "No learned emoji signals yet."}
+              </p>
+              <p className="queue-meta">
+                Category hints:{" "}
+                {profile?.learnedEmojiCategoryHints && profile.learnedEmojiCategoryHints.length > 0
+                  ? profile.learnedEmojiCategoryHints.join(" · ")
+                  : "No learned category hints yet."}
+              </p>
+            </div>
+          ) : null}
           {profileLoading ? (
             <LoadingBlock label="Loading learned traits…" rows={4} />
           ) : (
@@ -560,7 +626,8 @@ function StyleLabContent() {
             <p className="empty-line">No persona packs available.</p>
           ) : (
             personaPacks.packs.map((pack) => {
-              const isActive = personaPacks.activePersonaPackId === pack.id;
+              const activeForProfileSlugs = pack.activeForProfileSlugs || [];
+              const isActive = activeForProfileSlugs.length > 0 || personaPacks.activePersonaPackId === pack.id;
               return (
                 <div key={pack.id} className="queue-item">
                   <p className="queue-title">
@@ -568,7 +635,9 @@ function StyleLabContent() {
                   </p>
                   <p className="queue-body">{pack.description}</p>
                   <p className="queue-meta">
-                    Allowed profiles: {pack.allowedProfileSlugs.join(", ")}{isActive ? " · Active" : ""}
+                    Allowed profiles: {pack.allowedProfileSlugs.join(", ")}
+                    {activeForProfileSlugs.length ? ` · Active for: ${activeForProfileSlugs.join(", ")}` : ""}
+                    {!activeForProfileSlugs.length && pack.isLegacyActive ? " · Legacy active fallback" : ""}
                   </p>
                   {Array.isArray(pack.cohorts) && pack.cohorts.length > 0 ? (
                     <p className="queue-meta">

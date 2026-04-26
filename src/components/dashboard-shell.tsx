@@ -7,6 +7,7 @@ import { ShellNavigation } from "@/components/shell-navigation";
 import { isInstancePinEnabled } from "@/lib/instance-pin";
 import { SetupNotice } from "@/components/setup-notice";
 import { dashboardNavItems } from "@/lib/ui/dashboard-nav";
+import { WorkspaceHeaderControls } from "@/components/workspace-header-controls";
 import { ReactNode } from "react";
 
 type DashboardShellProps = {
@@ -16,6 +17,7 @@ type DashboardShellProps = {
   convexUrl?: string;
   autonomyPaused?: boolean;
   showLogWatcher?: boolean;
+  logWatcherDefaultExpanded?: boolean;
   hideViewHeader?: boolean;
   hideShellChrome?: boolean;
 };
@@ -27,6 +29,7 @@ export async function DashboardShell({
   convexUrl,
   autonomyPaused,
   showLogWatcher = false,
+  logWatcherDefaultExpanded = true,
   hideViewHeader = false,
   hideShellChrome = false,
 }: DashboardShellProps) {
@@ -45,18 +48,17 @@ export async function DashboardShell({
               <header className="shell-topbar">
                 <div className="brand-block">
                   <p className="brand-kicker">Social Life Manager</p>
-                  <p className="brand-title">WhatsApp Brain</p>
-                  <p className="brand-note">Workspaces for queue, conversations, follow-ups, and system health.</p>
                 </div>
                 <div className="shell-topbar-actions">
                   {pinEnabled ? (
                     <form action="/api/auth/pin/logout" method="post">
                       <button type="submit" className="btn btn-ghost">
-                        Lock
+                        Lock App
                       </button>
                     </form>
                   ) : null}
                   <ShellControlsModal realtimeEnabled={realtimeEnabled} fallbackPaused={autonomyPaused} />
+                  <WorkspaceHeaderControls className="shell-menu-mobile" showMenu />
                 </div>
               </header>
 
@@ -68,16 +70,21 @@ export async function DashboardShell({
             {!hideViewHeader ? (
               <>
                 <header className="view-header">
-                  <h1 className="panel-title">{title}</h1>
-                  <p className="panel-subtitle">{subtitle}</p>
+                  <div className="view-header-main">
+                    <h1 className="panel-title">{title}</h1>
+                    <p className="panel-subtitle">{subtitle}</p>
+                  </div>
+                  <WorkspaceHeaderControls />
                 </header>
-                <h2 className="sr-only">Workspace sections</h2>
+                <h2 className="sr-only">Page sections</h2>
               </>
             ) : null}
-            {!realtimeEnabled ? <SetupNotice error={null} /> : null}
-            {children}
+            <div className="shell-view-scroll">
+              {!realtimeEnabled ? <SetupNotice error={null} /> : null}
+              {children}
+            </div>
           </main>
-          {showLogWatcher ? <LogWatcher /> : null}
+          {showLogWatcher ? <LogWatcher defaultExpanded={logWatcherDefaultExpanded} /> : null}
         </div>
       </ConvexAppProvider>
     </div>

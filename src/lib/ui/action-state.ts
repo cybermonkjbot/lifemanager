@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 export type ActionNoticeKind = "success" | "error" | "info";
 
@@ -35,6 +35,8 @@ const EMPTY_RECORD: ActionRecord = {
   pending: false,
 };
 
+const NOTICE_AUTO_DISMISS_MS = 5000;
+
 function getErrorMessage(error: unknown) {
   if (error instanceof Error && error.message) {
     return error.message;
@@ -47,6 +49,17 @@ export function useActionStateRegistry() {
   const [records, setRecords] = useState<Record<string, ActionRecord>>({});
   const [notices, setNotices] = useState<ActionNotice[]>([]);
   const pendingRef = useRef<Set<string>>(new Set());
+  const noticeTimeoutsRef = useRef<Map<string, number>>(new Map());
+
+  const clearNoticeTimeout = useCallback((id: string) => {
+    const timeoutId = noticeTimeoutsRef.current.get(id);
+    if (timeoutId === undefined) {
+      return;
+    }
+
+    window.clearTimeout(timeoutId);
+    noticeTimeoutsRef.current.delete(id);
+  }, []);
 
   const upsertRecord = useCallback((key: string, patch: Partial<ActionRecord>) => {
     setRecords((current) => ({
@@ -72,7 +85,45 @@ export function useActionStateRegistry() {
   }, []);
 
   const dismissNotice = useCallback((id: string) => {
+    clearNoticeTimeout(id);
     setNotices((current) => current.filter((notice) => notice.id !== id));
+  }, [clearNoticeTimeout]);
+
+  useEffect(() => {
+    const now = Date.now();
+    const activeNoticeIds = new Set(notices.map((notice) => notice.id));
+
+    for (const [id] of noticeTimeoutsRef.current) {
+      if (!activeNoticeIds.has(id)) {
+        clearNoticeTimeout(id);
+      }
+    }
+
+    for (const notice of notices) {
+      if (noticeTimeoutsRef.current.has(notice.id)) {
+        continue;
+      }
+
+      const elapsed = now - notice.createdAt;
+      const remaining = Math.max(0, NOTICE_AUTO_DISMISS_MS - elapsed);
+      const timeoutId = window.setTimeout(() => {
+        noticeTimeoutsRef.current.delete(notice.id);
+        setNotices((current) => current.filter((item) => item.id !== notice.id));
+      }, remaining);
+
+      noticeTimeoutsRef.current.set(notice.id, timeoutId);
+    }
+  }, [clearNoticeTimeout, notices]);
+
+  useEffect(() => {
+    const noticeTimeouts = noticeTimeoutsRef.current;
+
+    return () => {
+      for (const timeoutId of noticeTimeouts.values()) {
+        window.clearTimeout(timeoutId);
+      }
+      noticeTimeouts.clear();
+    };
   }, []);
 
   const clearError = useCallback((key: string) => {

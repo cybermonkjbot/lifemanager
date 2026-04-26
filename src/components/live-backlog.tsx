@@ -15,6 +15,68 @@ type BacklogTab = "all" | "critical" | "answer" | "restart" | "snoozed";
 type SortMode = "importance" | "oldest" | "newest" | "relationship" | "activity";
 type RelationshipValue = "girlfriend" | "relationship" | "friendship" | "casual" | "family" | "business";
 type ImportanceValue = "critical" | "high" | "medium" | "low";
+type BacklogPreset = "custom" | "critical_first" | "reconnect_only" | "snoozed_review";
+const BACKLOG_PRESET_STORAGE_KEY = "slm.backlog.preset";
+const BACKLOG_NAMED_PRESETS_STORAGE_KEY = "slm.backlog.named_presets";
+
+type SavedBacklogPreset = {
+  name: string;
+  tab: BacklogTab;
+  sort: SortMode;
+  relationshipFilter: "all" | RelationshipValue;
+  search: string;
+};
+
+function readStoredBacklogPreset(): BacklogPreset {
+  if (typeof window === "undefined") {
+    return "custom";
+  }
+  const value = window.localStorage.getItem(BACKLOG_PRESET_STORAGE_KEY);
+  if (value === "critical_first" || value === "reconnect_only" || value === "snoozed_review" || value === "custom") {
+    return value;
+  }
+  return "custom";
+}
+
+function tabFromPreset(preset: BacklogPreset): BacklogTab {
+  if (preset === "critical_first") return "critical";
+  if (preset === "reconnect_only") return "restart";
+  if (preset === "snoozed_review") return "snoozed";
+  return "all";
+}
+
+function sortFromPreset(preset: BacklogPreset): SortMode {
+  if (preset === "critical_first") return "importance";
+  if (preset === "reconnect_only" || preset === "snoozed_review") return "oldest";
+  return "importance";
+}
+
+function readNamedBacklogPresets(): SavedBacklogPreset[] {
+  if (typeof window === "undefined") {
+    return [];
+  }
+  const raw = window.localStorage.getItem(BACKLOG_NAMED_PRESETS_STORAGE_KEY);
+  if (!raw) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(raw) as SavedBacklogPreset[];
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed
+      .filter((entry) => typeof entry?.name === "string" && entry.name.trim().length > 0)
+      .map((entry) => ({
+        name: entry.name.trim(),
+        tab: entry.tab,
+        sort: entry.sort,
+        relationshipFilter: entry.relationshipFilter,
+        search: entry.search || "",
+      }));
+  } catch {
+    return [];
+  }
+}
 
 const RELATIONSHIP_OPTIONS: Array<{ value: RelationshipValue; label: string }> = [
   { value: "girlfriend", label: "Girlfriend/Boyfriend" },
@@ -100,18 +162,18 @@ function recommendationHint(item: BacklogItem) {
 
 function emptyStateMessage(tab: BacklogTab) {
   if (tab === "critical") {
-    return "No critical backlog threads right now.";
+    return "No critical stale threads right now.";
   }
   if (tab === "answer") {
-    return "No threads need direct replies in this view.";
+    return "No unresolved threads need a direct reply in this view.";
   }
   if (tab === "restart") {
-    return "No threads need a reconnect draft right now.";
+    return "No stale threads need a reconnect draft right now.";
   }
   if (tab === "snoozed") {
-    return "Nothing is snoozed right now.";
+    return "No backlog threads are snoozed right now.";
   }
-  return "No active backlog threads match these filters.";
+  return "No stale or unresolved threads match these filters.";
 }
 
 function tabFromCounts(items: BacklogItem[]) {
@@ -154,15 +216,19 @@ function BacklogContent() {
 
   const { runAction, getRecord, notices, dismissNotice, pushNotice } = useActionStateRegistry();
 
-  const [tab, setTab] = useState<BacklogTab>("all");
+  const [preset, setPreset] = useState<BacklogPreset>(() => readStoredBacklogPreset());
+  const [tab, setTab] = useState<BacklogTab>(() => tabFromPreset(readStoredBacklogPreset()));
   const [providerFilter, setProviderFilter] = useState<ProviderFilterValue>("all");
-  const [sort, setSort] = useState<SortMode>("importance");
+  const [sort, setSort] = useState<SortMode>(() => sortFromPreset(readStoredBacklogPreset()));
   const [relationshipFilter, setRelationshipFilter] = useState<"all" | RelationshipValue>("all");
   const [search, setSearch] = useState("");
   const [limit, setLimit] = useState(120);
   const [snoozeMinutes, setSnoozeMinutes] = useState(24 * 60);
   const [snoozeReason, setSnoozeReason] = useState("");
   const [selectedThreadIds, setSelectedThreadIds] = useState<string[]>([]);
+  const [namedPresets, setNamedPresets] = useState<SavedBacklogPreset[]>(() => readNamedBacklogPresets());
+  const [namedPresetName, setNamedPresetName] = useState("");
+  const [selectedNamedPreset, setSelectedNamedPreset] = useState("");
   const hasHydratedRef = useRef(false);
 
   const queryArgs = useMemo(() => {
@@ -244,6 +310,89 @@ function BacklogContent() {
     );
   };
 
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem(BACKLOG_NAMED_PRESETS_STORAGE_KEY, JSON.stringify(namedPresets));
+  }, [namedPresets]);
+
+  const applyPreset = (nextPreset: BacklogPreset) => {
+    setPreset(nextPreset);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(BACKLOG_PRESET_STORAGE_KEY, nextPreset);
+    }
+    if (nextPreset === "critical_first") {
+      setTab("critical");
+      setSort("importance");
+      setRelationshipFilter("all");
+      setSearch("");
+      setLimit(120);
+      return;
+    }
+    if (nextPreset === "reconnect_only") {
+      setTab("restart");
+      setSort("oldest");
+      setRelationshipFilter("all");
+      setSearch("");
+      setLimit(120);
+      return;
+    }
+    if (nextPreset === "snoozed_review") {
+      setTab("snoozed");
+      setSort("oldest");
+      setRelationshipFilter("all");
+      setSearch("");
+      setLimit(120);
+      return;
+    }
+  };
+
+  const saveNamedPreset = () => {
+    const name = namedPresetName.trim();
+    if (!name) {
+      pushNotice("error", "Enter a preset name.");
+      return;
+    }
+    const nextPreset: SavedBacklogPreset = {
+      name,
+      tab,
+      sort,
+      relationshipFilter,
+      search: search.trim(),
+    };
+    setNamedPresets((current) => {
+      const withoutSameName = current.filter((entry) => entry.name.toLowerCase() !== name.toLowerCase());
+      return [...withoutSameName, nextPreset].slice(-20);
+    });
+    setSelectedNamedPreset(name);
+    pushNotice("success", `Saved preset "${name}".`);
+  };
+
+  const applyNamedPreset = (name: string) => {
+    const presetToApply = namedPresets.find((entry) => entry.name === name);
+    if (!presetToApply) {
+      return;
+    }
+    setPreset("custom");
+    setTab(presetToApply.tab);
+    setSort(presetToApply.sort);
+    setRelationshipFilter(presetToApply.relationshipFilter);
+    setSearch(presetToApply.search);
+    setLimit(120);
+    setSelectedNamedPreset(name);
+  };
+
+  const deleteNamedPreset = () => {
+    const name = selectedNamedPreset.trim();
+    if (!name) {
+      return;
+    }
+    setNamedPresets((current) => current.filter((entry) => entry.name !== name));
+    setSelectedNamedPreset("");
+    pushNotice("info", `Deleted preset "${name}".`);
+  };
+
   const onClearAll = () => {
     const confirmed = window.confirm(
       "Clear the entire backlog now? This resets backlog history so old unresolved messages will not reappear.",
@@ -263,7 +412,7 @@ function BacklogContent() {
       },
       {
         pendingLabel: "Clearing backlog...",
-        successMessage: "Backlog cleared.",
+        successMessage: "Backlog clear requested.",
       },
     );
   };
@@ -477,6 +626,18 @@ function BacklogContent() {
 
             <div className="backlog-filters">
               <label className="setup-input-group inline">
+                <span className="queue-meta">Preset</span>
+                <select
+                  value={preset}
+                  onChange={(event) => applyPreset(event.target.value as BacklogPreset)}
+                >
+                  <option value="custom">Custom</option>
+                  <option value="critical_first">Critical first</option>
+                  <option value="reconnect_only">Reconnect only</option>
+                  <option value="snoozed_review">Snoozed threads</option>
+                </select>
+              </label>
+              <label className="setup-input-group inline search-field-group">
                 <span className="queue-meta">Search</span>
                 <input
                   type="text"
@@ -485,98 +646,164 @@ function BacklogContent() {
                   onChange={(event) => {
                     setSearch(event.target.value);
                     setLimit(120);
+                    setPreset("custom");
                   }}
+                />
+              </label>
+              <div className="backlog-filter-actions">
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  onClick={onRefresh}
+                  disabled={getRecord("backlog:refresh").pending}
+                  aria-disabled={getRecord("backlog:refresh").pending}
+                >
+                  {getRecord("backlog:refresh").pending ? "Refreshing..." : "Refresh"}
+                </button>
+
+                <button type="button" className="btn btn-ghost" onClick={() => setLimit((prev) => Math.min(prev + 120, 480))}>
+                  Load more
+                </button>
+              </div>
+            </div>
+
+            <details className="backlog-control-section">
+            <summary className="backlog-control-summary">Advanced filters</summary>
+              <div className="backlog-filters backlog-filters-advanced">
+                <label className="setup-input-group inline">
+                  <span className="queue-meta">Relationship</span>
+                  <select
+                    value={relationshipFilter}
+                    onChange={(event) => {
+                      setRelationshipFilter(event.target.value as "all" | RelationshipValue);
+                      setPreset("custom");
+                    }}
+                  >
+                    <option value="all">All</option>
+                    {RELATIONSHIP_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="setup-input-group inline">
+                  <span className="queue-meta">Sort</span>
+                  <select
+                    value={sort}
+                    onChange={(event) => {
+                      setSort(event.target.value as SortMode);
+                      setPreset("custom");
+                    }}
+                  >
+                    <option value="importance">Importance</option>
+                    <option value="oldest">Oldest pending</option>
+                    <option value="newest">Newest pending</option>
+                    <option value="relationship">Relationship</option>
+                    <option value="activity">Recent activity</option>
+                  </select>
+                </label>
+
+                <label className="setup-input-group inline">
+                  <span className="queue-meta">Saved presets</span>
+                  <select
+                    value={selectedNamedPreset}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      setSelectedNamedPreset(value);
+                      if (value) {
+                        applyNamedPreset(value);
+                      }
+                    }}
+                  >
+                    <option value="">None</option>
+                    {namedPresets.map((entry) => (
+                      <option key={entry.name} value={entry.name}>
+                        {entry.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="setup-input-group inline">
+                  <span className="queue-meta">Save current as</span>
+                  <input
+                    type="text"
+                    value={namedPresetName}
+                    onChange={(event) => setNamedPresetName(event.target.value)}
+                    placeholder="e.g. Family reconnect"
+                  />
+                </label>
+                <div className="backlog-filter-actions">
+                  <button type="button" className="btn btn-ghost" onClick={saveNamedPreset}>
+                    Save preset
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    onClick={deleteNamedPreset}
+                    disabled={!selectedNamedPreset}
+                    aria-disabled={!selectedNamedPreset}
+                  >
+                    Delete preset
+                  </button>
+                </div>
+              </div>
+            </details>
+          </div>
+
+          <details className="backlog-control-section">
+            <summary className="backlog-control-summary">Bulk actions ({selectedCount} selected)</summary>
+            <div className="queue-actions backlog-bulk-actions">
+              <label className="queue-meta backlog-select-toggle">
+                <input
+                  type="checkbox"
+                  checked={allVisibleSelected}
+                  onChange={(event) =>
+                    setSelectedThreadIds(event.target.checked ? visibleItems.map((item) => item.threadId) : [])
+                  }
+                />{" "}
+                Select visible threads
+              </label>
+
+              <p className="queue-meta backlog-selection-count">{selectedCount} selected</p>
+
+              <label className="setup-input-group inline">
+                <span className="queue-meta">Snooze duration (minutes)</span>
+                <input
+                  type="number"
+                  min={5}
+                  step={5}
+                  value={snoozeMinutes}
+                  onChange={(event) => setSnoozeMinutes(Number(event.target.value) || 5)}
                 />
               </label>
 
               <label className="setup-input-group inline">
-                <span className="queue-meta">Relationship</span>
-                <select value={relationshipFilter} onChange={(event) => setRelationshipFilter(event.target.value as "all" | RelationshipValue)}>
-                  <option value="all">All</option>
-                  {RELATIONSHIP_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
+                <span className="queue-meta">Snooze note</span>
+                <input type="text" value={snoozeReason} onChange={(event) => setSnoozeReason(event.target.value)} placeholder="Why this can wait" />
               </label>
 
-              <label className="setup-input-group inline">
-                <span className="queue-meta">Sort</span>
-                <select value={sort} onChange={(event) => setSort(event.target.value as SortMode)}>
-                  <option value="importance">Importance</option>
-                  <option value="oldest">Oldest pending</option>
-                  <option value="newest">Newest pending</option>
-                  <option value="relationship">Relationship</option>
-                  <option value="activity">Recent activity</option>
-                </select>
-              </label>
-
+              <button type="button" className="btn btn-ghost" onClick={bulkSnooze} disabled={selectedCount === 0}>
+                Snooze selected
+              </button>
+              <button type="button" className="btn btn-ghost" onClick={() => bulkIgnore(true)} disabled={selectedCount === 0}>
+                Ignore selected
+              </button>
+              <button type="button" className="btn btn-ghost" onClick={() => bulkIgnore(false)} disabled={selectedCount === 0}>
+                Unignore selected
+              </button>
               <button
                 type="button"
-                className="btn btn-ghost"
-                onClick={onRefresh}
-                disabled={getRecord("backlog:refresh").pending}
-                aria-disabled={getRecord("backlog:refresh").pending}
+                className="btn btn-ghost backlog-clear-all"
+                onClick={onClearAll}
+                disabled={getRecord("backlog:clear-all").pending}
+                aria-disabled={getRecord("backlog:clear-all").pending}
               >
-                {getRecord("backlog:refresh").pending ? "Refreshing..." : "Refresh"}
-              </button>
-
-              <button type="button" className="btn btn-ghost" onClick={() => setLimit((prev) => Math.min(prev + 120, 480))}>
-                Load More
+                {getRecord("backlog:clear-all").pending ? "Clearing..." : "Clear entire backlog"}
               </button>
             </div>
-          </div>
-
-          <div className="queue-actions backlog-bulk-actions">
-            <label className="queue-meta backlog-select-toggle">
-              <input
-                type="checkbox"
-                checked={allVisibleSelected}
-                onChange={(event) =>
-                  setSelectedThreadIds(event.target.checked ? visibleItems.map((item) => item.threadId) : [])
-                }
-              />{" "}
-              Select visible threads
-            </label>
-
-            <p className="queue-meta backlog-selection-count">{selectedCount} selected</p>
-
-            <label className="setup-input-group inline">
-              <span className="queue-meta">Snooze for (minutes)</span>
-              <input
-                type="number"
-                min={5}
-                step={5}
-                value={snoozeMinutes}
-                onChange={(event) => setSnoozeMinutes(Number(event.target.value) || 5)}
-              />
-            </label>
-
-            <label className="setup-input-group inline">
-              <span className="queue-meta">Snooze note</span>
-              <input type="text" value={snoozeReason} onChange={(event) => setSnoozeReason(event.target.value)} placeholder="Optional context" />
-            </label>
-
-            <button type="button" className="btn btn-ghost" onClick={bulkSnooze} disabled={selectedCount === 0}>
-              Snooze Selection
-            </button>
-            <button type="button" className="btn btn-ghost" onClick={() => bulkIgnore(true)} disabled={selectedCount === 0}>
-              Ignore Selection
-            </button>
-            <button type="button" className="btn btn-ghost" onClick={() => bulkIgnore(false)} disabled={selectedCount === 0}>
-              Unignore Selection
-            </button>
-            <button
-              type="button"
-              className="btn btn-ghost backlog-clear-all"
-              onClick={onClearAll}
-              disabled={getRecord("backlog:clear-all").pending}
-              aria-disabled={getRecord("backlog:clear-all").pending}
-            >
-              {getRecord("backlog:clear-all").pending ? "Clearing..." : "Clear Entire Backlog"}
-            </button>
-          </div>
+          </details>
         </section>
 
         <section className="backlog-main-rail">
@@ -672,7 +899,7 @@ function BacklogContent() {
                         aria-disabled={isPending || alreadyQueued}
                         title="Reply directly to the latest unresolved message."
                       >
-                        Reply Draft
+                        Draft reply
                       </button>
                       <button
                         type="button"
@@ -682,11 +909,11 @@ function BacklogContent() {
                         aria-disabled={isPending || alreadyQueued}
                         title="Start with a warm reconnection opener for stale threads."
                       >
-                        Reconnect Draft
+                        Draft reconnect
                       </button>
                     </div>
                     <p className="queue-meta backlog-draft-help">
-                      Reply Draft responds directly. Reconnect Draft reopens the conversation gently.
+                      Draft reply answers the unresolved message. Draft reconnect opens cold threads gently.
                     </p>
                     <div className="backlog-secondary-actions">
                       {item.isSnoozed ? (
@@ -716,7 +943,7 @@ function BacklogContent() {
                       </button>
 
                       <Link href={`/conversations?threadId=${item.threadId}`} className="btn btn-ghost">
-                        Open Thread
+                        Open thread
                       </Link>
                     </div>
                     {draftError ? (
