@@ -16,6 +16,7 @@ import {
 } from "./lib/threadEligibility";
 import type { EligibilityReason } from "./lib/threadEligibility";
 import { dedupeAliases, sanitizeExtractedAliasToken } from "./lib/aliasNormalization";
+import { resolveTenantForMutation } from "./lib/tenantSecurity";
 
 const INBOUND_STALE_GRACE_MS = 2 * 60 * 1000;
 const GHOST_MODE_DURATION_MS = 30 * 60 * 1000;
@@ -262,6 +263,8 @@ async function updateAutoAliases(args: {
 
 export const ingest = mutation({
   args: {
+    tenantId: v.optional(v.id("tenantAccounts")),
+    connectorTokenHash: v.optional(v.string()),
     provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
     threadJid: v.string(),
     senderJid: v.string(),
@@ -296,6 +299,7 @@ export const ingest = mutation({
   },
   handler: async (ctx, args) => {
     const now = Date.now();
+    const tenantId = await resolveTenantForMutation(ctx, args);
     const messageProvider = normalizeProvider(args.provider);
     const ingestMode: IngestMode = args.ingestMode || "live";
     const isHistoryIngest = ingestMode !== "live";
@@ -304,15 +308,27 @@ export const ingest = mutation({
     const messageType = args.messageType || "text";
     const normalizedText = args.text.trim();
 
-    let thread = await ctx.db
-      .query("threads")
-      .withIndex("by_provider_and_jid", (q) => q.eq("provider", messageProvider).eq("jid", args.threadJid))
-      .first();
+    let thread = tenantId
+      ? await ctx.db
+          .query("threads")
+          .withIndex("by_tenantId_and_provider_and_jid", (q) =>
+            q.eq("tenantId", tenantId).eq("provider", messageProvider).eq("jid", args.threadJid),
+          )
+          .first()
+      : await ctx.db
+          .query("threads")
+          .withIndex("by_provider_and_jid", (q) => q.eq("provider", messageProvider).eq("jid", args.threadJid))
+          .first();
     if (!thread) {
-      thread = await ctx.db
-        .query("threads")
-        .withIndex("by_jid", (q) => q.eq("jid", args.threadJid))
-        .first();
+      thread = tenantId
+        ? await ctx.db
+            .query("threads")
+            .withIndex("by_tenantId_and_jid", (q) => q.eq("tenantId", tenantId).eq("jid", args.threadJid))
+            .first()
+        : await ctx.db
+            .query("threads")
+            .withIndex("by_jid", (q) => q.eq("jid", args.threadJid))
+            .first();
     }
 
     const config = await getConfig(ctx);
@@ -323,10 +339,17 @@ export const ingest = mutation({
         if (candidateJid === args.threadJid) {
           continue;
         }
-        thread = await ctx.db
-          .query("threads")
-          .withIndex("by_provider_and_jid", (q) => q.eq("provider", messageProvider).eq("jid", candidateJid))
-          .first();
+        thread = tenantId
+          ? await ctx.db
+              .query("threads")
+              .withIndex("by_tenantId_and_provider_and_jid", (q) =>
+                q.eq("tenantId", tenantId).eq("provider", messageProvider).eq("jid", candidateJid),
+              )
+              .first()
+          : await ctx.db
+              .query("threads")
+              .withIndex("by_provider_and_jid", (q) => q.eq("provider", messageProvider).eq("jid", candidateJid))
+              .first();
         if (thread) {
           break;
         }
@@ -337,6 +360,7 @@ export const ingest = mutation({
 
     if (!thread) {
       const threadId = await ctx.db.insert("threads", {
+        tenantId,
         provider: messageProvider,
         jid: args.threadJid,
         title: args.senderTitle,
@@ -358,6 +382,7 @@ export const ingest = mutation({
       }
     } else {
       await ctx.db.patch(thread._id, {
+        tenantId: thread.tenantId || tenantId,
         provider: thread.provider || messageProvider,
         title: args.senderTitle ?? thread.title,
         isGroup: inputThreadKind === "group",
@@ -431,12 +456,19 @@ export const ingest = mutation({
 
     const effectiveMessageId = args.providerMessageId || args.whatsappMessageId;
     if (effectiveMessageId) {
-      const crossThreadExistingKey = await ctx.db
-        .query("inboundDedupeKeys")
-        .withIndex("by_provider_and_providerMessageId", (q) =>
-          q.eq("provider", messageProvider).eq("providerMessageId", effectiveMessageId),
-        )
-        .first();
+      const crossThreadExistingKey = tenantId
+        ? await ctx.db
+            .query("inboundDedupeKeys")
+            .withIndex("by_tenantId_and_provider_and_providerMessageId", (q) =>
+              q.eq("tenantId", tenantId).eq("provider", messageProvider).eq("providerMessageId", effectiveMessageId),
+            )
+            .first()
+        : await ctx.db
+            .query("inboundDedupeKeys")
+            .withIndex("by_provider_and_providerMessageId", (q) =>
+              q.eq("provider", messageProvider).eq("providerMessageId", effectiveMessageId),
+            )
+            .first();
       if (crossThreadExistingKey) {
         const existingMessage = await ctx.db.get(crossThreadExistingKey.messageId);
         if (existingMessage) {
@@ -621,6 +653,7 @@ export const ingest = mutation({
     }
 
     const messageId = await ctx.db.insert("messages", {
+      tenantId,
       provider: messageProvider,
       threadId: thread._id,
       direction: "inbound",
@@ -640,6 +673,7 @@ export const ingest = mutation({
     });
     if (effectiveMessageId) {
       await ctx.db.insert("inboundDedupeKeys", {
+        tenantId,
         provider: messageProvider,
         providerMessageId: effectiveMessageId,
         threadId: thread._id,
@@ -680,6 +714,7 @@ export const ingest = mutation({
         }
       } else if (existingReaction) {
         await ctx.db.patch(existingReaction._id, {
+          tenantId: existingReaction.tenantId || tenantId,
           emoji,
           direction: "inbound",
           provider: messageProvider,
@@ -689,6 +724,7 @@ export const ingest = mutation({
         });
       } else {
         await ctx.db.insert("messageReactions", {
+          tenantId,
           provider: messageProvider,
           threadId: thread._id,
           messageId: reactionTargetMessageId,
@@ -713,6 +749,7 @@ export const ingest = mutation({
     }
 
     await ctx.db.insert("systemEvents", {
+      tenantId,
       source: "worker",
       eventType:
         isHistoryIngest
@@ -925,6 +962,8 @@ export const ingest = mutation({
 
 export const ingestHistorical = mutation({
   args: {
+    tenantId: v.optional(v.id("tenantAccounts")),
+    connectorTokenHash: v.optional(v.string()),
     provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
     ingestMode: v.union(v.literal("history_sync"), v.literal("history_fetch")),
     direction: v.union(v.literal("inbound"), v.literal("outbound")),
@@ -959,6 +998,7 @@ export const ingestHistorical = mutation({
   },
   handler: async (ctx, args): Promise<IngestHistoricalResult> => {
     const now = Date.now();
+    const tenantId = await resolveTenantForMutation(ctx, args);
     const messageProvider = normalizeProvider(args.provider);
     const isStatusMessage = args.isStatus === true;
     const messageAt = normalizeTimestampMs(args.messageAt, now);
@@ -966,20 +1006,33 @@ export const ingestHistorical = mutation({
       args.threadKind || classifyThreadKind({ jid: args.threadJid, isGroupHint: args.isGroup, provider: messageProvider });
     const normalizedArchivedAt = normalizeTimestampMs(args.archivedAt, messageAt);
     const normalizedText = args.text.trim() || (args.direction === "outbound" ? "[Historical outbound message]" : "[Historical inbound message]");
-    let thread = await ctx.db
-      .query("threads")
-      .withIndex("by_provider_and_jid", (q) => q.eq("provider", messageProvider).eq("jid", args.threadJid))
-      .first();
+    let thread = tenantId
+      ? await ctx.db
+          .query("threads")
+          .withIndex("by_tenantId_and_provider_and_jid", (q) =>
+            q.eq("tenantId", tenantId).eq("provider", messageProvider).eq("jid", args.threadJid),
+          )
+          .first()
+      : await ctx.db
+          .query("threads")
+          .withIndex("by_provider_and_jid", (q) => q.eq("provider", messageProvider).eq("jid", args.threadJid))
+          .first();
     if (!thread) {
-      thread = await ctx.db
-        .query("threads")
-        .withIndex("by_jid", (q) => q.eq("jid", args.threadJid))
-        .first();
+      thread = tenantId
+        ? await ctx.db
+            .query("threads")
+            .withIndex("by_tenantId_and_jid", (q) => q.eq("tenantId", tenantId).eq("jid", args.threadJid))
+            .first()
+        : await ctx.db
+            .query("threads")
+            .withIndex("by_jid", (q) => q.eq("jid", args.threadJid))
+            .first();
     }
 
     if (!thread) {
       const config = await getConfig(ctx);
       const threadId = await ctx.db.insert("threads", {
+        tenantId,
         provider: messageProvider,
         jid: args.threadJid,
         title: args.senderTitle,
@@ -1000,6 +1053,7 @@ export const ingestHistorical = mutation({
       }
     } else {
       await ctx.db.patch(thread._id, {
+        tenantId: thread.tenantId || tenantId,
         provider: thread.provider || messageProvider,
         title: args.senderTitle ?? thread.title,
         isGroup: threadKind === "group",
@@ -1088,12 +1142,19 @@ export const ingestHistorical = mutation({
 
     const effectiveMessageId = args.providerMessageId || args.whatsappMessageId;
     if (effectiveMessageId) {
-      const crossThreadExistingKey = await ctx.db
-        .query("inboundDedupeKeys")
-        .withIndex("by_provider_and_providerMessageId", (q) =>
-          q.eq("provider", messageProvider).eq("providerMessageId", effectiveMessageId),
-        )
-        .first();
+      const crossThreadExistingKey = tenantId
+        ? await ctx.db
+            .query("inboundDedupeKeys")
+            .withIndex("by_tenantId_and_provider_and_providerMessageId", (q) =>
+              q.eq("tenantId", tenantId).eq("provider", messageProvider).eq("providerMessageId", effectiveMessageId),
+            )
+            .first()
+        : await ctx.db
+            .query("inboundDedupeKeys")
+            .withIndex("by_provider_and_providerMessageId", (q) =>
+              q.eq("provider", messageProvider).eq("providerMessageId", effectiveMessageId),
+            )
+            .first();
       if (crossThreadExistingKey) {
         const existingMessage = await ctx.db.get(crossThreadExistingKey.messageId);
         if (existingMessage) {
@@ -1122,6 +1183,7 @@ export const ingestHistorical = mutation({
     }
 
     const messageId = await ctx.db.insert("messages", {
+      tenantId,
       provider: messageProvider,
       threadId: thread._id,
       direction: args.direction,
@@ -1141,6 +1203,7 @@ export const ingestHistorical = mutation({
     });
     if (args.direction === "inbound" && effectiveMessageId) {
       await ctx.db.insert("inboundDedupeKeys", {
+        tenantId,
         provider: messageProvider,
         providerMessageId: effectiveMessageId,
         threadId: thread._id,

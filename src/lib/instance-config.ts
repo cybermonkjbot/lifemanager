@@ -1,18 +1,22 @@
-import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import {
+  DEFAULT_INSTANCE_ACCOUNT_PROFILE,
   DEFAULT_INSTANCE_SETUP_PREFERENCES,
+  type InstanceAccountProfile,
   type InstancePinSource,
+  type InstanceSelfHostedConfig,
   type InstanceSetupPreferences,
   type InstanceSetupState,
   type InstanceSoulPrivacy,
   type InstanceSoulPrivacyLevel,
   type InstanceSoulProfile,
 } from "./instance-setup-types";
+import { getRuntimeDataPath } from "./runtime/paths";
 
-const INSTANCE_CONFIG_PATH = join(process.cwd(), ".slm", "instance-config.json");
-const SOUL_PROFILE_PATH = join(process.cwd(), ".slm", "soul.md");
+const INSTANCE_CONFIG_PATH = getRuntimeDataPath("instance-config.json");
+const SOUL_PROFILE_PATH = getRuntimeDataPath("soul.md");
 
 type LocalPinRecord = {
   salt: string;
@@ -29,6 +33,7 @@ export type LocalInstanceConfig = {
   updatedAt: number;
   pin: LocalPinRecord | null;
   preferences: InstanceSetupPreferences;
+  account?: InstanceAccountProfile;
   setupAiSettingsToolConsumedAt?: number | null;
 };
 
@@ -52,8 +57,104 @@ function normalizeSoulText(value: unknown, maxChars = 1200) {
   return typeof value === "string" ? value.replace(/\s+/g, " ").trim().slice(0, maxChars) : "";
 }
 
+function normalizeConfigText(value: unknown, maxChars = 800) {
+  return typeof value === "string" ? value.trim().slice(0, maxChars) : "";
+}
+
+function normalizeEmail(value: unknown) {
+  return normalizeConfigText(value, 320).toLowerCase();
+}
+
+function deriveLocalSecretKey(secret: string) {
+  return createHash("sha256").update(`odogwu-local-secret:${secret}`).digest();
+}
+
+function encryptLocalSecret(value: string, secret: string) {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", deriveLocalSecretKey(secret), iv);
+  const encrypted = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return {
+    encrypted: encrypted.toString("base64url"),
+    iv: iv.toString("base64url"),
+    tag: tag.toString("base64url"),
+  };
+}
+
+export function decryptLocalSecret(
+  encrypted: string | undefined,
+  iv: string | undefined,
+  tag: string | undefined,
+  secret: string | undefined,
+) {
+  if (!encrypted || !iv || !tag || !secret) {
+    return "";
+  }
+  try {
+    const decipher = createDecipheriv("aes-256-gcm", deriveLocalSecretKey(secret), Buffer.from(iv, "base64url"));
+    decipher.setAuthTag(Buffer.from(tag, "base64url"));
+    return Buffer.concat([
+      decipher.update(Buffer.from(encrypted, "base64url")),
+      decipher.final(),
+    ]).toString("utf8");
+  } catch {
+    return "";
+  }
+}
+
 function normalizeSoulPrivacyLevel(value: unknown, fallback: InstanceSoulPrivacyLevel): InstanceSoulPrivacyLevel {
   return value === "setup_only" || value === "ai_usable" || value === "never_mention" ? value : fallback;
+}
+
+function sanitizeSelfHostedConfig(value: Partial<InstanceSelfHostedConfig> | null | undefined): InstanceSelfHostedConfig {
+  return {
+    convexUrl: normalizeConfigText(value?.convexUrl),
+    appBaseUrl: normalizeConfigText(value?.appBaseUrl),
+    aiBaseUrl: normalizeConfigText(value?.aiBaseUrl),
+    aiApiKey: normalizeConfigText(value?.aiApiKey, 2000),
+    aiModel: normalizeConfigText(value?.aiModel, 200),
+  };
+}
+
+export function sanitizeInstanceAccountProfile(
+  value: Partial<InstanceAccountProfile> | null | undefined,
+): InstanceAccountProfile {
+  const billingStatus =
+    value?.billingStatus === "trialing" ||
+    value?.billingStatus === "active" ||
+    value?.billingStatus === "past_due" ||
+    value?.billingStatus === "paused" ||
+    value?.billingStatus === "canceled" ||
+    value?.billingStatus === "self_hosted" ||
+    value?.billingStatus === "unknown"
+      ? value.billingStatus
+      : DEFAULT_INSTANCE_ACCOUNT_PROFILE.billingStatus;
+  const trialStartedAt = Number(value?.trialStartedAt);
+  const trialEndsAt = Number(value?.trialEndsAt);
+  return {
+    email: normalizeEmail(value?.email),
+    displayName: normalizeConfigText(value?.displayName, 160),
+    tenantId: normalizeConfigText(value?.tenantId, 120),
+    deviceId: normalizeConfigText(value?.deviceId, 120),
+    connectorToken: normalizeConfigText(value?.connectorToken, 2000),
+    connectorTokenEncrypted: normalizeConfigText(value?.connectorTokenEncrypted, 4000),
+    connectorTokenIv: normalizeConfigText(value?.connectorTokenIv, 400),
+    connectorTokenTag: normalizeConfigText(value?.connectorTokenTag, 400),
+    connectorTokenExpiresAt: Number.isFinite(Number(value?.connectorTokenExpiresAt)) ? Number(value?.connectorTokenExpiresAt) : null,
+    trialStartedAt: Number.isFinite(trialStartedAt) ? trialStartedAt : null,
+    trialEndsAt: Number.isFinite(trialEndsAt) ? trialEndsAt : null,
+    billingStatus,
+  };
+}
+
+export function redactInstanceAccountProfileForClient(account: InstanceAccountProfile): InstanceAccountProfile {
+  return {
+    ...account,
+    connectorToken: "",
+    connectorTokenEncrypted: "",
+    connectorTokenIv: "",
+    connectorTokenTag: "",
+  };
 }
 
 export function sanitizeInstanceSoulProfile(value: Partial<InstanceSoulProfile> | null | undefined): InstanceSoulProfile {
@@ -99,6 +200,8 @@ export function sanitizeInstanceSetupPreferences(
   value: Partial<InstanceSetupPreferences> | null | undefined,
 ): InstanceSetupPreferences {
   return {
+    serviceMode: normalizeStringUnion(value?.serviceMode, ["hosted", "self_hosted"], DEFAULT_INSTANCE_SETUP_PREFERENCES.serviceMode),
+    selfHosted: sanitizeSelfHostedConfig(value?.selfHosted || DEFAULT_INSTANCE_SETUP_PREFERENCES.selfHosted),
     autonomyMode: normalizeStringUnion(value?.autonomyMode, ["review_first", "autopilot"], DEFAULT_INSTANCE_SETUP_PREFERENCES.autonomyMode),
     replyPace: normalizeStringUnion(value?.replyPace, ["measured", "deliberate", "unhurried"], DEFAULT_INSTANCE_SETUP_PREFERENCES.replyPace),
     mimicryPreset: normalizeStringUnion(value?.mimicryPreset, ["light", "balanced", "close"], DEFAULT_INSTANCE_SETUP_PREFERENCES.mimicryPreset),
@@ -139,6 +242,7 @@ export async function readLocalInstanceConfig(): Promise<LocalInstanceConfig | n
             }
           : null,
       preferences: sanitizeInstanceSetupPreferences(parsed.preferences),
+      account: sanitizeInstanceAccountProfile(parsed.account),
       setupAiSettingsToolConsumedAt: Number.isFinite(setupAiSettingsToolConsumedAt) ? setupAiSettingsToolConsumedAt : null,
     };
   } catch {
@@ -146,9 +250,26 @@ export async function readLocalInstanceConfig(): Promise<LocalInstanceConfig | n
   }
 }
 
+function prepareConfigForDisk(config: LocalInstanceConfig): LocalInstanceConfig {
+  const account = sanitizeInstanceAccountProfile(config.account);
+  const rawConnectorToken = account.connectorToken.trim();
+  if (rawConnectorToken && config.pin?.cookieSecret) {
+    const encrypted = encryptLocalSecret(rawConnectorToken, config.pin.cookieSecret);
+    account.connectorToken = "";
+    account.connectorTokenEncrypted = encrypted.encrypted;
+    account.connectorTokenIv = encrypted.iv;
+    account.connectorTokenTag = encrypted.tag;
+  }
+
+  return {
+    ...config,
+    account,
+  };
+}
+
 export async function writeLocalInstanceConfig(config: LocalInstanceConfig) {
   await mkdir(dirname(INSTANCE_CONFIG_PATH), { recursive: true });
-  await writeFile(INSTANCE_CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  await writeFile(INSTANCE_CONFIG_PATH, `${JSON.stringify(prepareConfigForDisk(config), null, 2)}\n`, "utf8");
 }
 
 export function hasInstanceSoulProfileContent(profile: InstanceSoulProfile) {
@@ -208,6 +329,10 @@ function hashPin(pin: string, salt: string) {
   return scryptSync(pin, salt, 64).toString("hex");
 }
 
+export function createLocalPinHash(pin: string, salt: string) {
+  return hashPin(pin, salt);
+}
+
 export function createLocalPinRecord(pin: string, previousSecret?: string, now = Date.now()): LocalPinRecord {
   const normalizedPin = normalizePin(pin);
   const salt = randomBytes(16).toString("hex");
@@ -250,6 +375,7 @@ export async function resolveInstanceSetupState(): Promise<InstanceSetupState> {
     pinEnabled: pinSource !== "none",
     pinSource,
     preferences: config?.preferences || DEFAULT_INSTANCE_SETUP_PREFERENCES,
+    account: redactInstanceAccountProfileForClient(sanitizeInstanceAccountProfile(config?.account)),
     setupAiSettingsToolAvailable: !setupCompleted && !setupAiSettingsToolConsumedAt,
     setupAiSettingsToolConsumedAt,
     updatedAt: config?.updatedAt ?? null,

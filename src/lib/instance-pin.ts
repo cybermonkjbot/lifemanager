@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { readLocalInstanceConfig, verifyLocalPin } from "./instance-config";
 import { type InstancePinSource, type InstanceSetupState } from "./instance-setup-types";
+import { secureSessionCookieBase } from "./secure-cookies";
 
 const INSTANCE_PIN_COOKIE_NAME = "slm_instance_pin";
 const INSTANCE_PIN_TOKEN_VERSION = "v1";
@@ -79,10 +80,7 @@ export function getInstancePinCookieName() {
 export function getInstancePinCookieOptions() {
   const ttlDays = getInstancePinTtlDays();
   return {
-    httpOnly: true,
-    sameSite: "lax" as const,
-    secure: process.env.NODE_ENV === "production",
-    path: "/",
+    ...secureSessionCookieBase(),
     maxAge: ttlDays * 24 * 60 * 60,
   };
 }

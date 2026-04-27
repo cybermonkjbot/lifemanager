@@ -8,10 +8,15 @@
  * @module
  */
 
+import type * as adminSecrets from "../adminSecrets.js";
+import type * as adminUsers from "../adminUsers.js";
 import type * as aiFeedback from "../aiFeedback.js";
 import type * as backlog from "../backlog.js";
+import type * as billing from "../billing.js";
+import type * as billingActions from "../billingActions.js";
 import type * as calls from "../calls.js";
 import type * as chatTools from "../chatTools.js";
+import type * as connectedAccounts from "../connectedAccounts.js";
 import type * as contextTools from "../contextTools.js";
 import type * as conversationIntelligence from "../conversationIntelligence.js";
 import type * as crons from "../crons.js";
@@ -35,6 +40,7 @@ import type * as lib_outboxEnqueue from "../lib/outboxEnqueue.js";
 import type * as lib_outreachModes from "../lib/outreachModes.js";
 import type * as lib_personaPacks from "../lib/personaPacks.js";
 import type * as lib_staleness from "../lib/staleness.js";
+import type * as lib_tenantSecurity from "../lib/tenantSecurity.js";
 import type * as lib_threadEligibility from "../lib/threadEligibility.js";
 import type * as lib_time from "../lib/time.js";
 import type * as lib_types from "../lib/types.js";
@@ -55,6 +61,7 @@ import type * as settings from "../settings.js";
 import type * as statusBuilder from "../statusBuilder.js";
 import type * as style from "../style.js";
 import type * as system from "../system.js";
+import type * as tenantAccounts from "../tenantAccounts.js";
 import type * as threads from "../threads.js";
 import type * as todos from "../todos.js";
 
@@ -65,10 +72,15 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  adminSecrets: typeof adminSecrets;
+  adminUsers: typeof adminUsers;
   aiFeedback: typeof aiFeedback;
   backlog: typeof backlog;
+  billing: typeof billing;
+  billingActions: typeof billingActions;
   calls: typeof calls;
   chatTools: typeof chatTools;
+  connectedAccounts: typeof connectedAccounts;
   contextTools: typeof contextTools;
   conversationIntelligence: typeof conversationIntelligence;
   crons: typeof crons;
@@ -92,6 +104,7 @@ declare const fullApi: ApiFromModules<{
   "lib/outreachModes": typeof lib_outreachModes;
   "lib/personaPacks": typeof lib_personaPacks;
   "lib/staleness": typeof lib_staleness;
+  "lib/tenantSecurity": typeof lib_tenantSecurity;
   "lib/threadEligibility": typeof lib_threadEligibility;
   "lib/time": typeof lib_time;
   "lib/types": typeof lib_types;
@@ -112,6 +125,7 @@ declare const fullApi: ApiFromModules<{
   statusBuilder: typeof statusBuilder;
   style: typeof style;
   system: typeof system;
+  tenantAccounts: typeof tenantAccounts;
   threads: typeof threads;
   todos: typeof todos;
 }>;

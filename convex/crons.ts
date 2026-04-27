@@ -3,6 +3,8 @@ import { internal } from "./_generated/api";
 
 const crons = cronJobs();
 const refRomanceMorningRun = makeFunctionReference<"mutation">("romanceProtocol:run");
+const refBillingPauseExpired = makeFunctionReference<"mutation">("billing:pauseExpiredBatch");
+const refWeeklyTenantReports = makeFunctionReference<"action">("billingActions:sendWeeklyTenantReports");
 
 crons.interval("process-confirmed-followups", { minutes: 1 }, internal.followupsPromoter.run, {});
 crons.interval("recover-stuck-outbox-claims", { minutes: 2 }, internal.outbox.recoverExpiredClaims, {});
@@ -20,6 +22,10 @@ crons.interval("ai-smartness-v2-backfill", { hours: 6 }, internal.aiFeedback.bac
 });
 crons.interval("ai-smartness-v2-train", { hours: 24 }, internal.aiFeedback.trainTuningProfiles, {
   trainingWindowDays: 30,
+});
+crons.interval("billing-expiry-enforcement", { hours: 1 }, refBillingPauseExpired, {});
+crons.cron("weekly-tenant-owner-reports", "0 8 * * 1", refWeeklyTenantReports, {
+  limit: 80,
 });
 
 export default crons;

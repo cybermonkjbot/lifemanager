@@ -29,6 +29,7 @@ import {
   resolveThreadEligibility,
 } from "./lib/threadEligibility";
 import { isIgnoredMorningPauseActive } from "../shared/romance-morning";
+import { assertTenantOwned, resolveTenantForMutation, resolveTenantForQuery } from "./lib/tenantSecurity";
 
 const UNANSWERED_OUTBOUND_RECHECK_MS = 5 * 60 * 1000;
 const CALL_REPLY_BARRIER_RECHECK_MS = 5 * 60 * 1000;
@@ -390,6 +391,8 @@ export function findNewestStaleInboundMessage(args: {
 
 export const claimDue = mutation({
   args: {
+    tenantId: v.optional(v.id("tenantAccounts")),
+    connectorTokenHash: v.optional(v.string()),
     workerId: v.string(),
     messageProvider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
     limit: v.optional(v.number()),
@@ -397,18 +400,26 @@ export const claimDue = mutation({
   },
   handler: async (ctx, args) => {
     const now = Date.now();
+    const tenantId = await resolveTenantForMutation(ctx, args);
     const messageProvider = normalizeMessageProvider(args.messageProvider);
     const leaseMs = Math.max(15_000, Math.min(args.leaseMs ?? DEFAULT_LEASE_MS, 10 * 60_000));
     const max = Math.min(args.limit ?? 5, 20);
     const config = await getConfig(ctx);
     const sendRateLimits = resolveSendRateLimits(config, messageProvider);
 
-    const expiredClaims = await ctx.db
-      .query("outbox")
-      .withIndex("by_messageProvider_and_status_leaseExpiresAt", (q) =>
-        q.eq("messageProvider", messageProvider).eq("status", "claimed").lte("leaseExpiresAt", now),
-      )
-      .take(max);
+    const expiredClaims = tenantId
+      ? await ctx.db
+          .query("outbox")
+          .withIndex("by_tenantId_and_messageProvider_and_status_and_leaseExpiresAt", (q) =>
+            q.eq("tenantId", tenantId).eq("messageProvider", messageProvider).eq("status", "claimed").lte("leaseExpiresAt", now),
+          )
+          .take(max)
+      : await ctx.db
+          .query("outbox")
+          .withIndex("by_messageProvider_and_status_leaseExpiresAt", (q) =>
+            q.eq("messageProvider", messageProvider).eq("status", "claimed").lte("leaseExpiresAt", now),
+          )
+          .take(max);
 
     for (const item of expiredClaims) {
       const nextRecoveryCount = (item.leaseRecoveryCount || 0) + 1;
@@ -425,6 +436,7 @@ export const claimDue = mutation({
       });
       if (quarantine) {
         await ctx.db.insert("systemEvents", {
+          tenantId: item.tenantId,
           source: "convex",
           eventType: "outbox.quarantined.lease_expiry",
           threadId: item.threadId,
@@ -435,12 +447,19 @@ export const claimDue = mutation({
       }
     }
 
-    const due = await ctx.db
-      .query("outbox")
-      .withIndex("by_messageProvider_and_status_sendAt", (q) =>
-        q.eq("messageProvider", messageProvider).eq("status", "pending").lte("sendAt", now),
-      )
-      .take(max);
+    const due = tenantId
+      ? await ctx.db
+          .query("outbox")
+          .withIndex("by_tenantId_and_messageProvider_and_status_and_sendAt", (q) =>
+            q.eq("tenantId", tenantId).eq("messageProvider", messageProvider).eq("status", "pending").lte("sendAt", now),
+          )
+          .take(max)
+      : await ctx.db
+          .query("outbox")
+          .withIndex("by_messageProvider_and_status_sendAt", (q) =>
+            q.eq("messageProvider", messageProvider).eq("status", "pending").lte("sendAt", now),
+          )
+          .take(max);
 
     const claimed = [] as Array<{
       outboxId: string;
@@ -719,8 +738,14 @@ export const claimDue = mutation({
           deferReasons.push("instagram-story-daily-limit");
         }
       }
+      const operatorApprovedHomePreview = item.toolRunId?.startsWith("home-preview:") === true;
+      const operatorIgnoredQuietHours = item.toolRunId?.startsWith("home-preview:ignore-quiet-hours:") === true;
       const nowHour = new Date(now).getHours();
-      if (config.quietHoursEnabled && isWithinQuietHours(nowHour, config.quietHoursStartHour, config.quietHoursEndHour)) {
+      if (
+        !operatorIgnoredQuietHours &&
+        config.quietHoursEnabled &&
+        isWithinQuietHours(nowHour, config.quietHoursStartHour, config.quietHoursEndHour)
+      ) {
         deferUntil = Math.max(deferUntil, nextAllowedAfterQuietHours(now, config.quietHoursStartHour, config.quietHoursEndHour));
         deferReasons.push("quiet-hours");
       }
@@ -739,11 +764,15 @@ export const claimDue = mutation({
       const recentThreadOutbound = recentThread.filter(
         (message) => message.direction === "outbound" && message.messageAt >= cutoff,
       );
-      if (recentThread.length >= threadScanLimit && recentThreadOutbound.length >= sendRateLimits.maxPerThread) {
+      if (
+        !operatorApprovedHomePreview &&
+        recentThread.length >= threadScanLimit &&
+        recentThreadOutbound.length >= sendRateLimits.maxPerThread
+      ) {
         deferUntil = Math.max(deferUntil, now + 30_000);
         deferReasons.push("thread-rate-limit-scan-cap");
       }
-      if (recentThreadOutbound.length >= sendRateLimits.maxPerThread) {
+      if (!operatorApprovedHomePreview && recentThreadOutbound.length >= sendRateLimits.maxPerThread) {
         const oldestThreadWindow = Math.min(...recentThreadOutbound.slice(0, sendRateLimits.maxPerThread).map((message) => message.messageAt));
         deferUntil = Math.max(deferUntil, oldestThreadWindow + windowMs + 1_000);
         deferReasons.push("thread-rate-limit");
@@ -820,17 +849,21 @@ export const claimDue = mutation({
           message.messageAt >= cutoff &&
           (message.provider || "whatsapp") === messageProvider,
       );
-      if (recentGlobal.length >= globalScanLimit && recentGlobalOutbound.length >= sendRateLimits.maxGlobal) {
+      if (
+        !operatorApprovedHomePreview &&
+        recentGlobal.length >= globalScanLimit &&
+        recentGlobalOutbound.length >= sendRateLimits.maxGlobal
+      ) {
         deferUntil = Math.max(deferUntil, now + 30_000);
         deferReasons.push("global-rate-limit-scan-cap");
       }
-      if (recentGlobalOutbound.length >= sendRateLimits.maxGlobal) {
+      if (!operatorApprovedHomePreview && recentGlobalOutbound.length >= sendRateLimits.maxGlobal) {
         const oldestGlobalWindow = Math.min(...recentGlobalOutbound.slice(0, sendRateLimits.maxGlobal).map((message) => message.messageAt));
         deferUntil = Math.max(deferUntil, oldestGlobalWindow + windowMs + 1_000);
         deferReasons.push("global-rate-limit");
       }
 
-      if (threadKind === "direct") {
+      if (!operatorApprovedHomePreview && threadKind === "direct") {
         let unansweredState = unansweredOutboundStateByThread.get(thread._id);
         if (!unansweredState) {
           const latestMessages = await ctx.db
@@ -1126,15 +1159,20 @@ export const claimDue = mutation({
 
 export const markTyping = mutation({
   args: {
+    tenantId: v.optional(v.id("tenantAccounts")),
+    connectorTokenHash: v.optional(v.string()),
     outboxId: v.id("outbox"),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForMutation(ctx, args);
     const outbox = await ctx.db.get(args.outboxId);
     if (!outbox) {
       return null;
     }
+    assertTenantOwned(tenantId, outbox.tenantId);
 
     await ctx.db.insert("systemEvents", {
+      tenantId: outbox.tenantId,
       source: "worker",
       eventType: "outbox.typing",
       threadId: outbox.threadId,
@@ -1149,9 +1187,12 @@ export const markTyping = mutation({
 
 export const getSendDisposition = query({
   args: {
+    tenantId: v.optional(v.id("tenantAccounts")),
+    connectorTokenHash: v.optional(v.string()),
     outboxId: v.id("outbox"),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForQuery(ctx, args);
     const outbox = await ctx.db.get(args.outboxId);
     if (!outbox) {
       return {
@@ -1159,6 +1200,7 @@ export const getSendDisposition = query({
         reason: "outbox_missing",
       };
     }
+    assertTenantOwned(tenantId, outbox.tenantId);
     if (outbox.status !== "claimed") {
       return {
         canSend: false,
@@ -1491,6 +1533,8 @@ export const suppressForManualIntervention = mutation({
 
 export const hydrateAiOutreach = mutation({
   args: {
+    tenantId: v.optional(v.id("tenantAccounts")),
+    connectorTokenHash: v.optional(v.string()),
     outboxId: v.id("outbox"),
     text: v.string(),
     provider: v.union(v.literal("azure"), v.literal("codex"), v.literal("heuristic")),
@@ -1500,10 +1544,12 @@ export const hydrateAiOutreach = mutation({
     contextPack: v.optional(contextPackValidator),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForMutation(ctx, args);
     const outbox = await ctx.db.get(args.outboxId);
     if (!outbox) {
       return null;
     }
+    assertTenantOwned(tenantId, outbox.tenantId);
 
     const now = Date.now();
     await ctx.db.patch(outbox._id, {
@@ -1528,6 +1574,7 @@ export const hydrateAiOutreach = mutation({
     }
 
     await ctx.db.insert("systemEvents", {
+      tenantId: outbox.tenantId,
       source: "worker",
       eventType: "outbox.aiOutreachHydrated",
       threadId: outbox.threadId,
@@ -1542,6 +1589,8 @@ export const hydrateAiOutreach = mutation({
 
 export const hydrateAiStatus = mutation({
   args: {
+    tenantId: v.optional(v.id("tenantAccounts")),
+    connectorTokenHash: v.optional(v.string()),
     outboxId: v.id("outbox"),
     text: v.string(),
     provider: v.union(v.literal("azure"), v.literal("codex"), v.literal("heuristic")),
@@ -1556,10 +1605,12 @@ export const hydrateAiStatus = mutation({
     contextPack: v.optional(contextPackValidator),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForMutation(ctx, args);
     const outbox = await ctx.db.get(args.outboxId);
     if (!outbox) {
       return null;
     }
+    assertTenantOwned(tenantId, outbox.tenantId);
 
     const now = Date.now();
     const nextSendKind: "text" | "meme" = args.statusFormat === "meme" ? "meme" : "text";
@@ -1611,14 +1662,18 @@ export const hydrateAiStatus = mutation({
 
 export const stageStatusReview = mutation({
   args: {
+    tenantId: v.optional(v.id("tenantAccounts")),
+    connectorTokenHash: v.optional(v.string()),
     outboxId: v.id("outbox"),
     reason: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForMutation(ctx, args);
     const outbox = await ctx.db.get(args.outboxId);
     if (!outbox) {
       return null;
     }
+    assertTenantOwned(tenantId, outbox.tenantId);
 
     const now = Date.now();
     const reason = (args.reason?.trim() || "Auto status sampled for manual review before send.").slice(0, 280);
@@ -1640,6 +1695,7 @@ export const stageStatusReview = mutation({
     }
 
     await ctx.db.insert("systemEvents", {
+      tenantId: outbox.tenantId,
       source: "worker",
       eventType: "status_builder.staged_manual_review",
       threadId: outbox.threadId,
@@ -1658,15 +1714,19 @@ export const stageStatusReview = mutation({
 
 export const rewriteClaimedMessage = mutation({
   args: {
+    tenantId: v.optional(v.id("tenantAccounts")),
+    connectorTokenHash: v.optional(v.string()),
     outboxId: v.id("outbox"),
     messageText: v.string(),
     mediaCaption: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForMutation(ctx, args);
     const outbox = await ctx.db.get(args.outboxId);
     if (!outbox) {
       return null;
     }
+    assertTenantOwned(tenantId, outbox.tenantId);
 
     const now = Date.now();
     const previousText = outbox.messageText;
@@ -1717,16 +1777,20 @@ export const rewriteClaimedMessage = mutation({
 
 export const markSent = mutation({
   args: {
+    tenantId: v.optional(v.id("tenantAccounts")),
+    connectorTokenHash: v.optional(v.string()),
     outboxId: v.id("outbox"),
     messageProvider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
     providerMessageId: v.optional(v.string()),
     whatsappMessageId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForMutation(ctx, args);
     const item = await ctx.db.get(args.outboxId);
     if (!item) {
       return null;
     }
+    assertTenantOwned(tenantId, item.tenantId);
 
     if (item.status === "sent") {
       return item._id;
@@ -1775,6 +1839,7 @@ export const markSent = mutation({
     }
 
     const insertedMessageId = await ctx.db.insert("messages", {
+      tenantId: item.tenantId,
       provider: messageProvider,
       threadId: item.threadId,
       direction: "outbound",
@@ -1896,6 +1961,7 @@ export const markSent = mutation({
           } else {
             const judgedConfidence = clamp01(commitment.candidate.confidence * followupJudge.confidenceScale);
             await ctx.db.insert("followUps", {
+              tenantId: item.tenantId,
               threadId: item.threadId,
               sourceMessageId: insertedMessageId,
               reason: commitment.candidate.reason,
@@ -1957,6 +2023,7 @@ export const markSent = mutation({
           });
         } else {
           await ctx.db.insert("todoCandidates", {
+            tenantId: item.tenantId,
             threadId: item.threadId,
             sourceMessageId: insertedMessageId,
             title: todoJudge.title,
@@ -2000,6 +2067,7 @@ export const markSent = mutation({
 
         if (existingReaction) {
           await ctx.db.patch(existingReaction._id, {
+            tenantId: existingReaction.tenantId || item.tenantId,
             emoji: item.reactionEmoji,
             direction: "outbound",
             provider: messageProvider,
@@ -2009,6 +2077,7 @@ export const markSent = mutation({
           });
         } else {
           await ctx.db.insert("messageReactions", {
+            tenantId: item.tenantId,
             provider: messageProvider,
             threadId: item.threadId,
             messageId: targetMessage._id,
@@ -2025,6 +2094,7 @@ export const markSent = mutation({
     }
 
     await ctx.db.insert("systemEvents", {
+      tenantId: item.tenantId,
       source: "worker",
       eventType: "outbox.sent",
       threadId: item.threadId,
@@ -2050,15 +2120,19 @@ export const markSent = mutation({
 
 export const markFailed = mutation({
   args: {
+    tenantId: v.optional(v.id("tenantAccounts")),
+    connectorTokenHash: v.optional(v.string()),
     outboxId: v.id("outbox"),
     error: v.string(),
     forceFinal: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForMutation(ctx, args);
     const item = await ctx.db.get(args.outboxId);
     if (!item) {
       return null;
     }
+    assertTenantOwned(tenantId, item.tenantId);
 
     const now = Date.now();
     const retryClass = classifyRetryError(args.error);
@@ -2083,6 +2157,7 @@ export const markFailed = mutation({
           updatedAt: now,
         });
         await ctx.db.insert("systemEvents", {
+          tenantId: item.tenantId,
           source: "worker",
           eventType: "followup.failed",
           threadId: item.threadId,
@@ -2094,6 +2169,7 @@ export const markFailed = mutation({
     }
 
     await ctx.db.insert("systemEvents", {
+      tenantId: item.tenantId,
       source: "worker",
       eventType: exhausted ? "outbox.failed.final" : "outbox.failed.retry",
       threadId: item.threadId,
@@ -2112,15 +2188,19 @@ export const markFailed = mutation({
 
 export const deferClaimed = mutation({
   args: {
+    tenantId: v.optional(v.id("tenantAccounts")),
+    connectorTokenHash: v.optional(v.string()),
     outboxId: v.id("outbox"),
     sendAt: v.number(),
     reason: v.string(),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForMutation(ctx, args);
     const item = await ctx.db.get(args.outboxId);
     if (!item) {
       return null;
     }
+    assertTenantOwned(tenantId, item.tenantId);
     const now = Date.now();
     const nextSendAt = Math.max(now + 1_000, Math.round(args.sendAt));
     await ctx.db.patch(item._id, {
@@ -2132,6 +2212,7 @@ export const deferClaimed = mutation({
       error: args.reason.slice(0, 300),
     });
     await ctx.db.insert("systemEvents", {
+      tenantId: item.tenantId,
       source: "worker",
       eventType: "outbox.deferred.time_window",
       threadId: item.threadId,
@@ -2140,6 +2221,105 @@ export const deferClaimed = mutation({
       createdAt: now,
     });
     return item._id;
+  },
+});
+
+export const expediteHomePreviewPending = mutation({
+  args: {
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    const max = Math.min(Math.max(Math.round(args.limit ?? 50), 1), 100);
+    const pending = await ctx.db
+      .query("outbox")
+      .withIndex("by_status_sendAt", (q) => q.eq("status", "pending"))
+      .take(max);
+    let updated = 0;
+    for (const item of pending) {
+      if (item.toolRunId?.startsWith("home-preview:") !== true || item.sendAt <= now) {
+        continue;
+      }
+      await ctx.db.patch(item._id, {
+        sendAt: now,
+        workerId: undefined,
+        leaseExpiresAt: undefined,
+        updatedAt: now,
+      });
+      await ctx.db.insert("systemEvents", {
+        source: "dashboard",
+        eventType: "outbox.home_preview.expedited",
+        threadId: item.threadId,
+        outboxId: item._id,
+        detail: "Operator-approved Home preview send expedited after quiet-hours bypass update.",
+        createdAt: now,
+      });
+      updated += 1;
+    }
+    return { updated };
+  },
+});
+
+export const listHomePreviewRecent = query({
+  args: {
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const max = Math.min(Math.max(Math.round(args.limit ?? 30), 1), 100);
+    const rows = await ctx.db.query("outbox").withIndex("by_status_sendAt", (q) => q.eq("status", "pending")).take(max);
+    const homePreview = [];
+    for (const item of rows) {
+      if (item.toolRunId?.startsWith("home-preview:") !== true) {
+        continue;
+      }
+      const thread = await ctx.db.get(item.threadId);
+      homePreview.push({
+        outboxId: item._id,
+        threadId: item.threadId,
+        title: thread?.title,
+        jid: thread?.jid,
+        threadProvider: thread?.provider,
+        messageProvider: item.messageProvider,
+        status: item.status,
+        sendAt: item.sendAt,
+        attempts: item.attempts,
+        provider: item.provider,
+        error: item.error,
+        text: item.messageText.slice(0, 120),
+      });
+    }
+    return homePreview;
+  },
+});
+
+export const getStatuses = query({
+  args: {
+    outboxIds: v.array(v.id("outbox")),
+  },
+  handler: async (ctx, args) => {
+    const rows = [];
+    for (const outboxId of args.outboxIds.slice(0, 100)) {
+      const item = await ctx.db.get(outboxId);
+      if (!item) {
+        rows.push({
+          outboxId,
+          status: "missing" as const,
+        });
+        continue;
+      }
+      const thread = await ctx.db.get(item.threadId);
+      rows.push({
+        outboxId: item._id,
+        threadId: item.threadId,
+        title: thread?.title,
+        status: item.status,
+        attempts: item.attempts,
+        sendAt: item.sendAt,
+        updatedAt: item.updatedAt,
+        error: item.error,
+      });
+    }
+    return rows;
   },
 });
 

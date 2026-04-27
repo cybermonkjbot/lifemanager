@@ -11,6 +11,7 @@ import {
   eligibilityReasonLabel,
   resolveThreadEligibility,
 } from "./lib/threadEligibility";
+import { assertTenantOwned, resolveTenantForQuery } from "./lib/tenantSecurity";
 
 function clampInt(value: number | undefined, fallback: number, min: number, max: number) {
   if (!Number.isFinite(value)) {
@@ -278,9 +279,12 @@ export const listContacts = query({
 
 export const getEligibility = query({
   args: {
+    tenantId: v.optional(v.id("tenantAccounts")),
+    connectorTokenHash: v.optional(v.string()),
     threadId: v.id("threads"),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForQuery(ctx, args);
     const thread = await ctx.db.get(args.threadId);
     if (!thread) {
       return {
@@ -289,6 +293,7 @@ export const getEligibility = query({
         detail: "thread not found",
       };
     }
+    assertTenantOwned(tenantId, thread.tenantId);
 
     const config = await getConfig(ctx);
     const threadKind =

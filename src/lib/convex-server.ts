@@ -1,12 +1,12 @@
 import { ConvexHttpClient } from "convex/browser";
 import { convexRefs } from "./convex-refs";
 
-export function getConvexUrl() {
-  return process.env.CONVEX_URL || process.env.NEXT_PUBLIC_CONVEX_URL || "";
+export function getConvexUrl(overrideUrl?: string) {
+  return overrideUrl || process.env.CONVEX_URL || process.env.NEXT_PUBLIC_CONVEX_URL || "";
 }
 
-export function createConvexClient() {
-  const url = getConvexUrl();
+export function createConvexClient(overrideUrl?: string) {
+  const url = getConvexUrl(overrideUrl);
   if (!url) {
     throw new Error("Missing CONVEX_URL or NEXT_PUBLIC_CONVEX_URL");
   }

@@ -34,6 +34,8 @@ export type EnqueueOutboxArgs = {
 
 export async function enqueueOutbox(ctx: MutationCtx, args: EnqueueOutboxArgs) {
   const now = args.now ?? Date.now();
+  const thread = await ctx.db.get(args.threadId);
+  const tenantId = thread?.tenantId;
 
   const existing = await ctx.db
     .query("outbox")
@@ -47,6 +49,7 @@ export async function enqueueOutbox(ctx: MutationCtx, args: EnqueueOutboxArgs) {
     }
 
     await ctx.db.patch(existing._id, {
+      tenantId: existing.tenantId || tenantId,
       messageProvider: args.messageProvider,
       threadId: args.threadId,
       draftId: args.draftId,
@@ -82,6 +85,7 @@ export async function enqueueOutbox(ctx: MutationCtx, args: EnqueueOutboxArgs) {
   }
 
   const outboxId = await ctx.db.insert("outbox", {
+    tenantId,
     messageProvider: args.messageProvider,
     threadId: args.threadId,
     draftId: args.draftId,

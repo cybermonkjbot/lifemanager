@@ -54,12 +54,12 @@ function buildSoulProfileDescription(profile: InstanceSoulProfile, privacy: Inst
 }
 
 export async function syncInstancePreferencesToConvex(preferences: InstanceSetupPreferences) {
-  const url = getConvexUrl();
+  const url = getConvexUrl(preferences.serviceMode === "self_hosted" ? preferences.selfHosted.convexUrl : undefined);
   if (!url) {
     return false;
   }
 
-  const client = createConvexClient();
+  const client = createConvexClient(url);
   await client.mutation(convexRefs.settingsSaveOnboardingPreset, {
     autonomyMode: preferences.autonomyMode,
     replyPace: preferences.replyPace,

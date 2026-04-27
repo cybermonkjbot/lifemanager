@@ -22,7 +22,185 @@ export default defineSchema({
     updatedAt: v.number(),
   }).index("by_key", ["key"]),
 
+  managedSecrets: defineTable({
+    key: v.string(),
+    algorithm: v.string(),
+    iv: v.string(),
+    tag: v.string(),
+    encryptedValue: v.string(),
+    valuePreview: v.string(),
+    updatedAt: v.number(),
+    updatedBy: v.string(),
+  }).index("by_key", ["key"]),
+
+  adminUsers: defineTable({
+    emailNormalized: v.string(),
+    email: v.string(),
+    pinSalt: v.string(),
+    pinHash: v.string(),
+    canMasqueradeTenants: v.optional(v.boolean()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+    createdBy: v.optional(v.string()),
+  }).index("by_emailNormalized", ["emailNormalized"]),
+
+  tenantAccounts: defineTable({
+    emailNormalized: v.string(),
+    email: v.string(),
+    displayName: v.optional(v.string()),
+    serviceMode: v.union(v.literal("hosted"), v.literal("self_hosted")),
+    plan: v.union(v.literal("personal_connector"), v.literal("business_whatsapp"), v.literal("self_hosted")),
+    billingStatus: v.union(
+      v.literal("trialing"),
+      v.literal("active"),
+      v.literal("past_due"),
+      v.literal("paused"),
+      v.literal("canceled"),
+    ),
+    subscriptionProvider: v.optional(v.union(v.literal("manual"), v.literal("flutterwave"))),
+    subscriptionExpiresAt: v.optional(v.number()),
+    subscriptionPausedAt: v.optional(v.number()),
+    subscriptionPauseReason: v.optional(v.string()),
+    flutterwaveCustomerId: v.optional(v.string()),
+    flutterwaveSubscriptionId: v.optional(v.string()),
+    flutterwavePaymentPlanId: v.optional(v.string()),
+    flutterwaveTxRef: v.optional(v.string()),
+    lastSubscriptionEmailAt: v.optional(v.number()),
+    lastTenantReportEmailAt: v.optional(v.number()),
+    pinSalt: v.optional(v.string()),
+    pinHash: v.optional(v.string()),
+    pinUpdatedAt: v.optional(v.number()),
+    trialStartedAt: v.number(),
+    trialEndsAt: v.number(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_emailNormalized", ["emailNormalized"])
+    .index("by_billingStatus_and_trialEndsAt", ["billingStatus", "trialEndsAt"])
+    .index("by_billingStatus_and_subscriptionExpiresAt", ["billingStatus", "subscriptionExpiresAt"]),
+
+  tenantSubscriptions: defineTable({
+    tenantId: v.id("tenantAccounts"),
+    provider: v.union(v.literal("flutterwave"), v.literal("manual")),
+    plan: v.union(v.literal("personal_connector"), v.literal("business_whatsapp"), v.literal("self_hosted")),
+    status: v.union(
+      v.literal("pending"),
+      v.literal("trialing"),
+      v.literal("active"),
+      v.literal("past_due"),
+      v.literal("paused"),
+      v.literal("canceled"),
+      v.literal("expired"),
+    ),
+    amount: v.optional(v.number()),
+    currency: v.optional(v.string()),
+    providerPaymentPlanId: v.optional(v.string()),
+    providerSubscriptionId: v.optional(v.string()),
+    providerCustomerId: v.optional(v.string()),
+    txRef: v.optional(v.string()),
+    transactionId: v.optional(v.string()),
+    paymentLink: v.optional(v.string()),
+    currentPeriodStartedAt: v.optional(v.number()),
+    currentPeriodEndsAt: v.optional(v.number()),
+    lastPaymentAt: v.optional(v.number()),
+    lastWebhookAt: v.optional(v.number()),
+    cancelAt: v.optional(v.number()),
+    canceledAt: v.optional(v.number()),
+    pausedAt: v.optional(v.number()),
+    pauseReason: v.optional(v.string()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_tenantId", ["tenantId"])
+    .index("by_tenantId_and_provider", ["tenantId", "provider"])
+    .index("by_txRef", ["txRef"])
+    .index("by_providerSubscriptionId", ["providerSubscriptionId"])
+    .index("by_status_and_currentPeriodEndsAt", ["status", "currentPeriodEndsAt"]),
+
+  subscriptionEvents: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
+    subscriptionId: v.optional(v.id("tenantSubscriptions")),
+    provider: v.union(v.literal("flutterwave"), v.literal("resend"), v.literal("system")),
+    eventType: v.string(),
+    providerEventId: v.optional(v.string()),
+    txRef: v.optional(v.string()),
+    transactionId: v.optional(v.string()),
+    status: v.optional(v.string()),
+    detail: v.string(),
+    createdAt: v.number(),
+  })
+    .index("by_createdAt", ["createdAt"])
+    .index("by_tenantId_and_createdAt", ["tenantId", "createdAt"])
+    .index("by_providerEventId", ["providerEventId"])
+    .index("by_txRef", ["txRef"]),
+
+  tenantDevices: defineTable({
+    tenantId: v.id("tenantAccounts"),
+    deviceId: v.string(),
+    label: v.optional(v.string()),
+    lastSeenAt: v.number(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_tenantId", ["tenantId"])
+    .index("by_tenantId_and_deviceId", ["tenantId", "deviceId"]),
+
+  tenantUsers: defineTable({
+    tenantId: v.id("tenantAccounts"),
+    emailNormalized: v.string(),
+    email: v.string(),
+    displayName: v.optional(v.string()),
+    role: v.union(v.literal("owner"), v.literal("admin"), v.literal("member")),
+    isSuperAdmin: v.boolean(),
+    pinSalt: v.optional(v.string()),
+    pinHash: v.optional(v.string()),
+    pinUpdatedAt: v.optional(v.number()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_emailNormalized", ["emailNormalized"])
+    .index("by_tenantId", ["tenantId"])
+    .index("by_tenantId_and_emailNormalized", ["tenantId", "emailNormalized"]),
+
+  tenantConnectorTokens: defineTable({
+    tenantId: v.id("tenantAccounts"),
+    deviceId: v.string(),
+    tokenHash: v.string(),
+    tokenPreview: v.string(),
+    status: v.union(v.literal("active"), v.literal("revoked")),
+    scopes: v.array(v.string()),
+    lastUsedAt: v.optional(v.number()),
+    expiresAt: v.optional(v.number()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_tokenHash", ["tokenHash"])
+    .index("by_tenantId", ["tenantId"])
+    .index("by_tenantId_and_deviceId", ["tenantId", "deviceId"]),
+
+  tenantConnectedAccounts: defineTable({
+    tenantId: v.id("tenantAccounts"),
+    deviceId: v.string(),
+    provider: v.union(v.literal("whatsapp"), v.literal("instagram")),
+    providerAccountId: v.string(),
+    accountLabel: v.optional(v.string()),
+    displayName: v.optional(v.string()),
+    phoneNumberMasked: v.optional(v.string()),
+    username: v.optional(v.string()),
+    authState: v.union(v.literal("connected"), v.literal("disconnected"), v.literal("expired"), v.literal("unknown")),
+    connectedAt: v.optional(v.number()),
+    disconnectedAt: v.optional(v.number()),
+    lastSeenAt: v.optional(v.number()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_tenantId", ["tenantId"])
+    .index("by_tenantId_and_provider", ["tenantId", "provider"])
+    .index("by_tenantId_and_deviceId_and_provider", ["tenantId", "deviceId", "provider"])
+    .index("by_tenantId_and_provider_and_providerAccountId", ["tenantId", "provider", "providerAccountId"]),
+
   threads: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
     provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
     jid: v.string(),
     title: v.optional(v.string()),
@@ -40,6 +218,8 @@ export default defineSchema({
   })
     .index("by_jid", ["jid"])
     .index("by_provider_and_jid", ["provider", "jid"])
+    .index("by_tenantId_and_provider_and_jid", ["tenantId", "provider", "jid"])
+    .index("by_tenantId_and_jid", ["tenantId", "jid"])
     .index("by_lastMessageAt", ["lastMessageAt"])
     .index("by_provider_and_lastMessageAt", ["provider", "lastMessageAt"])
     .index("by_threadKind_and_lastMessageAt", ["threadKind", "lastMessageAt"])
@@ -82,6 +262,7 @@ export default defineSchema({
     .index("by_threadId_and_endedAt", ["threadId", "endedAt"]),
 
   messages: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
     provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
     threadId: v.id("threads"),
     direction: v.union(v.literal("inbound"), v.literal("outbound")),
@@ -114,12 +295,14 @@ export default defineSchema({
   })
     .index("by_thread", ["threadId"])
     .index("by_thread_messageAt", ["threadId", "messageAt"])
+    .index("by_tenantId_and_threadId_and_messageAt", ["tenantId", "threadId", "messageAt"])
     .index("by_thread_providerMessageId", ["threadId", "providerMessageId"])
     .index("by_thread_whatsappMessageId", ["threadId", "whatsappMessageId"])
     .index("by_provider_and_providerMessageId", ["provider", "providerMessageId"])
     .index("by_isStatus_and_messageAt", ["isStatus", "messageAt"])
     .index("by_mediaAssetId", ["mediaAssetId"])
     .index("by_provider_and_createdAt", ["provider", "createdAt"])
+    .index("by_tenantId_and_provider_and_createdAt", ["tenantId", "provider", "createdAt"])
     .index("by_createdAt", ["createdAt"])
     .index("by_messageType_and_createdAt", ["messageType", "createdAt"])
     .searchIndex("search_text", {
@@ -241,6 +424,7 @@ export default defineSchema({
     .index("by_updatedAt", ["updatedAt"]),
 
   replyDrafts: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
     messageProvider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
     threadId: v.id("threads"),
     sourceMessageId: v.id("messages"),
@@ -275,11 +459,13 @@ export default defineSchema({
   })
     .index("by_thread", ["threadId"])
     .index("by_status", ["status"])
+    .index("by_tenantId_and_status", ["tenantId", "status"])
     .index("by_messageProvider_and_status", ["messageProvider", "status"])
     .index("by_sourceMessage", ["sourceMessageId"])
     .index("by_mediaAssetId", ["mediaAssetId"]),
 
   outbox: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
     messageProvider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
     threadId: v.id("threads"),
     draftId: v.id("replyDrafts"),
@@ -324,6 +510,13 @@ export default defineSchema({
     .index("by_status_leaseExpiresAt", ["status", "leaseExpiresAt"])
     .index("by_messageProvider_and_status_sendAt", ["messageProvider", "status", "sendAt"])
     .index("by_messageProvider_and_status_leaseExpiresAt", ["messageProvider", "status", "leaseExpiresAt"])
+    .index("by_tenantId_and_messageProvider_and_status_and_sendAt", ["tenantId", "messageProvider", "status", "sendAt"])
+    .index("by_tenantId_and_messageProvider_and_status_and_leaseExpiresAt", [
+      "tenantId",
+      "messageProvider",
+      "status",
+      "leaseExpiresAt",
+    ])
     .index("by_thread_and_status", ["threadId", "status"])
     .index("by_worker", ["workerId"])
     .index("by_draft", ["draftId"])
@@ -331,6 +524,7 @@ export default defineSchema({
     .index("by_mediaAssetId", ["mediaAssetId"]),
 
   inboundDedupeKeys: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
     provider: v.union(v.literal("whatsapp"), v.literal("instagram")),
     providerMessageId: v.string(),
     threadId: v.id("threads"),
@@ -338,6 +532,7 @@ export default defineSchema({
     createdAt: v.number(),
   })
     .index("by_provider_and_providerMessageId", ["provider", "providerMessageId"])
+    .index("by_tenantId_and_provider_and_providerMessageId", ["tenantId", "provider", "providerMessageId"])
     .index("by_threadId_and_createdAt", ["threadId", "createdAt"]),
 
   aiFeedbackSignals: defineTable({
@@ -428,6 +623,7 @@ export default defineSchema({
   }).index("by_jobKey", ["jobKey"]),
 
   followUps: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
     threadId: v.id("threads"),
     sourceMessageId: v.id("messages"),
     reason: v.string(),
@@ -450,10 +646,12 @@ export default defineSchema({
     updatedAt: v.number(),
   })
     .index("by_status_dueAt", ["status", "dueAt"])
+    .index("by_tenantId_and_status_and_dueAt", ["tenantId", "status", "dueAt"])
     .index("by_dueAt", ["dueAt"])
     .index("by_thread", ["threadId"]),
 
   todoCandidates: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
     threadId: v.id("threads"),
     sourceMessageId: v.id("messages"),
     title: v.string(),
@@ -463,9 +661,11 @@ export default defineSchema({
     updatedAt: v.number(),
   })
     .index("by_status", ["status"])
+    .index("by_tenantId_and_status", ["tenantId", "status"])
     .index("by_thread", ["threadId"]),
 
   todos: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
     threadId: v.optional(v.id("threads")),
     sourceMessageId: v.optional(v.id("messages")),
     title: v.string(),
@@ -473,7 +673,9 @@ export default defineSchema({
     status: v.union(v.literal("open"), v.literal("done")),
     createdAt: v.number(),
     updatedAt: v.number(),
-  }).index("by_status", ["status"]),
+  })
+    .index("by_status", ["status"])
+    .index("by_tenantId_and_status", ["tenantId", "status"]),
 
   styleProfiles: defineTable({
     scope: v.union(v.literal("global"), v.literal("thread")),
@@ -587,6 +789,7 @@ export default defineSchema({
     .index("by_resolvedAt_and_createdAt", ["resolvedAt", "createdAt"]),
 
   providerRuns: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
     threadId: v.optional(v.id("threads")),
     draftId: v.optional(v.id("replyDrafts")),
     provider: v.union(v.literal("azure"), v.literal("codex"), v.literal("heuristic")),
@@ -604,9 +807,11 @@ export default defineSchema({
     createdAt: v.number(),
   })
     .index("by_createdAt", ["createdAt"])
+    .index("by_tenantId_and_createdAt", ["tenantId", "createdAt"])
     .index("by_provider_and_createdAt", ["provider", "createdAt"]),
 
   toolRuns: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
     threadId: v.optional(v.id("threads")),
     toolRunId: v.optional(v.string()),
     plannerSource: v.optional(v.union(v.literal("deterministic"), v.literal("hybrid"))),
@@ -625,12 +830,14 @@ export default defineSchema({
     createdAt: v.number(),
   })
     .index("by_createdAt", ["createdAt"])
+    .index("by_tenantId_and_createdAt", ["tenantId", "createdAt"])
     .index("by_threadId_and_createdAt", ["threadId", "createdAt"])
     .index("by_threadId_and_toolRunId", ["threadId", "toolRunId"])
     .index("by_toolName_and_createdAt", ["toolName", "createdAt"])
     .index("by_status_and_createdAt", ["status", "createdAt"]),
 
   systemEvents: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
     source: v.union(
       v.literal("worker"),
       v.literal("convex"),
@@ -645,12 +852,14 @@ export default defineSchema({
     createdAt: v.number(),
   })
     .index("by_createdAt", ["createdAt"])
+    .index("by_tenantId_and_createdAt", ["tenantId", "createdAt"])
     .index("by_type", ["eventType"])
     .index("by_threadId_and_createdAt", ["threadId", "createdAt"])
     .index("by_threadId_and_eventType_and_createdAt", ["threadId", "eventType", "createdAt"])
     .index("by_threadId_and_toolRunId", ["threadId", "toolRunId"]),
 
   setupRuntime: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
     key: v.string(),
     provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
     status: v.union(
@@ -677,9 +886,11 @@ export default defineSchema({
     updatedAt: v.number(),
   })
     .index("by_key", ["key"])
-    .index("by_provider", ["provider"]),
+    .index("by_provider", ["provider"])
+    .index("by_tenantId_and_provider", ["tenantId", "provider"]),
 
   messageReactions: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
     provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
     threadId: v.id("threads"),
     messageId: v.id("messages"),
@@ -691,11 +902,13 @@ export default defineSchema({
     createdAt: v.number(),
     updatedAt: v.number(),
   })
+    .index("by_tenantId_and_messageId_and_actorJid", ["tenantId", "messageId", "actorJid"])
     .index("by_messageId_and_actorJid", ["messageId", "actorJid"])
     .index("by_threadId_and_messageId", ["threadId", "messageId"])
     .index("by_threadId", ["threadId"]),
 
   mediaAssets: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
     kind: v.union(
       v.literal("sticker"),
       v.literal("meme"),
@@ -728,6 +941,7 @@ export default defineSchema({
   })
     .index("by_kind_and_enabled", ["kind", "enabled"])
     .index("by_kind", ["kind"])
+    .index("by_tenantId_and_kind", ["tenantId", "kind"])
     .index("by_kind_and_contentHash", ["kind", "contentHash"])
     .index("by_kind_and_providerContentHash", ["kind", "providerContentHash"])
     .index("by_kind_and_source_and_threadId_and_enabled", ["kind", "source", "threadId", "enabled"]),

@@ -3,6 +3,30 @@ export type InstanceAutonomyMode = "review_first" | "autopilot";
 export type InstanceReplyPacePreset = "measured" | "deliberate" | "unhurried";
 export type InstanceMimicryPreset = "light" | "balanced" | "close";
 export type InstanceSoulPrivacyLevel = "setup_only" | "ai_usable" | "never_mention";
+export type InstanceServiceMode = "hosted" | "self_hosted";
+
+export type InstanceSelfHostedConfig = {
+  convexUrl: string;
+  appBaseUrl: string;
+  aiBaseUrl: string;
+  aiApiKey: string;
+  aiModel: string;
+};
+
+export type InstanceAccountProfile = {
+  email: string;
+  displayName: string;
+  tenantId: string;
+  deviceId: string;
+  connectorToken: string;
+  connectorTokenEncrypted: string;
+  connectorTokenIv: string;
+  connectorTokenTag: string;
+  connectorTokenExpiresAt: number | null;
+  trialStartedAt: number | null;
+  trialEndsAt: number | null;
+  billingStatus: "trialing" | "active" | "past_due" | "paused" | "canceled" | "self_hosted" | "unknown";
+};
 
 export type InstanceSoulProfile = {
   useCase: string;
@@ -24,6 +48,8 @@ export type InstanceSoulProfile = {
 export type InstanceSoulPrivacy = Record<keyof InstanceSoulProfile, InstanceSoulPrivacyLevel>;
 
 export type InstanceSetupPreferences = {
+  serviceMode: InstanceServiceMode;
+  selfHosted: InstanceSelfHostedConfig;
   autonomyMode: InstanceAutonomyMode;
   replyPace: InstanceReplyPacePreset;
   mimicryPreset: InstanceMimicryPreset;
@@ -41,12 +67,36 @@ export type InstanceSetupState = {
   pinEnabled: boolean;
   pinSource: InstancePinSource;
   preferences: InstanceSetupPreferences;
+  account: InstanceAccountProfile;
   setupAiSettingsToolAvailable: boolean;
   setupAiSettingsToolConsumedAt: number | null;
   updatedAt: number | null;
 };
 
+export const DEFAULT_INSTANCE_ACCOUNT_PROFILE: InstanceAccountProfile = {
+  email: "",
+  displayName: "",
+  tenantId: "",
+  deviceId: "",
+  connectorToken: "",
+  connectorTokenEncrypted: "",
+  connectorTokenIv: "",
+  connectorTokenTag: "",
+  connectorTokenExpiresAt: null,
+  trialStartedAt: null,
+  trialEndsAt: null,
+  billingStatus: "unknown",
+};
+
 export const DEFAULT_INSTANCE_SETUP_PREFERENCES: InstanceSetupPreferences = {
+  serviceMode: "hosted",
+  selfHosted: {
+    convexUrl: "",
+    appBaseUrl: "",
+    aiBaseUrl: "",
+    aiApiKey: "",
+    aiModel: "",
+  },
   autonomyMode: "review_first",
   replyPace: "deliberate",
   mimicryPreset: "balanced",

@@ -1,6 +1,7 @@
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 import { getConfig, setConfigValue } from "./lib/config";
+import { resolveTenantForMutation } from "./lib/tenantSecurity";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const SPENDING_WINDOWS = {
@@ -701,6 +702,8 @@ export const upsertSetupStatus = mutation({
 
 export const reportSetupListener = mutation({
   args: {
+    tenantId: v.optional(v.id("tenantAccounts")),
+    connectorTokenHash: v.optional(v.string()),
     provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
     listenerActive: v.boolean(),
     listenerWorkerId: v.optional(v.string()),
@@ -709,12 +712,18 @@ export const reportSetupListener = mutation({
     hasAuth: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForMutation(ctx, args);
     const provider = args.provider || "whatsapp";
-    let existing = await ctx.db
-      .query("setupRuntime")
-      .withIndex("by_provider", (q) => q.eq("provider", provider))
-      .first();
-    if (!existing && provider === "whatsapp") {
+    let existing = tenantId
+      ? await ctx.db
+          .query("setupRuntime")
+          .withIndex("by_tenantId_and_provider", (q) => q.eq("tenantId", tenantId).eq("provider", provider))
+          .first()
+      : await ctx.db
+          .query("setupRuntime")
+          .withIndex("by_provider", (q) => q.eq("provider", provider))
+          .first();
+    if (!existing && !tenantId && provider === "whatsapp") {
       existing = await ctx.db
         .query("setupRuntime")
         .withIndex("by_key", (q) => q.eq("key", "whatsapp"))
@@ -723,6 +732,7 @@ export const reportSetupListener = mutation({
 
     const now = Date.now();
     const patch = {
+      tenantId,
       provider,
       key: provider,
       listenerActive: args.listenerActive,
