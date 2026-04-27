@@ -43,6 +43,7 @@ type SetupWizardProps = {
   embedded?: boolean;
   initialScreen?: SetupWizardScreen;
   setupSecret?: string;
+  onWhatsAppConnectedChange?: (connected: boolean) => void;
 };
 
 type SetupWizardScreen = "options" | "whatsapp" | "pairing" | "instagram" | "voice";
@@ -64,19 +65,19 @@ const setupWizardScreens: Record<
   }
 > = {
   options: {
-    title: "Setup",
+    title: "Connect accounts",
   },
   whatsapp: {
-    title: "WhatsApp",
+    title: "Connect WhatsApp",
   },
   pairing: {
-    title: "Pair WhatsApp",
+    title: "Scan or enter code",
   },
   instagram: {
-    title: "Instagram",
+    title: "Connect Instagram",
   },
   voice: {
-    title: "Voice Notes",
+    title: "Voice sample",
   },
 };
 
@@ -263,6 +264,7 @@ function SetupWizardContent({
   initialScreen = "options",
   embedded = false,
   setupSecret,
+  onWhatsAppConnectedChange,
 }: {
   liveState: SetupState | null | undefined;
   instagramLiveState: SetupState | null | undefined;
@@ -270,11 +272,13 @@ function SetupWizardContent({
   initialScreen?: SetupWizardScreen;
   embedded?: boolean;
   setupSecret?: string;
+  onWhatsAppConnectedChange?: (connected: boolean) => void;
 }) {
   const [localState, setLocalState] = useState<SetupState | null>(null);
   const [voiceState, setVoiceState] = useState<VoiceSetupState | null>(null);
   const [phoneNumber, setPhoneNumber] = useState("");
   const [activeScreen, setActiveScreen] = useState<SetupWizardScreen>(initialScreen);
+  const autoQrLastStartedAtRef = useRef(0);
 
   const { runAction, isPending, anyPending, notices, dismissNotice } = useActionStateRegistry();
 
@@ -321,6 +325,10 @@ function SetupWizardContent({
     [setupSecret],
   );
   const showBackToOptions = !embedded && activeScreen !== "options";
+
+  useEffect(() => {
+    onWhatsAppConnectedChange?.(isConnected);
+  }, [isConnected, onWhatsAppConnectedChange]);
 
   const refreshVoiceState = useCallback(async () => {
     try {
@@ -426,7 +434,9 @@ function SetupWizardContent({
 
         const next = await readSetupResponse(response);
         setLocalState(next);
-        setActiveScreen("pairing");
+        if (!embedded) {
+          setActiveScreen("pairing");
+        }
       },
       {
         pendingLabel: mode === "qr" ? "Starting QR..." : "Starting pairing code...",
@@ -489,6 +499,31 @@ function SetupWizardContent({
   };
 
   useEffect(() => {
+    if (
+      !embedded ||
+      activeScreen !== "whatsapp" ||
+      liveStateLoading ||
+      anyPending ||
+      pendingStartQr ||
+      isConnected ||
+      showQrCode ||
+      (status !== "idle" && status !== "error")
+    ) {
+      return;
+    }
+
+    const now = Date.now();
+    if (now - autoQrLastStartedAtRef.current < 5000) {
+      return;
+    }
+
+    autoQrLastStartedAtRef.current = now;
+    startSetup("qr");
+    // startSetup intentionally omitted so the auto-start is driven by setup state, not function identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeScreen, anyPending, embedded, isConnected, liveStateLoading, pendingStartQr, showQrCode, status]);
+
+  useEffect(() => {
     if (!realtimeEnabled) {
       refresh();
     }
@@ -499,7 +534,9 @@ function SetupWizardContent({
   useEffect(() => {
     const shouldPollForAutoStart = status === "connected" && !state?.listenerActive;
     const shouldPoll = realtimeEnabled
-      ? ((status === "starting" || status === "syncing") && !state?.qrDataUrl && !state?.pairingCode) || shouldPollForAutoStart
+      ? status === "qr_ready" ||
+        ((status === "starting" || status === "syncing") && !state?.qrDataUrl && !state?.pairingCode) ||
+        shouldPollForAutoStart
       : status === "starting" ||
           status === "syncing" ||
           status === "qr_ready" ||
@@ -555,19 +592,19 @@ function SetupWizardContent({
             <div className="setup-option-grid">
               <button className="setup-option-card" type="button" onClick={() => setActiveScreen("whatsapp")}>
                 <p className="setup-option-kicker">WhatsApp</p>
-                <h4>Connect</h4>
+                <h4>Pair device</h4>
                 <span className={`status-pill ${statusToneClass(status, state?.listenerActive)}`}>{whatsappStatusText}</span>
               </button>
               <button className="setup-option-card" type="button" onClick={() => setActiveScreen("instagram")}>
-                <p className="setup-option-kicker">Instagram</p>
-                <h4>Connect</h4>
+                <p className="setup-option-kicker">Instagram <em className="setup-unstable-tag">Currently unstable</em></p>
+                <h4>Sign in</h4>
                 <span className={`status-pill ${statusToneClass(instagramStatus, instagramLiveState?.listenerActive)}`}>
                   {instagramStatusText}
                 </span>
               </button>
               <button className="setup-option-card" type="button" onClick={() => setActiveScreen("voice")}>
                 <p className="setup-option-kicker">Voice Notes</p>
-                <h4>Set up</h4>
+                <h4>Add sample</h4>
                 <span className={`status-pill ${voiceStatusToneClass(voiceState?.status)}`}>{voiceStatusText}</span>
               </button>
             </div>
@@ -576,12 +613,16 @@ function SetupWizardContent({
           <section id="setup-panel-whatsapp" className="setup-flow-panel" hidden={activeScreen !== "whatsapp"}>
             <div className="setup-wizard-card">
               <ActionNotices notices={notices} onDismiss={dismissNotice} />
-              <h3>WhatsApp</h3>
+              {!embedded ? <h3>Connect WhatsApp</h3> : null}
 
-              <div className="setup-status-row">
-                <span className={`status-pill ${statusToneClass(status, state?.listenerActive)}`}>{whatsappStatusText}</span>
-                {status === "error" ? <span className="queue-meta">{uiStatusMessage}</span> : null}
-              </div>
+              {!embedded ? (
+                <div className="setup-status-row">
+                  <span className={`status-pill ${statusToneClass(status, state?.listenerActive)}`}>{whatsappStatusText}</span>
+                  {status === "error" ? <span className="queue-meta">{uiStatusMessage}</span> : null}
+                </div>
+              ) : status === "error" ? (
+                <p className="queue-meta">{uiStatusMessage}</p>
+              ) : null}
               {liveStateLoading ? <LoadingIndicator label="Loading live setup status…" /> : null}
 
               {retryGuidance ? (
@@ -613,98 +654,123 @@ function SetupWizardContent({
                 </p>
               ) : null}
 
-              <div className="wizard-actions">
-                <button
-                  className="btn btn-primary"
-                  type="button"
-                  onClick={() => startSetup("qr")}
-                  disabled={!controls.canStartQr}
-                  aria-disabled={!controls.canStartQr}
-                >
-                  {pendingStartQr ? "Starting..." : "Start QR session"}
-                </button>
-                {showQrCode || showPairingCode || isConnected ? (
-                  <button className="btn btn-ghost" type="button" onClick={() => setActiveScreen("pairing")}>
-                    Open pairing screen
-                  </button>
-                ) : null}
-              </div>
-
-              <details className="setup-advanced">
-                <summary>Use pairing code instead</summary>
-                <label className="setup-input-group">
-                  <span className="queue-meta">Phone number</span>
-                  <input
-                    type="text"
-                    inputMode="tel"
-                    placeholder="2348012345678"
-                    value={phoneNumber}
-                    onChange={(event) => setPhoneNumber(event.target.value)}
-                    disabled={!controls.canEditPhone}
-                    aria-disabled={!controls.canEditPhone}
-                  />
-                </label>
+              {!embedded ? (
                 <div className="wizard-actions">
                   <button
-                    className="btn btn-ghost"
+                    className="btn btn-primary"
                     type="button"
-                    onClick={() => startSetup("pairing_code")}
-                    disabled={!controls.canStartCode || !hasPhoneForPairing}
-                    aria-disabled={!controls.canStartCode || !hasPhoneForPairing}
+                    onClick={() => startSetup("qr")}
+                    disabled={!controls.canStartQr}
+                    aria-disabled={!controls.canStartQr}
                   >
-                    {pendingStartCode ? "Starting..." : "Get pairing code"}
+                    {pendingStartQr ? "Starting..." : "Show QR code"}
                   </button>
+                  {showQrCode || showPairingCode || isConnected ? (
+                    <button className="btn btn-ghost" type="button" onClick={() => setActiveScreen("pairing")}>
+                      View code
+                    </button>
+                  ) : null}
                 </div>
-              </details>
+              ) : null}
 
-              <details className="setup-advanced">
-                <summary>More actions</summary>
-                <div className="wizard-actions">
-                  <button
-                    className="btn btn-ghost"
-                    type="button"
-                    onClick={refresh}
-                    disabled={!controls.canRefresh}
-                    aria-disabled={!controls.canRefresh}
-                  >
-                    {pendingRefresh ? "Refreshing..." : "Refresh"}
-                  </button>
-                  <button
-                    className="btn btn-ghost"
-                    type="button"
-                    onClick={stopSetup}
-                    disabled={!controls.canStop}
-                    aria-disabled={!controls.canStop}
-                >
-                  {pendingStop ? "Stopping..." : "Stop session"}
-                </button>
-                  <button
-                    className="btn btn-ghost"
-                    type="button"
-                    onClick={restartWorker}
-                    disabled={!controls.canRestartWorker}
-                    aria-disabled={!controls.canRestartWorker}
-                  >
-                    {pendingRestart ? "Restarting..." : "Restart worker"}
-                  </button>
-                  <button
-                    className="btn btn-ghost"
-                    type="button"
-                    onClick={resetSetup}
-                    disabled={!controls.canReset}
-                    aria-disabled={!controls.canReset}
-                >
-                  {pendingReset ? "Resetting..." : "Reset credentials"}
-                </button>
-              </div>
-            </details>
+              {embedded && isConnected ? (
+                <div className="qr-frame qr-frame-connected">
+                  <div className="qr-fake" aria-hidden="true" />
+                  <div className="qr-frame-overlay" aria-hidden="true">
+                    <span>Already connected</span>
+                  </div>
+                </div>
+              ) : null}
+
+              {embedded && !isConnected && showQrCode ? (
+                <div className={`qr-frame ${isConnected ? "qr-frame-connected" : ""}`}>
+                  <Image src={state!.qrDataUrl!} width={320} height={320} alt="WhatsApp setup QR code" unoptimized />
+                </div>
+              ) : null}
+
+              {embedded && !isConnected && !showQrCode && !liveStateLoading ? (
+                <LoadingIndicator label="Preparing QR code…" />
+              ) : null}
+
+              {!embedded ? (
+                <details className="setup-advanced">
+                  <summary>Use phone pairing code</summary>
+                  <label className="setup-input-group">
+                    <span className="queue-meta">Phone number</span>
+                    <input
+                      type="text"
+                      inputMode="tel"
+                      placeholder="2348012345678"
+                      value={phoneNumber}
+                      onChange={(event) => setPhoneNumber(event.target.value)}
+                      disabled={!controls.canEditPhone}
+                      aria-disabled={!controls.canEditPhone}
+                    />
+                  </label>
+                  <div className="wizard-actions">
+                    <button
+                      className="btn btn-ghost"
+                      type="button"
+                      onClick={() => startSetup("pairing_code")}
+                      disabled={!controls.canStartCode || !hasPhoneForPairing}
+                      aria-disabled={!controls.canStartCode || !hasPhoneForPairing}
+                    >
+                      {pendingStartCode ? "Starting..." : "Get pairing code"}
+                    </button>
+                  </div>
+                </details>
+              ) : null}
+
+              {!embedded ? (
+                <details className="setup-advanced">
+                  <summary>More actions</summary>
+                  <div className="wizard-actions">
+                    <button
+                      className="btn btn-ghost"
+                      type="button"
+                      onClick={refresh}
+                      disabled={!controls.canRefresh}
+                      aria-disabled={!controls.canRefresh}
+                    >
+                      {pendingRefresh ? "Refreshing..." : "Refresh"}
+                    </button>
+                    <button
+                      className="btn btn-ghost"
+                      type="button"
+                      onClick={stopSetup}
+                      disabled={!controls.canStop}
+                      aria-disabled={!controls.canStop}
+                    >
+                      {pendingStop ? "Stopping..." : "Stop session"}
+                    </button>
+                    <button
+                      className="btn btn-ghost"
+                      type="button"
+                      onClick={restartWorker}
+                      disabled={!controls.canRestartWorker}
+                      aria-disabled={!controls.canRestartWorker}
+                    >
+                      {pendingRestart ? "Restarting..." : "Restart worker"}
+                    </button>
+                    <button
+                      className="btn btn-ghost"
+                      type="button"
+                      onClick={resetSetup}
+                      disabled={!controls.canReset}
+                      aria-disabled={!controls.canReset}
+                    >
+                      {pendingReset ? "Resetting..." : "Reset credentials"}
+                    </button>
+                  </div>
+                </details>
+              ) : null}
             </div>
           </section>
 
           <section id="setup-panel-pairing" className="setup-flow-panel" hidden={activeScreen !== "pairing"}>
             <div className="setup-wizard-card">
-              <p className="queue-meta">Pairing</p>
-              <h3>{state?.mode === "pairing_code" ? "Pairing Code" : "QR Code"}</h3>
+              <p className="queue-meta">WhatsApp</p>
+              <h3>{state?.mode === "pairing_code" ? "Enter this code" : "Scan this QR code"}</h3>
 
               <div className="wizard-actions">
                 <button className="btn btn-ghost" type="button" onClick={() => setActiveScreen("whatsapp")}>
@@ -735,8 +801,8 @@ function SetupWizardContent({
               ) : (
                 <p className="empty-line">
                   {state?.mode === "pairing_code"
-                    ? "Request a pairing code first."
-                    : "Start QR setup first."}
+                    ? "Get a pairing code first."
+                    : "Show a QR code first."}
                 </p>
               )}
             </div>
@@ -1037,7 +1103,7 @@ function VoiceSetupPanel({
   return (
     <div className="setup-wizard-card" aria-busy={anyPending}>
       <ActionNotices notices={notices} onDismiss={dismissNotice} />
-      <h3>Voice Notes</h3>
+      <h3>Voice sample</h3>
 
       <div className="setup-status-row">
         <span className={`status-pill ${voiceStatusToneClass(state?.status)}`}>{statusText}</span>
@@ -1050,7 +1116,7 @@ function VoiceSetupPanel({
           value={promptText}
           onChange={(event) => setPromptText(event.target.value)}
           rows={3}
-          placeholder="Type the exact words spoken in your recorded sample."
+          placeholder="Type the exact words in your recording."
           disabled={anyPending}
           aria-disabled={anyPending}
         />
@@ -1064,7 +1130,7 @@ function VoiceSetupPanel({
           disabled={!canInstall}
           aria-disabled={!canInstall}
         >
-          {pendingInstall ? "Installing..." : "Install voice tools"}
+          {pendingInstall ? "Installing..." : "Install tools"}
         </button>
         <button
           className="btn btn-ghost"
@@ -1100,7 +1166,7 @@ function VoiceSetupPanel({
       {state?.hasSample ? (
         <p className="queue-meta">Sample saved.</p>
       ) : (
-        <p className="queue-meta">No sample saved yet.</p>
+        <p className="queue-meta">No sample yet.</p>
       )}
 
       <div className="wizard-actions">
@@ -1373,7 +1439,8 @@ function InstagramSetupPanel({
   return (
     <div className="setup-wizard-card" aria-busy={anyPending}>
       <ActionNotices notices={notices} onDismiss={dismissNotice} />
-      <h3>Instagram</h3>
+      <h3>Connect Instagram <em className="setup-unstable-tag">Currently unstable</em></h3>
+      <p className="queue-meta">Instagram support is experimental and may require retries.</p>
 
       <div className="setup-status-row">
         <span
@@ -1429,7 +1496,7 @@ function InstagramSetupPanel({
           disabled={!canStart}
           aria-disabled={!canStart}
         >
-          {pendingStart ? "Signing in..." : "Start Instagram setup"}
+          {pendingStart ? "Signing in..." : "Sign in"}
         </button>
         {requiresChallenge ? (
           <button
@@ -1511,10 +1578,12 @@ function SetupWizardRealtimeWrapper({
   embedded,
   initialScreen,
   setupSecret,
+  onWhatsAppConnectedChange,
 }: {
   embedded?: boolean;
   initialScreen?: SetupWizardScreen;
   setupSecret?: string;
+  onWhatsAppConnectedChange?: (connected: boolean) => void;
 }) {
   const liveState = useQuery(api.system.setupStatus, { provider: "whatsapp" }) as SetupState | null | undefined;
   const instagramLiveState = useQuery(api.system.setupStatus, { provider: "instagram" }) as SetupState | null | undefined;
@@ -1526,11 +1595,18 @@ function SetupWizardRealtimeWrapper({
       embedded={embedded}
       initialScreen={initialScreen}
       setupSecret={setupSecret}
+      onWhatsAppConnectedChange={onWhatsAppConnectedChange}
     />
   );
 }
 
-export function SetupWizard({ realtimeEnabled, embedded = false, initialScreen = "options", setupSecret }: SetupWizardProps) {
+export function SetupWizard({
+  realtimeEnabled,
+  embedded = false,
+  initialScreen = "options",
+  setupSecret,
+  onWhatsAppConnectedChange,
+}: SetupWizardProps) {
   if (!realtimeEnabled) {
     return (
       <SetupWizardContent
@@ -1540,9 +1616,17 @@ export function SetupWizard({ realtimeEnabled, embedded = false, initialScreen =
         embedded={embedded}
         initialScreen={initialScreen}
         setupSecret={setupSecret}
+        onWhatsAppConnectedChange={onWhatsAppConnectedChange}
       />
     );
   }
 
-  return <SetupWizardRealtimeWrapper embedded={embedded} initialScreen={initialScreen} setupSecret={setupSecret} />;
+  return (
+    <SetupWizardRealtimeWrapper
+      embedded={embedded}
+      initialScreen={initialScreen}
+      setupSecret={setupSecret}
+      onWhatsAppConnectedChange={onWhatsAppConnectedChange}
+    />
+  );
 }

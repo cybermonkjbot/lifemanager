@@ -1,12 +1,12 @@
 import { getWhatsAppSetupManager } from "../../../../../lib/whatsapp-setup/session";
-import { requireInstanceApiAccess } from "../../../../../lib/instance-guard";
+import { requireRuntimeControlApiAccess } from "../../../../../lib/instance-guard";
 import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
-  const unauthorized = await requireInstanceApiAccess(request);
+  const unauthorized = await requireRuntimeControlApiAccess(request);
   if (unauthorized) {
     return unauthorized;
   }

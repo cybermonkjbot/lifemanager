@@ -2,13 +2,13 @@
 
 import { ActionNotices } from "@/components/action-notices";
 import { SetupWizard } from "@/components/setup-wizard";
-import { getSetupBootstrapHeaderName } from "@/lib/setup-bootstrap-auth";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
 import {
   DEFAULT_INSTANCE_SETUP_PREFERENCES,
   type InstanceAutonomyMode,
   type InstanceMimicryPreset,
   type InstanceReplyPacePreset,
+  type InstanceSelfHostedConfig,
   type InstanceSetupPreferences,
   type InstanceSetupState,
   type InstanceSoulPrivacyLevel,
@@ -22,27 +22,35 @@ type SetupOnboardingProps = {
   initialInstanceState: InstanceSetupState;
 };
 
-type SetupStage = "security" | "preferences" | "connect" | "finish";
+type SetupStage = "service" | "security" | "profile" | "defaults" | "connect" | "finish";
 
 const setupStages: Array<{
   id: SetupStage;
-  title: string;
+  sentence: string;
 }> = [
   {
-    id: "security",
-    title: "Secure",
+    id: "service",
+    sentence: "Add the account details for this app.",
   },
   {
-    id: "preferences",
-    title: "Defaults",
+    id: "security",
+    sentence: "Create the PIN that protects your control surface.",
+  },
+  {
+    id: "profile",
+    sentence: "Add only the profile context you want replies to use.",
+  },
+  {
+    id: "defaults",
+    sentence: "Choose how replies should behave by default.",
   },
   {
     id: "connect",
-    title: "Connect",
+    sentence: "Scan the WhatsApp QR code on this computer.",
   },
   {
     id: "finish",
-    title: "Launch",
+    sentence: "Review the setup and open the dashboard.",
   },
 ];
 
@@ -76,38 +84,41 @@ function setupStageIndex(stage: SetupStage) {
 
 function formatSetupStep(stage: SetupStage) {
   const index = setupStageIndex(stage);
-  return `Step ${index + 1} of ${setupStages.length}`;
+  return setupStages[index]?.sentence || setupStages[0].sentence;
 }
 
 function resolveMimicryPreview(preset: InstanceMimicryPreset) {
   if (preset === "light") {
-    return "Small voice matching with a neutral tone.";
+    return "Light voice matching.";
   }
   if (preset === "close") {
-    return "Strong voice matching for closer tone and rhythm.";
+    return "Closer tone and rhythm.";
   }
-  return "Balanced voice matching for most conversations.";
+  return "Balanced voice matching.";
 }
 
 function resolveReplyPacePreview(preset: InstanceReplyPacePreset) {
   if (preset === "measured") {
-    return "Quicker replies with a natural delay.";
+    return "Quicker replies.";
   }
   if (preset === "unhurried") {
-    return "Slower replies with a calm pace.";
+    return "Slower replies.";
   }
-  return "Balanced pace between speed and quality.";
+  return "Balanced pace.";
 }
 
 function resolveAutonomyPreview(mode: InstanceAutonomyMode) {
   return mode === "autopilot"
-    ? "Allowed drafts may send without another review."
-    : "Every generated draft waits for your approval.";
+    ? "Allowed drafts can send automatically."
+    : "Drafts wait for your approval.";
 }
 
 function cloneDefaultPreferences(): InstanceSetupPreferences {
   return {
     ...DEFAULT_INSTANCE_SETUP_PREFERENCES,
+    selfHosted: {
+      ...DEFAULT_INSTANCE_SETUP_PREFERENCES.selfHosted,
+    },
     soulProfile: {
       ...DEFAULT_INSTANCE_SETUP_PREFERENCES.soulProfile,
     },
@@ -121,8 +132,95 @@ function normalizeSoulText(profile: InstanceSoulProfile) {
   return Object.values(profile).join(" ").toLowerCase();
 }
 
-function hasSoulProfileContent(profile: InstanceSoulProfile) {
-  return Object.values(profile).some((value) => value.trim().length > 0);
+function countDescriptionWords(value: string) {
+  return value.trim().split(/\s+/).filter(Boolean).length;
+}
+
+function isProfileDescriptionEnough(value: string) {
+  return value.trim().length >= 160 && countDescriptionWords(value) >= 30;
+}
+
+function inferSoulProfileFromDescription(profile: InstanceSoulProfile): InstanceSoulProfile {
+  const description = profile.selfDescription.trim();
+  const text = description.toLowerCase();
+  if (!description) {
+    return profile;
+  }
+
+  const wantsProfessional = /\b(work|business|client|professional|team|company|founder|startup|sales|career)\b/.test(text);
+  const wantsPersonal = /\b(friend|family|dating|relationship|personal|romantic|partner|crush|social)\b/.test(text);
+  const useCase = profile.useCase || (wantsProfessional && wantsPersonal ? "mixed" : wantsProfessional ? "professional" : "personal");
+  const communicationStyle =
+    profile.communicationStyle ||
+    (/\b(pidgin|yoruba|igbo|hausa|slang|emoji|banter|playful|warm|direct|formal|short|concise)\b/.test(text)
+      ? description
+      : "Use the tone, pace, and boundaries described in the setup description.");
+  const dailyRhythm =
+    profile.dailyRhythm ||
+    (/\b(morning|night|late|busy|weekend|weekday|after work|school|routine|quiet hours)\b/.test(text) ? description : "");
+  const goals =
+    profile.goals ||
+    (/\b(build|grow|focus|goal|priority|project|business|career|study|learn|launch)\b/.test(text) ? description : "");
+  const boundaries =
+    profile.boundaries ||
+    (/\b(boundary|private|privacy|careful|review|approve|avoid|never|sensitive|do not|don't)\b/.test(text) ? description : "");
+
+  return {
+    ...profile,
+    useCase,
+    selfDescription: description,
+    communicationStyle,
+    dailyRhythm,
+    goals,
+    boundaries,
+  };
+}
+
+function parseHttpUrl(value: string) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:" ? url : null;
+  } catch {
+    return null;
+  }
+}
+
+function isPlaceholderValue(value: string) {
+  const normalized = value.trim().toLowerCase();
+  return (
+    !normalized ||
+    normalized === "test-key" ||
+    normalized === "your-api-key" ||
+    normalized.includes("example.") ||
+    normalized.includes("your-")
+  );
+}
+
+function validateSelfHostedSetup(preferences: InstanceSetupPreferences) {
+  if (preferences.serviceMode !== "self_hosted") {
+    return "";
+  }
+
+  const { selfHosted } = preferences;
+  const convexUrl = parseHttpUrl(selfHosted.convexUrl);
+  if (!convexUrl || !selfHosted.convexUrl.includes(".convex.cloud")) {
+    return "Enter your real Convex deployment URL, for example https://your-deployment.convex.cloud.";
+  }
+  if (isPlaceholderValue(selfHosted.convexUrl)) {
+    return "Replace the placeholder Convex URL with your real self-hosted Convex deployment.";
+  }
+
+  const aiBaseUrl = parseHttpUrl(selfHosted.aiBaseUrl);
+  if (!aiBaseUrl || isPlaceholderValue(selfHosted.aiBaseUrl)) {
+    return "Enter the real AI base URL you want this self-hosted instance to use.";
+  }
+  if (isPlaceholderValue(selfHosted.aiModel)) {
+    return "Enter the real AI model for this self-hosted instance.";
+  }
+  if (isPlaceholderValue(selfHosted.aiApiKey)) {
+    return "Enter a real AI API key. Placeholder keys like test-key cannot finish setup.";
+  }
+  return "";
 }
 
 function derivePreferencesFromSoulProfile(
@@ -164,7 +262,7 @@ function summarizeSoulDefaults(preferences: InstanceSetupPreferences) {
     resolveAutonomyPreview(preferences.autonomyMode),
     resolveReplyPacePreview(preferences.replyPace),
     resolveMimicryPreview(preferences.mimicryPreset),
-    preferences.memesEnabled ? "Meme tools are available from launch." : "Meme tools stay hidden at launch.",
+    preferences.memesEnabled ? "Meme tools on." : "Meme tools off.",
   ];
 }
 
@@ -222,17 +320,17 @@ function formatPrivacyLabel(value: InstanceSoulPrivacyLevel) {
 
 export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: SetupOnboardingProps) {
   const router = useRouter();
-  const [stage, setStage] = useState<SetupStage>(initialInstanceState.setupCompleted ? "finish" : "security");
+  const [stage, setStage] = useState<SetupStage>(initialInstanceState.setupCompleted ? "finish" : "service");
   const [instanceState, setInstanceState] = useState<InstanceSetupState>(initialInstanceState);
   const [preferences, setPreferences] = useState<InstanceSetupPreferences>(
     initialInstanceState.preferences || cloneDefaultPreferences(),
   );
-  const [setupSecret, setSetupSecret] = useState("");
+  const [account, setAccount] = useState(initialInstanceState.account);
   const [pin, setPin] = useState("");
   const [pinConfirm, setPinConfirm] = useState("");
+  const [whatsappConnected, setWhatsappConnected] = useState(false);
   const { runAction, getRecord, notices, dismissNotice, pushNotice } = useActionStateRegistry();
 
-  const activeStage = setupStages[setupStageIndex(stage)] || setupStages[0];
   const securityRecord = getRecord("setup:onboarding:security");
   const preferencesRecord = getRecord("setup:onboarding:preferences");
   const setupAiRecord = getRecord("setup:onboarding:ai-settings");
@@ -240,13 +338,14 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
   const pinSource = instanceState.pinSource;
   const envManagedPin = pinSource === "env";
   const filePinExists = pinSource === "file";
+  const pinAlreadyConfigured = envManagedPin || filePinExists || instanceState.pinEnabled;
   const pinRequiredCopy = envManagedPin
-    ? "Your PIN is already managed by environment variables."
+    ? "This PIN is managed by environment variables."
     : filePinExists
-      ? "A local PIN already exists. Leave both fields empty to keep it, or enter a new PIN."
+      ? "A PIN is already set for this app."
       : "Create a local PIN before opening the control surface.";
   const pinValidationMessage = useMemo(() => {
-    if (envManagedPin) {
+    if (pinAlreadyConfigured) {
       return "";
     }
     if (!filePinExists && pin.trim().length === 0) {
@@ -259,11 +358,18 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
       return "PIN confirmation does not match.";
     }
     return "";
-  }, [envManagedPin, filePinExists, pin, pinConfirm]);
+  }, [filePinExists, pin, pinAlreadyConfigured, pinConfirm]);
+  const serviceValidationMessage = useMemo(() => validateSelfHostedSetup(preferences), [preferences]);
 
-  const canSaveSecurity = envManagedPin || pinValidationMessage === "";
-  const canFinish = canSaveSecurity;
-  const soulProfileHasContent = hasSoulProfileContent(preferences.soulProfile);
+  const canSaveSecurity = pinAlreadyConfigured || pinValidationMessage === "";
+  const canSaveService = serviceValidationMessage === "";
+  const canFinish = canSaveSecurity && canSaveService;
+  const profileDescription = preferences.soulProfile.selfDescription;
+  const profileDescriptionWordCount = countDescriptionWords(profileDescription);
+  const profileDescriptionEnough = isProfileDescriptionEnough(profileDescription);
+  const profileValidationMessage = profileDescriptionEnough
+    ? ""
+    : `Write at least 30 words so setup can infer tone, boundaries, pace, and defaults. ${profileDescriptionWordCount}/30 words.`;
   const soulDefaults = summarizeSoulDefaults(preferences);
   const setupAiToolAvailable = instanceState.setupAiSettingsToolAvailable;
   const showRomanticSetup =
@@ -293,6 +399,16 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
     }));
   };
 
+  const updateSelfHostedConfig = (field: keyof InstanceSelfHostedConfig, value: string) => {
+    setPreferences((current) => ({
+      ...current,
+      selfHosted: {
+        ...current.selfHosted,
+        [field]: value,
+      },
+    }));
+  };
+
   const renderPrivacyControl = (field: SoulFieldKey) => (
     <select
       className="setup-privacy-select"
@@ -313,6 +429,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
     payload: {
       pin?: string;
       preferences?: InstanceSetupPreferences;
+      account?: typeof account;
       setupCompleted?: boolean;
       beginFullSetup?: boolean;
       issueSession?: boolean;
@@ -330,11 +447,6 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
           method: "POST",
           headers: {
             "content-type": "application/json",
-            ...(setupSecret.trim()
-              ? {
-                  [getSetupBootstrapHeaderName()]: setupSecret.trim(),
-                }
-              : {}),
           },
           body: JSON.stringify(payload),
         });
@@ -346,6 +458,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
 
         setInstanceState(body.state);
         setPreferences(body.state.preferences);
+        setAccount(body.state.account);
         if (payload.pin) {
           setPin("");
           setPinConfirm("");
@@ -369,7 +482,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
     );
   };
 
-  const runSetupAiSettingsTool = async () => {
+  const runSetupAiSettingsTool = async (options?: { nextStage?: SetupStage }) => {
     return await runAction(
       "setup:onboarding:ai-settings",
       async () => {
@@ -377,13 +490,13 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
           method: "POST",
           headers: {
             "content-type": "application/json",
-            ...(setupSecret.trim()
-              ? {
-                  [getSetupBootstrapHeaderName()]: setupSecret.trim(),
-                }
-              : {}),
           },
-          body: JSON.stringify({ preferences }),
+          body: JSON.stringify({
+            preferences: {
+              ...preferences,
+              soulProfile: inferSoulProfileFromDescription(preferences.soulProfile),
+            },
+          }),
         });
 
         const body = await readSetupAiSettingsResponse(response);
@@ -396,6 +509,9 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
         if (body.preferencesSynced === false) {
           pushNotice("info", "AI-fit settings were saved locally, but sync failed. Some runtime settings may still use older values.");
         }
+        if (options?.nextStage) {
+          setStage(options.nextStage);
+        }
         return body;
       },
       {
@@ -405,84 +521,187 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
     );
   };
 
+  const applyProfileLocally = () => {
+    setPreferences((current) => derivePreferencesFromSoulProfile(inferSoulProfileFromDescription(current.soulProfile), current));
+    setStage("defaults");
+  };
+
+  const continueFromProfile = () => {
+    if (!profileDescriptionEnough) {
+      pushNotice("error", profileValidationMessage);
+      return;
+    }
+    if (setupAiToolAvailable) {
+      void runSetupAiSettingsTool({ nextStage: "defaults" });
+      return;
+    }
+    applyProfileLocally();
+  };
+
   return (
     <main className="setup-onboarding-shell">
       <div className="setup-onboarding-noise" aria-hidden="true" />
       <section className="setup-onboarding-stage">
-        <aside className="setup-onboarding-aside">
-          <h1 className="setup-onboarding-title">Setup</h1>
-
-          <div className="setup-onboarding-checklist">
-            {setupStages.map((item, index) => {
-              const active = item.id === stage;
-              const completed = setupStageIndex(stage) > index || (item.id === "finish" && instanceState.setupCompleted);
-              return (
-                <button
-                  key={item.id}
-                  type="button"
-                  className={`setup-step-chip ${active ? "setup-step-chip-active" : ""} ${completed ? "setup-step-chip-complete" : ""}`}
-                  onClick={() => setStage(item.id)}
-                >
-                  <span className="setup-step-chip-count">{String(index + 1).padStart(2, "0")}</span>
-                  <span className="setup-step-chip-copy">
-                    <strong>{item.title}</strong>
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        </aside>
-
         <section className="setup-onboarding-main">
           <header className="setup-onboarding-head">
-            <p className="queue-meta">{formatSetupStep(stage)}</p>
-            <h2 className="setup-onboarding-panel-title">{activeStage.title}</h2>
+            <p className="queue-meta">OdogwuHQ setup</p>
+            <h1 className="setup-step-sentence">{formatSetupStep(stage)}</h1>
           </header>
 
           <ActionNotices notices={notices} onDismiss={dismissNotice} />
+
+          {stage === "service" ? (
+            <div className="setup-onboarding-panel">
+              {preferences.serviceMode === "hosted" ? (
+                <div className="setup-form-grid">
+                  <label className="setup-input-group setup-soul-wide">
+                    <span className="queue-meta">Email</span>
+                    <input
+                      type="email"
+                      value={account.email}
+                      placeholder="you@example.com"
+                      onChange={(event) => setAccount((current) => ({ ...current, email: event.target.value }))}
+                      autoComplete="email"
+                    />
+                  </label>
+                </div>
+              ) : null}
+
+              <div className="setup-soul-summary">
+                <span>7 day trial.</span>
+                <span>₦5,000/month.</span>
+                <span>WhatsApp session remains local.</span>
+              </div>
+
+              <details className="setup-advanced">
+                <summary>Use your own backend</summary>
+                <label className="setup-toggle-card">
+                  <input
+                    type="checkbox"
+                    checked={preferences.serviceMode === "self_hosted"}
+                    onChange={(event) =>
+                      setPreferences((current) => ({
+                        ...current,
+                        serviceMode: event.target.checked ? "self_hosted" : "hosted",
+                      }))
+                    }
+                  />
+                  <span>
+                    <strong>Self-hosted mode</strong>
+                    <span>Use your own Convex deployment, AI endpoint, keys, and app URLs.</span>
+                  </span>
+                </label>
+
+                {preferences.serviceMode === "self_hosted" ? (
+                  <div className="setup-form-grid">
+                    <label className="setup-input-group setup-soul-wide">
+                      <span className="queue-meta">Convex deployment URL</span>
+                      <input
+                        type="url"
+                        value={preferences.selfHosted.convexUrl}
+                        placeholder="https://your-deployment.convex.cloud"
+                        onChange={(event) => updateSelfHostedConfig("convexUrl", event.target.value)}
+                      />
+                    </label>
+                    <label className="setup-input-group">
+                      <span className="queue-meta">App / API base URL</span>
+                      <input
+                        type="url"
+                        value={preferences.selfHosted.appBaseUrl}
+                        placeholder="https://your-domain.example"
+                        onChange={(event) => updateSelfHostedConfig("appBaseUrl", event.target.value)}
+                      />
+                    </label>
+                    <label className="setup-input-group">
+                      <span className="queue-meta">AI base URL</span>
+                      <input
+                        type="url"
+                        value={preferences.selfHosted.aiBaseUrl}
+                        placeholder="https://api.openai.com/v1 or Azure endpoint"
+                        onChange={(event) => updateSelfHostedConfig("aiBaseUrl", event.target.value)}
+                      />
+                    </label>
+                    <label className="setup-input-group">
+                      <span className="queue-meta">AI model</span>
+                      <input
+                        type="text"
+                        value={preferences.selfHosted.aiModel}
+                        placeholder="gpt-5.4, gpt-4.1, or your hosted model"
+                        onChange={(event) => updateSelfHostedConfig("aiModel", event.target.value)}
+                      />
+                    </label>
+                    <label className="setup-input-group">
+                      <span className="queue-meta">AI API key</span>
+                      <input
+                        type="password"
+                        value={preferences.selfHosted.aiApiKey}
+                        placeholder="Stored locally on this machine"
+                        onChange={(event) => updateSelfHostedConfig("aiApiKey", event.target.value)}
+                        autoComplete="off"
+                      />
+                    </label>
+                  </div>
+                ) : null}
+              </details>
+
+              {serviceValidationMessage ? <p className="instance-lock-error">{serviceValidationMessage}</p> : null}
+
+              <div className="wizard-actions">
+                <button
+                  className="btn btn-primary"
+                  type="button"
+                  disabled={!canSaveService || preferencesRecord.pending}
+                  aria-disabled={!canSaveService || preferencesRecord.pending}
+                  onClick={() => {
+                    void saveInstanceSetup(
+                      "setup:onboarding:preferences",
+                      {
+                        preferences,
+                        account,
+                      },
+                      {
+                        successMessage: "Service choice saved.",
+                        nextStage: "security",
+                      },
+                    );
+                  }}
+                >
+                  {preferencesRecord.pending ? "Saving..." : "Save and continue"}
+                </button>
+              </div>
+            </div>
+          ) : null}
 
           {stage === "security" ? (
             <div className="setup-onboarding-panel">
               <p className="queue-meta">{pinRequiredCopy}</p>
 
-              <details className="setup-advanced">
-                <summary>Remote setup access</summary>
+              <div className="setup-form-grid">
                 <label className="setup-input-group">
-                  <span className="queue-meta">Setup secret</span>
+                  <span className="queue-meta">Instance PIN</span>
                   <input
                     type="password"
-                    value={setupSecret}
-                    placeholder="Required only when SLM_SETUP_SECRET is set"
-                    onChange={(event) => setSetupSecret(event.target.value)}
-                    autoComplete="off"
+                    value={pin}
+                    placeholder={pinAlreadyConfigured ? "PIN already set" : "Create PIN"}
+                    onChange={(event) => setPin(event.target.value)}
+                    autoComplete="new-password"
+                    disabled={pinAlreadyConfigured}
+                    aria-disabled={pinAlreadyConfigured}
                   />
                 </label>
-              </details>
-
-              {!envManagedPin ? (
-                <div className="setup-form-grid">
-                  <label className="setup-input-group">
-                    <span className="queue-meta">Instance PIN</span>
-                    <input
-                      type="password"
-                      value={pin}
-                      placeholder={filePinExists ? "Leave blank to keep your current PIN" : "Create PIN"}
-                      onChange={(event) => setPin(event.target.value)}
-                      autoComplete="new-password"
-                    />
-                  </label>
-                  <label className="setup-input-group">
-                    <span className="queue-meta">Confirm PIN</span>
-                    <input
-                      type="password"
-                      value={pinConfirm}
-                      placeholder={filePinExists && pin.trim().length === 0 ? "Only needed when changing PIN" : "Confirm PIN"}
-                      onChange={(event) => setPinConfirm(event.target.value)}
-                      autoComplete="new-password"
-                    />
-                  </label>
-                </div>
-              ) : null}
+                <label className="setup-input-group">
+                  <span className="queue-meta">Confirm PIN</span>
+                  <input
+                    type="password"
+                    value={pinConfirm}
+                    placeholder={pinAlreadyConfigured ? "PIN already set" : "Confirm PIN"}
+                    onChange={(event) => setPinConfirm(event.target.value)}
+                    autoComplete="new-password"
+                    disabled={pinAlreadyConfigured}
+                    aria-disabled={pinAlreadyConfigured}
+                  />
+                </label>
+              </div>
 
               {pinValidationMessage ? <p className="instance-lock-error">{pinValidationMessage}</p> : null}
 
@@ -496,69 +715,52 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                     void saveInstanceSetup(
                       "setup:onboarding:security",
                       {
-                        ...(envManagedPin ? {} : { pin: pin.trim() }),
-                        issueSession: !envManagedPin,
+                        ...(pinAlreadyConfigured ? {} : { pin: pin.trim() }),
+                        issueSession: !envManagedPin && !pinAlreadyConfigured,
                       },
                       {
-                        successMessage: "Local PIN settings saved.",
-                        nextStage: "preferences",
+                        successMessage: pinAlreadyConfigured ? "PIN kept." : "PIN saved.",
+                        nextStage: "profile",
                       },
                     );
                   }}
                 >
-                  {securityRecord.pending ? "Saving..." : "Save and continue"}
+                  {securityRecord.pending ? "Saving..." : pinAlreadyConfigured ? "Continue" : "Save and continue"}
+                </button>
+                <button className="btn btn-ghost" type="button" onClick={() => setStage("service")}>
+                  Back
                 </button>
               </div>
             </div>
           ) : null}
 
-          {stage === "preferences" ? (
+          {stage === "profile" ? (
             <div className="setup-onboarding-panel">
-              <div className="setup-poster-block setup-preference-hero">
-                <h3>Recommended defaults</h3>
-                <p className="queue-meta">
-                  Add only the personal context you want this system to use when shaping replies and defaults.
-                </p>
-                <div className="wizard-actions">
-                  <button
-                    className="btn btn-ghost"
-                    type="button"
-                    onClick={() => setPreferences(cloneDefaultPreferences())}
-                  >
-                    Use recommended defaults
-                  </button>
-                </div>
-              </div>
-
               <div className="setup-soul-panel">
                 <div className="setup-soul-head">
                   <div>
-                    <p className="queue-meta">Guidance profile</p>
-                    <h3>What context should guide the system?</h3>
+                    <p className="queue-title">Describe yourself, your voice, your boundaries, and how this app should act for you.</p>
                   </div>
-                  <button
-                    className="btn btn-primary"
-                    type="button"
-                    disabled={!soulProfileHasContent || !setupAiToolAvailable || setupAiRecord.pending}
-                    aria-disabled={!soulProfileHasContent || !setupAiToolAvailable || setupAiRecord.pending}
-                    onClick={() => {
-                      void runSetupAiSettingsTool();
-                    }}
-                  >
-                    {setupAiRecord.pending ? "Applying..." : setupAiToolAvailable ? "Fit defaults with AI" : "AI fit already used"}
-                  </button>
-                  <button
-                    className="btn btn-ghost"
-                    type="button"
-                    disabled={!soulProfileHasContent || setupAiRecord.pending}
-                    aria-disabled={!soulProfileHasContent || setupAiRecord.pending}
-                    onClick={() => setPreferences((current) => derivePreferencesFromSoulProfile(current.soulProfile, current))}
-                  >
-                    Fit defaults locally
-                  </button>
                 </div>
 
-                <div className="setup-soul-grid">
+                <label className="setup-input-group setup-soul-wide">
+                  <span className="queue-meta">Profile description</span>
+                  <textarea
+                    value={profileDescription}
+                    rows={8}
+                    placeholder="Example: I run a busy business, reply warmly but directly, use light Nigerian English and occasional pidgin, avoid sensitive family topics, slow down at night, and keep anything romantic private unless I mention it."
+                    onChange={(event) => updateSoulField("selfDescription", event.target.value)}
+                  />
+                </label>
+                <p className={profileDescriptionEnough ? "queue-meta" : "instance-lock-error"}>
+                  {profileDescriptionEnough
+                    ? "Enough context to infer setup defaults."
+                    : `Add more context so setup can infer the important settings. ${profileDescriptionWordCount}/30 words.`}
+                </p>
+
+                <details className="setup-advanced">
+                  <summary>Advanced profile fields</summary>
+                  <div className="setup-soul-grid">
                   <label className="setup-input-group">
                     <span className="setup-field-head">
                       <span className="queue-meta">Use case</span>
@@ -663,7 +865,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                     <textarea
                       value={preferences.soulProfile.selfDescription}
                       rows={4}
-                      placeholder="The version of you this system should stay loyal to."
+                      placeholder="Short description of you."
                       onChange={(event) => updateSoulField("selfDescription", event.target.value)}
                     />
                   </label>
@@ -687,7 +889,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                     <textarea
                       value={preferences.soulProfile.communicationStyle}
                       rows={3}
-                      placeholder="How you sound when you mean it."
+                      placeholder="Tone, phrases, languages, emoji style."
                       onChange={(event) => updateSoulField("communicationStyle", event.target.value)}
                     />
                   </label>
@@ -699,7 +901,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                     <textarea
                       value={preferences.soulProfile.boundaries}
                       rows={3}
-                      placeholder="What should be protected."
+                      placeholder="Topics or actions to avoid."
                       onChange={(event) => updateSoulField("boundaries", event.target.value)}
                     />
                   </label>
@@ -711,7 +913,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                     <textarea
                       value={preferences.soulProfile.relationships}
                       rows={3}
-                      placeholder="Roles, closeness, family, work, community."
+                      placeholder="Important people and context."
                       onChange={(event) => updateSoulField("relationships", event.target.value)}
                     />
                   </label>
@@ -723,7 +925,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                     <textarea
                       value={preferences.soulProfile.goals}
                       rows={3}
-                      placeholder="What you are becoming or building."
+                      placeholder="Goals or priorities."
                       onChange={(event) => updateSoulField("goals", event.target.value)}
                     />
                   </label>
@@ -735,25 +937,42 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                     <textarea
                       value={preferences.soulProfile.dailyRhythm}
                       rows={3}
-                      placeholder="Busy hours, quiet hours, energy patterns."
+                      placeholder="Busy hours, quiet hours, routines."
                       onChange={(event) => updateSoulField("dailyRhythm", event.target.value)}
                     />
                   </label>
-                </div>
+                  </div>
+                </details>
 
                 <div className="setup-soul-summary">
                   {soulDefaults.map((item) => (
                     <span key={item}>{item}</span>
                   ))}
                   {!setupAiToolAvailable && instanceState.setupAiSettingsToolConsumedAt ? (
-                    <span>Setup AI tool disabled.</span>
+                    <span>AI fit already used.</span>
                   ) : null}
                 </div>
               </div>
 
-              <details className="setup-advanced setup-preference-details">
-                <summary>Customize defaults</summary>
+              <div className="wizard-actions">
+                <button
+                  className="btn btn-primary"
+                  type="button"
+                  disabled={!profileDescriptionEnough || setupAiRecord.pending}
+                  aria-disabled={!profileDescriptionEnough || setupAiRecord.pending}
+                  onClick={continueFromProfile}
+                >
+                  {setupAiRecord.pending ? "Fitting..." : setupAiToolAvailable ? "Fit and continue" : "Continue"}
+                </button>
+                <button className="btn btn-ghost" type="button" onClick={() => setStage("security")}>
+                  Back
+                </button>
+              </div>
+            </div>
+          ) : null}
 
+          {stage === "defaults" ? (
+            <div className="setup-onboarding-panel">
                 <div className="setup-choice-group">
                   <p className="queue-title">Automation mode</p>
                   <div className="setup-choice-grid">
@@ -814,7 +1033,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                     />
                     <span>
                       <strong>Enable meme tools</strong>
-                      <span>Show meme creation and review features from the start.</span>
+                      <span>Show meme creation and review.</span>
                     </span>
                   </label>
                   <label className="setup-toggle-card">
@@ -824,8 +1043,8 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                       onChange={(event) => setPreferences((current) => ({ ...current, instagramEnabled: event.target.checked }))}
                     />
                     <span>
-                      <strong>Enable Instagram setup</strong>
-                      <span>Show Instagram connection steps and runtime controls.</span>
+                      <strong>Enable Instagram setup <em className="setup-unstable-tag">Currently unstable</em></strong>
+                      <span>Show experimental Instagram connection controls.</span>
                     </span>
                   </label>
                 </div>
@@ -838,7 +1057,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                   />
                   <span>
                     <strong>Quiet hours</strong>
-                    <span>Defer automatic sends during overnight hours.</span>
+                    <span>Pause automatic sends during these hours.</span>
                   </span>
                 </label>
 
@@ -882,8 +1101,6 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                     </label>
                   </div>
                 ) : null}
-              </details>
-
               <div className="wizard-actions">
                 <button
                   className="btn btn-primary"
@@ -893,6 +1110,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                       "setup:onboarding:preferences",
                       {
                         preferences,
+                        account,
                       },
                       {
                         successMessage: "Launch defaults saved.",
@@ -905,7 +1123,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                 >
                   {preferencesRecord.pending ? "Saving..." : "Save and continue"}
                 </button>
-                <button className="btn btn-ghost" type="button" onClick={() => setStage("security")}>
+                <button className="btn btn-ghost" type="button" onClick={() => setStage("profile")}>
                   Back
                 </button>
               </div>
@@ -914,12 +1132,19 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
 
           {stage === "connect" ? (
             <div className="setup-onboarding-panel">
-              <SetupWizard realtimeEnabled={realtimeEnabled} embedded initialScreen="whatsapp" setupSecret={setupSecret.trim()} />
+              <SetupWizard
+                realtimeEnabled={realtimeEnabled}
+                embedded
+                initialScreen="whatsapp"
+                onWhatsAppConnectedChange={setWhatsappConnected}
+              />
               <div className="wizard-actions">
-                <button className="btn btn-primary" type="button" onClick={() => setStage("finish")}>
-                  Continue without connecting
-                </button>
-                <button className="btn btn-ghost" type="button" onClick={() => setStage("preferences")}>
+                {whatsappConnected ? (
+                  <button className="btn btn-primary" type="button" onClick={() => setStage("finish")}>
+                    Continue
+                  </button>
+                ) : null}
+                <button className="btn btn-ghost" type="button" onClick={() => setStage("defaults")}>
                   Back
                 </button>
               </div>
@@ -928,15 +1153,23 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
 
           {stage === "finish" ? (
             <div className="setup-onboarding-panel">
-              <div className="setup-completion-banner">
-                <p className="setup-poster-kicker">Review</p>
-                <h3>Check the profile and defaults before launch.</h3>
-                <p>
-                  Privacy choices decide what stays in setup, what can guide replies, and what must never be mentioned.
-                </p>
-              </div>
-
               <div className="setup-summary-grid">
+                <div className="setup-summary-card">
+                  <p className="queue-meta">Service</p>
+                  <p className="setup-summary-value">{preferences.serviceMode === "hosted" ? "managed" : "self-hosted"}</p>
+                </div>
+                {account.email ? (
+                  <div className="setup-summary-card">
+                    <p className="queue-meta">Email</p>
+                    <p className="setup-summary-value">{account.email}</p>
+                  </div>
+                ) : null}
+                {preferences.serviceMode === "self_hosted" && preferences.selfHosted.convexUrl ? (
+                  <div className="setup-summary-card">
+                    <p className="queue-meta">Convex URL</p>
+                    <p className="setup-summary-value">{preferences.selfHosted.convexUrl}</p>
+                  </div>
+                ) : null}
                 <div className="setup-summary-card">
                   <p className="queue-meta">Autonomy</p>
                   <p className="setup-summary-value">{preferences.autonomyMode === "autopilot" ? "autopilot" : "review first"}</p>
@@ -950,18 +1183,30 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                   <p className="setup-summary-value">{preferences.mimicryPreset}</p>
                 </div>
                 <div className="setup-summary-card">
-                  <p className="queue-meta">Profile fields</p>
-                  <p className="setup-summary-value">{visibleSoulReviewFields.length || 0} saved</p>
+                  <p className="queue-meta">Meme tools</p>
+                  <p className="setup-summary-value">{preferences.memesEnabled ? "enabled" : "off"}</p>
                 </div>
+                <div className="setup-summary-card">
+                  <p className="queue-meta">Instagram <em className="setup-unstable-tag">Currently unstable</em></p>
+                  <p className="setup-summary-value">{preferences.instagramEnabled ? "enabled" : "off"}</p>
+                </div>
+                {preferences.quietHoursEnabled ? (
+                  <div className="setup-summary-card">
+                    <p className="queue-meta">Quiet hours</p>
+                    <p className="setup-summary-value">
+                      {String(preferences.quietHoursStartHour).padStart(2, "0")}:00 to{" "}
+                      {String(preferences.quietHoursEndHour).padStart(2, "0")}:00
+                    </p>
+                  </div>
+                ) : null}
               </div>
 
               <div className="setup-review-panel">
                 <div className="setup-review-head">
                   <div>
-                    <p className="queue-meta">Guidance profile</p>
-                    <p className="queue-title">Saved fields and privacy</p>
+                    <p className="queue-title">Profile context</p>
                   </div>
-                  <button className="btn btn-ghost" type="button" onClick={() => setStage("preferences")}>
+                  <button className="btn btn-ghost" type="button" onClick={() => setStage("profile")}>
                     Edit profile
                   </button>
                 </div>
@@ -984,7 +1229,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
 
               {!canFinish ? (
                 <p className="instance-lock-error">
-                  Save a valid PIN before finishing setup.
+                  {pinValidationMessage || serviceValidationMessage || "Complete setup before opening the dashboard."}
                 </p>
               ) : null}
 
@@ -1000,6 +1245,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                       {
                         ...(envManagedPin || pin.trim().length === 0 ? {} : { pin: pin.trim() }),
                         preferences,
+                        account,
                         setupCompleted: true,
                         issueSession: !envManagedPin,
                       },
@@ -1015,29 +1261,6 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                 <button className="btn btn-ghost" type="button" onClick={() => setStage("connect")}>
                   Back
                 </button>
-                {instanceState.setupCompleted ? (
-                  <button
-                    className="btn btn-ghost"
-                    type="button"
-                    disabled={finishRecord.pending}
-                    aria-disabled={finishRecord.pending}
-                    onClick={() => {
-                      void saveInstanceSetup(
-                        "setup:onboarding:finish",
-                        {
-                          preferences,
-                          beginFullSetup: true,
-                        },
-                        {
-                          successMessage: "Full setup restarted.",
-                          nextStage: "security",
-                        },
-                      );
-                    }}
-                  >
-                    Run setup again
-                  </button>
-                ) : null}
               </div>
             </div>
           ) : null}

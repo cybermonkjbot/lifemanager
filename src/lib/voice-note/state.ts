@@ -1,5 +1,6 @@
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { getRuntimeDataPath } from "../runtime/paths";
 
 export type VoiceModuleStatus = "not_installed" | "installing" | "ready" | "error";
 
@@ -24,7 +25,7 @@ export type VoiceModuleStateSnapshot = VoiceModuleState & {
 const DEFAULT_MODEL_ID = "openbmb/VoxCPM-0.5B";
 
 export function getVoiceNoteDataDir() {
-  return join(process.cwd(), ".slm", "voice-note");
+  return getRuntimeDataPath("voice-note");
 }
 
 export function getVoiceNoteStatePath() {

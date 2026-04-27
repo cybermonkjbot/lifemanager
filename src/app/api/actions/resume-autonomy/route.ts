@@ -1,9 +1,9 @@
 import { resumeAutonomy } from "@/lib/convex-server";
-import { requireInstanceApiAccess } from "@/lib/instance-guard";
+import { requireRuntimeControlApiAccess } from "@/lib/instance-guard";
 import { NextResponse } from "next/server";
 
 export async function POST(request: Request) {
-  const unauthorized = await requireInstanceApiAccess(request, "redirect");
+  const unauthorized = await requireRuntimeControlApiAccess(request, "redirect");
   if (unauthorized) {
     return unauthorized;
   }

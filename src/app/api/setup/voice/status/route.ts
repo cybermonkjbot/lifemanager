@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireInstanceApiAccess } from "@/lib/instance-guard";
+import { requireRuntimeControlApiAccess } from "@/lib/instance-guard";
 import { getVoiceNoteSetupManager } from "@/lib/voice-note/setup-manager";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: NextRequest) {
-  const unauthorized = await requireInstanceApiAccess(request);
+  const unauthorized = await requireRuntimeControlApiAccess(request);
   if (unauthorized) {
     return unauthorized;
   }

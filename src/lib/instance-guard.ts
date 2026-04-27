@@ -16,14 +16,12 @@ import {
   resolveInstanceGateState,
   verifyInstancePinSessionToken,
 } from "./instance-pin";
-import { convexRefs } from "./convex-refs";
-import { createConvexClient, getConvexUrl } from "./convex-server";
-import { readLocalInstanceConfig } from "./instance-config";
 import {
   getTenantSessionCookieName,
   hasValidTenantSession,
   verifyTenantSessionToken,
 } from "./tenant-session";
+import { getCurrentHostedBillingGate } from "./billing-access";
 
 type UnauthorizedResponseKind = "json" | "redirect";
 type PageAccessOptions = {
@@ -67,36 +65,8 @@ async function hasValidTenantPageSession(token: string | undefined) {
   return await hasValidTenantSession(token);
 }
 
-function tenantBillingIsActive(status: string | undefined, trialEndsAt: number | null | undefined, now = Date.now()) {
-  if (status === "active") {
-    return true;
-  }
-  return status === "trialing" && typeof trialEndsAt === "number" && trialEndsAt >= now;
-}
-
 async function currentTenantNeedsBilling() {
-  const config = await readLocalInstanceConfig();
-  if (!config?.setupCompleted || config.preferences.serviceMode !== "hosted" || !config.account?.tenantId) {
-    return false;
-  }
-
-  try {
-    const summary = await createConvexClient(getConvexUrl()).query(convexRefs.billingGetTenantBillingSummary, {
-      tenantId: config.account.tenantId,
-    }) as {
-      tenant?: {
-        billingStatus?: string;
-        trialEndsAt?: number | null;
-      };
-    } | null;
-    if (summary?.tenant) {
-      return !tenantBillingIsActive(summary.tenant.billingStatus, summary.tenant.trialEndsAt);
-    }
-  } catch {
-    // Fall back to local state if Convex cannot be reached.
-  }
-
-  return !tenantBillingIsActive(config.account.billingStatus, config.account.trialEndsAt);
+  return (await getCurrentHostedBillingGate()).billingRequired;
 }
 
 function hasValidAdminMasqueradeSession(adminToken: string | undefined, masqueradeToken: string | undefined) {

@@ -9,6 +9,7 @@ import {
 } from "@/lib/instance-config";
 import { syncInstancePreferencesToConvex } from "@/lib/instance-setup-sync";
 import { DEFAULT_INSTANCE_SETUP_PREFERENCES, type InstanceSetupPreferences } from "@/lib/instance-setup-types";
+import { requireRuntimeControlApiAccess } from "@/lib/instance-guard";
 import {
   isLoopbackHostname,
   requestHasValidSetupBootstrapSecret,
@@ -42,6 +43,13 @@ export async function POST(request: NextRequest) {
   try {
     const current = await readLocalInstanceConfig();
     const currentState = await resolveInstanceSetupState();
+    if (currentState.setupCompleted) {
+      const unauthorized = await requireRuntimeControlApiAccess(request);
+      if (unauthorized) {
+        return unauthorized;
+      }
+    }
+
     const isLocalBootstrap = isLoopbackHostname(request.nextUrl.hostname);
     const hasValidSetupSecret = requestHasValidSetupBootstrapSecret(request.headers);
 
@@ -82,6 +90,7 @@ export async function POST(request: NextRequest) {
       updatedAt: now,
       pin: current?.pin || null,
       preferences: nextPreferences,
+      account: current?.account,
       setupAiSettingsToolConsumedAt: now,
     });
     await writeLocalSoulMarkdown(nextPreferences.soulProfile, nextPreferences.soulPrivacy);
