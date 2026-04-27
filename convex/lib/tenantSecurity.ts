@@ -1,5 +1,6 @@
 import type { Doc, Id } from "../_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "../_generated/server";
+import { isTenantBillingActive, tenantBillingInactiveReason } from "./billingAccess";
 
 export type TenantScopedArgs = {
   tenantId?: Id<"tenantAccounts">;
@@ -36,11 +37,8 @@ export async function resolveTenantConnectorForMutation(
   }
 
   const tenant = await ctx.db.get(token.tenantId);
-  if (!tenant || (tenant.billingStatus !== "active" && tenant.billingStatus !== "trialing")) {
-    throw new Error("Tenant subscription is not active.");
-  }
-  if (tenant.billingStatus === "trialing" && tenant.trialEndsAt < now) {
-    throw new Error("Tenant trial has expired.");
+  if (!tenant || !isTenantBillingActive(tenant, now)) {
+    throw new Error(tenant ? tenantBillingInactiveReason(tenant, now) : "Tenant subscription is not active.");
   }
 
   await ctx.db.patch(token._id, {
@@ -86,11 +84,8 @@ export async function resolveTenantForQuery(
   }
 
   const tenant = await ctx.db.get(token.tenantId);
-  if (!tenant || (tenant.billingStatus !== "active" && tenant.billingStatus !== "trialing")) {
-    throw new Error("Tenant subscription is not active.");
-  }
-  if (tenant.billingStatus === "trialing" && tenant.trialEndsAt < now) {
-    throw new Error("Tenant trial has expired.");
+  if (!tenant || !isTenantBillingActive(tenant, now)) {
+    throw new Error(tenant ? tenantBillingInactiveReason(tenant, now) : "Tenant subscription is not active.");
   }
   return token.tenantId;
 }

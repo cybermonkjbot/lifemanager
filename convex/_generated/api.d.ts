@@ -28,6 +28,7 @@ import type * as grounding from "../grounding.js";
 import type * as inbound from "../inbound.js";
 import type * as lib_aiSmartness from "../lib/aiSmartness.js";
 import type * as lib_aliasNormalization from "../lib/aliasNormalization.js";
+import type * as lib_billingAccess from "../lib/billingAccess.js";
 import type * as lib_commitments from "../lib/commitments.js";
 import type * as lib_config from "../lib/config.js";
 import type * as lib_constants from "../lib/constants.js";
@@ -92,6 +93,7 @@ declare const fullApi: ApiFromModules<{
   inbound: typeof inbound;
   "lib/aiSmartness": typeof lib_aiSmartness;
   "lib/aliasNormalization": typeof lib_aliasNormalization;
+  "lib/billingAccess": typeof lib_billingAccess;
   "lib/commitments": typeof lib_commitments;
   "lib/config": typeof lib_config;
   "lib/constants": typeof lib_constants;

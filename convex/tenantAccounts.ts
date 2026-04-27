@@ -2,6 +2,7 @@ import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
+import { isTenantBillingActive, tenantBillingInactiveReason } from "./lib/billingAccess";
 
 const TRIAL_DAYS = 7;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -30,15 +31,11 @@ function requireValidEmail(email: string) {
   return normalized;
 }
 
-function isTenantActive(tenant: { billingStatus: string; trialEndsAt: number }, now = Date.now()) {
-  if (tenant.billingStatus !== "active" && tenant.billingStatus !== "trialing") {
-    return false;
-  }
-  return tenant.billingStatus !== "trialing" || tenant.trialEndsAt >= now;
-}
-
-function tenantAccessStatus(tenant: { billingStatus: string; trialEndsAt: number }, now = Date.now()) {
-  return isTenantActive(tenant, now) ? "active" as const : "billing_required" as const;
+function tenantAccessStatus(
+  tenant: { billingStatus: string; trialEndsAt: number; subscriptionExpiresAt?: number },
+  now = Date.now(),
+) {
+  return isTenantBillingActive(tenant, now) ? "active" as const : "billing_required" as const;
 }
 
 export const registerFromDesktop = mutation({
@@ -181,11 +178,8 @@ export const issueConnectorToken = mutation({
     }
 
     const now = Date.now();
-    if (tenant.billingStatus !== "active" && tenant.billingStatus !== "trialing") {
-      throw new Error("Tenant subscription is not active.");
-    }
-    if (tenant.billingStatus === "trialing" && tenant.trialEndsAt < now) {
-      throw new Error("Tenant trial has expired.");
+    if (!isTenantBillingActive(tenant, now)) {
+      throw new Error(tenantBillingInactiveReason(tenant, now));
     }
 
     const deviceId = args.deviceId.trim();
@@ -260,10 +254,7 @@ export const verifyConnectorToken = mutation({
       return null;
     }
     const tenant = await ctx.db.get(token.tenantId);
-    if (!tenant || (tenant.billingStatus !== "active" && tenant.billingStatus !== "trialing")) {
-      return null;
-    }
-    if (tenant.billingStatus === "trialing" && tenant.trialEndsAt < now) {
+    if (!tenant || !isTenantBillingActive(tenant, now)) {
       return null;
     }
     await ctx.db.patch(token._id, {

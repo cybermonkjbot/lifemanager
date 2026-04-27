@@ -3,6 +3,7 @@ import { v } from "convex/values";
 import { internalAction, internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import type { MutationCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
+import { isTenantBillingActive } from "./lib/billingAccess";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MONTH_MS = 30 * DAY_MS;
@@ -495,7 +496,7 @@ export const listTenantsDueForReports = internalQuery({
       if (tenant.serviceMode !== "hosted") {
         continue;
       }
-      if (tenant.billingStatus !== "active" && tenant.billingStatus !== "trialing") {
+      if (!isTenantBillingActive(tenant, args.now)) {
         continue;
       }
       if ((tenant.lastTenantReportEmailAt || 0) > args.now - WEEK_MS) {
