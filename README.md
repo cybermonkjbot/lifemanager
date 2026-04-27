@@ -1,16 +1,15 @@
-# Social Life Manager
+# Odogwu HQ
 
-Local-first social orchestration system for WhatsApp and Instagram, built with Bun, Next.js (App Router), Convex, and long-running channel workers.
+Odogwu HQ is your AI communication double for WhatsApp and Instagram. It can read the room, draft replies in your style, keep conversations warm, and, when you allow it, chat as you so people are not left hanging while you are busy.
 
 This project combines:
-- a real-time operator dashboard
-- autonomous and review-first messaging workflows
-- context-aware AI reply generation with fallback providers
-- follow-up / todo extraction and scheduling
-- media and meme workflows
-- channel setup, runtime controls, and health telemetry
+- a private dashboard for seeing who needs you
+- replies written in your tone, ready for approval or automatic sending
+- memory of conversation context, promises, and follow-ups
+- stickers, memes, and optional voice notes so replies do not feel robotic
+- safe controls for when it should draft, send, pause, or ask you first
 
-If you are preparing this repo for open source, this document is the entrypoint. Deep references live in `docs/reference`.
+This is a proprietary, self-hostable product. Deep technical references live in `docs/reference`.
 
 ## Table of Contents
 
@@ -26,21 +25,21 @@ If you are preparing this repo for open source, this document is the entrypoint.
 - [License](#license)
 - [Contributing](#contributing)
 - [Support and Security](#support-and-security)
-- [Open-Source Readiness Checklist](#open-source-readiness-checklist)
+- [Distribution Notes](#distribution-notes)
 - [Reference Docs](#reference-docs)
 
 ## What This Project Does
 
-Social Life Manager is a local-first personal automation system for social messaging.
+Odogwu HQ is a local-first personal automation system that helps you stay present in your chats without being glued to your phone. It watches incoming messages, understands the conversation history, writes like you, and can either queue replies for approval or send them automatically inside the boundaries you set.
 
 Core capabilities:
-- Ingests inbound activity from WhatsApp and Instagram workers.
-- Persists messages, thread state, drafts, outbox jobs, follow-ups, todos, media assets, and telemetry in Convex.
-- Generates replies with Azure AI first and Codex CLI fallback.
-- Applies guardrails, quality checks, mimicry controls, and conversation steering rules.
-- Supports review-first and autonomous send modes.
+- Watches your WhatsApp and Instagram conversations.
+- Understands who you are talking to, what has been said before, and what kind of reply fits.
+- Writes replies that match your tone, context, relationship, and current boundaries.
+- Can chat on your behalf in approved/autonomous mode, including follow-ups, reconnects, and everyday replies.
+- Lets you approve first, automate trusted situations, pause autonomy, or force review.
+- Supports stickers, memes, reactions, and optional cloned voice-note responses.
 - Supports a setup/onboarding flow with local instance security (PIN + unlock session).
-- Exposes an OpenAI-style chat completion endpoint powered by the same internal reply pipeline.
 - Includes a local self-improvement loop (`codex exec`) with run history and dashboard visibility.
 
 ## System Architecture
@@ -72,7 +71,7 @@ Primary areas:
 - `Conversations` (`/conversations`): thread timeline, draft edits, grounding, personality overrides, per-thread ops.
 - `Status` (`/status`): status drafts/posts pipeline and status automation controls.
 - `Media` (`/media`): unified media stream with source-thread linkage.
-- `Memes` (`/memes`): meme generation and meme asset review.
+- `Memes` (`/memes`): meme generation, sticker/meme asset review, and outbound media asset management.
 - `Backlog` (`/backlog`): stale/unread thread triage, importance/relationship overrides, snoozing, reconnect drafts.
 - `Follow-ups` (`/followups`): follow-up timeline, confirm/snooze/cancel, agenda todo creation.
 - `Activity Core` (`/activity-core`): live activity and media signal stream.
@@ -93,7 +92,8 @@ Additional feature domains:
 - Contact memory extraction and retrieval tools.
 - Conversation intelligence signals (check-ins, topic lanes, pivot/close guidance).
 - Relationship state tracking and adaptive romantic morning/outreach flows.
-- Voice note STT and optional TTS cloning flow.
+- Sticker-aware inbound context, outbound sticker replies, and rolling sticker-thread behavior.
+- Voice note STT plus optional cloned voice-note generation for explicit `/vn` requests or configured automatic replies.
 
 For complete capability mapping, see [docs/reference/feature-catalog.md](docs/reference/feature-catalog.md).
 
@@ -257,17 +257,15 @@ bun test convex
 
 ## License
 
-This repository is **source-available** under the [PolyForm Noncommercial 1.0.0 license](./LICENSE).
+This repository is proprietary and **not open source**. See [LICENSE](./LICENSE).
 
-- Personal and other non-commercial use is permitted.
-- Commercial use is not permitted under the default license.
-- Because commercial use is restricted, this license does not meet OSI open source criteria.
-
-If you need commercial usage rights, contact the maintainers to discuss a separate commercial license.
+- No rights are granted unless they are expressly authorized in a separate written agreement.
+- Self-hostability is a product and deployment feature, not a grant to copy, redistribute, or publish the source.
+- Do not publish the working tree or generated builds without explicit authorization.
 
 ## Contributing
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for contribution workflow and contribution license terms.
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for private contribution workflow and contribution terms.
 
 ## Support and Security
 
@@ -275,22 +273,22 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for contribution workflow and contribut
 - Security policy and disclosure process: [SECURITY.md](./SECURITY.md)
 - Community behavior standards: [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md)
 
-## Open-Source Readiness Checklist
+## Distribution Notes
 
-Implemented in this repository:
+Before any external distribution:
 
-1. Distribution license and package metadata are aligned (`LICENSE`, `package.json`).
-2. Community and governance docs are present (`CONTRIBUTING`, `CODE_OF_CONDUCT`, `SUPPORT`, `SECURITY`).
-3. Contributor workflows are present (`.github/ISSUE_TEMPLATE/*`, `.github/pull_request_template.md`, `.github/CODEOWNERS`).
-4. Automation is present (`.github/workflows/ci.yml`, `.github/workflows/codeql.yml`, `.github/dependabot.yml`).
-5. Release process docs are present (`CHANGELOG.md`, `RELEASE.md`).
+1. Confirm the intended distribution channel: hosted service, desktop build, container image, or licensed source access.
+2. Confirm dependency license obligations for the chosen distribution format.
+3. Ensure secrets, auth artifacts, runtime state, and customer data are excluded.
+4. Ensure private admin, billing, tenant, and managed-secret features are only included in authorized builds.
+5. Confirm release notes and support terms match the actual distribution.
 
-Manual GitHub repo settings still required:
+Manual repository settings still required:
 
-1. Enable branch protection on `main` and require CI + CodeQL checks.
-2. Enable private vulnerability reporting and GitHub security features (secret scanning, Dependabot alerts, push protection).
-3. Decide whether to enable GitHub Discussions for support questions.
-4. Scrub full git history for secrets before public launch (if not already done).
+1. Keep the repository private unless a release plan explicitly says otherwise.
+2. Enable branch protection on `main` and require CI + CodeQL checks.
+3. Enable private vulnerability reporting and GitHub security features (secret scanning, Dependabot alerts, push protection).
+4. Scrub full git history for secrets before any authorized source handoff.
 
 ## Reference Docs
 

@@ -23,6 +23,12 @@ Please include:
 - impact assessment
 - suggested mitigation if available
 
+## Proprietary Distribution Review
+
+The hosted admin console, billing internals, tenant administration, and managed secret internals are private code. Do not publish the working tree or generated source snapshots without explicit authorization.
+
+Before any external distribution, verify that the package, installer, container image, or licensed source handoff excludes secrets, local auth state, customer data, and any modules that are outside the authorized distribution scope.
+
 ## Response Targets
 
 - Initial acknowledgment: within 3 business days.

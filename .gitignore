@@ -19,6 +19,7 @@
 
 # production
 /build
+/dist
 
 # misc
 .DS_Store
@@ -45,4 +46,4 @@ yarn-error.log*
 next-env.d.ts
 
 # local launch drafts
-docs/linkedin-opensource-social-life-manager.md
+docs/linkedin-product-launch-social-life-manager.md

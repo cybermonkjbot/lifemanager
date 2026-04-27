@@ -1,7 +1,6 @@
 # Release Process
 
-This repository is distributed as source-available software under PolyForm Noncommercial 1.0.0.
-It is not published as an npm package by default.
+This repository is proprietary and is not published as an npm package by default.
 
 ## Release Checklist
 

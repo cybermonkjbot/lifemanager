@@ -1,6 +1,8 @@
 # Feature Catalog
 
-This file documents the implemented feature surface of Social Life Manager based on the current codebase.
+This file documents the implemented feature surface of Odogwu HQ based on the current codebase.
+
+Plain-language product promise: Odogwu HQ can help chat as the account owner. It reads conversation context, drafts replies in the owner's style, queues them for approval when review mode is enabled, and can send on the owner's behalf when autonomy is enabled.
 
 ## 1) Product Areas
 
@@ -113,7 +115,7 @@ This file documents the implemented feature surface of Social Life Manager based
 ### Inbound parsing and storage
 - Normalized inbound/outbound message persistence in `messages` table.
 - Message type support includes:
-  - `text`, `reaction`, `sticker`, `meme`, `image`, `video`, `audio`, `document`
+  - `text`, `reaction`, `sticker`, `meme`, `image`, `video`, `audio`, `voice_note`, `document`
 - Call session tracking and call fallback logic (`callSessions`, `calls:*`).
 - Inbound dedupe key tracking (`inboundDedupeKeys`).
 
@@ -121,6 +123,7 @@ This file documents the implemented feature surface of Social Life Manager based
 - Primary provider: Azure AI.
 - Fallback provider: local Codex CLI.
 - Runtime strategy includes:
+  - owner-style reply drafting and autonomous send paths
   - configurable deterministic guardrail modes
   - quality gate modes (`auto_rewrite_once`, `manual_review`, `log_only`)
   - context/rerank/tool-router execution support
@@ -131,7 +134,7 @@ This file documents the implemented feature surface of Social Life Manager based
 - Claim/send/mark sent/mark failed/defer/recover-expired flows.
 - Lease-based claiming and recovery.
 - Idempotency key support.
-- Send kinds include text, reaction, sticker, meme, status-post variants.
+- Send kinds include text, reaction, sticker, meme, voice note, and status-post variants.
 
 ### Autonomy and runtime controls
 - Autonomy pause/resume mutations.
@@ -156,13 +159,15 @@ This file documents the implemented feature surface of Social Life Manager based
 
 ### Media and meme capabilities
 - Storage-backed media asset registry with dedupe/merge flows.
-- Sticker context inference and compaction.
+- Sticker context inference, visual-frame preparation, dedupe, compaction, and outbound sticker reply selection.
+- Rolling sticker-thread behavior can choose sticker-only or sticker-companion replies when a chat is already operating in that mode.
 - Manual meme generation endpoint with Azure image/video support.
 - Asset enable/disable and metadata updates.
 
 ### Voice features
 - Inbound transcription via local `whisper.cpp` integration.
 - Voice-note generation path with optional local VoxCPM setup and sample capture.
+- Explicit `/vn`/voice-note directives can send generated voice notes, and runtime settings can allow automatic voice-note replies for configured intent cues.
 - Setup APIs for install/status/reset/sample capture.
 
 ## 3) Convex Cron Jobs

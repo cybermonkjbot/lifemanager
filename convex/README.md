@@ -1,6 +1,6 @@
 # Convex Backend
 
-This directory contains the Social Life Manager backend: schema, queries, mutations, actions, and crons.
+This directory contains the Odogwu HQ backend: schema, queries, mutations, actions, and crons.
 
 ## Modules
 

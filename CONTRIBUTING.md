@@ -1,13 +1,12 @@
 # Contributing
 
-Thanks for contributing to Social Life Manager.
+Thanks for contributing to Odogwu HQ.
 
 ## License Gate
 
-By submitting a contribution, you agree that your contribution is licensed under the project license in [`LICENSE`](./LICENSE), currently **PolyForm Noncommercial 1.0.0**.
+This is a proprietary repository. Do not submit external contributions unless the maintainers have explicitly authorized the work and the required contribution agreement is in place.
 
-This repository is source-available for non-commercial use.
-Commercial use is not permitted under the default project license.
+By submitting an authorized contribution, you agree that the contribution may be used, modified, sublicensed, and distributed by the project owner under proprietary or other license terms.
 
 ## Development Setup
 
