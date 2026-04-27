@@ -3,6 +3,8 @@ export type DashboardNavItem = {
   label: string;
   description: string;
   primary?: boolean;
+  adminOnly?: boolean;
+  runtimeControlOnly?: boolean;
 };
 
 export const dashboardNavItems: DashboardNavItem[] = [
@@ -55,21 +57,10 @@ export const dashboardNavItems: DashboardNavItem[] = [
     primary: true,
   },
   {
-    href: "/activity-core",
-    label: "Activity Core",
-    description: "Watch live signals, media, and runtime events.",
-    primary: true,
-  },
-  {
-    href: "/systems-design",
-    label: "Systems Design",
-    description: "Trace service links, dependencies, and recent logs.",
-    primary: true,
-  },
-  {
     href: "/setup",
     label: "Setup",
     description: "Secure the app and connect message channels.",
+    runtimeControlOnly: true,
   },
   {
     href: "/style-lab",
@@ -86,19 +77,6 @@ export const dashboardNavItems: DashboardNavItem[] = [
     label: "Settings",
     description: "Adjust runtime defaults and automation thresholds.",
   },
-  {
-    href: "/system",
-    label: "System",
-    description: "Monitor health, provider attempts, alerts, and logs.",
-  },
-  {
-    href: "/spending",
-    label: "Spending",
-    description: "Track AI usage, model cost, and token volume.",
-  },
-  {
-    href: "/self-improvement",
-    label: "Self Improvement",
-    description: "Review local improvement runs, reports, and failures.",
-  },
 ];
+
+export const publicDashboardNavItems = dashboardNavItems.filter((item) => !item.adminOnly && !item.runtimeControlOnly);

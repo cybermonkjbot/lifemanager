@@ -3,7 +3,7 @@
 import { formatDateTime, trim } from "@/lib/format";
 import { isImageLikeMedia, type UnifiedMediaItem } from "@/lib/ui/media";
 import { LoadingIndicator } from "@/components/loading-state";
-import { UIModal } from "@/components/ui-modal";
+import { ModalTabs, UIModal } from "@/components/ui-modal";
 import { api } from "../../convex/_generated/api";
 import { useQuery } from "convex/react";
 import dynamic from "next/dynamic";
@@ -638,181 +638,209 @@ export function LiveActivityCore({ splineSceneUrl }: LiveActivityCoreProps) {
         onClose={closeNodeDetails}
         title={selectedNode?.title || "Activity Detail"}
         description={selectedNode ? `${sourceLabel(selectedNode.source)} · ${formatDateTime(selectedNode.createdAt)}` : undefined}
+        size="wide"
       >
         {selectedNode ? (
-          <div className="stack compact">
-            <div className="queue-item">
-              <p className="queue-title">{selectedNode.title}</p>
-              <p className="queue-body">{selectedNode.detail}</p>
-              <p className="queue-meta">
-                Stream: {selectedNode.stream} · Source: {sourceLabel(selectedNode.source)} · Status: {selectedNode.status}
-              </p>
-              <p className="queue-meta">Created: {formatDateTime(selectedNode.createdAt)}</p>
-              {selectedNode.eventType ? <p className="queue-meta">Event type: {selectedNode.eventType}</p> : null}
-            </div>
+          <ModalTabs
+            label="Activity detail sections"
+            tabs={[
+              {
+                id: "overview",
+                label: "Overview",
+                content: (
+                  <div className="queue-item">
+                    <p className="queue-title">{selectedNode.title}</p>
+                    <p className="queue-body">{selectedNode.detail}</p>
+                    <p className="queue-meta">
+                      Stream: {selectedNode.stream} · Source: {sourceLabel(selectedNode.source)} · Status: {selectedNode.status}
+                    </p>
+                    <p className="queue-meta">Created: {formatDateTime(selectedNode.createdAt)}</p>
+                    {selectedNode.eventType ? <p className="queue-meta">Event type: {selectedNode.eventType}</p> : null}
+                  </div>
+                ),
+              },
+              ...(selectedNode.stream === "media" && selectedNode.mediaDetails
+                ? [
+                    {
+                      id: "media",
+                      label: "Media",
+                      content: (
+                        <div className="queue-item">
+                          {selectedNode.mediaDetails.url ? (
+                            selectedMediaIsZoomableImage ? (
+                              <div className="activity-modal-media-zoom">
+                                <div className="queue-actions">
+                                  <button
+                                    type="button"
+                                    className="btn btn-ghost"
+                                    onClick={() => applyZoom(mediaZoom - 0.25)}
+                                    disabled={mediaZoom <= MIN_MEDIA_ZOOM}
+                                  >
+                                    Zoom Out
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="btn btn-ghost"
+                                    onClick={() => applyZoom(mediaZoom + 0.25)}
+                                    disabled={mediaZoom >= MAX_MEDIA_ZOOM}
+                                  >
+                                    Zoom In
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="btn btn-ghost"
+                                    onClick={resetMediaView}
+                                    disabled={Math.abs(mediaZoom - DEFAULT_MEDIA_ZOOM) < 0.001 && mediaPan.x === 0 && mediaPan.y === 0}
+                                  >
+                                    Reset View
+                                  </button>
+                                  <p className="queue-meta">Zoom: {(mediaZoom * 100).toFixed(0)}%</p>
+                                </div>
+                                <div
+                                  ref={mediaViewportRef}
+                                  className={`activity-modal-zoom-viewport ${mediaDragState ? "is-dragging" : ""}`}
+                                  onWheel={(event) => {
+                                    event.preventDefault();
+                                    applyZoom(mediaZoom + (event.deltaY < 0 ? 0.2 : -0.2));
+                                  }}
+                                  onPointerDown={(event) => {
+                                    if (mediaZoom <= 1) {
+                                      return;
+                                    }
+                                    event.currentTarget.setPointerCapture(event.pointerId);
+                                    setMediaDragState({
+                                      pointerId: event.pointerId,
+                                      startX: event.clientX,
+                                      startY: event.clientY,
+                                      originX: mediaPan.x,
+                                      originY: mediaPan.y,
+                                    });
+                                  }}
+                                  onPointerMove={(event) => {
+                                    setMediaDragState((current) => {
+                                      if (!current || current.pointerId !== event.pointerId) {
+                                        return current;
+                                      }
+                                      const dx = event.clientX - current.startX;
+                                      const dy = event.clientY - current.startY;
+                                      setMediaPan(clampMediaPan({ x: current.originX + dx, y: current.originY + dy }, mediaZoom));
+                                      return current;
+                                    });
+                                  }}
+                                  onPointerUp={(event) => {
+                                    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                                      event.currentTarget.releasePointerCapture(event.pointerId);
+                                    }
+                                    setMediaDragState((current) => (current?.pointerId === event.pointerId ? null : current));
+                                  }}
+                                  onPointerCancel={(event) => {
+                                    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                                      event.currentTarget.releasePointerCapture(event.pointerId);
+                                    }
+                                    setMediaDragState((current) => (current?.pointerId === event.pointerId ? null : current));
+                                  }}
+                                  style={{ cursor: mediaZoom > 1 ? (mediaDragState ? "grabbing" : "grab") : "zoom-in" }}
+                                >
+                                  <div
+                                    className="activity-modal-zoom-canvas"
+                                    style={{ transform: `translate3d(${mediaPan.x}px, ${mediaPan.y}px, 0) scale(${mediaZoom})` }}
+                                  >
+                                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                                    <img
+                                      src={selectedNode.mediaDetails.url}
+                                      alt={selectedNode.mediaDetails.label || `${selectedNode.mediaDetails.kind} preview`}
+                                      className="message-media-image modal-preview-image"
+                                      draggable={false}
+                                    />
+                                  </div>
+                                </div>
+                                <p className="queue-meta">Use mouse wheel to zoom and drag to pan while zoomed in.</p>
+                              </div>
+                            ) : selectedNode.mediaDetails.mimeType.toLowerCase().startsWith("video/") ||
+                              selectedNode.mediaDetails.kind === "video" ? (
+                              <video src={selectedNode.mediaDetails.url} controls preload="metadata" className="message-media-video" />
+                            ) : selectedNode.mediaDetails.mimeType.toLowerCase().startsWith("audio/") ||
+                              selectedNode.mediaDetails.kind === "audio" ? (
+                              <audio src={selectedNode.mediaDetails.url} controls preload="none" className="message-media-audio" />
+                            ) : (
+                              <a href={selectedNode.mediaDetails.url} target="_blank" rel="noreferrer" className="message-media-link">
+                                Open attachment
+                              </a>
+                            )
+                          ) : (
+                            <p className="empty-line">Media URL unavailable.</p>
+                          )}
 
-            {selectedNode.stream === "media" && selectedNode.mediaDetails ? (
-              <div className="queue-item">
-                {selectedNode.mediaDetails.url ? (
-                  selectedMediaIsZoomableImage ? (
-                    <div className="activity-modal-media-zoom">
-                      <div className="queue-actions">
-                        <button
-                          type="button"
-                          className="btn btn-ghost"
-                          onClick={() => applyZoom(mediaZoom - 0.25)}
-                          disabled={mediaZoom <= MIN_MEDIA_ZOOM}
-                        >
-                          Zoom Out
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btn-ghost"
-                          onClick={() => applyZoom(mediaZoom + 0.25)}
-                          disabled={mediaZoom >= MAX_MEDIA_ZOOM}
-                        >
-                          Zoom In
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btn-ghost"
-                          onClick={resetMediaView}
-                          disabled={Math.abs(mediaZoom - DEFAULT_MEDIA_ZOOM) < 0.001 && mediaPan.x === 0 && mediaPan.y === 0}
-                        >
-                          Reset View
-                        </button>
-                        <p className="queue-meta">Zoom: {(mediaZoom * 100).toFixed(0)}%</p>
-                      </div>
-                      <div
-                        ref={mediaViewportRef}
-                        className={`activity-modal-zoom-viewport ${mediaDragState ? "is-dragging" : ""}`}
-                        onWheel={(event) => {
-                          event.preventDefault();
-                          applyZoom(mediaZoom + (event.deltaY < 0 ? 0.2 : -0.2));
-                        }}
-                        onPointerDown={(event) => {
-                          if (mediaZoom <= 1) {
-                            return;
-                          }
-                          event.currentTarget.setPointerCapture(event.pointerId);
-                          setMediaDragState({
-                            pointerId: event.pointerId,
-                            startX: event.clientX,
-                            startY: event.clientY,
-                            originX: mediaPan.x,
-                            originY: mediaPan.y,
-                          });
-                        }}
-                        onPointerMove={(event) => {
-                          setMediaDragState((current) => {
-                            if (!current || current.pointerId !== event.pointerId) {
-                              return current;
-                            }
-                            const dx = event.clientX - current.startX;
-                            const dy = event.clientY - current.startY;
-                            setMediaPan(clampMediaPan({ x: current.originX + dx, y: current.originY + dy }, mediaZoom));
-                            return current;
-                          });
-                        }}
-                        onPointerUp={(event) => {
-                          if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-                            event.currentTarget.releasePointerCapture(event.pointerId);
-                          }
-                          setMediaDragState((current) => (current?.pointerId === event.pointerId ? null : current));
-                        }}
-                        onPointerCancel={(event) => {
-                          if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-                            event.currentTarget.releasePointerCapture(event.pointerId);
-                          }
-                          setMediaDragState((current) => (current?.pointerId === event.pointerId ? null : current));
-                        }}
-                        style={{ cursor: mediaZoom > 1 ? (mediaDragState ? "grabbing" : "grab") : "zoom-in" }}
-                      >
-                        <div
-                          className="activity-modal-zoom-canvas"
-                          style={{ transform: `translate3d(${mediaPan.x}px, ${mediaPan.y}px, 0) scale(${mediaZoom})` }}
-                        >
-                          {/* eslint-disable-next-line @next/next/no-img-element */}
-                          <img
-                            src={selectedNode.mediaDetails.url}
-                            alt={selectedNode.mediaDetails.label || `${selectedNode.mediaDetails.kind} preview`}
-                            className="message-media-image modal-preview-image"
-                            draggable={false}
-                          />
+                          <div className="queue-actions">
+                            {selectedNode.mediaDetails.url ? (
+                              <a href={selectedNode.mediaDetails.url} target="_blank" rel="noreferrer" className="btn btn-ghost">
+                                Open Raw
+                              </a>
+                            ) : null}
+                            {selectedNode.mediaDetails.threadId ? (
+                              <Link href={`/conversations?threadId=${selectedNode.mediaDetails.threadId}`} className="btn btn-ghost">
+                                Open Thread
+                              </Link>
+                            ) : null}
+                          </div>
                         </div>
-                      </div>
-                      <p className="queue-meta">Use mouse wheel to zoom and drag to pan while zoomed in.</p>
-                    </div>
-                  ) : selectedNode.mediaDetails.mimeType.toLowerCase().startsWith("video/") ||
-                    selectedNode.mediaDetails.kind === "video" ? (
-                    <video src={selectedNode.mediaDetails.url} controls preload="metadata" className="message-media-video" />
-                  ) : selectedNode.mediaDetails.mimeType.toLowerCase().startsWith("audio/") ||
-                    selectedNode.mediaDetails.kind === "audio" ? (
-                    <audio src={selectedNode.mediaDetails.url} controls preload="none" className="message-media-audio" />
-                  ) : (
-                    <a href={selectedNode.mediaDetails.url} target="_blank" rel="noreferrer" className="message-media-link">
-                      Open attachment
-                    </a>
-                  )
-                ) : (
-                  <p className="empty-line">Media URL unavailable.</p>
-                )}
-
-                <p className="queue-meta">
-                  Kind: {selectedNode.mediaDetails.kind} · MIME: {selectedNode.mediaDetails.mimeType || "unknown"} ·{" "}
-                  {selectedNode.mediaDetails.enabled ? "Enabled" : "Disabled"}
-                </p>
-                <p className="queue-meta">
-                  Source: {selectedNode.mediaDetails.source === "message" ? "Message timeline" : "Media library"}
-                </p>
-                {selectedNode.mediaDetails.tags.length ? <p className="queue-meta">Tags: {selectedNode.mediaDetails.tags.join(", ")}</p> : null}
-                {selectedNode.mediaDetails.messageText ? (
-                  <p className="queue-body">Message: {trim(selectedNode.mediaDetails.messageText, 500)}</p>
-                ) : null}
-                {selectedNode.mediaDetails.messageCaption ? (
-                  <p className="queue-meta">Caption: {trim(selectedNode.mediaDetails.messageCaption, 320)}</p>
-                ) : null}
-                {selectedNode.mediaDetails.messageType ? <p className="queue-meta">Message type: {selectedNode.mediaDetails.messageType}</p> : null}
-                {selectedNode.mediaDetails.messageDirection ? (
-                  <p className="queue-meta">Direction: {selectedNode.mediaDetails.messageDirection}</p>
-                ) : null}
-                {selectedNode.mediaDetails.messageAt ? (
-                  <p className="queue-meta">Message time: {formatDateTime(selectedNode.mediaDetails.messageAt)}</p>
-                ) : null}
-                {selectedNode.mediaDetails.contextSummary ? (
-                  <p className="queue-body">Context summary: {trim(selectedNode.mediaDetails.contextSummary, 360)}</p>
-                ) : null}
-                {selectedNode.mediaDetails.contextTags?.length ? (
-                  <p className="queue-meta">Context tags: {selectedNode.mediaDetails.contextTags.join(", ")}</p>
-                ) : null}
-                {selectedNode.mediaDetails.contextTriggers?.length ? (
-                  <p className="queue-meta">Use when: {selectedNode.mediaDetails.contextTriggers.join(", ")}</p>
-                ) : null}
-                {selectedNode.mediaDetails.contextAvoid?.length ? (
-                  <p className="queue-meta">Avoid when: {selectedNode.mediaDetails.contextAvoid.join(", ")}</p>
-                ) : null}
-                {typeof selectedNode.mediaDetails.contextConfidence === "number" ? (
-                  <p className="queue-meta">Context confidence: {(selectedNode.mediaDetails.contextConfidence * 100).toFixed(0)}%</p>
-                ) : null}
-
-                <div className="queue-actions">
-                  {selectedNode.mediaDetails.url ? (
-                    <a href={selectedNode.mediaDetails.url} target="_blank" rel="noreferrer" className="btn btn-ghost">
-                      Open Raw
-                    </a>
-                  ) : null}
-                  {selectedNode.mediaDetails.threadId ? (
-                    <Link href={`/conversations?threadId=${selectedNode.mediaDetails.threadId}`} className="btn btn-ghost">
-                      Open Thread
-                    </Link>
-                  ) : null}
-                </div>
-                {selectedNode.mediaDetails.threadTitle || selectedNode.mediaDetails.threadJid ? (
-                  <p className="queue-meta">{selectedNode.mediaDetails.threadTitle || selectedNode.mediaDetails.threadJid}</p>
-                ) : null}
-              </div>
-            ) : null}
-          </div>
+                      ),
+                    },
+                    {
+                      id: "context",
+                      label: "Context",
+                      content: (
+                        <div className="queue-item">
+                          <p className="queue-meta">
+                            Kind: {selectedNode.mediaDetails.kind} · MIME: {selectedNode.mediaDetails.mimeType || "unknown"} ·{" "}
+                            {selectedNode.mediaDetails.enabled ? "Enabled" : "Disabled"}
+                          </p>
+                          <p className="queue-meta">
+                            Source: {selectedNode.mediaDetails.source === "message" ? "Message timeline" : "Media library"}
+                          </p>
+                          {selectedNode.mediaDetails.tags.length ? (
+                            <p className="queue-meta">Tags: {selectedNode.mediaDetails.tags.join(", ")}</p>
+                          ) : null}
+                          {selectedNode.mediaDetails.messageText ? (
+                            <p className="queue-body">Message: {trim(selectedNode.mediaDetails.messageText, 500)}</p>
+                          ) : null}
+                          {selectedNode.mediaDetails.messageCaption ? (
+                            <p className="queue-meta">Caption: {trim(selectedNode.mediaDetails.messageCaption, 320)}</p>
+                          ) : null}
+                          {selectedNode.mediaDetails.messageType ? (
+                            <p className="queue-meta">Message type: {selectedNode.mediaDetails.messageType}</p>
+                          ) : null}
+                          {selectedNode.mediaDetails.messageDirection ? (
+                            <p className="queue-meta">Direction: {selectedNode.mediaDetails.messageDirection}</p>
+                          ) : null}
+                          {selectedNode.mediaDetails.messageAt ? (
+                            <p className="queue-meta">Message time: {formatDateTime(selectedNode.mediaDetails.messageAt)}</p>
+                          ) : null}
+                          {selectedNode.mediaDetails.contextSummary ? (
+                            <p className="queue-body">Context summary: {trim(selectedNode.mediaDetails.contextSummary, 360)}</p>
+                          ) : null}
+                          {selectedNode.mediaDetails.contextTags?.length ? (
+                            <p className="queue-meta">Context tags: {selectedNode.mediaDetails.contextTags.join(", ")}</p>
+                          ) : null}
+                          {selectedNode.mediaDetails.contextTriggers?.length ? (
+                            <p className="queue-meta">Use when: {selectedNode.mediaDetails.contextTriggers.join(", ")}</p>
+                          ) : null}
+                          {selectedNode.mediaDetails.contextAvoid?.length ? (
+                            <p className="queue-meta">Avoid when: {selectedNode.mediaDetails.contextAvoid.join(", ")}</p>
+                          ) : null}
+                          {typeof selectedNode.mediaDetails.contextConfidence === "number" ? (
+                            <p className="queue-meta">Context confidence: {(selectedNode.mediaDetails.contextConfidence * 100).toFixed(0)}%</p>
+                          ) : null}
+                          {selectedNode.mediaDetails.threadTitle || selectedNode.mediaDetails.threadJid ? (
+                            <p className="queue-meta">{selectedNode.mediaDetails.threadTitle || selectedNode.mediaDetails.threadJid}</p>
+                          ) : null}
+                        </div>
+                      ),
+                    },
+                  ]
+                : []),
+            ]}
+          />
         ) : null}
       </UIModal>
     </section>

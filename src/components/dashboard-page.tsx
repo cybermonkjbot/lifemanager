@@ -1,4 +1,5 @@
 import { DashboardShell } from "@/components/dashboard-shell";
+import { requireAuthenticatedPageAccess } from "@/lib/instance-guard";
 import { getConvexUrl } from "@/lib/runtime-env";
 import type { ReactNode } from "react";
 
@@ -21,6 +22,8 @@ export async function DashboardPage({
   hideViewHeader = false,
   hideShellChrome = false,
 }: DashboardPageProps) {
+  await requireAuthenticatedPageAccess();
+
   return (
     <DashboardShell
       title={title}

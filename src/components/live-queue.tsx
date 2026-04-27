@@ -4,7 +4,7 @@ import { ActionNotices } from "@/components/action-notices";
 import { LoadingBlock } from "@/components/loading-state";
 import { SharedMediaPreview } from "@/components/media-preview";
 import { ProviderFilter, type ProviderFilterValue } from "@/components/provider-filter";
-import { UIModal } from "@/components/ui-modal";
+import { ModalTabs, UIModal } from "@/components/ui-modal";
 import { formatDateTime, formatDateTimeWithRelative, trim } from "@/lib/format";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
 import { followupRescheduleDueAt, generateFollowupReasonWithAi, type FollowupItem } from "@/lib/ui/followups";
@@ -868,112 +868,142 @@ function QueueContent() {
             return (
               <div className="stack compact" onKeyDown={(event) => onNeedsReplyShortcut(event, reviewState.item)}>
                 <p className="queue-title">{reviewState.item.thread?.title || reviewState.item.thread?.jid || "Unknown contact"}</p>
-                <p className="queue-body">{trim(reviewState.item.sourceMessage?.text || reviewState.item.text || "")}</p>
-                <SharedMediaPreview
-                  preview={reviewState.item.sourceMessage?.mediaPreview}
-                  mediaAssetId={reviewState.item.sourceMessage?.mediaAssetId}
+                <ModalTabs
+                  label="Reply review sections"
+                  tabs={[
+                    {
+                      id: "draft",
+                      label: "Draft",
+                      content: (
+                        <div className="stack compact">
+                          <p className="queue-body">{trim(reviewState.item.sourceMessage?.text || reviewState.item.text || "")}</p>
+                          <SharedMediaPreview
+                            preview={reviewState.item.sourceMessage?.mediaPreview}
+                            mediaAssetId={reviewState.item.sourceMessage?.mediaAssetId}
+                          />
+                          <p className="queue-meta">Draft type: {reviewState.item.sendKind || "text"}</p>
+                          {reviewState.item.text ? <p className="queue-body">{trim(reviewState.item.text, 240)}</p> : null}
+                          <SharedMediaPreview preview={reviewState.item.mediaPreview} mediaAssetId={reviewState.item.mediaAssetId} />
+                          {reviewState.item.mediaCaption?.trim() ? (
+                            <p className="queue-meta">Media caption: {trim(reviewState.item.mediaCaption.trim(), 240)}</p>
+                          ) : null}
+                        </div>
+                      ),
+                    },
+                    {
+                      id: "delivery",
+                      label: "Delivery",
+                      content: (
+                        <div className="stack compact">
+                          <p className="queue-meta">
+                            Channel: {reviewState.item.messageProvider || "whatsapp"} · Model: {reviewState.item.provider} · Delay:{" "}
+                            {Math.round(reviewState.item.delayMs / 1000)}s · Typing: {Math.round(reviewState.item.typingMs / 1000)}s
+                          </p>
+                          <p className="queue-meta">Keyboard shortcuts: A send · S snooze · R discard · E edit</p>
+                        </div>
+                      ),
+                    },
+                    {
+                      id: "actions",
+                      label: "Actions",
+                      content: (
+                        <div className="stack compact">
+                          {editingDraftId === reviewState.item._id ? (
+                            <label className="stack compact">
+                              <span className="queue-meta">Edit draft text</span>
+                              <textarea
+                                rows={4}
+                                value={editingDraftText}
+                                onChange={(event) => setEditingDraftText(event.target.value)}
+                                aria-label="Edit draft text"
+                              />
+                            </label>
+                          ) : null}
+                          <div className="queue-actions">
+                            <button
+                              type="button"
+                              className="btn btn-primary"
+                              onClick={() => onSend(reviewState.item._id)}
+                              disabled={sendOrSnoozePending}
+                              aria-disabled={sendOrSnoozePending}
+                            >
+                              Send
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-ghost"
+                              onClick={() => onSnooze(reviewState.item._id)}
+                              disabled={sendOrSnoozePending}
+                              aria-disabled={sendOrSnoozePending}
+                            >
+                              Snooze 30m
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-ghost"
+                              onClick={() => openEdit(reviewState.item._id, reviewState.item.text)}
+                              disabled={isPending(`edit:${reviewState.item._id}`)}
+                              aria-disabled={isPending(`edit:${reviewState.item._id}`)}
+                            >
+                              Edit
+                            </button>
+                            {editingDraftId === reviewState.item._id ? (
+                              <>
+                                <button
+                                  type="button"
+                                  className="btn btn-primary"
+                                  onClick={() => onSaveEdit(reviewState.item._id)}
+                                  disabled={isPending(`edit:${reviewState.item._id}`)}
+                                  aria-disabled={isPending(`edit:${reviewState.item._id}`)}
+                                >
+                                  {isPending(`edit:${reviewState.item._id}`) ? "Saving..." : "Save changes"}
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn btn-ghost"
+                                  onClick={() => onCancelEdit(reviewState.item._id)}
+                                  disabled={isPending(`edit:${reviewState.item._id}`)}
+                                  aria-disabled={isPending(`edit:${reviewState.item._id}`)}
+                                >
+                                  Cancel
+                                </button>
+                              </>
+                            ) : null}
+                            <button
+                              type="button"
+                              className="btn btn-ghost"
+                              onClick={() => onReject(reviewState.item._id)}
+                              disabled={isPending(`reject:${reviewState.item._id}`)}
+                              aria-disabled={isPending(`reject:${reviewState.item._id}`)}
+                            >
+                              Discard draft
+                            </button>
+                            {reviewState.item.thread?._id ? (
+                              <Link href={`/conversations?threadId=${reviewState.item.thread._id}`} className="btn btn-ghost">
+                                Open conversation
+                              </Link>
+                            ) : null}
+                          </div>
+                          {getRecord(`send:${reviewState.item._id}`).error || getRecord(`snooze:${reviewState.item._id}`).error ? (
+                            <p className="queue-meta action-inline-error" role="alert">
+                              {getRecord(`send:${reviewState.item._id}`).error || getRecord(`snooze:${reviewState.item._id}`).error}
+                            </p>
+                          ) : null}
+                          {getRecord(`edit:${reviewState.item._id}`).error ? (
+                            <p className="queue-meta action-inline-error" role="alert">
+                              {getRecord(`edit:${reviewState.item._id}`).error}
+                            </p>
+                          ) : null}
+                          {getRecord(`reject:${reviewState.item._id}`).error ? (
+                            <p className="queue-meta action-inline-error" role="alert">
+                              {getRecord(`reject:${reviewState.item._id}`).error}
+                            </p>
+                          ) : null}
+                        </div>
+                      ),
+                    },
+                  ]}
                 />
-                <p className="queue-meta">Draft type: {reviewState.item.sendKind || "text"}</p>
-                {reviewState.item.text ? <p className="queue-body">{trim(reviewState.item.text, 240)}</p> : null}
-                <SharedMediaPreview preview={reviewState.item.mediaPreview} mediaAssetId={reviewState.item.mediaAssetId} />
-                {reviewState.item.mediaCaption?.trim() ? (
-                  <p className="queue-meta">Media caption: {trim(reviewState.item.mediaCaption.trim(), 240)}</p>
-                ) : null}
-                <p className="queue-meta">
-                  Channel: {reviewState.item.messageProvider || "whatsapp"} · Model: {reviewState.item.provider} · Delay: {Math.round(reviewState.item.delayMs / 1000)}s · Typing: {Math.round(reviewState.item.typingMs / 1000)}s
-                </p>
-                <p className="queue-meta">Keyboard shortcuts: A send · S snooze · R discard · E edit</p>
-                {editingDraftId === reviewState.item._id ? (
-                  <label className="stack compact">
-                    <span className="queue-meta">Edit draft text</span>
-                    <textarea
-                      rows={4}
-                      value={editingDraftText}
-                      onChange={(event) => setEditingDraftText(event.target.value)}
-                      aria-label="Edit draft text"
-                    />
-                  </label>
-                ) : null}
-                <div className="queue-actions">
-                  <button
-                    type="button"
-                    className="btn btn-primary"
-                    onClick={() => onSend(reviewState.item._id)}
-                    disabled={sendOrSnoozePending}
-                    aria-disabled={sendOrSnoozePending}
-                  >
-                    Send
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-ghost"
-                    onClick={() => onSnooze(reviewState.item._id)}
-                    disabled={sendOrSnoozePending}
-                    aria-disabled={sendOrSnoozePending}
-                  >
-                    Snooze 30m
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-ghost"
-                    onClick={() => openEdit(reviewState.item._id, reviewState.item.text)}
-                    disabled={isPending(`edit:${reviewState.item._id}`)}
-                    aria-disabled={isPending(`edit:${reviewState.item._id}`)}
-                  >
-                    Edit
-                  </button>
-                  {editingDraftId === reviewState.item._id ? (
-                    <>
-                      <button
-                        type="button"
-                        className="btn btn-primary"
-                        onClick={() => onSaveEdit(reviewState.item._id)}
-                        disabled={isPending(`edit:${reviewState.item._id}`)}
-                        aria-disabled={isPending(`edit:${reviewState.item._id}`)}
-                      >
-                        {isPending(`edit:${reviewState.item._id}`) ? "Saving..." : "Save changes"}
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-ghost"
-                        onClick={() => onCancelEdit(reviewState.item._id)}
-                        disabled={isPending(`edit:${reviewState.item._id}`)}
-                        aria-disabled={isPending(`edit:${reviewState.item._id}`)}
-                      >
-                        Cancel
-                      </button>
-                    </>
-                  ) : null}
-                  <button
-                    type="button"
-                    className="btn btn-ghost"
-                    onClick={() => onReject(reviewState.item._id)}
-                    disabled={isPending(`reject:${reviewState.item._id}`)}
-                    aria-disabled={isPending(`reject:${reviewState.item._id}`)}
-                  >
-                    Discard draft
-                  </button>
-                  {reviewState.item.thread?._id ? (
-                    <Link href={`/conversations?threadId=${reviewState.item.thread._id}`} className="btn btn-ghost">
-                      Open conversation
-                    </Link>
-                  ) : null}
-                </div>
-                {getRecord(`send:${reviewState.item._id}`).error || getRecord(`snooze:${reviewState.item._id}`).error ? (
-                  <p className="queue-meta action-inline-error" role="alert">
-                    {getRecord(`send:${reviewState.item._id}`).error || getRecord(`snooze:${reviewState.item._id}`).error}
-                  </p>
-                ) : null}
-                {getRecord(`edit:${reviewState.item._id}`).error ? (
-                  <p className="queue-meta action-inline-error" role="alert">
-                    {getRecord(`edit:${reviewState.item._id}`).error}
-                  </p>
-                ) : null}
-                {getRecord(`reject:${reviewState.item._id}`).error ? (
-                  <p className="queue-meta action-inline-error" role="alert">
-                    {getRecord(`reject:${reviewState.item._id}`).error}
-                  </p>
-                ) : null}
               </div>
             );
           })()

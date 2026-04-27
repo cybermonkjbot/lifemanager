@@ -2768,7 +2768,7 @@ export function LiveSettings() {
               }
               disabled={record.pending || !draft.aboutAutomationEnabled}
               aria-disabled={record.pending || !draft.aboutAutomationEnabled}
-              placeholder="Social Life Manager active • {date} {time}"
+              placeholder="Odogwu HQ active • {date} {time}"
             />
             <span className="queue-meta">Supports placeholders: {"{date}"}, {"{time}"}, {"{datetime}"}.</span>
           </label>

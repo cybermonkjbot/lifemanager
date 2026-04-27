@@ -4,7 +4,7 @@ import { ActionNotices } from "@/components/action-notices";
 import { LoadingBlock, LoadingIndicator } from "@/components/loading-state";
 import { SharedMediaPreview } from "@/components/media-preview";
 import { ProviderFilter, type ProviderFilterValue } from "@/components/provider-filter";
-import { UIModal } from "@/components/ui-modal";
+import { ModalTabs, UIModal } from "@/components/ui-modal";
 import { followupRescheduleDueAt, generateFollowupReasonWithAi } from "@/lib/ui/followups";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
 import type { MediaPreviewResource } from "@/lib/ui/media";
@@ -121,6 +121,29 @@ type ThreadGrounding = {
   theirName?: string;
   autoAliases: string[];
   vibeNotes?: string;
+};
+
+type ContactMemoryFact = {
+  _id: string;
+  factKey: string;
+  factValue: string;
+  factType: "preference" | "profile" | "schedule" | "relationship" | "promise" | "other";
+  confidence?: number;
+  sourceExcerpt?: string;
+  updatedAt?: number;
+};
+
+type ContactMemoryFactsPayload = {
+  facts: ContactMemoryFact[];
+};
+
+type CorrectableGender = "unknown" | "female" | "male" | "nonbinary";
+
+type IdentityCorrectionFormProps = {
+  facts: ContactMemoryFact[];
+  loading: boolean;
+  pending: boolean;
+  onSaveGender: (gender: CorrectableGender, note: string) => void;
 };
 
 type MessageMediaPreview = MediaPreviewResource;
@@ -310,6 +333,24 @@ function numberField(record: Record<string, unknown> | null, key: string) {
 function stringField(record: Record<string, unknown> | null, key: string) {
   const value = record?.[key];
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function normalizedGenderFromFactValue(value: string): CorrectableGender {
+  const text = ` ${value.toLowerCase()} `;
+  if (/\b(nonbinary|non-binary|genderfluid|they\/them)\b/.test(text)) {
+    return "nonbinary";
+  }
+  if (/\b(female|woman|girl|lady|she\/her)\b/.test(text)) {
+    return "female";
+  }
+  if (/\b(male|man|guy|boy|he\/him)\b/.test(text)) {
+    return "male";
+  }
+  return "unknown";
+}
+
+function factLabel(key: string) {
+  return key.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 function parsePlannerSummary(value: unknown): PlannerSummary | null {
@@ -920,6 +961,95 @@ function GroundingForm({ initialMyName, initialTheirName, initialVibeNotes, auto
   );
 }
 
+function IdentityCorrectionForm({ facts, loading, pending, onSaveGender }: IdentityCorrectionFormProps) {
+  const overrideFact = facts.find((fact) => fact.factKey === "profile_gender_override" || fact.factKey === "gender_override");
+  const inferredFact = facts.find((fact) => fact.factKey === "inferred_gender");
+  const relevantFacts = facts.filter((fact) => /(gender|pronoun|identity|profile)/i.test(`${fact.factKey} ${fact.factValue}`)).slice(0, 8);
+  const activeFact = overrideFact || inferredFact || relevantFacts[0];
+  const [gender, setGender] = useState<CorrectableGender>(() => normalizedGenderFromFactValue(activeFact?.factValue || ""));
+  const [note, setNote] = useState("");
+  const savedGender = normalizedGenderFromFactValue(overrideFact?.factValue || "");
+  const hasSavedOverride = Boolean(overrideFact);
+  const hasChanged = gender !== savedGender || Boolean(note.trim());
+
+  return (
+    <div className="personality-config-block identity-correction-panel">
+      <h3>Contact Identity</h3>
+      <p className="queue-meta">
+        Correct the system&apos;s gender read for this conversation. Manual corrections are used before inferred name, pronoun, or chat-language cues.
+      </p>
+
+      {loading ? <LoadingIndicator label="Loading saved identity facts..." /> : null}
+
+      <div className="identity-correction-grid">
+        <div className="identity-correction-summary">
+          <p className="queue-title">Current read</p>
+          <p className="identity-correction-value">{hasSavedOverride ? factLabel(gender) : factLabel(normalizedGenderFromFactValue(activeFact?.factValue || ""))}</p>
+          <p className="queue-meta">
+            {hasSavedOverride
+              ? "Manually corrected in settings."
+              : activeFact
+                ? `Inferred from ${factLabel(activeFact.factKey)}${typeof activeFact.confidence === "number" ? ` · ${Math.round(activeFact.confidence * 100)}%` : ""}`
+                : "No saved gender cue yet."}
+          </p>
+        </div>
+
+        <label className="setup-input-group">
+          <span className="queue-meta">Correct gender cue</span>
+          <select
+            value={gender}
+            onChange={(event) => setGender(event.target.value as CorrectableGender)}
+            disabled={pending}
+            aria-disabled={pending}
+          >
+            <option value="unknown">Unknown / do not infer</option>
+            <option value="female">Female</option>
+            <option value="male">Male</option>
+            <option value="nonbinary">Nonbinary</option>
+          </select>
+        </label>
+      </div>
+
+      <label className="setup-input-group">
+        <span className="queue-meta">Optional note for future scans</span>
+        <textarea
+          rows={2}
+          value={note}
+          onChange={(event) => setNote(event.target.value)}
+          placeholder="Example: She/her; confirmed by conversation. Avoid guessing from name alone."
+          disabled={pending}
+          aria-disabled={pending}
+        />
+      </label>
+
+      <button
+        type="button"
+        className="btn btn-primary"
+        onClick={() => onSaveGender(gender, note)}
+        disabled={pending || !hasChanged}
+        aria-disabled={pending || !hasChanged}
+      >
+        {pending ? "Saving..." : "Save Identity Correction"}
+      </button>
+
+      <div className="identity-fact-list">
+        <p className="queue-title">Saved cues</p>
+        {relevantFacts.length ? (
+          relevantFacts.map((fact) => (
+            <div className="identity-fact-row" key={fact._id}>
+              <span>{factLabel(fact.factKey)}</span>
+              <p>{fact.factValue}</p>
+              <em>{typeof fact.updatedAt === "number" ? formatDateTime(fact.updatedAt) : "Saved memory"}</em>
+            </div>
+          ))
+        ) : (
+          <p className="queue-meta">No identity cues saved for this conversation yet.</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ConversationsContent({ initialThreadId }: { initialThreadId?: string }) {
   type ThreadListItem = {
     _id: string;
@@ -996,6 +1126,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
   const setThreadPromptProfile = useMutation(api.personality.setThreadPromptProfile);
   const autoBuildThreadPromptProfile = useMutation(api.personality.autoBuildThreadPromptProfile);
   const saveGroundingMutation = useMutation(api.grounding.saveThreadGrounding);
+  const upsertContactMemoryFact = useMutation(api.chatTools.upsertContactMemoryFact);
   const ignoreThreadMutation = useMutation(api.backlog.ignoreThread);
   const deleteThreadMutation = useMutation(api.threads.deleteThread);
   const recordEvent = useMutation(api.system.recordEvent);
@@ -1075,6 +1206,10 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
     api.grounding.getThreadGrounding,
     selectedThreadId ? { threadId: selectedThreadId as Id<"threads"> } : "skip",
   ) as ThreadGrounding | null | undefined;
+  const contactMemoryFacts = useQuery(
+    api.chatTools.contactMemoryFactsList,
+    selectedThreadId ? { threadId: selectedThreadId as Id<"threads">, factType: "profile", limit: 80 } : "skip",
+  ) as ContactMemoryFactsPayload | undefined;
   const threadToolEvents = useQuery(
     api.threads.getToolEvents,
     selectedThreadId ? { threadId: selectedThreadId as Id<"threads">, limit: 260 } : "skip",
@@ -1099,12 +1234,14 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
   const settingsKey = selectedThreadId ? `personality:thread:${selectedThreadId}` : "personality:thread:none";
   const promptProfileKey = selectedThreadId ? `personality:promptprofile:${selectedThreadId}` : "personality:promptprofile:none";
   const groundingKey = selectedThreadId ? `grounding:thread:${selectedThreadId}` : "grounding:thread:none";
+  const identityCorrectionKey = selectedThreadId ? `identity:thread:${selectedThreadId}` : "identity:thread:none";
   const ignoreThreadKey = selectedThreadId ? `conversation:ignore:${selectedThreadId}` : "conversation:ignore:none";
   const deleteThreadKey = selectedThreadId ? `conversation:delete:${selectedThreadId}` : "conversation:delete:none";
 
   const settingsRecord = getRecord(settingsKey);
   const promptProfileRecord = getRecord(promptProfileKey);
   const groundingRecord = getRecord(groundingKey);
+  const identityCorrectionRecord = getRecord(identityCorrectionKey);
   const ignoreThreadRecord = getRecord(ignoreThreadKey);
   const deleteThreadRecord = getRecord(deleteThreadKey);
   const lastLoadStartedThreadRef = useRef<string | null>(null);
@@ -1253,6 +1390,31 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
       {
         pendingLabel: "Saving grounding...",
         successMessage: "Conversation grounding updated.",
+      },
+    );
+  };
+
+  const saveIdentityCorrection = (gender: CorrectableGender, note: string) => {
+    if (!selectedThreadId) {
+      return;
+    }
+    const label = gender === "unknown" ? "unknown; manually corrected; do not infer gender unless stronger evidence appears" : gender;
+    const cleanedNote = note.trim();
+    void runAction(
+      identityCorrectionKey,
+      async () => {
+        await upsertContactMemoryFact({
+          threadId: selectedThreadId as Id<"threads">,
+          factKey: "profile_gender_override",
+          factValue: cleanedNote ? `${label}; ${cleanedNote}` : `${label}; manually corrected in conversation settings`,
+          factType: "profile",
+          confidence: 0.99,
+          sourceExcerpt: "Manual gender correction from Conversation Settings.",
+        });
+      },
+      {
+        pendingLabel: "Saving identity correction...",
+        successMessage: "Identity correction saved.",
       },
     );
   };
@@ -2418,52 +2580,106 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
         <UIModal
           open={settingsModalOpen}
           onClose={() => setSettingsModalOpen(false)}
-          title={selectedThreadId ? "Conversation Settings" : "Page Settings"}
-          description="Adjust personality, prompt profile, and grounding."
+          title={
+            selectedThreadId && thread
+              ? `Conversation Settings: ${thread.thread.title || thread.thread.jid}`
+              : selectedThreadId
+                ? "Conversation Settings"
+                : "Page Settings"
+          }
+          description={
+            selectedThreadId && thread
+              ? `${thread.thread.jid} · ${(thread.thread.provider || "whatsapp") === "instagram" ? "Instagram" : "WhatsApp"} · ${
+                  thread.thread.threadKind === "broadcast_or_system"
+                    ? "Broadcast/System"
+                    : thread.thread.threadKind === "group"
+                      ? "Group"
+                      : "Direct"
+                } · Auto-respond ${thread.thread.isIgnored ? "off" : "on"}`
+              : "Adjust personality, prompt profile, and grounding."
+          }
         >
           <div className="conversation-controls">
             {selectedThreadId && (threadPersonalityLoading || profilesLoading) ? (
               <LoadingIndicator label="Loading personality settings…" />
             ) : null}
 
-            {selectedThreadId && !threadLoading && !threadMissing && !threadPersonalityLoading && profiles.length > 0 ? (
-              <ThreadPersonalityForm
-                key={threadSettingKey}
-                profiles={profiles}
-                initialProfileSlug={threadPersonality?.profileSlug || "casual"}
-                initialIntensity={threadPersonality?.intensity ?? 0.6}
-                initialCustomPrompt={threadPersonality?.customPrompt || ""}
-                initialMemePolicyMode={threadPersonality?.memePolicyMode || "auto"}
-                autoProfessional={threadPersonality?.memeAutoProfessional}
-                autoProfessionalScore={threadPersonality?.memeAutoProfessionalScore}
-                autoProfessionalSignals={threadPersonality?.memeAutoProfessionalSignals}
-                pending={settingsRecord.pending}
-                onSave={saveThreadSetting}
-              />
-            ) : null}
-
-            {selectedThreadId && !threadLoading && !threadMissing && !threadPersonalityLoading ? (
-              <PromptProfileForm
-                key={promptProfileFormKey}
-                initialPromptProfile={threadPersonality?.threadPromptProfile || ""}
-                source={threadPersonality?.threadPromptProfileSource}
-                messageCount={threadPersonality?.threadPromptProfileMessageCount}
-                updatedAt={threadPersonality?.threadPromptProfileUpdatedAt}
-                pending={promptProfileRecord.pending}
-                onAutoBuild={autoBuildPromptProfile}
-                onSaveManual={savePromptProfile}
-              />
-            ) : null}
-
             {selectedThreadId && !threadLoading && !threadMissing ? (
-              <GroundingForm
-                key={`${selectedThreadId}:${threadGrounding?.myName || ""}:${threadGrounding?.theirName || ""}:${threadGrounding?.vibeNotes || ""}`}
-                initialMyName={threadGrounding?.myName || ""}
-                initialTheirName={threadGrounding?.theirName || ""}
-                initialVibeNotes={threadGrounding?.vibeNotes || ""}
-                autoAliases={threadGrounding?.autoAliases || []}
-                pending={groundingRecord.pending}
-                onSave={saveGrounding}
+              <ModalTabs
+                label="Conversation settings sections"
+                tabs={[
+                  {
+                    id: "personality",
+                    label: "Personality",
+                    content:
+                      !threadPersonalityLoading && profiles.length > 0 ? (
+                        <ThreadPersonalityForm
+                          key={threadSettingKey}
+                          profiles={profiles}
+                          initialProfileSlug={threadPersonality?.profileSlug || "casual"}
+                          initialIntensity={threadPersonality?.intensity ?? 0.6}
+                          initialCustomPrompt={threadPersonality?.customPrompt || ""}
+                          initialMemePolicyMode={threadPersonality?.memePolicyMode || "auto"}
+                          autoProfessional={threadPersonality?.memeAutoProfessional}
+                          autoProfessionalScore={threadPersonality?.memeAutoProfessionalScore}
+                          autoProfessionalSignals={threadPersonality?.memeAutoProfessionalSignals}
+                          pending={settingsRecord.pending}
+                          onSave={saveThreadSetting}
+                        />
+                      ) : (
+                        <p className="empty-line">Personality settings are still loading.</p>
+                      ),
+                  },
+                  {
+                    id: "prompt",
+                    label: "Prompt",
+                    content: !threadPersonalityLoading ? (
+                      <PromptProfileForm
+                        key={promptProfileFormKey}
+                        initialPromptProfile={threadPersonality?.threadPromptProfile || ""}
+                        source={threadPersonality?.threadPromptProfileSource}
+                        messageCount={threadPersonality?.threadPromptProfileMessageCount}
+                        updatedAt={threadPersonality?.threadPromptProfileUpdatedAt}
+                        pending={promptProfileRecord.pending}
+                        onAutoBuild={autoBuildPromptProfile}
+                        onSaveManual={savePromptProfile}
+                      />
+                    ) : (
+                      <p className="empty-line">Prompt profile is still loading.</p>
+                    ),
+                  },
+                  {
+                    id: "grounding",
+                    label: "Grounding",
+                    content: (
+                      <GroundingForm
+                        key={`${selectedThreadId}:${threadGrounding?.myName || ""}:${threadGrounding?.theirName || ""}:${threadGrounding?.vibeNotes || ""}`}
+                        initialMyName={threadGrounding?.myName || ""}
+                        initialTheirName={threadGrounding?.theirName || ""}
+                        initialVibeNotes={threadGrounding?.vibeNotes || ""}
+                        autoAliases={threadGrounding?.autoAliases || []}
+                        pending={groundingRecord.pending}
+                        onSave={saveGrounding}
+                      />
+                    ),
+                  },
+                  {
+                    id: "identity",
+                    label: "Identity",
+                    content: (
+                      <IdentityCorrectionForm
+                        key={`${selectedThreadId}:${(contactMemoryFacts?.facts || [])
+                          .filter((fact) => fact.factKey === "profile_gender_override" || fact.factKey === "inferred_gender")
+                          .map((fact) => `${fact.factKey}:${fact.factValue}`)
+                          .join("|")}`}
+                        facts={contactMemoryFacts?.facts || []}
+                        loading={contactMemoryFacts === undefined}
+                        pending={identityCorrectionRecord.pending}
+                        onSaveGender={saveIdentityCorrection}
+                      />
+                    ),
+                  },
+                ]}
               />
             ) : null}
 
@@ -2505,197 +2721,228 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
           onClose={() => setToolSummaryMessageId(null)}
           title="Tool Call Summary"
           description="Context tools and checks captured before this outbound response."
+          size="wide"
         >
           {selectedToolSummary ? (
-            <div className="stack compact">
-              <div className="queue-item">
-                <p className="queue-title">Response</p>
-                <p className="queue-body">{trim(selectedToolSummaryMessage?.text || "No response text available.", 340)}</p>
-                <p className="queue-meta">Sent: {formatDateTime(selectedToolSummary.messageAt)}</p>
-              </div>
-
-              <div className="queue-item">
-                <p className="queue-title">Trust Snapshot</p>
-                {(() => {
-                  const plannerEvent = selectedToolSummary.toolCalls.find((event) => event.toolName === "response_workbench");
-                  const plannerSummary = parsePlannerSummary(plannerEvent?.parsedOutput);
-                  const toolCalls = selectedToolSummary.toolCalls.filter((event) => event.toolName !== "response_workbench");
-                  const failedToolCount = toolCalls.filter((event) => toolTone(event) === "danger").length;
-                  const passedGuardrails = selectedToolSummary.styleGuardrails.filter((event) => event.passed).length;
-                  const failedGuardrails = selectedToolSummary.styleGuardrails.filter((event) => event.passed === false).length;
-                  return (
-                    <div className="tool-evidence-grid">
-                      <div className="tool-evidence-stat">
-                        <span>Planner</span>
-                        <strong>
-                          {plannerSummary
-                            ? `${plannerModeLabel(plannerSummary.replyMode)} · ${Math.round(plannerSummary.confidence * 100)}%`
-                            : "Not captured"}
-                        </strong>
-                      </div>
-                      <div className="tool-evidence-stat">
-                        <span>Tool calls</span>
-                        <strong>{failedToolCount > 0 ? `${failedToolCount} need attention` : `${toolCalls.length} completed`}</strong>
-                      </div>
-                      <div className="tool-evidence-stat">
-                        <span>Context</span>
-                        <strong>
-                          {selectedToolSummary.contextWindows.length} window
-                          {selectedToolSummary.contextWindows.length === 1 ? "" : "s"}
-                        </strong>
-                      </div>
-                      <div className="tool-evidence-stat">
-                        <span>Style check</span>
-                        <strong>
-                          {failedGuardrails > 0
-                            ? `${failedGuardrails} failed`
-                            : passedGuardrails > 0
-                              ? `${passedGuardrails} passed`
-                              : "Not captured"}
-                        </strong>
-                      </div>
-                    </div>
-                  );
-                })()}
-              </div>
-
-              <div className="queue-item">
-                <p className="queue-title">Response Planner</p>
-                {(() => {
-                  const plannerEvent = selectedToolSummary.toolCalls.find((event) => event.toolName === "response_workbench");
-                  const plannerSummary = parsePlannerSummary(plannerEvent?.parsedOutput);
-                  if (!plannerEvent || !plannerSummary) {
-                    return <p className="empty-line">No planner diagnostics captured for this response.</p>;
-                  }
-                  return (
-                    <div className="tool-summary-item">
-                      <p className="queue-meta">
-                        {plannerEvent.phase === "outreach" ? "Outreach" : "Reply"} planner · {plannerEvent.latencyMs || 0}ms ·{" "}
-                        {formatDateTime(plannerEvent.createdAt)}
-                      </p>
-                      <p className="queue-body">
-                        Mode: {plannerModeLabel(plannerSummary.replyMode)} · Intent: {plannerSummary.intentLabel} · Confidence:{" "}
-                        {Math.round(plannerSummary.confidence * 100)}%
-                      </p>
-                      <p className="queue-meta">
-                        Explicit asks: {plannerSummary.explicitAskCount} · Ambiguity signals: {plannerSummary.ambiguityCount}
-                      </p>
-                    </div>
-                  );
-                })()}
-              </div>
-
-              <div className="queue-item">
-                <p className="queue-title">Tool Calls</p>
-                {(() => {
-                  const toolCalls = selectedToolSummary.toolCalls.filter((event) => event.toolName !== "response_workbench");
-                  if (toolCalls.length === 0) {
-                    return <p className="empty-line">No tool calls captured for this response.</p>;
-                  }
-                  return (
+            <ModalTabs
+              label="Tool call summary sections"
+              tabs={[
+                {
+                  id: "summary",
+                  label: "Summary",
+                  content: (
                     <div className="stack compact">
-                      {toolCalls.map((event) => {
-                        const chips = toolMetricChips(event);
-                        const inputPayload = safePrettyJson(event.parsedInput) || event.inputText || "(not captured)";
-                        const outputPayload = safePrettyJson(event.parsedOutput) || event.outputText || "(not captured)";
-                        return (
-                          <div key={event._id} className="tool-summary-item tool-evidence-item">
-                            <div className="tool-evidence-head">
-                              <span className={`tool-evidence-dot tool-evidence-dot-${toolTone(event)}`} aria-hidden="true" />
-                              <div className="tool-evidence-title-block">
-                                <p className="queue-title">{toolDisplayName(event.toolName)}</p>
-                                <p className="queue-meta">
-                                  {event.phase === "outreach" ? "Outreach" : "Reply"} · {event.toolName || event.eventType} ·{" "}
-                                  {formatLatencyMs(event.latencyMs)} · {formatDateTime(event.createdAt)}
-                                </p>
+                      <div className="queue-item">
+                        <p className="queue-title">Response</p>
+                        <p className="queue-body">{trim(selectedToolSummaryMessage?.text || "No response text available.", 340)}</p>
+                        <p className="queue-meta">Sent: {formatDateTime(selectedToolSummary.messageAt)}</p>
+                      </div>
+
+                      <div className="queue-item">
+                        <p className="queue-title">Trust Snapshot</p>
+                        {(() => {
+                          const plannerEvent = selectedToolSummary.toolCalls.find((event) => event.toolName === "response_workbench");
+                          const plannerSummary = parsePlannerSummary(plannerEvent?.parsedOutput);
+                          const toolCalls = selectedToolSummary.toolCalls.filter((event) => event.toolName !== "response_workbench");
+                          const failedToolCount = toolCalls.filter((event) => toolTone(event) === "danger").length;
+                          const passedGuardrails = selectedToolSummary.styleGuardrails.filter((event) => event.passed).length;
+                          const failedGuardrails = selectedToolSummary.styleGuardrails.filter((event) => event.passed === false).length;
+                          return (
+                            <div className="tool-evidence-grid">
+                              <div className="tool-evidence-stat">
+                                <span>Planner</span>
+                                <strong>
+                                  {plannerSummary
+                                    ? `${plannerModeLabel(plannerSummary.replyMode)} · ${Math.round(plannerSummary.confidence * 100)}%`
+                                    : "Not captured"}
+                                </strong>
+                              </div>
+                              <div className="tool-evidence-stat">
+                                <span>Tool calls</span>
+                                <strong>{failedToolCount > 0 ? `${failedToolCount} need attention` : `${toolCalls.length} completed`}</strong>
+                              </div>
+                              <div className="tool-evidence-stat">
+                                <span>Context</span>
+                                <strong>
+                                  {selectedToolSummary.contextWindows.length} window
+                                  {selectedToolSummary.contextWindows.length === 1 ? "" : "s"}
+                                </strong>
+                              </div>
+                              <div className="tool-evidence-stat">
+                                <span>Style check</span>
+                                <strong>
+                                  {failedGuardrails > 0
+                                    ? `${failedGuardrails} failed`
+                                    : passedGuardrails > 0
+                                      ? `${passedGuardrails} passed`
+                                      : "Not captured"}
+                                </strong>
                               </div>
                             </div>
-                            <p className="queue-body">{toolOutcomeText(event)}</p>
-                            {chips.length > 0 ? (
-                              <div className="tool-evidence-chips" aria-label="Tool metrics">
-                                {chips.map((chip) => (
-                                  <span key={chip}>{chip}</span>
-                                ))}
-                              </div>
-                            ) : null}
-                            <details className="tool-technical-details">
-                              <summary>Technical details</summary>
-                              <p className="queue-meta">Input</p>
-                              <pre className="tool-summary-json">{inputPayload}</pre>
-                              <p className="queue-meta">Output</p>
-                              <pre className="tool-summary-json">{outputPayload}</pre>
-                            </details>
+                          );
+                        })()}
+                      </div>
+                    </div>
+                  ),
+                },
+                {
+                  id: "planner",
+                  label: "Planner",
+                  content: (
+                    <div className="queue-item">
+                      <p className="queue-title">Response Planner</p>
+                      {(() => {
+                        const plannerEvent = selectedToolSummary.toolCalls.find((event) => event.toolName === "response_workbench");
+                        const plannerSummary = parsePlannerSummary(plannerEvent?.parsedOutput);
+                        if (!plannerEvent || !plannerSummary) {
+                          return <p className="empty-line">No planner diagnostics captured for this response.</p>;
+                        }
+                        return (
+                          <div className="tool-summary-item">
+                            <p className="queue-meta">
+                              {plannerEvent.phase === "outreach" ? "Outreach" : "Reply"} planner · {plannerEvent.latencyMs || 0}ms ·{" "}
+                              {formatDateTime(plannerEvent.createdAt)}
+                            </p>
+                            <p className="queue-body">
+                              Mode: {plannerModeLabel(plannerSummary.replyMode)} · Intent: {plannerSummary.intentLabel} · Confidence:{" "}
+                              {Math.round(plannerSummary.confidence * 100)}%
+                            </p>
+                            <p className="queue-meta">
+                              Explicit asks: {plannerSummary.explicitAskCount} · Ambiguity signals: {plannerSummary.ambiguityCount}
+                            </p>
                           </div>
                         );
-                      })}
+                      })()}
                     </div>
-                  );
-                })()}
-              </div>
-
-              <div className="queue-item">
-                <p className="queue-title">Context Window + Style Check</p>
-                {selectedToolSummary.contextWindows.length === 0 && selectedToolSummary.styleGuardrails.length === 0 ? (
-                  <p className="empty-line">No context-window or style-check events captured.</p>
-                ) : (
-                  <div className="stack compact">
-                    {selectedToolSummary.contextWindows.map((event) => (
-                      <div key={event._id} className="tool-summary-item tool-evidence-item">
-                        <div className="tool-evidence-head">
-                          <span className="tool-evidence-dot tool-evidence-dot-ok" aria-hidden="true" />
-                          <div className="tool-evidence-title-block">
-                            <p className="queue-title">Context window</p>
-                            <p className="queue-meta">
-                              {event.phase === "outreach" ? "Outreach" : "Reply"} · {formatDateTime(event.createdAt)}
-                            </p>
+                  ),
+                },
+                {
+                  id: "tools",
+                  label: "Tools",
+                  badge: selectedToolSummary.toolCalls.filter((event) => event.toolName !== "response_workbench").length,
+                  content: (
+                    <div className="queue-item">
+                      <p className="queue-title">Tool Calls</p>
+                      {(() => {
+                        const toolCalls = selectedToolSummary.toolCalls.filter((event) => event.toolName !== "response_workbench");
+                        if (toolCalls.length === 0) {
+                          return <p className="empty-line">No tool calls captured for this response.</p>;
+                        }
+                        return (
+                          <div className="stack compact">
+                            {toolCalls.map((event) => {
+                              const chips = toolMetricChips(event);
+                              const inputPayload = safePrettyJson(event.parsedInput) || event.inputText || "(not captured)";
+                              const outputPayload = safePrettyJson(event.parsedOutput) || event.outputText || "(not captured)";
+                              return (
+                                <div key={event._id} className="tool-summary-item tool-evidence-item">
+                                  <div className="tool-evidence-head">
+                                    <span className={`tool-evidence-dot tool-evidence-dot-${toolTone(event)}`} aria-hidden="true" />
+                                    <div className="tool-evidence-title-block">
+                                      <p className="queue-title">{toolDisplayName(event.toolName)}</p>
+                                      <p className="queue-meta">
+                                        {event.phase === "outreach" ? "Outreach" : "Reply"} · {event.toolName || event.eventType} ·{" "}
+                                        {formatLatencyMs(event.latencyMs)} · {formatDateTime(event.createdAt)}
+                                      </p>
+                                    </div>
+                                  </div>
+                                  <p className="queue-body">{toolOutcomeText(event)}</p>
+                                  {chips.length > 0 ? (
+                                    <div className="tool-evidence-chips" aria-label="Tool metrics">
+                                      {chips.map((chip) => (
+                                        <span key={chip}>{chip}</span>
+                                      ))}
+                                    </div>
+                                  ) : null}
+                                  <details className="tool-technical-details">
+                                    <summary>Technical details</summary>
+                                    <p className="queue-meta">Input</p>
+                                    <pre className="tool-summary-json">{inputPayload}</pre>
+                                    <p className="queue-meta">Output</p>
+                                    <pre className="tool-summary-json">{outputPayload}</pre>
+                                  </details>
+                                </div>
+                              );
+                            })}
                           </div>
-                        </div>
-                        <p className="queue-body">{trim(event.detail || "No detail captured.", 220)}</p>
-                        <details className="tool-technical-details">
-                          <summary>Technical details</summary>
-                          <pre className="tool-summary-json">{event.detail || "(no detail)"}</pre>
-                        </details>
+                        );
+                      })()}
+                    </div>
+                  ),
+                },
+                {
+                  id: "context",
+                  label: "Context",
+                  badge: selectedToolSummary.contextWindows.length + selectedToolSummary.styleGuardrails.length,
+                  content: (
+                    <div className="stack compact">
+                      <div className="queue-item">
+                        <p className="queue-title">Context Window + Style Check</p>
+                        {selectedToolSummary.contextWindows.length === 0 && selectedToolSummary.styleGuardrails.length === 0 ? (
+                          <p className="empty-line">No context-window or style-check events captured.</p>
+                        ) : (
+                          <div className="stack compact">
+                            {selectedToolSummary.contextWindows.map((event) => (
+                              <div key={event._id} className="tool-summary-item tool-evidence-item">
+                                <div className="tool-evidence-head">
+                                  <span className="tool-evidence-dot tool-evidence-dot-ok" aria-hidden="true" />
+                                  <div className="tool-evidence-title-block">
+                                    <p className="queue-title">Context window</p>
+                                    <p className="queue-meta">
+                                      {event.phase === "outreach" ? "Outreach" : "Reply"} · {formatDateTime(event.createdAt)}
+                                    </p>
+                                  </div>
+                                </div>
+                                <p className="queue-body">{trim(event.detail || "No detail captured.", 220)}</p>
+                                <details className="tool-technical-details">
+                                  <summary>Technical details</summary>
+                                  <pre className="tool-summary-json">{event.detail || "(no detail)"}</pre>
+                                </details>
+                              </div>
+                            ))}
+                            {selectedToolSummary.styleGuardrails.map((event) => (
+                              <div key={event._id} className="tool-summary-item tool-evidence-item">
+                                <div className="tool-evidence-head">
+                                  <span
+                                    className={`tool-evidence-dot ${event.passed ? "tool-evidence-dot-ok" : "tool-evidence-dot-danger"}`}
+                                    aria-hidden="true"
+                                  />
+                                  <div className="tool-evidence-title-block">
+                                    <p className="queue-title">Style check {event.passed ? "passed" : "failed"}</p>
+                                    <p className="queue-meta">
+                                      Score {Number(event.score || 0).toFixed(2)} / {Number(event.threshold || 0).toFixed(2)} ·{" "}
+                                      {formatDateTime(event.createdAt)}
+                                    </p>
+                                  </div>
+                                </div>
+                                <p className="queue-body">
+                                  {(event.hints || []).length > 0
+                                    ? trim((event.hints || []).join(" · "), 220)
+                                    : trim(event.detail || "No hints captured.", 220)}
+                                </p>
+                                <details className="tool-technical-details">
+                                  <summary>Technical details</summary>
+                                  <pre className="tool-summary-json">
+                                    {(event.hints || []).length > 0 ? (event.hints || []).join("\n") : event.detail || "(no hints captured)"}
+                                  </pre>
+                                </details>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
-                    ))}
-                    {selectedToolSummary.styleGuardrails.map((event) => (
-                      <div key={event._id} className="tool-summary-item tool-evidence-item">
-                        <div className="tool-evidence-head">
-                          <span
-                            className={`tool-evidence-dot ${event.passed ? "tool-evidence-dot-ok" : "tool-evidence-dot-danger"}`}
-                            aria-hidden="true"
-                          />
-                          <div className="tool-evidence-title-block">
-                            <p className="queue-title">Style check {event.passed ? "passed" : "failed"}</p>
-                            <p className="queue-meta">
-                              Score {Number(event.score || 0).toFixed(2)} / {Number(event.threshold || 0).toFixed(2)} ·{" "}
-                              {formatDateTime(event.createdAt)}
-                            </p>
-                          </div>
-                        </div>
-                        <p className="queue-body">
-                          {(event.hints || []).length > 0
-                            ? trim((event.hints || []).join(" · "), 220)
-                            : trim(event.detail || "No hints captured.", 220)}
+
+                      {toolEventSummary.unmatchedEvents.length > 0 ? (
+                        <p className="queue-meta">
+                          {toolEventSummary.unmatchedEvents.length} recent tool event
+                          {toolEventSummary.unmatchedEvents.length === 1 ? "" : "s"} could not be matched to a visible outbound message.
                         </p>
-                        <details className="tool-technical-details">
-                          <summary>Technical details</summary>
-                          <pre className="tool-summary-json">
-                            {(event.hints || []).length > 0 ? (event.hints || []).join("\n") : event.detail || "(no hints captured)"}
-                          </pre>
-                        </details>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              {toolEventSummary.unmatchedEvents.length > 0 ? (
-                <p className="queue-meta">
-                  {toolEventSummary.unmatchedEvents.length} recent tool event
-                  {toolEventSummary.unmatchedEvents.length === 1 ? "" : "s"} could not be matched to a visible outbound message.
-                </p>
-              ) : null}
-            </div>
+                      ) : null}
+                    </div>
+                  ),
+                },
+              ]}
+            />
           ) : null}
         </UIModal>
       </article>

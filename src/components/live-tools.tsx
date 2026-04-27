@@ -421,7 +421,7 @@ export function LiveTools() {
           </label>
 
           <label className="setup-input-group">
-            <span className="queue-meta">Candidate reply (for style guardrail / router)</span>
+            <span className="queue-meta">Candidate reply (for style check / router)</span>
             <textarea
               rows={2}
               value={candidateReply}
@@ -475,7 +475,7 @@ export function LiveTools() {
       </article>
 
       <article className="panel-card">
-        <h3>Style + Guardrail</h3>
+        <h3>Style + Safety Check</h3>
         <label className="setup-input-group">
           <span className="queue-meta">Lookback messages</span>
           <input type="number" min={20} max={400} value={lookbackMessages} onChange={(event) => setLookbackMessages(event.target.value)} />

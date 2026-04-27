@@ -1,13 +1,14 @@
 "use client";
 
 import { UIModal } from "@/components/ui-modal";
-import { dashboardNavItems } from "@/lib/ui/dashboard-nav";
+import { dashboardNavItems, publicDashboardNavItems } from "@/lib/ui/dashboard-nav";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useState } from "react";
 
 type WorkspaceHeaderControlsProps = {
   className?: string;
+  items?: typeof dashboardNavItems;
   showBack?: boolean;
   showMenu?: boolean;
 };
@@ -21,12 +22,14 @@ function isActive(pathname: string, href: string) {
 
 export function WorkspaceHeaderControls({
   className,
+  items = publicDashboardNavItems,
   showBack = false,
   showMenu = false,
 }: WorkspaceHeaderControlsProps) {
   const router = useRouter();
   const pathname = usePathname() || "/";
   const [menuOpen, setMenuOpen] = useState(false);
+  const visibleItems = items;
 
   const onBack = () => {
     if (window.history.length > 1) {
@@ -66,7 +69,7 @@ export function WorkspaceHeaderControls({
         title="Menu"
       >
         <div className="workspace-modal-list">
-          {dashboardNavItems.map((item) => {
+          {visibleItems.map((item) => {
             const active = isActive(pathname, item.href);
             return (
               <Link
@@ -79,6 +82,11 @@ export function WorkspaceHeaderControls({
               </Link>
             );
           })}
+          <form action="/api/auth/pin/logout" method="post">
+            <button type="submit" className="workspace-modal-link workspace-modal-button">
+              <span>Log out</span>
+            </button>
+          </form>
         </div>
       </UIModal>
     </>
