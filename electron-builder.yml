@@ -1,0 +1,31 @@
+appId: com.odogwuhq.desktop
+productName: Odogwu HQ
+directories:
+  output: dist/desktop
+files:
+  - package.json
+  - src/desktop/**/*
+  - src/**/*
+  - shared/**/*
+  - convex/_generated/**/*
+  - public/**/*
+  - .next/**/*
+  - "!.next/cache/**/*"
+  - "!.next/dev/**/*"
+  - next.config.ts
+  - tsconfig.json
+  - node_modules/**/*
+asar: false
+icon: public/icons/icon
+mac:
+  category: public.app-category.productivity
+  icon: public/icons/icon.icns
+win:
+  icon: public/icons/icon.ico
+  target: nsis
+linux:
+  icon: public/icons/icon.png
+  target:
+    - AppImage
+    - deb
+  category: Utility

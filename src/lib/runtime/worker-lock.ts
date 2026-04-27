@@ -1,17 +1,18 @@
 import { existsSync, rmSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
+import { getRuntimeDataPath } from "./paths";
 
 export type WorkerProvider = "whatsapp" | "instagram";
 
 const WORKER_PID_PATHS: Record<WorkerProvider, string> = {
-  whatsapp: join(".slm", "worker.pid"),
-  instagram: join(".slm", "worker-instagram.pid"),
+  whatsapp: getRuntimeDataPath("worker.pid"),
+  instagram: getRuntimeDataPath("worker-instagram.pid"),
 };
 
 const WORKER_SUPERVISOR_PID_PATHS: Record<WorkerProvider, string> = {
-  whatsapp: join(".slm", "worker-supervisor.pid"),
-  instagram: join(".slm", "worker-instagram-supervisor.pid"),
+  whatsapp: getRuntimeDataPath("worker-supervisor.pid"),
+  instagram: getRuntimeDataPath("worker-instagram-supervisor.pid"),
 };
 
 type StopWorkerResult = {

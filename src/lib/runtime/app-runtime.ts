@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
+import { getRuntimeDataPath } from "./paths";
 
-const APP_PID_PATH = join(".slm", "app.pid");
+const APP_PID_PATH = getRuntimeDataPath("app.pid");
 
 export type AppRuntimeStatus = {
   running: boolean;

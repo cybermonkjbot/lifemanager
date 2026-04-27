@@ -7,6 +7,12 @@ import {
 } from "./src/lib/instance-pin";
 import { gatewayApiKeyConfigured, requestHasGatewayApiKey } from "./src/lib/api-gateway-auth";
 import {
+  DESKTOP_RUNTIME_COOKIE_NAME,
+  DESKTOP_RUNTIME_HEADER_NAME,
+  isElectronEnvironment,
+  isValidDesktopRuntimeSecret,
+} from "./src/lib/runtime-env";
+import {
   getSetupBootstrapCookieName,
   isLoopbackHostname,
   requestHasValidSetupBootstrapSecret,
@@ -16,6 +22,7 @@ import {
 
 const PUBLIC_FILE_REGEX = /\.(?:svg|png|jpg|jpeg|gif|webp|ico|txt|xml)$/i;
 const GATEWAY_PATH_PREFIX = "/api/gateway/";
+const ADMIN_UI_PATHS = new Set(["/system", "/spending", "/self-improvement", "/systems-design"]);
 const GATEWAY_CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
@@ -38,11 +45,37 @@ function gatewayJsonResponse(status: number, message: string) {
   );
 }
 
+function isAdminRequestPath(pathname: string) {
+  return (
+    pathname === "/admin" ||
+    pathname.startsWith("/admin/") ||
+    pathname.startsWith("/api/admin/") ||
+    ADMIN_UI_PATHS.has(pathname) ||
+    pathname.startsWith("/api/system/self-improvement/")
+  );
+}
+
+function hasDesktopRuntimeAccess(request: NextRequest) {
+  return (
+    isValidDesktopRuntimeSecret(request.cookies.get(DESKTOP_RUNTIME_COOKIE_NAME)?.value) ||
+    isValidDesktopRuntimeSecret(request.headers.get(DESKTOP_RUNTIME_HEADER_NAME))
+  );
+}
+
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
   const gatewayRequest = pathname.startsWith(GATEWAY_PATH_PREFIX);
   const setupApiRequest = pathname.startsWith("/api/setup/");
   const setupPageRequest = pathname.startsWith("/setup");
+  if (isElectronEnvironment()) {
+    if (!hasDesktopRuntimeAccess(request)) {
+      return NextResponse.json({ error: "Desktop app server is private." }, { status: 403 });
+    }
+    if (isAdminRequestPath(pathname)) {
+      return NextResponse.json({ error: "Admin functionality is disabled in the desktop app." }, { status: 404 });
+    }
+  }
+
   if (
     pathname.startsWith("/_next/") ||
     pathname === "/favicon.ico" ||

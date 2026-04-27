@@ -1,9 +1,9 @@
 {
   "name": "odogwuhq",
   "version": "0.1.0",
-  "description": "Local-first social orchestration system for WhatsApp and Instagram.",
-  "private": false,
-  "license": "PolyForm-Noncommercial-1.0.0",
+  "description": "AI communication double that can reply in your style across WhatsApp and Instagram.",
+  "private": true,
+  "license": "UNLICENSED",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/cybermonkjbot/lifemanager.git"
@@ -12,6 +12,7 @@
     "url": "https://github.com/cybermonkjbot/lifemanager/issues"
   },
   "homepage": "https://github.com/cybermonkjbot/lifemanager#readme",
+  "main": "src/desktop/main.mjs",
   "bin": {
     "OdogwuHQ": "scripts/lifemanager-installer.mjs",
     "odogwuhq": "scripts/lifemanager-installer.mjs",
@@ -33,7 +34,8 @@
     "convex.json",
     "data",
     "docs",
-    "!docs/linkedin-opensource-social-life-manager.md",
+    "electron-builder.yml",
+    "!docs/linkedin-product-launch-social-life-manager.md",
     "eslint.config.mjs",
     "next.config.ts",
     "package.json",
@@ -54,6 +56,12 @@
     "worker:raw": "bun run src/worker/index.ts",
     "worker:instagram": "bun run src/worker/supervisor.ts instagram",
     "worker:instagram:raw": "bun run src/worker/instagram.ts",
+    "desktop:dev": "ODOGWU_DESKTOP_DEV=1 electron src/desktop/main.mjs",
+    "desktop:dev:no-worker": "ODOGWU_DESKTOP_DEV=1 ODOGWU_DESKTOP_START_WORKER=0 electron src/desktop/main.mjs",
+    "desktop:build:next": "bun run build",
+    "desktop:build:connector": "bun build src/worker/index.ts --target bun --outdir dist/connector",
+    "desktop:package": "bun run desktop:build:next && electron-builder --dir",
+    "desktop:dist": "bun run desktop:build:next && electron-builder",
     "pidgin:refresh": "bun run scripts/pidgin-lexicon-refresh.ts",
     "pidgin:promote": "bun run scripts/pidgin-lexicon-promote.ts",
     "pidgin:refresh-and-promote": "bun run scripts/pidgin-lexicon-refresh.ts --write --out data/pidgin-lexicon-candidates.json && bun run scripts/pidgin-lexicon-promote.ts --write",
@@ -91,6 +99,8 @@
     "@types/react-dom": "^19",
     "babel-plugin-react-compiler": "1.0.0",
     "concurrently": "^9.2.1",
+    "electron": "^41.3.0",
+    "electron-builder": "^26.8.1",
     "eslint": "^9",
     "eslint-config-next": "16.2.2",
     "tailwindcss": "^4",
