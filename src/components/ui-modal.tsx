@@ -1,13 +1,21 @@
 "use client";
 
-import { ReactNode, useEffect, useId, useRef } from "react";
+import { type KeyboardEvent as ReactKeyboardEvent, type ReactNode, useEffect, useId, useRef, useState } from "react";
 
 type ModalProps = {
   open: boolean;
   onClose: () => void;
   title: string;
   description?: string;
+  size?: "default" | "wide";
   children: ReactNode;
+};
+
+export type ModalTab = {
+  id: string;
+  label: string;
+  badge?: string | number;
+  content: ReactNode;
 };
 
 const FOCUSABLE_SELECTOR = [
@@ -30,7 +38,7 @@ function getFocusableElements(container: HTMLElement | null) {
   });
 }
 
-export function UIModal({ open, onClose, title, description, children }: ModalProps) {
+export function UIModal({ open, onClose, title, description, size = "default", children }: ModalProps) {
   const titleId = useId();
   const descriptionId = useId();
   const dialogRef = useRef<HTMLDivElement | null>(null);
@@ -48,7 +56,7 @@ export function UIModal({ open, onClose, title, description, children }: ModalPr
 
     previouslyFocusedRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
 
-    const onKeyDown = (event: KeyboardEvent) => {
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
         onClose();
@@ -110,7 +118,7 @@ export function UIModal({ open, onClose, title, description, children }: ModalPr
     <div className="ui-modal-backdrop" role="presentation" onClick={onClose}>
       <div
         ref={dialogRef}
-        className="ui-modal"
+        className={`ui-modal ${size === "wide" ? "ui-modal-wide" : ""}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
@@ -133,6 +141,98 @@ export function UIModal({ open, onClose, title, description, children }: ModalPr
         </div>
         <div className="ui-modal-body">{children}</div>
       </div>
+    </div>
+  );
+}
+
+type ModalTabsProps = {
+  tabs: ModalTab[];
+  defaultTabId?: string;
+  label: string;
+};
+
+export function ModalTabs({ tabs, defaultTabId, label }: ModalTabsProps) {
+  const baseId = useId();
+  const [activeTabId, setActiveTabId] = useState(() => defaultTabId ?? tabs[0]?.id ?? "");
+  const activeTab = tabs.some((tab) => tab.id === activeTabId) ? activeTabId : tabs[0]?.id ?? "";
+
+  if (tabs.length === 0) {
+    return null;
+  }
+
+  const focusTab = (index: number) => {
+    const nextTab = tabs[index];
+    if (!nextTab) {
+      return;
+    }
+    setActiveTabId(nextTab.id);
+    window.requestAnimationFrame(() => {
+      document.getElementById(`${baseId}-tab-${nextTab.id}`)?.focus();
+    });
+  };
+
+  const onTabKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>, index: number) => {
+    if (event.key === "ArrowRight") {
+      event.preventDefault();
+      focusTab((index + 1) % tabs.length);
+      return;
+    }
+
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      focusTab((index - 1 + tabs.length) % tabs.length);
+      return;
+    }
+
+    if (event.key === "Home") {
+      event.preventDefault();
+      focusTab(0);
+      return;
+    }
+
+    if (event.key === "End") {
+      event.preventDefault();
+      focusTab(tabs.length - 1);
+    }
+  };
+
+  return (
+    <div className="ui-modal-tabbed">
+      <div className="ui-modal-tabs queue-focus-tabs" role="tablist" aria-label={label}>
+        {tabs.map((tab, index) => {
+          const selected = tab.id === activeTab;
+          return (
+            <button
+              key={tab.id}
+              id={`${baseId}-tab-${tab.id}`}
+              type="button"
+              role="tab"
+              aria-selected={selected}
+              aria-controls={`${baseId}-panel-${tab.id}`}
+              tabIndex={selected ? 0 : -1}
+              className={`btn ${selected ? "btn-primary" : "btn-ghost"}`}
+              onClick={() => setActiveTabId(tab.id)}
+              onKeyDown={(event) => onTabKeyDown(event, index)}
+            >
+              {tab.label}
+              {tab.badge !== undefined ? <span className="ui-modal-tab-badge">{tab.badge}</span> : null}
+            </button>
+          );
+        })}
+      </div>
+
+      {tabs.map((tab) => (
+        <div
+          key={tab.id}
+          id={`${baseId}-panel-${tab.id}`}
+          role="tabpanel"
+          aria-labelledby={`${baseId}-tab-${tab.id}`}
+          hidden={tab.id !== activeTab}
+          className="ui-modal-tab-panel"
+        >
+          {tab.content}
+        </div>
+      ))}
     </div>
   );
 }
