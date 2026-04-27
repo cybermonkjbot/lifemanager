@@ -264,6 +264,14 @@ export type ConversationReplyGuidance = {
 type ResponseReplyMode = "answer" | "confirm" | "clarify" | "close" | "lead";
 
 type RuntimeAiTuning = {
+  endpoint?: string;
+  apiKey?: string;
+  imageEndpoint?: string;
+  imageApiKey?: string;
+  imageModel?: string;
+  videoEndpoint?: string;
+  videoApiKey?: string;
+  videoModel?: string;
   model?: string;
   apiStyle?: AzureApiStyle;
   fallbackMode?: FallbackMode;
@@ -447,6 +455,23 @@ const LOW_VALUE_GENERIC_PHRASE_PATTERNS = [
   /\b(?:update|details?) (?:soon|shortly)\b/i,
   /\blet me (?:sort|check|look into|get back)\b/i,
   /\b(?:allow|pardon)\s+me\s+small\b/i,
+];
+const CONTEXT_CONFUSION_CUE_PATTERNS = [
+  /\bi\s+(?:do\s+not|don't|dont|didn'?t|didnt)\s+understand\b/i,
+  /\bi\s+(?:am|'m)\s+(?:lost|confused)\b/i,
+  /\bi\s+no\s+understand\b/i,
+  /\b(?:what|wetin)\s+(?:are|were|be)\s+you\s+replying\s+to\b/i,
+  /\breplying\s+to\s+what\b/i,
+  /\bwhat\s+do\s+you\s+mean\b/i,
+  /\bwhat\s+is\s+this\s+about\b/i,
+];
+const BAD_CONTEXT_CONFUSION_REPLY_PATTERNS = [
+  /\bwhich\s+part\b/i,
+  /\bwhat\s+part\b/i,
+  /\b(?:no|not)\s+clear\s+for\s+you\b/i,
+  /\bwhat\s+(?:do\s+you|don'?t\s+you)\s+understand\b/i,
+  /\byou\s+dey\s+okay\b/i,
+  /\bare\s+you\s+okay\b/i,
 ];
 const SALES_INVENTORY_CLAIM_PATTERNS = [
   /\bi\s+(?:have|got|get)\s+(?:small\s+)?stock\b/i,
@@ -2120,6 +2145,14 @@ function hasAmbiguityCue(text: string) {
   return false;
 }
 
+export function hasContextConfusionCue(text: string) {
+  const normalized = normalizeOutboundText(text || "");
+  if (!normalized) {
+    return false;
+  }
+  return CONTEXT_CONFUSION_CUE_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
 const FRIENDSHIP_BOOMER_SIGNAL_PATTERNS: Array<{ id: string; pattern: RegExp; weight: number }> = [
   { id: "formal_polite", pattern: /\b(kindly|please|appreciate|thank you|much appreciated)\b/i, weight: 0.9 },
   { id: "formal_greeting", pattern: /\b(good morning|good afternoon|good evening)\b/i, weight: 0.8 },
@@ -2479,6 +2512,9 @@ function buildResponseWorkbench(args: ResponseWorkbenchInput) {
   });
   if (hasAmbiguityCue(args.inboundText)) {
     ambiguitySignals.push("ambiguous_reference");
+  }
+  if (hasContextConfusionCue(args.inboundText)) {
+    ambiguitySignals.push("context_confusion");
   }
   if (hasLeadHandoffCue(args.inboundText)) {
     ambiguitySignals.push("decision_handoff");
@@ -3364,6 +3400,9 @@ function buildPrompt(args: {
   const localAccusationInstruction = hasLocalAccusationCue(args.inboundText)
     ? "Local accusation guardrail: avoid fabricated situational claims. Use low-claim wording, offer one plausible availability constraint only if needed, and move to a concrete next step."
     : "";
+  const contextConfusionRepairInstruction = hasContextConfusionCue(args.inboundText)
+    ? "Confusion repair is active: the other person is confused about your previous message. Do not ask 'which part?' or check if they are okay. Briefly own the unclear context and explain what your previous outbound message was referring to."
+    : "";
   const steeringInstruction = steeringInstructionForMode(steeringMode);
   const steeringPriorityInstruction =
     "Steering priority order: (1) explicit safety/closure cues, (2) latest inbound ask, (3) relevant conversation context, (4) style/persona polish. If these conflict, follow this order.";
@@ -3590,6 +3629,7 @@ function buildPrompt(args: {
       utilityInterruptInstruction,
       passiveAggressiveInstruction,
       localAccusationInstruction,
+      contextConfusionRepairInstruction,
       steeringPriorityInstruction,
       steeringExecutionInstruction,
       insultHandlingInstruction,
@@ -4175,6 +4215,71 @@ function enforceHealthEmpathyOnlyReply(args: { inboundText: string; replyText: s
   return normalizeOutboundText(pickVariant(`${args.inboundText}:${reply}:health_empathy_only`, variants));
 }
 
+function hasGoodContextConfusionRepairShape(text: string) {
+  const normalized = normalizeOutboundText(text || "");
+  if (!normalized) {
+    return false;
+  }
+  return /\b(?:sorry|my bad|ah)\b/i.test(normalized) && /\b(?:i meant|i was talking|my last message|that was about)\b/i.test(normalized);
+}
+
+function hasBadContextConfusionRepairShape(text: string) {
+  const normalized = normalizeOutboundText(text || "");
+  if (!normalized) {
+    return false;
+  }
+  if (BAD_CONTEXT_CONFUSION_REPLY_PATTERNS.some((pattern) => pattern.test(normalized))) {
+    return true;
+  }
+  return /\?$/.test(normalized) && !hasGoodContextConfusionRepairShape(normalized);
+}
+
+function summarizePreviousOutboundForConfusion(previousOutbound: string) {
+  const previous = normalizeOutboundText(previousOutbound || "");
+  if (!previous) {
+    return "";
+  }
+
+  if (/\bconvocation\b/i.test(previous) && /\blast\s+line\b/i.test(previous)) {
+    return "the convocation update our school posted. The last line was what caught me off guard";
+  }
+
+  if (previous.length <= 140) {
+    return `my last message: ${previous.replace(/[.!?]+$/g, "")}`;
+  }
+
+  const keywords = extractKeywords(previous).slice(0, 5);
+  if (keywords.length > 0) {
+    return `my last message about ${keywords.join(" ")}`;
+  }
+  return "my last message";
+}
+
+function enforceContextConfusionRepair(args: {
+  inboundText: string;
+  replyText: string;
+  historyLines: string[];
+}) {
+  const reply = normalizeOutboundText(args.replyText || "");
+  if (!reply || !hasContextConfusionCue(args.inboundText)) {
+    return reply;
+  }
+  if (hasGoodContextConfusionRepairShape(reply)) {
+    return reply;
+  }
+
+  const previousOutbound = latestOutboundHistoryText(args.historyLines || []);
+  if (previousOutbound) {
+    const summary = summarizePreviousOutboundForConfusion(previousOutbound);
+    return normalizeOutboundText(`Sorry, I meant ${summary}.`);
+  }
+
+  if (hasBadContextConfusionRepairShape(reply)) {
+    return "Sorry, my last reply was unclear. Let me reset that properly.";
+  }
+  return reply;
+}
+
 export function postProcessReplyText(args: {
   text: string;
   inboundText: string;
@@ -4253,11 +4358,17 @@ export function postProcessReplyText(args: {
     replyText: withSelfRoastFactuality,
     pidginMode,
   });
+  const withContextConfusionRepair = enforceContextConfusionRepair({
+    inboundText: args.inboundText,
+    replyText: withHealthEmpathyOnly,
+    historyLines: args.historyLines || [],
+  });
   const shouldForceCloseOut =
-    shouldForceNoFollowUpQuestion(steeringMode) && (/\?/.test(withHealthEmpathyOnly) || hasCloseModeReopenCue(withHealthEmpathyOnly));
+    shouldForceNoFollowUpQuestion(steeringMode) &&
+    (/\?/.test(withContextConfusionRepair) || hasCloseModeReopenCue(withContextConfusionRepair));
   const withoutFollowUpQuestion = shouldForceCloseOut
     ? normalizeOutboundText(heuristicReply(args.inboundText, args.historyLines || []))
-    : withHealthEmpathyOnly;
+    : withContextConfusionRepair;
   const finalText = withoutFollowUpQuestion || fallback;
   return hasAwkwardCatchphrase(finalText) ? fallback : finalText;
 }
@@ -5875,11 +5986,13 @@ function extractAzureChatCompletionText(data: unknown) {
 
 function getAzureConfig(runtime?: RuntimeAiTuning): AzureConfig {
   const endpoint = pickConfigValue(
+    runtime?.endpoint,
     process.env.AZURE_AI_ENDPOINT,
     process.env.AZURE_OPENAI_ENDPOINT,
     HARD_CODED_AZURE_DEFAULTS.endpoint,
   );
   const apiKey = pickConfigValue(
+    runtime?.apiKey,
     process.env.AZURE_AI_API_KEY,
     process.env.AZURE_OPENAI_API_KEY,
     process.env.OPENAI_API_KEY,
@@ -6561,6 +6674,7 @@ const SETUP_APPLY_INITIAL_SETTINGS_SCHEMA = {
     "quietHoursStartHour",
     "quietHoursEndHour",
     "instagramEnabled",
+    "soulProfile",
     "rationale",
   ],
   properties: {
@@ -6599,6 +6713,42 @@ const SETUP_APPLY_INITIAL_SETTINGS_SCHEMA = {
       type: "boolean",
       description: "Whether Instagram setup should be visible from setup.",
     },
+    soulProfile: {
+      type: "object",
+      additionalProperties: false,
+      required: [
+        "useCase",
+        "genderIdentity",
+        "pronouns",
+        "romanticPreference",
+        "relationshipStatus",
+        "romanticInterests",
+        "cultureLocation",
+        "selfDescription",
+        "values",
+        "communicationStyle",
+        "boundaries",
+        "relationships",
+        "goals",
+        "dailyRhythm",
+      ],
+      properties: {
+        useCase: { type: "string", description: "personal, professional, mixed, or empty when unclear." },
+        genderIdentity: { type: "string", description: "Only if explicitly provided by the user." },
+        pronouns: { type: "string", description: "Only if explicitly provided by the user." },
+        romanticPreference: { type: "string", description: "Only if explicitly provided by the user." },
+        relationshipStatus: { type: "string", description: "Only if explicitly provided by the user." },
+        romanticInterests: { type: "string", description: "Only if explicitly provided by the user." },
+        cultureLocation: { type: "string", description: "Culture, location, or language context explicitly provided." },
+        selfDescription: { type: "string", description: "Concise summary of the user's description." },
+        values: { type: "string", description: "Values and priorities explicitly supported by the description." },
+        communicationStyle: { type: "string", description: "Tone, language, pace, and style cues from the description." },
+        boundaries: { type: "string", description: "Boundaries or sensitive areas explicitly named by the user." },
+        relationships: { type: "string", description: "Important people or relationship context explicitly named by the user." },
+        goals: { type: "string", description: "Goals or responsibilities explicitly named by the user." },
+        dailyRhythm: { type: "string", description: "Schedule, quiet hours, or routine cues explicitly named by the user." },
+      },
+    },
     rationale: {
       type: "string",
       description: "Short explanation of why these setup defaults fit the soul profile.",
@@ -6613,6 +6763,8 @@ function buildSetupAiPrompt(args: { soulProfile: InstanceSoulProfile; currentPre
     "The tool call is immediately applied by the setup server and then disabled forever for this setup run.",
     "Keep the user in control: choose review_first unless the profile explicitly asks for automatic delegation.",
     "Preserve quiet hours unless the profile strongly says they operate late at night.",
+    "Also return a concise inferred soulProfile from the user's description so the setup form can prefill advanced fields.",
+    "Do not invent identity, romantic, relationship, or demographic facts. Leave those profile fields empty unless the user explicitly provided them.",
     "Use optional gender, pronoun, and romantic-context fields only to fine tune defaults and tone; do not assume or invent sexuality, relationship facts, or intimacy levels.",
     "",
     "Soul profile:",
@@ -6630,6 +6782,35 @@ function parseHour(value: unknown, fallback: number) {
   }
   const rounded = Math.round(numeric);
   return ((rounded % 24) + 24) % 24;
+}
+
+function parseSetupSoulProfile(value: unknown, currentProfile: InstanceSoulProfile): InstanceSoulProfile {
+  if (!value || typeof value !== "object") {
+    return currentProfile;
+  }
+
+  const payload = value as Partial<Record<keyof InstanceSoulProfile, unknown>>;
+  const read = (key: keyof InstanceSoulProfile, maxLength = 1800) => {
+    const raw = payload[key];
+    return typeof raw === "string" ? raw.trim().slice(0, maxLength) : currentProfile[key];
+  };
+
+  return {
+    useCase: read("useCase", 80),
+    genderIdentity: read("genderIdentity", 160),
+    pronouns: read("pronouns", 120),
+    romanticPreference: read("romanticPreference", 160),
+    relationshipStatus: read("relationshipStatus", 220),
+    romanticInterests: read("romanticInterests"),
+    cultureLocation: read("cultureLocation", 400),
+    selfDescription: read("selfDescription"),
+    values: read("values"),
+    communicationStyle: read("communicationStyle"),
+    boundaries: read("boundaries"),
+    relationships: read("relationships"),
+    goals: read("goals"),
+    dailyRhythm: read("dailyRhythm"),
+  };
 }
 
 function parseSetupApplySettingsArguments(
@@ -6663,6 +6844,7 @@ function parseSetupApplySettingsArguments(
       quietHoursStartHour: parseHour(payload.quietHoursStartHour, currentPreferences.quietHoursStartHour),
       quietHoursEndHour: parseHour(payload.quietHoursEndHour, currentPreferences.quietHoursEndHour),
       instagramEnabled: typeof payload.instagramEnabled === "boolean" ? payload.instagramEnabled : currentPreferences.instagramEnabled,
+      soulProfile: parseSetupSoulProfile(payload.soulProfile, currentPreferences.soulProfile),
     },
     rationale: typeof payload.rationale === "string" ? payload.rationale.trim().slice(0, 600) : "",
   };
@@ -7721,18 +7903,23 @@ function buildMemePrompt(args: {
 
 function getAzureImageConfig(runtime?: RuntimeAiTuning) {
   const endpoint = pickConfigValue(
+    runtime?.imageEndpoint,
     process.env.AZURE_AI_IMAGE_ENDPOINT,
+    runtime?.endpoint,
     process.env.AZURE_AI_ENDPOINT,
     process.env.AZURE_OPENAI_ENDPOINT,
   );
   const apiKey = pickConfigValue(
+    runtime?.imageApiKey,
     process.env.AZURE_AI_IMAGE_API_KEY,
+    runtime?.apiKey,
     process.env.AZURE_AI_API_KEY,
     process.env.AZURE_OPENAI_API_KEY,
     process.env.OPENAI_API_KEY,
   );
   const runtimeImageModel = runtime?.model && /image/i.test(runtime.model) ? runtime.model : "";
   const model = pickConfigValue(
+    runtime?.imageModel,
     process.env.AZURE_AI_IMAGE_MODEL,
     process.env.AZURE_OPENAI_IMAGE_MODEL,
     runtimeImageModel,
@@ -7746,16 +7933,19 @@ function getAzureImageConfig(runtime?: RuntimeAiTuning) {
 
 function getAzureVideoConfig(runtime?: RuntimeAiTuning) {
   const endpoint = pickConfigValue(
+    runtime?.videoEndpoint,
     process.env.AZURE_AI_VIDEO_ENDPOINT,
     process.env.AZURE_OPENAI_VIDEO_ENDPOINT,
   );
   const apiKey = pickConfigValue(
+    runtime?.videoApiKey,
     process.env.AZURE_AI_VIDEO_API_KEY,
     process.env.AZURE_OPENAI_VIDEO_API_KEY,
     process.env.OPENAI_API_KEY,
   );
   const runtimeVideoModel = runtime?.model && /(video|sora|veo)/i.test(runtime.model) ? runtime.model : "";
   const model = pickConfigValue(
+    runtime?.videoModel,
     process.env.AZURE_AI_VIDEO_MODEL,
     process.env.AZURE_OPENAI_VIDEO_MODEL,
     runtimeVideoModel,

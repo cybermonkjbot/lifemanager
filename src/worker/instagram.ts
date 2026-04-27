@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -318,6 +319,18 @@ async function run() {
   const convex = await createConvexClient();
   const workerId = process.env.SLM_INSTAGRAM_WORKER_ID || process.env.SLM_WORKER_ID || `instagram-worker-${process.pid}`;
   const authDir = normalizeInstagramAuthDir();
+  const selfHosted = process.env.ODOGWU_SERVICE_MODE === "self_hosted";
+  const tenantId = selfHosted ? "" : (process.env.ODOGWU_TENANT_ID || "").trim();
+  const connectorToken = selfHosted ? "" : (process.env.ODOGWU_CONNECTOR_TOKEN || "").trim();
+  const connectorDeviceId = (process.env.ODOGWU_DEVICE_ID || workerId).trim();
+  const connectorTokenHash = connectorToken ? createHash("sha256").update(connectorToken).digest("hex") : "";
+  const tenantConnectorArgs = () =>
+    tenantId && connectorTokenHash
+      ? {
+          tenantId,
+          connectorTokenHash,
+        }
+      : {};
 
   const seenInboundIds = new Set<string>();
   const seenQueue: string[] = [];
@@ -347,6 +360,7 @@ async function run() {
   const reportListener = async (listenerActive: boolean, listenerMessage: string, hasAuth: boolean) => {
     try {
       await convex.mutation(convexRefs.systemReportSetupListener, {
+        ...tenantConnectorArgs(),
         provider: "instagram",
         listenerActive,
         listenerWorkerId: workerId,
@@ -354,6 +368,34 @@ async function run() {
         listenerLastSeenAt: Date.now(),
         hasAuth,
       });
+      if (listenerActive && hasAuth) {
+        const providerAccountId = selfUserPk
+          ? `instagram:${selfUserPk}`
+          : igUsername
+            ? `instagram:${createHash("sha256").update(igUsername.toLowerCase()).digest("hex")}`
+            : "";
+        if (providerAccountId) {
+          await convex.mutation(convexRefs.connectedAccountsUpsertFromConnector, {
+            ...tenantConnectorArgs(),
+            deviceId: connectorDeviceId,
+            provider: "instagram",
+            providerAccountId,
+            accountLabel: igUsername || undefined,
+            displayName: igUsername || undefined,
+            username: igUsername || undefined,
+            authState: "connected",
+            lastSeenAt: Date.now(),
+          });
+        }
+      } else if (!listenerActive) {
+        await convex.mutation(convexRefs.connectedAccountsMarkDisconnectedFromConnector, {
+          ...tenantConnectorArgs(),
+          deviceId: connectorDeviceId,
+          provider: "instagram",
+          authState: hasAuth ? "disconnected" : "unknown",
+          lastSeenAt: Date.now(),
+        });
+      }
     } catch {
       // best effort setup sync
     }
@@ -495,6 +537,7 @@ async function run() {
           const messageAt = parseInstagramTimestampMs(item.timestamp, now);
 
           await convex.mutation(convexRefs.inboundIngest, {
+            ...tenantConnectorArgs(),
             provider: "instagram",
             threadJid,
             senderJid: `ig:user:${senderPk}`,
@@ -539,6 +582,7 @@ async function run() {
       }
       if ((disposition.reason || "").startsWith("stale_inbound:")) {
         await convex.mutation(convexRefs.outboxMarkFailed, {
+          ...tenantConnectorArgs(),
           outboxId: item.outboxId as Id<"outbox">,
           error: "Suppressed: newer inbound message arrived before send.",
           forceFinal: true,
@@ -548,6 +592,7 @@ async function run() {
     };
 
     const sendDisposition = (await convex.query(convexRefs.outboxGetSendDisposition, {
+      ...tenantConnectorArgs(),
       outboxId: item.outboxId as Id<"outbox">,
     })) as { canSend: boolean; reason?: string };
     if (await maybeFinalizeStaleDisposition(sendDisposition)) {
@@ -588,6 +633,7 @@ async function run() {
           detail: reason,
         });
         await convex.mutation(convexRefs.outboxMarkFailed, {
+          ...tenantConnectorArgs(),
           outboxId: item.outboxId as Id<"outbox">,
           error: reason,
           forceFinal: true,
@@ -624,6 +670,7 @@ async function run() {
       }
 
       await convex.mutation(convexRefs.outboxMarkSent, {
+        ...tenantConnectorArgs(),
         outboxId: item.outboxId as Id<"outbox">,
         messageProvider: "instagram",
         providerMessageId: extractProviderMessageId(response),
@@ -640,11 +687,13 @@ async function run() {
     const dmDelayMs = randomIntInclusive(igDelayMin, igDelayMax);
     await sleep(dmDelayMs);
     await convex.mutation(convexRefs.outboxMarkTyping, {
+      ...tenantConnectorArgs(),
       outboxId: item.outboxId as Id<"outbox">,
     });
     await sleep(typingMs);
 
     const postTypingDisposition = (await convex.query(convexRefs.outboxGetSendDisposition, {
+      ...tenantConnectorArgs(),
       outboxId: item.outboxId as Id<"outbox">,
     })) as { canSend: boolean; reason?: string };
     if (await maybeFinalizeStaleDisposition(postTypingDisposition)) {
@@ -704,6 +753,7 @@ async function run() {
     }
 
     await convex.mutation(convexRefs.outboxMarkSent, {
+      ...tenantConnectorArgs(),
       outboxId: item.outboxId as Id<"outbox">,
       messageProvider: "instagram",
       providerMessageId: extractProviderMessageId(sendResponse),
@@ -717,6 +767,7 @@ async function run() {
     processingOutbox = true;
     try {
       const claimed = (await convex.mutation(convexRefs.outboxClaimDue, {
+        ...tenantConnectorArgs(),
         workerId,
         messageProvider: "instagram",
         limit: 1,
@@ -729,6 +780,7 @@ async function run() {
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
           await convex.mutation(convexRefs.outboxMarkFailed, {
+            ...tenantConnectorArgs(),
             outboxId: item.outboxId as Id<"outbox">,
             error: detail.slice(0, 300),
           });
@@ -797,6 +849,12 @@ async function run() {
   setInterval(() => {
     runBackgroundTask("instagram.outbox.poll", pollOutbox);
   }, outboxPollMs);
+
+  setInterval(() => {
+    runBackgroundTask("instagram.connected_account.heartbeat", () =>
+      reportListener(true, "Instagram worker listener is online.", true),
+    );
+  }, 60_000);
 
   runBackgroundTask("instagram.inbox.poll.startup", pollInbox);
   runBackgroundTask("instagram.outbox.poll.startup", pollOutbox);

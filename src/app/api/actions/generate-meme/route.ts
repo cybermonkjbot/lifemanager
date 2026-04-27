@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { createConvexClient } from "@/lib/convex-server";
 import { convexRefs } from "@/lib/convex-refs";
 import { requireInstanceApiAccess } from "@/lib/instance-guard";
+import { getManagedAiRuntimeOverrides } from "@/lib/managed-secrets-server";
 import { generateMemeImageWithAzure } from "@/worker/ai";
 import { NextResponse } from "next/server";
 
@@ -148,6 +149,7 @@ export async function POST(request: Request) {
       recentHistoryLines,
       styleHints,
       threadTitle,
+      runtime: await getManagedAiRuntimeOverrides(),
     });
 
     if (!generation.imageBytes || generation.error) {

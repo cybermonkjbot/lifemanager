@@ -6,6 +6,8 @@ import {
 import { createConvexClient } from "@/lib/convex-server";
 import { convexRefs } from "@/lib/convex-refs";
 import { gatewayApiKeyConfigured, requestHasGatewayApiKey } from "@/lib/api-gateway-auth";
+import { getCurrentHostedBillingGate } from "@/lib/billing-access";
+import { getManagedAiRuntimeOverrides } from "@/lib/managed-secrets-server";
 import {
   MAX_GATEWAY_INBOUND_CHARS,
   buildOpenAiChatCompletion,
@@ -200,6 +202,16 @@ export async function POST(request: Request) {
     );
   }
 
+  const billingGate = await getCurrentHostedBillingGate();
+  if (billingGate.billingRequired) {
+    return openAiErrorResponse(
+      402,
+      "Choose a plan to keep using the API gateway.",
+      "api_error",
+      "billing_required",
+    );
+  }
+
   let payload: OpenAiGatewayPayload;
   try {
     payload = (await request.json()) as OpenAiGatewayPayload;
@@ -388,6 +400,7 @@ export async function POST(request: Request) {
       );
     }
 
+    const managedAiRuntime = await getManagedAiRuntimeOverrides();
     const aiResult = await generateReplyWithFallback({
       inboundText,
       historyLines: combinedHistoryLines,
@@ -396,6 +409,7 @@ export async function POST(request: Request) {
       styleProfile: scopedStyleProfile || globalStyleProfile || undefined,
       personality,
       runtime: {
+        ...managedAiRuntime,
         ...(runtimeModel ? { model: runtimeModel } : {}),
         ...(resolvedTemperature === undefined ? {} : { temperature: resolvedTemperature }),
         ...(resolvedMaxOutputTokens === undefined ? {} : { maxOutputTokens: resolvedMaxOutputTokens }),

@@ -6,6 +6,7 @@ import {
 import { createConvexClient } from "@/lib/convex-server";
 import { convexRefs } from "@/lib/convex-refs";
 import { requireInstanceApiAccess } from "@/lib/instance-guard";
+import { getManagedAiRuntimeOverrides } from "@/lib/managed-secrets-server";
 import { generateReplyWithFallback } from "@/worker/ai";
 import { NextResponse } from "next/server";
 
@@ -265,6 +266,7 @@ export async function POST(request: Request) {
       });
     }
 
+    const managedAiRuntime = await getManagedAiRuntimeOverrides();
     const aiResult = await generateReplyWithFallback({
       inboundText: message,
       historyLines,
@@ -273,6 +275,7 @@ export async function POST(request: Request) {
       styleProfile: scopedStyleProfile || globalStyleProfile || undefined,
       personality,
       runtime: {
+        ...managedAiRuntime,
         temperature: runtimeSettings?.aiTemperature,
         maxOutputTokens: runtimeSettings?.aiMaxOutputTokens,
         maxReplyChars: runtimeSettings?.aiMaxReplyChars,

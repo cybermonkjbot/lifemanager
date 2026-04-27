@@ -1972,6 +1972,18 @@ async function run() {
   const convex = createConvexClient();
   const workerId = process.env.SLM_WORKER_ID || `worker-${process.pid}`;
   const authPath = process.env.WHATSAPP_AUTH_PATH || ".wa_auth";
+  const selfHosted = process.env.ODOGWU_SERVICE_MODE === "self_hosted";
+  const tenantId = selfHosted ? "" : (process.env.ODOGWU_TENANT_ID || "").trim();
+  const connectorToken = selfHosted ? "" : (process.env.ODOGWU_CONNECTOR_TOKEN || "").trim();
+  const connectorDeviceId = (process.env.ODOGWU_DEVICE_ID || workerId).trim();
+  const connectorTokenHash = connectorToken ? createHash("sha256").update(connectorToken).digest("hex") : "";
+  const tenantConnectorArgs = () =>
+    tenantId && connectorTokenHash
+      ? {
+          tenantId,
+          connectorTokenHash,
+        }
+      : {};
   let isShuttingDown = false;
   let reconnectAttempts = 0;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1991,9 +2003,63 @@ async function run() {
     return hasDeviceSuffix && !hasPendingPairingCode;
   };
 
+  const maskWhatsAppPhone = (jid: string) => {
+    const bare = normalizeAccountJid(jid);
+    const visible = bare.slice(-4);
+    if (!visible) {
+      return undefined;
+    }
+    return `${"*".repeat(Math.max(0, bare.length - visible.length))}${visible}`;
+  };
+
+  const getWhatsAppOwnIdentity = () => {
+    const creds = (state as { creds?: { me?: { id?: string; lid?: string; name?: string } } }).creds;
+    const jid = sock?.user?.id || creds?.me?.id || creds?.me?.lid || "";
+    const normalizedJid = normalizeJidForLookup(jid);
+    if (!normalizedJid) {
+      return null;
+    }
+    const displayName = (sock?.user?.name || creds?.me?.name || "").trim();
+    return {
+      providerAccountId: `whatsapp:${createHash("sha256").update(normalizedJid).digest("hex")}`,
+      accountLabel: maskWhatsAppPhone(normalizedJid),
+      displayName: displayName || undefined,
+      phoneNumberMasked: maskWhatsAppPhone(normalizedJid),
+    };
+  };
+
+  const reportConnectedAccount = async (authState: "connected" | "disconnected" | "expired" | "unknown") => {
+    const ownIdentity = getWhatsAppOwnIdentity();
+    if (!ownIdentity) {
+      return;
+    }
+    await convex.mutation(convexRefs.connectedAccountsUpsertFromConnector, {
+      ...tenantConnectorArgs(),
+      deviceId: connectorDeviceId,
+      provider: "whatsapp",
+      providerAccountId: ownIdentity.providerAccountId,
+      accountLabel: ownIdentity.accountLabel,
+      displayName: ownIdentity.displayName,
+      phoneNumberMasked: ownIdentity.phoneNumberMasked,
+      authState,
+      lastSeenAt: Date.now(),
+    });
+  };
+
+  const reportConnectedAccountDisconnected = async (authState: "disconnected" | "expired" | "unknown" = "disconnected") => {
+    await convex.mutation(convexRefs.connectedAccountsMarkDisconnectedFromConnector, {
+      ...tenantConnectorArgs(),
+      deviceId: connectorDeviceId,
+      provider: "whatsapp",
+      authState,
+      lastSeenAt: Date.now(),
+    });
+  };
+
   const reportListener = async (listenerActive: boolean, listenerMessage: string) => {
     try {
       await convex.mutation(convexRefs.systemReportSetupListener, {
+        ...tenantConnectorArgs(),
         provider: "whatsapp",
         listenerActive,
         listenerWorkerId: workerId,
@@ -2001,6 +2067,11 @@ async function run() {
         listenerLastSeenAt: Date.now(),
         hasAuth: isAuthLinked(),
       });
+      if (listenerActive && isAuthLinked()) {
+        await reportConnectedAccount("connected");
+      } else if (!listenerActive) {
+        await reportConnectedAccountDisconnected(isAuthLinked() ? "disconnected" : "unknown");
+      }
     } catch {
       // best effort status sync for setup UI
     }
@@ -2037,6 +2108,8 @@ async function run() {
 
   let processingOutbox = false;
   let sock: Awaited<ReturnType<typeof createSocket>>;
+  let whatsappConnectionOpen = false;
+  let triggerOutboxPollAfterOpen: (() => void) | null = null;
   let workerRuntimePaused = false;
   let lastBlocklistForceRefreshAt = 0;
   let lastPrivacyPreflightAt = 0;
@@ -3150,7 +3223,7 @@ function resolveTextEmojiAllowlist() {
     await ensureStickerContextForAsset(args.assetId);
     const stickerBuffer = await fetchMediaAssetBuffer(args.assetId);
     rememberAutomatedThreadSend(args.jid);
-    const sent = await sock.sendMessage(args.jid, {
+    const sent = await sendSocketMessageWithTimeout(args.jid, {
       sticker: stickerBuffer,
     });
     const sentId = sent?.key?.id || undefined;
@@ -3519,6 +3592,14 @@ function resolveTextEmojiAllowlist() {
   let adaptiveOutboxClaimLimit = 4;
   const runInboundWithLimit = createDynamicLimiter(() => inboundConcurrency);
   const runOutboxWithLimit = createDynamicLimiter(() => outboxSendConcurrency);
+  const socketSendTimeoutMs = Math.round(clamp(Number(process.env.SLM_SOCKET_SEND_TIMEOUT_MS || 90_000), 15_000, 5 * 60_000));
+  const socketPresenceTimeoutMs = Math.round(clamp(Number(process.env.SLM_SOCKET_PRESENCE_TIMEOUT_MS || 10_000), 2_000, 60_000));
+  const sendSocketMessageWithTimeout = async (...args: Parameters<typeof sock.sendMessage>) => {
+    return await runWithTimeout(sock.sendMessage(...args), socketSendTimeoutMs);
+  };
+  const sendSocketPresenceWithTimeout = async (...args: Parameters<typeof sock.sendPresenceUpdate>) => {
+    await runWithTimeout(sock.sendPresenceUpdate(...args), socketPresenceTimeoutMs);
+  };
   const pruneRecentEmojiOutboundByThread = () => {
     const cutoff = Date.now() - EMOJI_COOLDOWN_MS;
     for (const [threadJid, lastEmojiAt] of recentEmojiOutboundByThread.entries()) {
@@ -3772,7 +3853,7 @@ function resolveTextEmojiAllowlist() {
 
         try {
           rememberAutomatedThreadSend(args.threadJid);
-          const sent = await sock.sendMessage(args.threadJid, {
+          const sent = await sendSocketMessageWithTimeout(args.threadJid, {
             text: fallbackText,
           });
           rememberAutomatedOutboundId(sent?.key?.id || undefined);
@@ -4028,7 +4109,7 @@ function resolveTextEmojiAllowlist() {
     const now = new Date(nowMs);
     const baseText =
       resolveAboutAutomationTemplate(runtimeSettings) ||
-      `Social Life Manager active • ${now.toLocaleDateString()} ${now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+      `Odogwu HQ active • ${now.toLocaleDateString()} ${now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
     const rendered = baseText
       .replace(/\{date\}/gi, now.toLocaleDateString())
       .replace(/\{time\}/gi, now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }))
@@ -4692,7 +4773,7 @@ function resolveTextEmojiAllowlist() {
     for (const jid of args.selfControl.replyJids) {
       try {
         rememberAutomatedThreadSend(jid);
-        const sent = await sock.sendMessage(jid, { text: args.text });
+        const sent = await sendSocketMessageWithTimeout(jid, { text: args.text });
         rememberAutomatedOutboundId(sent?.key?.id || undefined);
         return;
       } catch (error) {
@@ -4717,7 +4798,7 @@ function resolveTextEmojiAllowlist() {
     for (const jid of args.selfControl.replyJids) {
       try {
         rememberAutomatedThreadSend(jid);
-        const sent = await sock.sendMessage(
+        const sent = await sendSocketMessageWithTimeout(
           jid,
           {
             document: args.document,
@@ -6694,6 +6775,7 @@ function resolveTextEmojiAllowlist() {
       }
 
       const ingested = (await convex.mutation(convexRefs.inboundIngestHistorical, {
+        ...tenantConnectorArgs(),
         provider: "whatsapp",
         ingestMode,
         direction,
@@ -7068,6 +7150,7 @@ function resolveTextEmojiAllowlist() {
       const runtimeSettings = await getRuntimeSettings();
 
       const ingest = (await convex.mutation(convexRefs.inboundIngest, {
+        ...tenantConnectorArgs(),
         provider: "whatsapp",
         threadJid,
         senderJid,
@@ -8732,6 +8815,7 @@ function resolveTextEmojiAllowlist() {
         }
 
         if (update.connection === "close") {
+          whatsappConnectionOpen = false;
           hasOpenTransitionBeenHandled = false;
           const statusCode = getStatusCode(update.lastDisconnect?.error);
           const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
@@ -8758,6 +8842,7 @@ function resolveTextEmojiAllowlist() {
             return;
           }
           hasOpenTransitionBeenHandled = true;
+          whatsappConnectionOpen = true;
           clearReconnectTimer();
           reconnectAttempts = 0;
           logger.info("WhatsApp connection established");
@@ -8772,6 +8857,7 @@ function resolveTextEmojiAllowlist() {
           await refreshBlocklist("connection_open", forceOpenMaintenance);
           await runPrivacyPreflight("connection_open", forceOpenMaintenance);
           await maybeRunAboutAutomation("connection_open", runtimeSettings, forceOpenMaintenance);
+          triggerOutboxPollAfterOpen?.();
         }
       });
     });
@@ -9485,6 +9571,7 @@ function resolveTextEmojiAllowlist() {
     const confidence = provider === "heuristic" ? fallbackConfidence : primaryConfidence;
 
     await convex.mutation(convexRefs.outboxHydrateAiOutreach, {
+      ...tenantConnectorArgs(),
       outboxId: item.outboxId,
       text: safeText,
       provider,
@@ -9962,6 +10049,7 @@ function resolveTextEmojiAllowlist() {
     const confidence = provider === "heuristic" ? fallbackConfidence : primaryConfidence;
 
     await convex.mutation(convexRefs.outboxHydrateAiStatus, {
+      ...tenantConnectorArgs(),
       outboxId: item.outboxId as Id<"outbox">,
       text: normalizedText,
       provider,
@@ -10102,6 +10190,7 @@ function resolveTextEmojiAllowlist() {
     }
     if ((disposition.reason || "").startsWith("stale_inbound:")) {
       await convex.mutation(convexRefs.outboxMarkFailed, {
+        ...tenantConnectorArgs(),
         outboxId: item.outboxId,
         error: "Suppressed: newer inbound message arrived before send.",
         forceFinal: true,
@@ -10117,18 +10206,25 @@ function resolveTextEmojiAllowlist() {
     if (workerRuntimePaused) {
       return;
     }
+    if (!whatsappConnectionOpen) {
+      return;
+    }
 
     processingOutbox = true;
     try {
       const runtimeSettings = await getRuntimeSettings();
       const configuredClaimLimit = Math.round(clamp(runtimeSettings?.outboxClaimLimit ?? 8, 1, 20));
       const claimLimit = Math.round(clamp(Math.min(configuredClaimLimit, adaptiveOutboxClaimLimit), 1, 20));
-      const claimed = (await convex.mutation(convexRefs.outboxClaimDue, {
-        workerId,
-        messageProvider: "whatsapp",
-        limit: claimLimit,
-      })) as OutboxClaimedItem[];
-      let sendFailures = 0;
+	      const claimed = (await convex.mutation(convexRefs.outboxClaimDue, {
+	        ...tenantConnectorArgs(),
+	        workerId,
+	        messageProvider: "whatsapp",
+	        limit: claimLimit,
+	      })) as OutboxClaimedItem[];
+	      if (claimed.length > 0) {
+	        logger.info({ claimed: claimed.length, claimLimit }, "WhatsApp outbox claimed due items");
+	      }
+	      let sendFailures = 0;
       const tasks = claimed.map((item) =>
         enqueueByThreadLane(outboxThreadLanes, item.threadId, () =>
           runOutboxWithLimit(async () => {
@@ -10139,6 +10235,7 @@ function resolveTextEmojiAllowlist() {
               isStatusBroadcastSend = item.isStatusPost === true && item.jid === "status@broadcast";
               if (!isStatusBroadcastSend) {
                 const eligibility = (await convex.query(convexRefs.threadsGetEligibility, {
+                  ...tenantConnectorArgs(),
                   threadId: item.threadId,
                 })) as {
                   allowed: boolean;
@@ -10147,6 +10244,7 @@ function resolveTextEmojiAllowlist() {
                 };
                 if (!eligibility.allowed) {
                   await convex.mutation(convexRefs.outboxMarkFailed, {
+                    ...tenantConnectorArgs(),
                     outboxId: item.outboxId,
                     error: `Blocked by eligibility: ${eligibility.reason || eligibility.detail || "unknown"}.`,
                     forceFinal: true,
@@ -10157,6 +10255,7 @@ function resolveTextEmojiAllowlist() {
 
               if (!isStatusBroadcastSend && (await isJidBlocked(item.jid))) {
                 await convex.mutation(convexRefs.outboxMarkFailed, {
+                  ...tenantConnectorArgs(),
                   outboxId: item.outboxId,
                   error: "Blocked by WhatsApp blocklist.",
                   forceFinal: true,
@@ -10182,14 +10281,15 @@ function resolveTextEmojiAllowlist() {
                 });
               }
 
-              if (
-                runtimeSettings?.aiFallbackMode === "azure_only" &&
-                item.provider !== "azure" &&
-                (item.sendKind === "text" || item.sendKind === "meme" || item.sendKind === "voice_note") &&
-                item.messageText !== AI_OUTREACH_PLACEHOLDER &&
+	              if (
+	                runtimeSettings?.aiFallbackMode === "azure_only" &&
+	                item.provider !== "azure" &&
+	                (item.sendKind === "text" || item.sendKind === "meme" || item.sendKind === "voice_note") &&
+	                item.messageText !== AI_OUTREACH_PLACEHOLDER &&
                 item.messageText !== AI_STATUS_PLACEHOLDER
               ) {
                 await convex.mutation(convexRefs.outboxMarkFailed, {
+                  ...tenantConnectorArgs(),
                   outboxId: item.outboxId,
                   error: `Blocked by Azure-only mode: non-Azure outbox item (${item.provider}).`,
                   forceFinal: true,
@@ -10212,6 +10312,7 @@ function resolveTextEmojiAllowlist() {
                   const nextSendAt = nextHourWindowStartMs(nowMs, morningStartHour, morningEndHour);
                   await convex
                     .mutation(convexRefs.outboxDeferClaimed, {
+                      ...tenantConnectorArgs(),
                       outboxId: item.outboxId as Id<"outbox">,
                       sendAt: nextSendAt,
                       reason: `Deferred good_morning outside configured window ${morningStartHour}-${morningEndHour}.`,
@@ -10222,6 +10323,7 @@ function resolveTextEmojiAllowlist() {
               }
 
               const preHydrationDisposition = (await convex.query(convexRefs.outboxGetSendDisposition, {
+                ...tenantConnectorArgs(),
                 outboxId: item.outboxId,
               })) as { canSend: boolean; reason?: string };
               if (await maybeFinalizeStaleDisposition(item, preHydrationDisposition)) {
@@ -10233,6 +10335,7 @@ function resolveTextEmojiAllowlist() {
               attemptedSendKind = hydrated.sendKind;
               attemptedMediaAssetId = hydrated.mediaAssetId;
               const postHydrationDisposition = (await convex.query(convexRefs.outboxGetSendDisposition, {
+                ...tenantConnectorArgs(),
                 outboxId: item.outboxId,
               })) as { canSend: boolean; reason?: string };
               if (await maybeFinalizeStaleDisposition(item, postHydrationDisposition)) {
@@ -10248,6 +10351,7 @@ function resolveTextEmojiAllowlist() {
               const requiresStatusReview = Boolean(item.statusReviewRequired) || legacySampledForReview;
               if (requiresStatusReview && item.isStatusPost === true && item.messageText === AI_STATUS_PLACEHOLDER) {
                 await convex.mutation(convexRefs.outboxStageStatusReview, {
+                  ...tenantConnectorArgs(),
                   outboxId: item.outboxId as Id<"outbox">,
                   reason: "Auto status sampled for manual review before send.",
                 });
@@ -10260,7 +10364,7 @@ function resolveTextEmojiAllowlist() {
                 (hydrated.sendKind === "text" || hydrated.sendKind === "voice_note")
               ) {
                 rememberAutomatedThreadSend(item.jid);
-                const preReactionSent = await sock.sendMessage(item.jid, {
+                const preReactionSent = await sendSocketMessageWithTimeout(item.jid, {
                   react: {
                     text: hydrated.reactionEmoji,
                     key: {
@@ -10313,6 +10417,7 @@ function resolveTextEmojiAllowlist() {
                 if (effectiveMessageText !== hydrated.messageText || captionChanged) {
                   await convex
                     .mutation(convexRefs.outboxRewriteClaimedMessage, {
+                      ...tenantConnectorArgs(),
                       outboxId: item.outboxId as Id<"outbox">,
                       messageText: effectiveMessageText,
                       mediaCaption: hydrated.sendKind === "meme" ? effectiveMediaCaption : undefined,
@@ -10391,6 +10496,7 @@ function resolveTextEmojiAllowlist() {
                 });
                 if (statusSendDecision.skip) {
                   await convex.mutation(convexRefs.outboxMarkFailed, {
+                    ...tenantConnectorArgs(),
                     outboxId: item.outboxId as Id<"outbox">,
                     error: "Skipped status post: manual allowlist mode requires at least one audience JID.",
                     forceFinal: true,
@@ -10414,7 +10520,7 @@ function resolveTextEmojiAllowlist() {
                   const memeMedia = await fetchMediaAssetPayload(hydrated.mediaAssetId);
                   rememberAutomatedThreadSend(destinationJid);
                   if (isVideoMimeType(memeMedia.mimeType)) {
-                    sent = await sock.sendMessage(
+                    sent = await sendSocketMessageWithTimeout(
                       destinationJid,
                       {
                         video: memeMedia.buffer,
@@ -10423,7 +10529,7 @@ function resolveTextEmojiAllowlist() {
                       statusSendOptions,
                     );
                   } else {
-                    sent = await sock.sendMessage(
+                    sent = await sendSocketMessageWithTimeout(
                       destinationJid,
                       {
                         image: memeMedia.buffer,
@@ -10434,14 +10540,14 @@ function resolveTextEmojiAllowlist() {
                   }
                 } else {
                   rememberAutomatedThreadSend(destinationJid);
-                  sent = await sock.sendMessage(destinationJid, { text: effectiveMessageText }, statusSendOptions);
+                  sent = await sendSocketMessageWithTimeout(destinationJid, { text: effectiveMessageText }, statusSendOptions);
                 }
               } else if (hydrated.sendKind === "reaction") {
                 if (!hydrated.reactionEmoji || !hydrated.reactionTargetWhatsAppMessageId) {
                   throw new Error("Reaction outbox item missing emoji or target message id.");
                 }
                 rememberAutomatedThreadSend(item.jid);
-                sent = await sock.sendMessage(item.jid, {
+                sent = await sendSocketMessageWithTimeout(item.jid, {
                   react: {
                     text: hydrated.reactionEmoji,
                     key: {
@@ -10458,7 +10564,7 @@ function resolveTextEmojiAllowlist() {
                 await ensureStickerContextForAsset(hydrated.mediaAssetId);
                 const stickerBuffer = await fetchMediaAssetBuffer(hydrated.mediaAssetId);
                 rememberAutomatedThreadSend(item.jid);
-                sent = await sock.sendMessage(item.jid, {
+                sent = await sendSocketMessageWithTimeout(item.jid, {
                   sticker: stickerBuffer,
                 }, quotedMessageOptions);
               } else if (hydrated.sendKind === "meme") {
@@ -10466,20 +10572,21 @@ function resolveTextEmojiAllowlist() {
                   throw new Error("Meme outbox item missing media asset id.");
                 }
                 await maybeSubscribePresence(item.jid, runtimeSettings);
-                await sock.sendPresenceUpdate("composing", item.jid);
-                await convex.mutation(convexRefs.outboxMarkTyping, { outboxId: item.outboxId });
+                await sendSocketPresenceWithTimeout("composing", item.jid);
+                await convex.mutation(convexRefs.outboxMarkTyping, { ...tenantConnectorArgs(), outboxId: item.outboxId });
                 await sleep(hydrated.typingMs);
                 const postTypingDisposition = (await convex.query(convexRefs.outboxGetSendDisposition, {
+                  ...tenantConnectorArgs(),
                   outboxId: item.outboxId,
                 })) as { canSend: boolean; reason?: string };
                 if (await maybeFinalizeStaleDisposition(item, postTypingDisposition)) {
-                  await sock.sendPresenceUpdate("paused", item.jid);
+                  await sendSocketPresenceWithTimeout("paused", item.jid);
                   return;
                 }
                 const memeMedia = await fetchMediaAssetPayload(hydrated.mediaAssetId);
                 rememberAutomatedThreadSend(item.jid);
                 if (isVideoMimeType(memeMedia.mimeType)) {
-                  sent = await sock.sendMessage(
+                  sent = await sendSocketMessageWithTimeout(
                     item.jid,
                     {
                       video: memeMedia.buffer,
@@ -10488,7 +10595,7 @@ function resolveTextEmojiAllowlist() {
                     quotedMessageOptions,
                   );
                 } else {
-                  sent = await sock.sendMessage(
+                  sent = await sendSocketMessageWithTimeout(
                     item.jid,
                     {
                       image: memeMedia.buffer,
@@ -10497,17 +10604,18 @@ function resolveTextEmojiAllowlist() {
                     quotedMessageOptions,
                   );
                 }
-                await sock.sendPresenceUpdate("paused", item.jid);
+                await sendSocketPresenceWithTimeout("paused", item.jid);
               } else if (hydrated.sendKind === "voice_note") {
                 await maybeSubscribePresence(item.jid, runtimeSettings);
-                await sock.sendPresenceUpdate("composing", item.jid);
-                await convex.mutation(convexRefs.outboxMarkTyping, { outboxId: item.outboxId });
+                await sendSocketPresenceWithTimeout("composing", item.jid);
+                await convex.mutation(convexRefs.outboxMarkTyping, { ...tenantConnectorArgs(), outboxId: item.outboxId });
                 await sleep(hydrated.typingMs);
                 const postTypingDisposition = (await convex.query(convexRefs.outboxGetSendDisposition, {
+                  ...tenantConnectorArgs(),
                   outboxId: item.outboxId,
                 })) as { canSend: boolean; reason?: string };
                 if (await maybeFinalizeStaleDisposition(item, postTypingDisposition)) {
-                  await sock.sendPresenceUpdate("paused", item.jid);
+                  await sendSocketPresenceWithTimeout("paused", item.jid);
                   return;
                 }
 
@@ -10522,6 +10630,7 @@ function resolveTextEmojiAllowlist() {
                   effectiveMessageText = voiceText;
                   await convex
                     .mutation(convexRefs.outboxRewriteClaimedMessage, {
+                      ...tenantConnectorArgs(),
                       outboxId: item.outboxId as Id<"outbox">,
                       messageText: effectiveMessageText,
                       mediaCaption: undefined,
@@ -10536,7 +10645,7 @@ function resolveTextEmojiAllowlist() {
                 if (voiceNote.status === "success") {
                   effectiveMessageText = voiceNote.generatedText;
                   rememberAutomatedThreadSend(item.jid);
-                  sent = await sock.sendMessage(
+                  sent = await sendSocketMessageWithTimeout(
                     item.jid,
                     {
                       audio: voiceNote.buffer,
@@ -10577,19 +10686,20 @@ function resolveTextEmojiAllowlist() {
                     })
                     .catch(() => undefined);
                   rememberAutomatedThreadSend(item.jid);
-                  sent = await sock.sendMessage(item.jid, { text: effectiveMessageText }, quotedMessageOptions);
+                  sent = await sendSocketMessageWithTimeout(item.jid, { text: effectiveMessageText }, quotedMessageOptions);
                 }
-                await sock.sendPresenceUpdate("paused", item.jid);
+                await sendSocketPresenceWithTimeout("paused", item.jid);
               } else {
                 await maybeSubscribePresence(item.jid, runtimeSettings);
-                await sock.sendPresenceUpdate("composing", item.jid);
-                await convex.mutation(convexRefs.outboxMarkTyping, { outboxId: item.outboxId });
+                await sendSocketPresenceWithTimeout("composing", item.jid);
+                await convex.mutation(convexRefs.outboxMarkTyping, { ...tenantConnectorArgs(), outboxId: item.outboxId });
                 await sleep(hydrated.typingMs);
                 const postTypingDisposition = (await convex.query(convexRefs.outboxGetSendDisposition, {
+                  ...tenantConnectorArgs(),
                   outboxId: item.outboxId,
                 })) as { canSend: boolean; reason?: string };
                 if (await maybeFinalizeStaleDisposition(item, postTypingDisposition)) {
-                  await sock.sendPresenceUpdate("paused", item.jid);
+                  await sendSocketPresenceWithTimeout("paused", item.jid);
                   return;
                 }
                 const dayBucket = new Date().toISOString().slice(0, 10);
@@ -10598,6 +10708,7 @@ function resolveTextEmojiAllowlist() {
                   effectiveMessageText = voiceDirective.normalizedText;
                   await convex
                     .mutation(convexRefs.outboxRewriteClaimedMessage, {
+                      ...tenantConnectorArgs(),
                       outboxId: item.outboxId as Id<"outbox">,
                       messageText: effectiveMessageText,
                       mediaCaption: undefined,
@@ -10610,7 +10721,7 @@ function resolveTextEmojiAllowlist() {
                   if (voiceNote.status === "success") {
                     effectiveMessageText = voiceNote.generatedText;
                     rememberAutomatedThreadSend(item.jid);
-                    sent = await sock.sendMessage(
+                    sent = await sendSocketMessageWithTimeout(
                       item.jid,
                       {
                         audio: voiceNote.buffer,
@@ -10652,16 +10763,16 @@ function resolveTextEmojiAllowlist() {
                       .catch(() => undefined);
                     await maybeSendStickerCompanion("before");
                     rememberAutomatedThreadSend(item.jid);
-                    sent = await sock.sendMessage(item.jid, { text: effectiveMessageText }, quotedMessageOptions);
+                    sent = await sendSocketMessageWithTimeout(item.jid, { text: effectiveMessageText }, quotedMessageOptions);
                     await maybeSendStickerCompanion("after");
                   }
                 } else {
                   await maybeSendStickerCompanion("before");
                   rememberAutomatedThreadSend(item.jid);
-                  sent = await sock.sendMessage(item.jid, { text: effectiveMessageText }, quotedMessageOptions);
+                  sent = await sendSocketMessageWithTimeout(item.jid, { text: effectiveMessageText }, quotedMessageOptions);
                   await maybeSendStickerCompanion("after");
                 }
-                await sock.sendPresenceUpdate("paused", item.jid);
+                await sendSocketPresenceWithTimeout("paused", item.jid);
               }
 
               if (
@@ -10676,6 +10787,7 @@ function resolveTextEmojiAllowlist() {
 
               rememberAutomatedOutboundId(sent?.key?.id || undefined);
               await convex.mutation(convexRefs.outboxMarkSent, {
+                ...tenantConnectorArgs(),
                 outboxId: item.outboxId,
                 messageProvider: "whatsapp",
                 providerMessageId: sent?.key?.id || undefined,
@@ -10688,6 +10800,7 @@ function resolveTextEmojiAllowlist() {
               sendFailures += 1;
               const err = error instanceof Error ? error.message : String(error);
               await convex.mutation(convexRefs.outboxMarkFailed, {
+                ...tenantConnectorArgs(),
                 outboxId: item.outboxId,
                 error: err,
               });
@@ -10958,9 +11071,22 @@ function resolveTextEmojiAllowlist() {
   const intervalMs = Math.round(
     clamp(startupSettings?.outboxPollMs ?? Number(process.env.SLM_OUTBOX_POLL_MS || 3000), 500, 60_000),
   );
+  triggerOutboxPollAfterOpen = () => {
+    runBackgroundTask("whatsapp.outbox.poll.connection_open", pollOutbox);
+  };
   setInterval(() => {
     runBackgroundTask("whatsapp.outbox.poll", pollOutbox);
   }, intervalMs);
+  runBackgroundTask("whatsapp.outbox.poll.startup", pollOutbox);
+  setInterval(() => {
+    runBackgroundTask("whatsapp.connected_account.heartbeat", async () => {
+      if (whatsappConnectionOpen && isAuthLinked()) {
+        await reportConnectedAccount("connected");
+        return;
+      }
+      await reportConnectedAccountDisconnected(isAuthLinked() ? "disconnected" : "unknown");
+    });
+  }, 60_000);
   setInterval(() => {
     runBackgroundTask("whatsapp.sticker.context_backfill", runStickerContextBackfillPass);
   }, STICKER_CONTEXT_PASS_INTERVAL_MS);
@@ -11024,7 +11150,7 @@ function resolveTextEmojiAllowlist() {
       aboutAutomationEnabled: resolveAboutAutomationEnabled(startupSettings),
       aboutAutomationIntervalMinutes: Math.round(resolveAboutAutomationIntervalMs(startupSettings) / 60_000),
     },
-    "Social Life Manager worker started",
+    "Odogwu HQ worker started",
   );
 }
 

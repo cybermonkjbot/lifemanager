@@ -15,6 +15,7 @@ import {
   inferFriendshipGenerationCohort,
   inferProfessionalLinguaProfile,
   generateMemeImageWithAzure,
+  hasContextConfusionCue,
   normalizeOutboundText,
   postProcessReplyText,
   rerankCandidateEvaluations,
@@ -301,6 +302,21 @@ test("postProcessReplyText keeps non-health take-care phrasing unchanged", () =>
     historyLines: [],
   });
   assert.equal(output, "Take care and talk soon.");
+});
+
+test("postProcessReplyText repairs context-confusion replies instead of asking which part", () => {
+  assert.equal(hasContextConfusionCue("I don't understand"), true);
+  assert.equal(hasContextConfusionCue("What are you replying to?"), true);
+
+  const output = postProcessReplyText({
+    text: "Which part exactly no clear for you, and you dey okay?",
+    inboundText: "I don't understand",
+    historyLines: ["Me: our school just drop convocation update from nowhere that last line really choke sha."],
+  });
+
+  assert.match(output, /convocation update/i);
+  assert.match(output, /last line/i);
+  assert.doesNotMatch(output, /which part|no clear|you dey okay/i);
 });
 
 test("postProcessReplyText strips AI-denial lines when AI was previously disclosed", () => {
@@ -2685,6 +2701,44 @@ test("generateReplyWithFallback injects clarify reply-mode instruction for ambig
     assert.equal(result.provider, "azure");
     assert.ok(requestBodies.some((body) => /Reply mode is CLARIFY/i.test(body)));
     assert.ok(requestBodies.some((body) => /Pre-response workbench/i.test(body)));
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback injects context-confusion repair and post-processes bad drafts", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  const requestBodies: string[] = [];
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      requestBodies.push(typeof init?.body === "string" ? init.body : "");
+      return new Response(JSON.stringify({ output_text: "Which part exactly no clear for you, and you dey okay?" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "I don't understand",
+      historyLines: ["Me: our school just drop convocation update from nowhere that last line really choke sha."],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "log_only",
+      },
+    });
+
+    assert.equal(result.provider, "azure");
+    assert.ok(requestBodies.some((body) => /Confusion repair is active/i.test(body)));
+    assert.match(result.text, /convocation update/i);
+    assert.doesNotMatch(result.text, /which part|no clear|you dey okay/i);
   } finally {
     globalThis.fetch = originalFetch;
     restoreAiEnv(snapshot);

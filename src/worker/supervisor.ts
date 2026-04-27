@@ -1,12 +1,12 @@
 import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 import pino from "pino";
 import {
   acquireWorkerSupervisorLock,
   releaseWorkerSupervisorLockSync,
   type WorkerProvider,
 } from "../lib/runtime/worker-lock";
+import { getRuntimeDataPath } from "../lib/runtime/paths";
 
 const logger = pino({
   name: "slm-worker-supervisor",
@@ -21,7 +21,7 @@ const WORKER_ENTRY_BY_PROVIDER: Record<WorkerProvider, string> = {
 const CHILD_STOP_TIMEOUT_MS = 4500;
 const QUICK_CRASH_RESET_MS = 120_000;
 const APP_PID_POLL_MS = 1200;
-const APP_PID_PATH = join(".slm", "app.pid");
+const APP_PID_PATH = getRuntimeDataPath("app.pid");
 
 function parseProvider(argvValue: string | undefined): WorkerProvider {
   if (!argvValue || argvValue.trim() === "") {
