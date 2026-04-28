@@ -26,6 +26,7 @@ export type ProjectSdkCall = {
   line: number;
   column: number;
   literalUrl?: string;
+  secretUrlKey?: string;
 };
 
 export type CodeCanvasNode = {
@@ -110,6 +111,7 @@ const importPattern = /^\s*import\s+"([^"]+)"/gm;
 const exportPattern = /^\s*export\s+(rule|webhook|function|heuristic|lexicon|prompt)\s+([A-Za-z_][\w]*)(?:\(([^)]*)\))?/gm;
 const sdkCallPattern = /\b([A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)+)\s*\(/g;
 const literalUrlPattern = /\bhttp\.(?:fetch|get|post|request)\s*\(\s*"([^"]+)"/;
+const secretUrlPattern = /\bhttp\.(?:fetch|get|post|request)\s*\(\s*(?:url:\s*)?secret\("([^"]+)"\)|\bhttp\.(?:fetch|get|post|request)\s*\(\s*secret:\s*"([^"]+)"/;
 
 const PROJECT_SDK_MODULES = new Set([
   ...Object.keys(CODE_SDK_REGISTRY),
@@ -293,6 +295,7 @@ export function compileCodeProject(files: CodeProjectFile[], entryPath = "main.o
       const { line, column } = lineColumnForIndex(file.content, match.index);
       const lineText = file.content.split("\n")[line - 1] || "";
       const urlMatch = lineText.match(literalUrlPattern);
+      const secretUrlMatch = lineText.match(secretUrlPattern);
       const sdkCall: ProjectSdkCall = {
         call: match[1],
         module: sdkModule,
@@ -300,6 +303,7 @@ export function compileCodeProject(files: CodeProjectFile[], entryPath = "main.o
         line,
         column,
         literalUrl: urlMatch?.[1],
+        secretUrlKey: secretUrlMatch?.[1] || secretUrlMatch?.[2],
       };
       sdkCalls.push(sdkCall);
       const callNodeId = `sdk:${file.path}:${line}:${column}:${sdkCall.call}`;

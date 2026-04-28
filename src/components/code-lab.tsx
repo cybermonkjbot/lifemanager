@@ -22,7 +22,7 @@ import { useAction, useMutation, useQuery } from "convex/react";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-const sampleProjectFiles: CodeProjectFile[] = [
+const starterProjectFiles: CodeProjectFile[] = [
   {
     path: "main.odo",
     language: "odogwu",
@@ -75,7 +75,7 @@ export webhook paidConsultation
 on webhook.received as hook
 do
   webhook.verify_secret("paystackWebhookSecret")
-  http.post("https://example.com/ops/payments")
+  http.post(secret: "ops.paymentWebhookUrl")
   followups.create(
     title: "Schedule paid consultation",
     thread: hook.payload.thread,
@@ -582,7 +582,7 @@ export function CodeLab() {
 
   const [selectedProjectId, setSelectedProjectId] = useState<Id<"codeProjects"> | null>(null);
   const [loadedProjectId, setLoadedProjectId] = useState<Id<"codeProjects"> | null>(null);
-  const [files, setFiles] = useState<CodeProjectFile[]>(sampleProjectFiles);
+  const [files, setFiles] = useState<CodeProjectFile[]>(starterProjectFiles);
   const [activePath, setActivePath] = useState("main.odo");
   const [lastSavedFilesJson, setLastSavedFilesJson] = useState("");
   const [description, setDescription] = useState("");
@@ -603,7 +603,7 @@ export function CodeLab() {
     let cancelled = false;
     queueMicrotask(() => {
       if (cancelled) return;
-      setFiles(nextFiles.length ? nextFiles : sampleProjectFiles);
+      setFiles(nextFiles.length ? nextFiles : starterProjectFiles);
       setActivePath(nextFiles.some((file) => file.path === "main.odo") ? "main.odo" : nextFiles[0]?.path || "main.odo");
       setDescription(loadedDescription);
       setLastSavedFilesJson(stableFilesJson(nextFiles));
@@ -614,7 +614,7 @@ export function CodeLab() {
     };
   }, [detail, loadedProjectId]);
 
-  const activeFile = files.find((file) => file.path === activePath) || files[0] || sampleProjectFiles[0];
+  const activeFile = files.find((file) => file.path === activePath) || files[0] || starterProjectFiles[0];
   const compileResult = useMemo(() => compileCodeProject(files), [files]);
   const localTestResult = useMemo(() => runCodeProjectTests(files), [files]);
   const activeDiagnostics = compileResult.diagnostics.filter((item) => item.filePath === activeFile.path);
@@ -796,8 +796,8 @@ export function CodeLab() {
           <button className="btn btn-ghost" type="button" onClick={() => router.push("/code/docs")}>
             Docs
           </button>
-          <button className="btn btn-ghost" type="button" onClick={() => setFiles(sampleProjectFiles)}>
-            Load sample
+          <button className="btn btn-ghost" type="button" onClick={() => setFiles(starterProjectFiles)}>
+            Starter
           </button>
           <button className="btn btn-ghost" type="button" onClick={onFormat}>
             Format
@@ -875,7 +875,7 @@ export function CodeLab() {
             <div className="code-lab-menu-group">
               <span>Edit</span>
               <button type="button" onClick={onFormat}>Format</button>
-              <button type="button" onClick={() => setFiles(sampleProjectFiles)}>Sample</button>
+              <button type="button" onClick={() => setFiles(starterProjectFiles)}>Starter</button>
               <button type="button" onClick={onGenerateCanvas}>Canvas</button>
               <button type="button" onClick={() => router.push("/code/docs")}>Docs</button>
             </div>

@@ -1,5 +1,6 @@
 import { createConvexClient } from "@/lib/convex-server";
 import { convexRefs } from "@/lib/convex-refs";
+import { resolveManagedSecretValue } from "@/lib/managed-secrets-server";
 import type { CodeProjectBundle, ProjectSdkCall } from "@/code-runtime";
 
 export const runtime = "nodejs";
@@ -28,14 +29,15 @@ async function readPayload(request: Request) {
 
 async function runHttpCall(call: ProjectSdkCall, payload: unknown): Promise<RunStep> {
   const startedAt = Date.now();
-  const url = call.literalUrl;
+  const url = call.literalUrl || (call.secretUrlKey ? await resolveManagedSecretValue(call.secretUrlKey) : "");
   if (!url) {
     return {
       stepId: `http:${call.filePath}:${call.line}`,
       toolName: call.call,
-      status: "skipped",
+      status: "error",
       latencyMs: 0,
-      outputSummary: "No literal URL found. Use http.post(\"https://...\") for webhook execution.",
+      outputSummary: call.secretUrlKey ? `Missing managed secret ${call.secretUrlKey}` : "Missing URL.",
+      errorMessage: call.secretUrlKey ? `Managed secret ${call.secretUrlKey} is not configured.` : "HTTP calls require a literal URL or managed secret URL.",
     };
   }
   let host = "unknown";
