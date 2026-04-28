@@ -128,7 +128,7 @@ export webhook paidConsultation
 on webhook.received as hook
 do
   webhook.verify_secret("paystackWebhookSecret")
-  http.post("https://example.com/ops/payments")
+  http.post(secret: "ops.paymentWebhookUrl")
   followups.create(
     title: "Schedule paid consultation",
     thread: hook.payload.thread,
