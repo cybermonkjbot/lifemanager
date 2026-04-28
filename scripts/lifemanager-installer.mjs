@@ -657,6 +657,17 @@ async function collectInteractiveSetup(targetRoot, args) {
     const whisperEnabledDefault = (existing.get("SLM_WHISPER_ENABLED") || (withVoice ? "true" : "false")).toLowerCase() !== "false";
 
     const convexUrl = await askRequired(rl, "Convex URL (CONVEX_URL)", convexDefault || undefined);
+    let convexDeployKey = (existing.get("CONVEX_DEPLOY_KEY") || "").trim();
+    const enteredConvexDeployKey = await askSecret(
+      rl,
+      mutableOutput,
+      convexDeployKey
+        ? "Convex deploy key (CONVEX_DEPLOY_KEY, leave empty to keep current)"
+        : "Convex deploy key (CONVEX_DEPLOY_KEY, optional for automatic backend setup)",
+    );
+    if (enteredConvexDeployKey) {
+      convexDeployKey = enteredConvexDeployKey;
+    }
     const azureEndpoint = await askRequired(rl, "Azure endpoint (AZURE_AI_ENDPOINT)", azureEndpointDefault || undefined);
     let azureApiKey;
     if ((existing.get("AZURE_AI_API_KEY") || "").trim()) {
@@ -729,6 +740,9 @@ async function collectInteractiveSetup(targetRoot, args) {
 
     if (azureApiKey) {
       updates.AZURE_AI_API_KEY = azureApiKey;
+    }
+    if (convexDeployKey) {
+      updates.CONVEX_DEPLOY_KEY = convexDeployKey;
     }
     if (instancePin) {
       updates.SLM_INSTANCE_PIN = instancePin;

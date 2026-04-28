@@ -99,8 +99,12 @@ Global route gate behavior is implemented in `proxy.ts`.
   - redirects to requested next path
 
 ### `POST /api/auth/pin/logout`
+- Input: optional form data `mode`
+  - `lock`: clears local access cookies only
+  - `nuke`: resets local WhatsApp and Instagram auth, marks connected accounts disconnected when possible, then clears access cookies
 - Behavior:
   - clears unlock cookie
+  - clears tenant session cookie
   - redirects to `/unlock`
 
 ## 3) OpenAI-Compatible Gateway
@@ -224,4 +228,3 @@ All setup endpoints use node runtime and dynamic responses.
   - `invalid_request_error`
   - `authentication_error`
   - `api_error`
-

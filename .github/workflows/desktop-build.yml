@@ -1,0 +1,45 @@
+name: Desktop Build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "desktop-v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            os: macos-latest
+            script: desktop:dist:mac
+            artifact: odogwuhq-macos
+          - name: Windows
+            os: windows-latest
+            script: desktop:dist:win
+            artifact: odogwuhq-windows
+    env:
+      NEXT_PUBLIC_CONVEX_URL: https://example.convex.cloud
+      CONVEX_URL: https://example.convex.cloud
+      AZURE_AI_ENDPOINT: https://example.openai.azure.com/openai/v1
+      AZURE_AI_API_KEY: test-key
+      AZURE_AI_MODEL: gpt-5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun run ${{ matrix.script }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/desktop/**
+          if-no-files-found: error

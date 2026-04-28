@@ -12,6 +12,9 @@
 
 # testing
 /coverage
+/test-results/
+/playwright-report/
+/.playwright-mcp/
 
 # next.js
 /.next/
@@ -24,10 +27,14 @@
 # misc
 .DS_Store
 *.pem
+*.log
+*.pid
 .wa_auth/
 .ig_auth/
-.slm/*.pid
-.slm/self-improvement/
+.slm*/
+/.tmp/
+/*-before-*.png
+/*-after-*.png
 
 # debug
 npm-debug.log*

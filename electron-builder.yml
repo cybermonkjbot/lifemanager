@@ -1,28 +1,43 @@
 appId: com.odogwuhq.desktop
 productName: Odogwu HQ
+copyright: Copyright © 2026 Marvengrey technologies Nig LTD
 directories:
   output: dist/desktop
 files:
   - package.json
   - src/desktop/**/*
-  - src/**/*
-  - shared/**/*
-  - convex/_generated/**/*
+  - dist/connector/**/*
   - public/**/*
-  - .next/**/*
-  - "!.next/cache/**/*"
-  - "!.next/dev/**/*"
-  - next.config.ts
-  - tsconfig.json
-  - node_modules/**/*
+  - .next/standalone/**/*
+  - "!node_modules/**/*"
+  - "!dist/open-source/**/*"
+  - "!dist/source-handoff/**/*"
 asar: false
 icon: public/icons/icon
+artifactName: ${productName}-${version}-${os}-${arch}.${ext}
+npmRebuild: false
 mac:
   category: public.app-category.productivity
   icon: public/icons/icon.icns
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+    - target: zip
+      arch:
+        - x64
+        - arm64
 win:
   icon: public/icons/icon.ico
-  target: nsis
+  target:
+    - target: nsis
+      arch:
+        - x64
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
 linux:
   icon: public/icons/icon.png
   target:

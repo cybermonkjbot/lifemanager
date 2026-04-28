@@ -8,6 +8,7 @@ Primary source template: `.env.example`
 
 - `CONVEX_URL` (required unless `NEXT_PUBLIC_CONVEX_URL` is provided)
 - `NEXT_PUBLIC_CONVEX_URL` (frontend/runtime Convex URL)
+- `CONVEX_DEPLOY_KEY` (optional; used by setup to deploy Convex Cloud backends automatically)
 - `AZURE_AI_ENDPOINT`
 - `AZURE_AI_API_KEY`
 - `AZURE_AI_MODEL` (default in template: `gpt-5.4`)
