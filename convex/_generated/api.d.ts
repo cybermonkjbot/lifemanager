@@ -8,6 +8,7 @@
  * @module
  */
 
+import type * as adminPlatform from "../adminPlatform.js";
 import type * as adminSecrets from "../adminSecrets.js";
 import type * as adminUsers from "../adminUsers.js";
 import type * as aiFeedback from "../aiFeedback.js";
@@ -16,6 +17,7 @@ import type * as billing from "../billing.js";
 import type * as billingActions from "../billingActions.js";
 import type * as calls from "../calls.js";
 import type * as chatTools from "../chatTools.js";
+import type * as code from "../code.js";
 import type * as connectedAccounts from "../connectedAccounts.js";
 import type * as contextTools from "../contextTools.js";
 import type * as conversationIntelligence from "../conversationIntelligence.js";
@@ -73,6 +75,7 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  adminPlatform: typeof adminPlatform;
   adminSecrets: typeof adminSecrets;
   adminUsers: typeof adminUsers;
   aiFeedback: typeof aiFeedback;
@@ -81,6 +84,7 @@ declare const fullApi: ApiFromModules<{
   billingActions: typeof billingActions;
   calls: typeof calls;
   chatTools: typeof chatTools;
+  code: typeof code;
   connectedAccounts: typeof connectedAccounts;
   contextTools: typeof contextTools;
   conversationIntelligence: typeof conversationIntelligence;

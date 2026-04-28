@@ -1,6 +1,7 @@
 import { internalMutation, mutation, type MutationCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import { getConfig } from "./lib/config";
+import { assertTenantBillingActive, listHostedTenantBillingScopes } from "./lib/billingAccess";
 import { estimateHumanTiming } from "./lib/heuristics";
 import { enqueueOutbox } from "./lib/outboxEnqueue";
 import { classifyThreadKind, directIgnoreContactKey, directIgnoreRuleCandidates } from "./lib/threadEligibility";
@@ -167,9 +168,10 @@ export function shouldQueueRandomCompliment(args: {
   return sample < COMPLIMENT_SELECTION_THRESHOLD;
 }
 
-async function runOutreachBatch(ctx: MutationCtx) {
+async function runOutreachBatch(ctx: MutationCtx, tenantId?: Id<"tenantAccounts">) {
     const now = Date.now();
-    const config = await getConfig(ctx);
+    await assertTenantBillingActive(ctx, tenantId, now);
+    const config = await getConfig(ctx, tenantId);
     const nowHour = new Date(now).getHours();
 
     if (!config.outreachEnabled) {
@@ -216,10 +218,15 @@ async function runOutreachBatch(ctx: MutationCtx) {
     }> = [];
 
     for (const jid of configuredContacts) {
-      const thread = await ctx.db
-        .query("threads")
-        .withIndex("by_jid", (q) => q.eq("jid", jid))
-        .first();
+      const thread = tenantId
+        ? await ctx.db
+            .query("threads")
+            .withIndex("by_tenantId_and_jid", (q) => q.eq("tenantId", tenantId).eq("jid", jid))
+            .first()
+        : await ctx.db
+            .query("threads")
+            .withIndex("by_jid", (q) => q.eq("jid", jid))
+            .first();
 
       if (!thread || thread.isIgnored) {
         continue;
@@ -382,6 +389,7 @@ async function runOutreachBatch(ctx: MutationCtx) {
         target.outreachMode === "compliment" ? COMPLIMENT_OUTREACH_REASON_PREFIX : PROACTIVE_OUTREACH_REASON_PREFIX;
 
       const draftId = await ctx.db.insert("replyDrafts", {
+        tenantId,
         messageProvider: target.messageProvider,
         threadId: target.threadId,
         sourceMessageId: target.sourceMessageId,
@@ -412,6 +420,7 @@ async function runOutreachBatch(ctx: MutationCtx) {
       });
 
       await ctx.db.insert("systemEvents", {
+        tenantId,
         source: "convex",
         eventType: "outreach.queued",
         threadId: target.threadId,
@@ -426,6 +435,7 @@ async function runOutreachBatch(ctx: MutationCtx) {
     if (queued > 0) {
       const dueCount = targets.filter((target) => target.mutualCheckInDue).length;
       await ctx.db.insert("systemEvents", {
+        tenantId,
         source: "convex",
         eventType: "outreach.batch",
         detail: `Queued ${queued} outreach message(s). mutual_checkin_due=${dueCount}/${targets.length}.`,
@@ -444,13 +454,39 @@ async function runOutreachBatch(ctx: MutationCtx) {
 export const run = internalMutation({
   args: {},
   handler: async (ctx) => {
-    return await runOutreachBatch(ctx);
+    const scopes = await listHostedTenantBillingScopes(ctx);
+    if (!scopes.hasHostedTenants) {
+      return await runOutreachBatch(ctx);
+    }
+    const results = [];
+    for (const tenantId of scopes.activeTenantIds) {
+      results.push(await runOutreachBatch(ctx, tenantId));
+    }
+    return {
+      queued: results.reduce((sum, result) => sum + result.queued, 0),
+      tenantCount: scopes.activeTenantIds.length,
+      results,
+      reason: "hosted_tenants" as const,
+    };
   },
 });
 
 export const runManual = mutation({
   args: {},
   handler: async (ctx) => {
-    return await runOutreachBatch(ctx);
+    const scopes = await listHostedTenantBillingScopes(ctx);
+    if (!scopes.hasHostedTenants) {
+      return await runOutreachBatch(ctx);
+    }
+    const results = [];
+    for (const tenantId of scopes.activeTenantIds) {
+      results.push(await runOutreachBatch(ctx, tenantId));
+    }
+    return {
+      queued: results.reduce((sum, result) => sum + result.queued, 0),
+      tenantCount: scopes.activeTenantIds.length,
+      results,
+      reason: "hosted_tenants" as const,
+    };
   },
 });

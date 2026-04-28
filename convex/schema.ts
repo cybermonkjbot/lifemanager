@@ -17,10 +17,13 @@ import {
 
 export default defineSchema({
   appConfig: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
     key: v.string(),
     value: v.string(),
     updatedAt: v.number(),
-  }).index("by_key", ["key"]),
+  })
+    .index("by_key", ["key"])
+    .index("by_tenantId_and_key", ["tenantId", "key"]),
 
   managedSecrets: defineTable({
     key: v.string(),
@@ -204,6 +207,16 @@ export default defineSchema({
     provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
     jid: v.string(),
     title: v.optional(v.string()),
+    baileysSavedName: v.optional(v.string()),
+    baileysNotifyName: v.optional(v.string()),
+    baileysVerifiedName: v.optional(v.string()),
+    baileysPhoneNumber: v.optional(v.string()),
+    baileysLid: v.optional(v.string()),
+    baileysChatName: v.optional(v.string()),
+    baileysConversationName: v.optional(v.string()),
+    baileysSubject: v.optional(v.string()),
+    baileysUnreadCount: v.optional(v.number()),
+    baileysMetadataUpdatedAt: v.optional(v.number()),
     isGroup: v.boolean(),
     isIgnored: v.boolean(),
     threadKind: v.optional(v.union(v.literal("direct"), v.literal("group"), v.literal("broadcast_or_system"))),
@@ -212,6 +225,11 @@ export default defineSchema({
     ghostedUntil: v.optional(v.number()),
     nightPausedUntil: v.optional(v.number()),
     callReplyBarrierAt: v.optional(v.number()),
+    avatarMediaAssetId: v.optional(v.id("mediaAssets")),
+    avatarContentHash: v.optional(v.string()),
+    avatarLastFetchedAt: v.optional(v.number()),
+    avatarUpdatedAt: v.optional(v.number()),
+    avatarStatus: v.optional(v.union(v.literal("available"), v.literal("missing"), v.literal("blocked"), v.literal("error"))),
     lastMessageAt: v.number(),
     createdAt: v.number(),
     updatedAt: v.number(),
@@ -300,6 +318,7 @@ export default defineSchema({
     .index("by_thread_whatsappMessageId", ["threadId", "whatsappMessageId"])
     .index("by_provider_and_providerMessageId", ["provider", "providerMessageId"])
     .index("by_isStatus_and_messageAt", ["isStatus", "messageAt"])
+    .index("by_tenantId_and_isStatus_and_messageAt", ["tenantId", "isStatus", "messageAt"])
     .index("by_mediaAssetId", ["mediaAssetId"])
     .index("by_provider_and_createdAt", ["provider", "createdAt"])
     .index("by_tenantId_and_provider_and_createdAt", ["tenantId", "provider", "createdAt"])
@@ -678,6 +697,7 @@ export default defineSchema({
     .index("by_tenantId_and_status", ["tenantId", "status"]),
 
   styleProfiles: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
     scope: v.union(v.literal("global"), v.literal("thread")),
     threadId: v.optional(v.id("threads")),
     mimicryLevel: v.number(),
@@ -688,9 +708,12 @@ export default defineSchema({
     updatedAt: v.number(),
   })
     .index("by_scope", ["scope"])
-    .index("by_thread", ["threadId"]),
+    .index("by_thread", ["threadId"])
+    .index("by_tenantId_and_scope", ["tenantId", "scope"])
+    .index("by_tenantId_and_thread", ["tenantId", "threadId"]),
 
   styleProfileHistory: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
     scope: v.union(v.literal("global"), v.literal("thread")),
     threadId: v.optional(v.id("threads")),
     mimicryLevel: v.number(),
@@ -702,9 +725,11 @@ export default defineSchema({
     createdAt: v.number(),
   })
     .index("by_scope_and_createdAt", ["scope", "createdAt"])
-    .index("by_createdAt", ["createdAt"]),
+    .index("by_createdAt", ["createdAt"])
+    .index("by_tenantId_and_scope_and_createdAt", ["tenantId", "scope", "createdAt"]),
 
   personalityProfiles: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
     slug: v.string(),
     name: v.string(),
     description: v.string(),
@@ -714,9 +739,12 @@ export default defineSchema({
     updatedAt: v.number(),
   })
     .index("by_slug", ["slug"])
-    .index("by_updatedAt", ["updatedAt"]),
+    .index("by_updatedAt", ["updatedAt"])
+    .index("by_tenantId_and_slug", ["tenantId", "slug"])
+    .index("by_tenantId_and_updatedAt", ["tenantId", "updatedAt"]),
 
   personalityProfileVersions: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
     profileSlug: v.string(),
     versionNumber: v.number(),
     name: v.string(),
@@ -727,9 +755,12 @@ export default defineSchema({
     createdAt: v.number(),
   })
     .index("by_profileSlug_and_versionNumber", ["profileSlug", "versionNumber"])
-    .index("by_profileSlug_and_createdAt", ["profileSlug", "createdAt"]),
+    .index("by_profileSlug_and_createdAt", ["profileSlug", "createdAt"])
+    .index("by_tenantId_and_profileSlug_and_versionNumber", ["tenantId", "profileSlug", "versionNumber"])
+    .index("by_tenantId_and_profileSlug_and_createdAt", ["tenantId", "profileSlug", "createdAt"]),
 
   threadPersonalitySettings: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
     threadId: v.id("threads"),
     profileSlug: v.string(),
     intensity: v.number(),
@@ -744,7 +775,9 @@ export default defineSchema({
     updatedAt: v.number(),
   })
     .index("by_thread", ["threadId"])
-    .index("by_profileSlug", ["profileSlug"]),
+    .index("by_profileSlug", ["profileSlug"])
+    .index("by_tenantId_and_thread", ["tenantId", "threadId"])
+    .index("by_tenantId_and_profileSlug", ["tenantId", "profileSlug"]),
 
   relationshipThreadState: defineTable({
     threadId: v.id("threads"),
@@ -765,6 +798,7 @@ export default defineSchema({
     .index("by_updatedAt", ["updatedAt"]),
 
   ignoreRules: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
     targetType: v.union(v.literal("contact"), v.literal("group"), v.literal("keyword")),
     targetValue: v.string(),
     enabled: v.boolean(),
@@ -772,7 +806,9 @@ export default defineSchema({
     updatedAt: v.number(),
   })
     .index("by_target", ["targetType", "targetValue"])
-    .index("by_type", ["targetType"]),
+    .index("by_type", ["targetType"])
+    .index("by_tenantId_and_target", ["tenantId", "targetType", "targetValue"])
+    .index("by_tenantId_and_type", ["tenantId", "targetType"]),
 
   guardrailEvents: defineTable({
     threadId: v.optional(v.id("threads")),
@@ -809,6 +845,165 @@ export default defineSchema({
     .index("by_createdAt", ["createdAt"])
     .index("by_tenantId_and_createdAt", ["tenantId", "createdAt"])
     .index("by_provider_and_createdAt", ["provider", "createdAt"]),
+
+  codePrograms: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
+    name: v.string(),
+    slug: v.string(),
+    description: v.optional(v.string()),
+    source: v.string(),
+    compiledPlanJson: v.optional(v.string()),
+    diagnosticsJson: v.string(),
+    status: v.union(v.literal("draft"), v.literal("published"), v.literal("disabled")),
+    activeVersionId: v.optional(v.id("codeProgramVersions")),
+    lastTestSuiteId: v.optional(v.id("codeTestSuites")),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+    publishedAt: v.optional(v.number()),
+  })
+    .index("by_tenantId_and_updatedAt", ["tenantId", "updatedAt"])
+    .index("by_tenantId_and_slug", ["tenantId", "slug"])
+    .index("by_status_and_updatedAt", ["status", "updatedAt"]),
+
+  codeProjects: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
+    name: v.string(),
+    slug: v.string(),
+    description: v.optional(v.string()),
+    status: v.union(v.literal("draft"), v.literal("published"), v.literal("disabled")),
+    webhookSlug: v.string(),
+    activeVersionId: v.optional(v.id("codeProjectVersions")),
+    lastTestSuiteId: v.optional(v.id("codeTestSuites")),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+    publishedAt: v.optional(v.number()),
+  })
+    .index("by_tenantId_and_updatedAt", ["tenantId", "updatedAt"])
+    .index("by_tenantId_and_slug", ["tenantId", "slug"])
+    .index("by_webhookSlug", ["webhookSlug"])
+    .index("by_status_and_updatedAt", ["status", "updatedAt"]),
+
+  codeFiles: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
+    projectId: v.id("codeProjects"),
+    path: v.string(),
+    content: v.string(),
+    language: v.union(v.literal("odogwu")),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_projectId_and_path", ["projectId", "path"])
+    .index("by_projectId_and_updatedAt", ["projectId", "updatedAt"])
+    .index("by_tenantId_and_updatedAt", ["tenantId", "updatedAt"]),
+
+  codeProjectVersions: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
+    projectId: v.id("codeProjects"),
+    versionLabel: v.string(),
+    filesJson: v.string(),
+    bundleJson: v.string(),
+    diagnosticsJson: v.string(),
+    status: v.union(v.literal("draft"), v.literal("published")),
+    createdAt: v.number(),
+    publishedAt: v.optional(v.number()),
+  })
+    .index("by_projectId_and_createdAt", ["projectId", "createdAt"])
+    .index("by_tenantId_and_createdAt", ["tenantId", "createdAt"]),
+
+  codeProgramVersions: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
+    programId: v.id("codePrograms"),
+    version: v.string(),
+    source: v.string(),
+    compiledPlanJson: v.optional(v.string()),
+    diagnosticsJson: v.string(),
+    status: v.union(v.literal("draft"), v.literal("published")),
+    createdAt: v.number(),
+    publishedAt: v.optional(v.number()),
+  })
+    .index("by_programId_and_createdAt", ["programId", "createdAt"])
+    .index("by_tenantId_and_createdAt", ["tenantId", "createdAt"]),
+
+  codeTestSuites: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
+    programId: v.optional(v.id("codePrograms")),
+    projectId: v.optional(v.id("codeProjects")),
+    versionId: v.optional(v.id("codeProgramVersions")),
+    projectVersionId: v.optional(v.id("codeProjectVersions")),
+    filePath: v.optional(v.string()),
+    sourceHash: v.string(),
+    passed: v.boolean(),
+    diagnosticsJson: v.string(),
+    resultJson: v.string(),
+    createdAt: v.number(),
+  })
+    .index("by_programId_and_createdAt", ["programId", "createdAt"])
+    .index("by_projectId_and_createdAt", ["projectId", "createdAt"])
+    .index("by_tenantId_and_createdAt", ["tenantId", "createdAt"])
+    .index("by_passed_and_createdAt", ["passed", "createdAt"]),
+
+  codeProjectRuns: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
+    projectId: v.id("codeProjects"),
+    projectVersionId: v.optional(v.id("codeProjectVersions")),
+    handlerName: v.string(),
+    eventName: v.string(),
+    status: v.union(v.literal("success"), v.literal("error"), v.literal("skipped")),
+    startedAt: v.number(),
+    finishedAt: v.optional(v.number()),
+    errorMessage: v.optional(v.string()),
+    createdAt: v.number(),
+  })
+    .index("by_projectId_and_createdAt", ["projectId", "createdAt"])
+    .index("by_tenantId_and_createdAt", ["tenantId", "createdAt"])
+    .index("by_status_and_createdAt", ["status", "createdAt"]),
+
+  codeProjectRunSteps: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
+    runId: v.id("codeProjectRuns"),
+    projectId: v.id("codeProjects"),
+    stepId: v.string(),
+    toolName: v.string(),
+    status: v.union(v.literal("success"), v.literal("error"), v.literal("skipped")),
+    latencyMs: v.number(),
+    outputSummary: v.optional(v.string()),
+    errorMessage: v.optional(v.string()),
+    createdAt: v.number(),
+  })
+    .index("by_runId_and_createdAt", ["runId", "createdAt"])
+    .index("by_projectId_and_createdAt", ["projectId", "createdAt"])
+    .index("by_tenantId_and_createdAt", ["tenantId", "createdAt"]),
+
+  codeRuns: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
+    programId: v.id("codePrograms"),
+    versionId: v.optional(v.id("codeProgramVersions")),
+    eventName: v.string(),
+    status: v.union(v.literal("success"), v.literal("error"), v.literal("skipped")),
+    startedAt: v.number(),
+    finishedAt: v.optional(v.number()),
+    errorMessage: v.optional(v.string()),
+    createdAt: v.number(),
+  })
+    .index("by_programId_and_createdAt", ["programId", "createdAt"])
+    .index("by_tenantId_and_createdAt", ["tenantId", "createdAt"])
+    .index("by_status_and_createdAt", ["status", "createdAt"]),
+
+  codeRunSteps: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
+    runId: v.id("codeRuns"),
+    programId: v.id("codePrograms"),
+    stepId: v.string(),
+    toolName: v.string(),
+    status: v.union(v.literal("success"), v.literal("error"), v.literal("skipped")),
+    latencyMs: v.number(),
+    outputSummary: v.optional(v.string()),
+    errorMessage: v.optional(v.string()),
+    createdAt: v.number(),
+  })
+    .index("by_runId_and_createdAt", ["runId", "createdAt"])
+    .index("by_programId_and_createdAt", ["programId", "createdAt"])
+    .index("by_tenantId_and_createdAt", ["tenantId", "createdAt"]),
 
   toolRuns: defineTable({
     tenantId: v.optional(v.id("tenantAccounts")),

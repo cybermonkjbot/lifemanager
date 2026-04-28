@@ -2,7 +2,9 @@ import { v } from "convex/values";
 import type { Doc } from "./_generated/dataModel";
 import { internalMutation, mutation, query } from "./_generated/server";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
+import { assertTenantBillingActive, assertThreadTenantBillingActive } from "./lib/billingAccess";
 import { enqueueOutbox } from "./lib/outboxEnqueue";
+import { resolveTenantForQuery } from "./lib/tenantSecurity";
 
 const followupStatusOrAll = v.union(
   v.literal("all"),
@@ -224,6 +226,14 @@ async function cancelFollowupRow(
   return true;
 }
 
+async function assertFollowupBillingActive(ctx: MutationCtx, followUp: Doc<"followUps">, now = Date.now()) {
+  if (followUp.tenantId) {
+    await assertTenantBillingActive(ctx, followUp.tenantId, now);
+    return;
+  }
+  await assertThreadTenantBillingActive(ctx, followUp.threadId, now);
+}
+
 export const list = query({
   args: {
     provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("all"))),
@@ -263,11 +273,14 @@ export const list = query({
 
 export const timeline = query({
   args: {
+    tenantId: v.optional(v.id("tenantAccounts")),
+    connectorTokenHash: v.optional(v.string()),
     provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("all"))),
     limit: v.optional(v.number()),
     filter: v.optional(followupTimelineFilter),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForQuery(ctx, args);
     const provider = args.provider || "all";
     const now = Date.now();
     const todayStart = startOfDay(now);
@@ -275,11 +288,26 @@ export const timeline = query({
     const limit = Math.min(args.limit ?? 160, 300);
     const filter = args.filter || "all";
 
-    const base = await ctx.db
-      .query("followUps")
-      .withIndex("by_dueAt")
-      .order("asc")
-      .take(Math.min(limit * 5, 900));
+    const base = tenantId
+      ? (
+          await Promise.all(
+            (["suggested", "confirmed", "queued", "sent", "failed", "cancelled"] as const).map((status) =>
+              ctx.db
+                .query("followUps")
+                .withIndex("by_tenantId_and_status_and_dueAt", (q) => q.eq("tenantId", tenantId).eq("status", status))
+                .order("asc")
+                .take(Math.min(limit * 2, 300)),
+            ),
+          )
+        )
+          .flat()
+          .sort((a, b) => a.dueAt - b.dueAt)
+          .slice(0, Math.min(limit * 5, 900))
+      : await ctx.db
+          .query("followUps")
+          .withIndex("by_dueAt")
+          .order("asc")
+          .take(Math.min(limit * 5, 900));
 
     const filtered = base.filter((item) => statusMatchesTimelineFilter(item.status, filter)).slice(0, limit);
     const enriched = (await enrichFollowups(ctx, filtered)).filter((item) =>
@@ -334,6 +362,7 @@ export const confirm = mutation({
     }
 
     const now = Date.now();
+    await assertFollowupBillingActive(ctx, followUp, now);
     await ctx.db.patch(followUp._id, {
       status: "confirmed",
       updatedAt: now,
@@ -365,6 +394,7 @@ export const reschedule = mutation({
       throw new Error("Cannot reschedule a closed follow-up.");
     }
 
+    await assertFollowupBillingActive(ctx, row);
     await ctx.db.patch(row._id, {
       dueAt: Math.max(args.dueAt, Date.now()),
       updatedAt: Date.now(),
@@ -388,6 +418,7 @@ export const snooze = mutation({
       throw new Error("Cannot snooze a closed follow-up.");
     }
 
+    await assertFollowupBillingActive(ctx, row);
     const dueAt = Date.now() + Math.max(5, Math.round(args.minutes)) * 60 * 1000;
     await ctx.db.patch(row._id, {
       dueAt,
@@ -412,6 +443,7 @@ export const cancel = mutation({
     }
 
     const now = Date.now();
+    await assertFollowupBillingActive(ctx, row, now);
     await cancelFollowupRow(ctx, row, now);
     return row._id;
   },
@@ -419,21 +451,29 @@ export const cancel = mutation({
 
 export const clearAll = mutation({
   args: {
+    tenantId: v.optional(v.id("tenantAccounts")),
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const now = Date.now();
+    await assertTenantBillingActive(ctx, args.tenantId, now);
     const batchSize = Math.min(Math.max(5, Math.round(args.limit ?? 30)), 60);
     let cleared = 0;
     let scanned = 0;
     let hasMore = false;
 
     for (const status of OPEN_FOLLOWUP_STATUSES) {
-      const rows = await ctx.db
-        .query("followUps")
-        .withIndex("by_status_dueAt", (q) => q.eq("status", status))
-        .order("asc")
-        .take(batchSize);
+      const rows = args.tenantId
+        ? await ctx.db
+            .query("followUps")
+            .withIndex("by_tenantId_and_status_and_dueAt", (q) => q.eq("tenantId", args.tenantId).eq("status", status))
+            .order("asc")
+            .take(batchSize)
+        : await ctx.db
+            .query("followUps")
+            .withIndex("by_status_dueAt", (q) => q.eq("status", status))
+            .order("asc")
+            .take(batchSize);
 
       scanned += rows.length;
       if (rows.length === batchSize) {
@@ -441,6 +481,7 @@ export const clearAll = mutation({
       }
 
       for (const row of rows) {
+        await assertFollowupBillingActive(ctx, row, now);
         const dismissed = await cancelFollowupRow(ctx, row, now);
         if (dismissed) {
           cleared += 1;
@@ -458,24 +499,40 @@ export const clearAll = mutation({
 
 export const promoteDueConfirmed = internalMutation({
   args: {
+    tenantId: v.optional(v.id("tenantAccounts")),
     now: v.optional(v.number()),
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const now = args.now ?? Date.now();
+    await assertTenantBillingActive(ctx, args.tenantId, now);
     const limit = Math.min(args.limit ?? 20, 50);
 
-    const dueConfirmed = await ctx.db
-      .query("followUps")
-      .withIndex("by_status_dueAt", (q) => q.eq("status", "confirmed").lte("dueAt", now))
-      .order("asc")
-      .take(limit);
+    const dueConfirmed = args.tenantId
+      ? await ctx.db
+          .query("followUps")
+          .withIndex("by_tenantId_and_status_and_dueAt", (q) =>
+            q.eq("tenantId", args.tenantId).eq("status", "confirmed").lte("dueAt", now),
+          )
+          .order("asc")
+          .take(limit)
+      : await ctx.db
+          .query("followUps")
+          .withIndex("by_status_dueAt", (q) => q.eq("status", "confirmed").lte("dueAt", now))
+          .order("asc")
+          .take(limit);
 
     let promoted = 0;
     let filtered = 0;
 
     for (const followUp of dueConfirmed) {
       const thread = await ctx.db.get(followUp.threadId);
+      try {
+        await assertTenantBillingActive(ctx, followUp.tenantId || thread?.tenantId, now);
+      } catch {
+        filtered += 1;
+        continue;
+      }
       const eligibility = evaluateFollowupPromotionEligibility({
         followUp,
         thread,
@@ -498,6 +555,7 @@ export const promoteDueConfirmed = internalMutation({
       }
       const messageProvider = thread?.provider || "whatsapp";
       const draftId = await ctx.db.insert("replyDrafts", {
+        tenantId: followUp.tenantId || thread?.tenantId,
         messageProvider,
         threadId: followUp.threadId,
         sourceMessageId: followUp.sourceMessageId,

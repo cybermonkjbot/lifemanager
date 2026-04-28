@@ -1,7 +1,7 @@
 import { v } from "convex/values";
 import { makeFunctionReference } from "convex/server";
 import { internal } from "./_generated/api";
-import type { Doc } from "./_generated/dataModel";
+import type { Doc, Id } from "./_generated/dataModel";
 import { action, internalMutation, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { DEFAULT_MIMICRY_LEVEL } from "./lib/constants";
 import { getConfig, setConfigValue } from "./lib/config";
@@ -10,6 +10,8 @@ import {
   parseLearnedEmojiProfile,
   type LearnedEmojiProfile,
 } from "./lib/emojiLearning";
+import { assertTenantOwned, resolveTenantForMutation, resolveTenantForQuery } from "./lib/tenantSecurity";
+import { assertTenantBillingActive } from "./lib/billingAccess";
 
 const refThreadsList = makeFunctionReference<"query">("threads:list");
 const refSetMimicry = makeFunctionReference<"mutation">("style:setMimicry");
@@ -36,6 +38,10 @@ const STYLE_SENSITIVE_PHRASE_PATTERNS = [
 const STYLE_MAX_COMMON_PHRASE_WORDS = 6;
 const MAX_SAFE_MIMICRY_LEVEL = 0.82;
 const CLEANUP_COMMON_PHRASES_BATCH_SIZE = 50;
+const tenantScopeArgs = {
+  tenantId: v.optional(v.id("tenantAccounts")),
+  connectorTokenHash: v.optional(v.string()),
+};
 const LOW_VALUE_STYLE_PHRASE_PATTERNS = [
   /\b(?:please|kindly|abeg)\s+(?:just\s+)?(?:allow|pardon)\s+me(?:\s+small)?\b/i,
   /\b(?:allow|pardon)\s+me\s+small\b/i,
@@ -152,6 +158,17 @@ const LEARNED_TRAIT_LIMITS = {
   spellingNotes: 30,
 } as const;
 type LearnedTraitField = keyof typeof LEARNED_TRAIT_LIMITS;
+
+async function resolveTenantForOptionalMutation(
+  ctx: MutationCtx,
+  args: { tenantId?: Id<"tenantAccounts">; connectorTokenHash?: string },
+) {
+  if (args.connectorTokenHash) {
+    return await resolveTenantForMutation(ctx, args);
+  }
+  await assertTenantBillingActive(ctx, args.tenantId);
+  return args.tenantId;
+}
 
 function isManualSelfAuthoredMessage(message: Pick<Doc<"messages">, "direction" | "senderJid" | "toolRunId">) {
   return message.direction === "outbound" && message.senderJid === "me" && !message.toolRunId;
@@ -371,6 +388,7 @@ export function normalizeCommonPhraseList(
 
 async function snapshotProfile(ctx: MutationCtx, profile: Doc<"styleProfiles">, reason: string, createdAt: number) {
   await ctx.db.insert("styleProfileHistory", {
+    tenantId: profile.tenantId,
     scope: profile.scope,
     threadId: profile.threadId,
     mimicryLevel: profile.mimicryLevel,
@@ -608,12 +626,29 @@ function hasTextHumorSignal(text: string, funnyKeywords: string[], funnyEmojis: 
   return false;
 }
 
-async function getLearnedEmojiProfile(ctx: QueryCtx | MutationCtx): Promise<LearnedEmojiProfile> {
-  const row = await ctx.db
-    .query("appConfig")
-    .withIndex("by_key", (q) => q.eq("key", LEARNED_EMOJI_PROFILE_CONFIG_KEY))
-    .first();
+async function getLearnedEmojiProfile(ctx: QueryCtx | MutationCtx, tenantId?: Id<"tenantAccounts">): Promise<LearnedEmojiProfile> {
+  const row = tenantId
+    ? await ctx.db
+        .query("appConfig")
+        .withIndex("by_tenantId_and_key", (q) => q.eq("tenantId", tenantId).eq("key", LEARNED_EMOJI_PROFILE_CONFIG_KEY))
+        .first()
+    : await ctx.db
+        .query("appConfig")
+        .withIndex("by_key", (q) => q.eq("key", LEARNED_EMOJI_PROFILE_CONFIG_KEY))
+        .first();
   return parseLearnedEmojiProfile(row?.value);
+}
+
+async function getGlobalStyleProfile(ctx: QueryCtx | MutationCtx, tenantId?: Id<"tenantAccounts">) {
+  return tenantId
+    ? await ctx.db
+        .query("styleProfiles")
+        .withIndex("by_tenantId_and_scope", (q) => q.eq("tenantId", tenantId).eq("scope", "global"))
+        .first()
+    : await ctx.db
+        .query("styleProfiles")
+        .withIndex("by_scope", (q) => q.eq("scope", "global"))
+        .first();
 }
 
 function withEmojiLearningHints<T extends Record<string, unknown>>(profile: T, learnedEmojiProfile: LearnedEmojiProfile) {
@@ -625,20 +660,19 @@ function withEmojiLearningHints<T extends Record<string, unknown>>(profile: T, l
 }
 
 export const getEmojiProfile = query({
-  args: {},
-  handler: async (ctx) => {
-    return await getLearnedEmojiProfile(ctx);
+  args: tenantScopeArgs,
+  handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForQuery(ctx, args);
+    return await getLearnedEmojiProfile(ctx, tenantId);
   },
 });
 
 export const getProfile = query({
-  args: {},
-  handler: async (ctx) => {
-    const learnedEmojiProfile = await getLearnedEmojiProfile(ctx);
-    const profile = await ctx.db
-      .query("styleProfiles")
-      .withIndex("by_scope", (q) => q.eq("scope", "global"))
-      .first();
+  args: tenantScopeArgs,
+  handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForQuery(ctx, args);
+    const learnedEmojiProfile = await getLearnedEmojiProfile(ctx, tenantId);
+    const profile = await getGlobalStyleProfile(ctx, tenantId);
 
     if (profile) {
       return withEmojiLearningHints(profile, learnedEmojiProfile);
@@ -658,16 +692,24 @@ export const getProfile = query({
 
 export const getStatusVoice = query({
   args: {
+    ...tenantScopeArgs,
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForQuery(ctx, args);
     const limit = Math.max(1, Math.min(Math.round(args.limit ?? 10), 24));
     const scanLimit = Math.max(limit * 6, 80);
-    const statusRows = await ctx.db
-      .query("messages")
-      .withIndex("by_isStatus_and_messageAt", (q) => q.eq("isStatus", true))
-      .order("desc")
-      .take(scanLimit);
+    const statusRows = tenantId
+      ? await ctx.db
+          .query("messages")
+          .withIndex("by_tenantId_and_isStatus_and_messageAt", (q) => q.eq("tenantId", tenantId).eq("isStatus", true))
+          .order("desc")
+          .take(scanLimit)
+      : await ctx.db
+          .query("messages")
+          .withIndex("by_isStatus_and_messageAt", (q) => q.eq("isStatus", true))
+          .order("desc")
+          .take(scanLimit);
 
     const manualStatusTexts = statusRows
       .filter((row) => isManualSelfAuthoredMessage(row))
@@ -695,14 +737,13 @@ export const getStatusVoice = query({
 
 export const setMimicry = mutation({
   args: {
+    ...tenantScopeArgs,
     mimicryLevel: v.number(),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForOptionalMutation(ctx, args);
     const bounded = Math.max(0, Math.min(args.mimicryLevel, MAX_SAFE_MIMICRY_LEVEL));
-    const existing = await ctx.db
-      .query("styleProfiles")
-      .withIndex("by_scope", (q) => q.eq("scope", "global"))
-      .first();
+    const existing = await getGlobalStyleProfile(ctx, tenantId);
 
     if (existing) {
       if (Math.abs(existing.mimicryLevel - bounded) >= 0.0001) {
@@ -716,6 +757,7 @@ export const setMimicry = mutation({
     }
 
     return await ctx.db.insert("styleProfiles", {
+      tenantId,
       scope: "global",
       mimicryLevel: bounded,
       commonPhrases: [],
@@ -729,32 +771,48 @@ export const setMimicry = mutation({
 
 export const listHistory = query({
   args: {
+    ...tenantScopeArgs,
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForQuery(ctx, args);
     const limit = Math.max(1, Math.min(Math.round(args.limit ?? 20), 100));
-    return await ctx.db
-      .query("styleProfileHistory")
-      .withIndex("by_scope_and_createdAt", (q) => q.eq("scope", "global"))
-      .order("desc")
-      .take(limit);
+    return tenantId
+      ? await ctx.db
+          .query("styleProfileHistory")
+          .withIndex("by_tenantId_and_scope_and_createdAt", (q) => q.eq("tenantId", tenantId).eq("scope", "global"))
+          .order("desc")
+          .take(limit)
+      : await ctx.db
+          .query("styleProfileHistory")
+          .withIndex("by_scope_and_createdAt", (q) => q.eq("scope", "global"))
+          .order("desc")
+          .take(limit);
   },
 });
 
 export const rollbackHistory = mutation({
   args: {
+    ...tenantScopeArgs,
     historyId: v.id("styleProfileHistory"),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForOptionalMutation(ctx, args);
     const row = await ctx.db.get(args.historyId);
     if (!row) {
       throw new Error("History entry not found.");
     }
+    assertTenantOwned(tenantId, row.tenantId);
 
-    const existing = await ctx.db
-      .query("styleProfiles")
-      .withIndex("by_scope", (q) => q.eq("scope", row.scope))
-      .first();
+    const existing = tenantId
+      ? await ctx.db
+          .query("styleProfiles")
+          .withIndex("by_tenantId_and_scope", (q) => q.eq("tenantId", tenantId).eq("scope", row.scope))
+          .first()
+      : await ctx.db
+          .query("styleProfiles")
+          .withIndex("by_scope", (q) => q.eq("scope", row.scope))
+          .first();
     const now = Date.now();
 
     if (existing) {
@@ -772,6 +830,7 @@ export const rollbackHistory = mutation({
     }
 
     return await ctx.db.insert("styleProfiles", {
+      tenantId,
       scope: row.scope,
       threadId: row.threadId,
       mimicryLevel: row.mimicryLevel,
@@ -786,11 +845,13 @@ export const rollbackHistory = mutation({
 
 export const updateLearnedTrait = mutation({
   args: {
+    ...tenantScopeArgs,
     trait: v.union(v.literal("commonPhrases"), v.literal("punctuationStyle"), v.literal("humorNotes"), v.literal("spellingNotes")),
     value: v.string(),
     previousValue: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForOptionalMutation(ctx, args);
     const trait = args.trait as LearnedTraitField;
     const limit = LEARNED_TRAIT_LIMITS[trait];
     const nextValue = normalizeTraitValue(args.value);
@@ -801,16 +862,14 @@ export const updateLearnedTrait = mutation({
       throw new Error("Trait phrase is too generic or awkward to save.");
     }
 
-    const profile = await ctx.db
-      .query("styleProfiles")
-      .withIndex("by_scope", (q) => q.eq("scope", "global"))
-      .first();
+    const profile = await getGlobalStyleProfile(ctx, tenantId);
     const now = Date.now();
 
     if (!profile) {
       const seedValues = trait === "commonPhrases" ? normalizeCommonPhraseList([nextValue], limit) : normalizeTraitList([nextValue], limit);
       const patch = makeTraitPatch(trait, seedValues);
       return await ctx.db.insert("styleProfiles", {
+        tenantId,
         scope: "global",
         mimicryLevel: DEFAULT_MIMICRY_LEVEL,
         commonPhrases: patch.commonPhrases || [],
@@ -860,10 +919,12 @@ export const updateLearnedTrait = mutation({
 
 export const removeLearnedTrait = mutation({
   args: {
+    ...tenantScopeArgs,
     trait: v.union(v.literal("commonPhrases"), v.literal("punctuationStyle"), v.literal("humorNotes"), v.literal("spellingNotes")),
     value: v.string(),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForOptionalMutation(ctx, args);
     const trait = args.trait as LearnedTraitField;
     const limit = LEARNED_TRAIT_LIMITS[trait];
     const target = normalizeTraitValue(args.value);
@@ -871,10 +932,7 @@ export const removeLearnedTrait = mutation({
       throw new Error("Trait value cannot be empty.");
     }
 
-    const profile = await ctx.db
-      .query("styleProfiles")
-      .withIndex("by_scope", (q) => q.eq("scope", "global"))
-      .first();
+    const profile = await getGlobalStyleProfile(ctx, tenantId);
     if (!profile) {
       return null;
     }
@@ -909,15 +967,14 @@ export const removeLearnedTrait = mutation({
 
 export const clearLearnedTraitSection = mutation({
   args: {
+    ...tenantScopeArgs,
     trait: v.union(v.literal("commonPhrases"), v.literal("punctuationStyle"), v.literal("humorNotes"), v.literal("spellingNotes")),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForOptionalMutation(ctx, args);
     const trait = args.trait as LearnedTraitField;
     const limit = LEARNED_TRAIT_LIMITS[trait];
-    const profile = await ctx.db
-      .query("styleProfiles")
-      .withIndex("by_scope", (q) => q.eq("scope", "global"))
-      .first();
+    const profile = await getGlobalStyleProfile(ctx, tenantId);
     if (!profile) {
       return null;
     }
@@ -942,9 +999,11 @@ export const clearLearnedTraitSection = mutation({
 
 export const cleanupCommonPhrases = mutation({
   args: {
+    ...tenantScopeArgs,
     dryRun: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForOptionalMutation(ctx, args);
     const result: {
       dryRun: boolean;
       scannedProfiles: number;
@@ -953,6 +1012,7 @@ export const cleanupCommonPhrases = mutation({
       isDone: boolean;
     } = await ctx.runMutation(internal.style.cleanupCommonPhrasesBatch, {
       dryRun: args.dryRun ?? false,
+      tenantId,
       cursor: null,
       scannedProfiles: 0,
       updatedProfiles: 0,
@@ -964,6 +1024,7 @@ export const cleanupCommonPhrases = mutation({
 
 export const cleanupCommonPhrasesBatch = internalMutation({
   args: {
+    tenantId: v.optional(v.id("tenantAccounts")),
     dryRun: v.boolean(),
     cursor: v.union(v.string(), v.null()),
     scannedProfiles: v.number(),
@@ -973,6 +1034,7 @@ export const cleanupCommonPhrasesBatch = internalMutation({
   handler: async (ctx, args) => {
     const page = await ctx.db
       .query("styleProfiles")
+      .withIndex("by_tenantId_and_scope", (q) => q.eq("tenantId", args.tenantId))
       .order("asc")
       .paginate({ numItems: CLEANUP_COMMON_PHRASES_BATCH_SIZE, cursor: args.cursor });
     const now = Date.now();
@@ -1003,6 +1065,7 @@ export const cleanupCommonPhrasesBatch = internalMutation({
     if (!args.dryRun && !page.isDone) {
       await ctx.scheduler.runAfter(0, internal.style.cleanupCommonPhrasesBatch, {
         dryRun: false,
+        tenantId: args.tenantId,
         cursor: page.continueCursor,
         scannedProfiles,
         updatedProfiles,
@@ -1012,6 +1075,7 @@ export const cleanupCommonPhrasesBatch = internalMutation({
 
     if (!args.dryRun && page.isDone) {
       await ctx.db.insert("systemEvents", {
+        tenantId: args.tenantId,
         source: "convex",
         eventType: "style.commonPhrases.cleanup",
         detail: `Cleaned common phrases across ${updatedProfiles}/${scannedProfiles} style profiles, removed ${removedPhraseCount} phrases.`,
@@ -1064,8 +1128,10 @@ export const learnFromOutboundEmoji = internalMutation({
     messageAt: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    const thread = await ctx.db.get(args.threadId);
+    const tenantId = thread?.tenantId;
     const messageAt = Number.isFinite(args.messageAt) ? Number(args.messageAt) : Date.now();
-    const baseProfile = await getLearnedEmojiProfile(ctx);
+    const baseProfile = await getLearnedEmojiProfile(ctx, tenantId);
     const nextProfile = applyEmojiUsageSignal(baseProfile, {
       texts: [args.text || "", args.mediaCaption || ""],
       reactionEmoji: args.reactionEmoji,
@@ -1081,7 +1147,7 @@ export const learnFromOutboundEmoji = internalMutation({
       } as const;
     }
 
-    await setConfigValue(ctx, LEARNED_EMOJI_PROFILE_CONFIG_KEY, JSON.stringify(nextProfile));
+    await setConfigValue(ctx, LEARNED_EMOJI_PROFILE_CONFIG_KEY, JSON.stringify(nextProfile), tenantId);
 
     return {
       learned: true,
@@ -1094,6 +1160,7 @@ export const learnFromOutboundEmoji = internalMutation({
 
 export const learnFromHumorSignal = mutation({
   args: {
+    ...tenantScopeArgs,
     threadId: v.id("threads"),
     inboundText: v.string(),
     signalKind: v.union(v.literal("text"), v.literal("reaction")),
@@ -1101,7 +1168,14 @@ export const learnFromHumorSignal = mutation({
     contextText: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const config = await getConfig(ctx);
+    const tenantId = await resolveTenantForOptionalMutation(ctx, args);
+    const thread = await ctx.db.get(args.threadId);
+    if (!thread) {
+      throw new Error("Thread not found.");
+    }
+    assertTenantOwned(tenantId, thread.tenantId);
+    const resolvedTenantId = tenantId || thread.tenantId;
+    const config = await getConfig(ctx, resolvedTenantId);
     const funnyKeywords = config.funnyStatusKeywords || [];
     const funnyEmojis = config.funnyStatusEmojis || [];
     const inboundText = args.inboundText.trim();
@@ -1158,10 +1232,7 @@ export const learnFromHumorSignal = mutation({
       funnyEmojis,
     });
 
-    const existing = await ctx.db
-      .query("styleProfiles")
-      .withIndex("by_scope", (q) => q.eq("scope", "global"))
-      .first();
+    const existing = await getGlobalStyleProfile(ctx, resolvedTenantId);
     const now = Date.now();
 
     if (existing) {
@@ -1172,6 +1243,7 @@ export const learnFromHumorSignal = mutation({
       });
     } else {
       await ctx.db.insert("styleProfiles", {
+        tenantId: resolvedTenantId,
         scope: "global",
         mimicryLevel: DEFAULT_MIMICRY_LEVEL,
         commonPhrases: normalizeCommonPhraseList(mergeLimited([], phrases, 40), 40, { strict: true }),
@@ -1183,6 +1255,7 @@ export const learnFromHumorSignal = mutation({
     }
 
     await ctx.db.insert("systemEvents", {
+      tenantId: resolvedTenantId,
       source: "convex",
       eventType: "style.humor.learned",
       threadId: args.threadId,

@@ -1,7 +1,9 @@
 import { v } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel";
 import { mutation, query } from "./_generated/server";
-import type { MutationCtx } from "./_generated/server";
+import type { MutationCtx, QueryCtx } from "./_generated/server";
+import { assertTenantOwned, resolveTenantForMutation, resolveTenantForQuery } from "./lib/tenantSecurity";
+import { assertTenantBillingActive } from "./lib/billingAccess";
 
 const mediaKindValidator = v.union(
   v.literal("sticker"),
@@ -32,6 +34,33 @@ function clampInt(value: number | undefined, fallback: number, min: number, max:
 }
 
 type MediaKind = Doc<"mediaAssets">["kind"];
+const MEDIA_KINDS: MediaKind[] = ["sticker", "meme", "image", "video", "audio", "document"];
+
+const tenantScopeArgs = {
+  tenantId: v.optional(v.id("tenantAccounts")),
+  connectorTokenHash: v.optional(v.string()),
+};
+
+async function resolveTenantForOptionalQuery(
+  ctx: QueryCtx,
+  args: { tenantId?: Id<"tenantAccounts">; connectorTokenHash?: string },
+) {
+  if (args.connectorTokenHash) {
+    return await resolveTenantForQuery(ctx, args);
+  }
+  return args.tenantId;
+}
+
+async function resolveTenantForOptionalMutation(
+  ctx: MutationCtx,
+  args: { tenantId?: Id<"tenantAccounts">; connectorTokenHash?: string },
+) {
+  if (args.connectorTokenHash) {
+    return await resolveTenantForMutation(ctx, args);
+  }
+  await assertTenantBillingActive(ctx, args.tenantId);
+  return args.tenantId;
+}
 
 type RegistrationLookupCandidate = Pick<Doc<"mediaAssets">, "_id" | "kind" | "contentHash" | "providerContentHash">;
 
@@ -255,6 +284,7 @@ export const generateUploadUrl = mutation({
 
 export const registerAsset = mutation({
   args: {
+    ...tenantScopeArgs,
     kind: mediaKindValidator,
     label: v.string(),
     tags: v.array(v.string()),
@@ -269,6 +299,7 @@ export const registerAsset = mutation({
     enabled: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForOptionalMutation(ctx, args);
     const normalizedContentHash = normalizeHashToken(args.contentHash) || "";
     const normalizedProviderHash = args.kind === "sticker" ? normalizeHashToken(args.providerContentHash) : undefined;
     if (args.kind === "sticker" && !normalizedContentHash) {
@@ -276,6 +307,7 @@ export const registerAsset = mutation({
     }
     const now = Date.now();
     return await ctx.db.insert("mediaAssets", {
+      tenantId,
       kind: args.kind,
       label: args.label.trim().slice(0, 120) || args.kind,
       tags: normalizeTags(args.tags),
@@ -313,6 +345,7 @@ export const findAssetByContentHash = query({
 
 export const registerAssetIfMissing = mutation({
   args: {
+    ...tenantScopeArgs,
     kind: mediaKindValidator,
     label: v.string(),
     tags: v.array(v.string()),
@@ -327,6 +360,7 @@ export const registerAssetIfMissing = mutation({
     enabled: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForOptionalMutation(ctx, args);
     const normalizedHash = normalizeHashToken(args.contentHash) || "";
     const normalizedProviderHash = args.kind === "sticker" ? normalizeHashToken(args.providerContentHash) : undefined;
     if (!normalizedHash) {
@@ -334,15 +368,19 @@ export const registerAssetIfMissing = mutation({
     }
     let existingByProviderContentHash: RegistrationLookupCandidate | null = null;
     if (args.kind === "sticker" && normalizedProviderHash) {
-      existingByProviderContentHash = await ctx.db
+      const providerHashMatches = await ctx.db
         .query("mediaAssets")
         .withIndex("by_kind_and_providerContentHash", (q) => q.eq("kind", "sticker").eq("providerContentHash", normalizedProviderHash))
-        .first();
+        .take(50);
+      existingByProviderContentHash =
+        providerHashMatches.find((asset) => (tenantId ? asset.tenantId === tenantId : !asset.tenantId)) || null;
     }
-    const existingByContentHash = await ctx.db
+    const contentHashMatches = await ctx.db
       .query("mediaAssets")
       .withIndex("by_kind_and_contentHash", (q) => q.eq("kind", args.kind).eq("contentHash", normalizedHash))
-      .first();
+      .take(50);
+    const existingByContentHash =
+      contentHashMatches.find((asset) => (tenantId ? asset.tenantId === tenantId : !asset.tenantId)) || null;
     const resolvedMatch = resolveAssetRegistrationMatch({
       kind: args.kind,
       normalizedContentHash: normalizedHash,
@@ -364,6 +402,7 @@ export const registerAssetIfMissing = mutation({
 
     const now = Date.now();
     return await ctx.db.insert("mediaAssets", {
+      tenantId,
       kind: args.kind,
       label: args.label.trim().slice(0, 120) || args.kind,
       tags: normalizeTags(args.tags),
@@ -442,18 +481,36 @@ export const listStickerAssetsNeedingContext = query({
 
 export const listAssets = query({
   args: {
+    ...tenantScopeArgs,
     kind: v.optional(mediaKindValidator),
     enabledOnly: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForOptionalQuery(ctx, args);
     const limit = 200;
-    let assets = args.kind
-      ? await ctx.db
-          .query("mediaAssets")
-          .withIndex("by_kind", (q) => q.eq("kind", args.kind!))
-          .order("desc")
-          .take(limit)
-      : await ctx.db.query("mediaAssets").order("desc").take(limit);
+    const kinds = args.kind ? [args.kind] : MEDIA_KINDS;
+    let assets = tenantId
+      ? (
+          await Promise.all(
+            kinds.map((kind) =>
+              ctx.db
+                .query("mediaAssets")
+                .withIndex("by_tenantId_and_kind", (q) => q.eq("tenantId", tenantId).eq("kind", kind))
+                .order("desc")
+                .take(limit),
+            ),
+          )
+        )
+          .flat()
+          .sort((a, b) => b.createdAt - a.createdAt)
+          .slice(0, limit)
+      : args.kind
+        ? await ctx.db
+            .query("mediaAssets")
+            .withIndex("by_kind", (q) => q.eq("kind", args.kind!))
+            .order("desc")
+            .take(limit)
+        : await ctx.db.query("mediaAssets").order("desc").take(limit);
 
     if (args.enabledOnly) {
       assets = assets.filter((asset) => asset.enabled);
@@ -473,19 +530,45 @@ export const listAssets = query({
 
 export const listUnifiedMedia = query({
   args: {
+    ...tenantScopeArgs,
     filter: v.optional(dashboardFilterValidator),
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForOptionalQuery(ctx, args);
     const filter = args.filter || "all";
     const limit = Math.max(20, Math.min(args.limit ?? 240, 400));
     const messageScanLimit = Math.min(Math.max(limit * 4, 300), 1500);
     const assetScanLimit = Math.min(Math.max(limit * 4, 300), 1500);
+    const filteredKinds = MEDIA_KINDS.filter((kind) => matchesDashboardFilter(kind, filter));
 
-    const [recentMessages, recentAssets] = await Promise.all([
-      ctx.db.query("messages").withIndex("by_createdAt").order("desc").take(messageScanLimit),
-      ctx.db.query("mediaAssets").order("desc").take(assetScanLimit),
-    ]);
+    const [recentMessages, recentAssets] = tenantId
+      ? await Promise.all([
+          Promise.all(
+            (["whatsapp", "instagram", undefined] as const).map((provider) =>
+              ctx.db
+                .query("messages")
+                .withIndex("by_tenantId_and_provider_and_createdAt", (q) =>
+                  q.eq("tenantId", tenantId).eq("provider", provider),
+                )
+                .order("desc")
+                .take(messageScanLimit),
+            ),
+          ).then((rows) => rows.flat().sort((a, b) => b.createdAt - a.createdAt).slice(0, messageScanLimit)),
+          Promise.all(
+            filteredKinds.map((kind) =>
+              ctx.db
+                .query("mediaAssets")
+                .withIndex("by_tenantId_and_kind", (q) => q.eq("tenantId", tenantId).eq("kind", kind))
+                .order("desc")
+                .take(assetScanLimit),
+            ),
+          ).then((rows) => rows.flat().sort((a, b) => b.createdAt - a.createdAt).slice(0, assetScanLimit)),
+        ])
+      : await Promise.all([
+          ctx.db.query("messages").withIndex("by_createdAt").order("desc").take(messageScanLimit),
+          ctx.db.query("mediaAssets").order("desc").take(assetScanLimit),
+        ]);
 
     const messagesWithMedia = recentMessages.filter((message) => Boolean(message.mediaAssetId));
     const messageAssetIds = [
@@ -926,14 +1009,17 @@ export const getAssetDownloadUrl = query({
 
 export const toggleAsset = mutation({
   args: {
+    ...tenantScopeArgs,
     assetId: v.id("mediaAssets"),
     enabled: v.boolean(),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForOptionalMutation(ctx, args);
     const asset = await ctx.db.get(args.assetId);
     if (!asset) {
       return null;
     }
+    assertTenantOwned(tenantId, asset.tenantId);
     await ctx.db.patch(asset._id, {
       enabled: args.enabled,
       updatedAt: Date.now(),
@@ -944,6 +1030,7 @@ export const toggleAsset = mutation({
 
 export const updateAssetMetadata = mutation({
   args: {
+    ...tenantScopeArgs,
     assetId: v.id("mediaAssets"),
     label: v.optional(v.string()),
     tags: v.optional(v.array(v.string())),
@@ -956,10 +1043,12 @@ export const updateAssetMetadata = mutation({
     contextSource: v.optional(v.union(v.literal("vision_ai"), v.literal("heuristic"))),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForOptionalMutation(ctx, args);
     const asset = await ctx.db.get(args.assetId);
     if (!asset) {
       return null;
     }
+    assertTenantOwned(tenantId, asset.tenantId);
 
     const now = Date.now();
     const patch: {
@@ -1099,10 +1188,12 @@ async function mergeSourceAssetIntoTarget(
 
 export const mergeAssets = mutation({
   args: {
+    ...tenantScopeArgs,
     sourceAssetId: v.id("mediaAssets"),
     targetAssetId: v.id("mediaAssets"),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForOptionalMutation(ctx, args);
     if (args.sourceAssetId === args.targetAssetId) {
       throw new Error("Source and target must be different assets.");
     }
@@ -1111,6 +1202,8 @@ export const mergeAssets = mutation({
     if (!source || !target) {
       throw new Error("Both source and target assets must exist.");
     }
+    assertTenantOwned(tenantId, source.tenantId);
+    assertTenantOwned(tenantId, target.tenantId);
     if (source.kind !== target.kind) {
       throw new Error("You can only merge assets of the same kind.");
     }
@@ -1246,14 +1339,17 @@ export const dedupeStickerExactPass = mutation({
 
 export const deleteAsset = mutation({
   args: {
+    ...tenantScopeArgs,
     assetId: v.id("mediaAssets"),
     replacementAssetId: v.optional(v.id("mediaAssets")),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForOptionalMutation(ctx, args);
     const asset = await ctx.db.get(args.assetId);
     if (!asset) {
       return null;
     }
+    assertTenantOwned(tenantId, asset.tenantId);
 
     let replacement: Doc<"mediaAssets"> | null = null;
     if (args.replacementAssetId) {
@@ -1261,6 +1357,7 @@ export const deleteAsset = mutation({
       if (!replacement) {
         throw new Error("Replacement asset not found.");
       }
+      assertTenantOwned(tenantId, replacement.tenantId);
       if (replacement._id === asset._id) {
         throw new Error("Replacement asset must be different from the asset being deleted.");
       }

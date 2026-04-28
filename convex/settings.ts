@@ -1,7 +1,10 @@
 import { v } from "convex/values";
 import { type MutationCtx, mutation, query } from "./_generated/server";
+import type { Id } from "./_generated/dataModel";
 import { type AiDeterministicMode, DEFAULT_APP_CONFIG, getConfig, setConfigValue } from "./lib/config";
 import { classifyThreadKind } from "./lib/threadEligibility";
+import { resolveTenantForMutation, resolveTenantForQuery } from "./lib/tenantSecurity";
+import { assertTenantBillingActive } from "./lib/billingAccess";
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(value, max));
@@ -48,6 +51,25 @@ const ALLOWED_AI_DETERMINISTIC_MODE_SET = new Set<AiDeterministicMode>([
 ]);
 const ROMANTIC_PARTNER_PROFILE_SLUG = "relationship";
 const ROMANTIC_PARTNER_DEFAULT_INTENSITY = 0.78;
+const tenantScopeArgs = {
+  tenantId: v.optional(v.id("tenantAccounts")),
+  connectorTokenHash: v.optional(v.string()),
+};
+
+async function resolveTenantForOptionalMutation(
+  ctx: MutationCtx,
+  args: { tenantId?: Id<"tenantAccounts">; connectorTokenHash?: string },
+) {
+  if (args.connectorTokenHash) {
+    return await resolveTenantForMutation(ctx, args);
+  }
+  await assertTenantBillingActive(ctx, args.tenantId);
+  return args.tenantId;
+}
+
+async function setScopedConfigValue(ctx: MutationCtx, tenantId: Id<"tenantAccounts"> | undefined, key: string, value: string) {
+  return await setConfigValue(ctx, key, value, tenantId);
+}
 
 function isAiDeterministicMode(value: string): value is AiDeterministicMode {
   return ALLOWED_AI_DETERMINISTIC_MODE_SET.has(value as AiDeterministicMode);
@@ -67,7 +89,11 @@ function isDirectWhatsAppThread(thread: {
   return kind === "direct";
 }
 
-async function upsertRomanticPartnerMappings(ctx: MutationCtx, romanticPartnerJids: string[]) {
+async function upsertRomanticPartnerMappings(
+  ctx: MutationCtx,
+  romanticPartnerJids: string[],
+  tenantId?: Id<"tenantAccounts">,
+) {
   if (romanticPartnerJids.length === 0) {
     return { matchedThreads: 0 };
   }
@@ -76,10 +102,17 @@ async function upsertRomanticPartnerMappings(ctx: MutationCtx, romanticPartnerJi
   let matchedThreads = 0;
 
   for (const jid of romanticPartnerJids) {
-    const threadByProvider = await ctx.db
-      .query("threads")
-      .withIndex("by_provider_and_jid", (q) => q.eq("provider", "whatsapp").eq("jid", jid))
-      .first();
+    const threadByProvider = tenantId
+      ? await ctx.db
+          .query("threads")
+          .withIndex("by_tenantId_and_provider_and_jid", (q) =>
+            q.eq("tenantId", tenantId).eq("provider", "whatsapp").eq("jid", jid),
+          )
+          .first()
+      : await ctx.db
+          .query("threads")
+          .withIndex("by_provider_and_jid", (q) => q.eq("provider", "whatsapp").eq("jid", jid))
+          .first();
     const threadByJid =
       threadByProvider ||
       (await ctx.db
@@ -97,6 +130,7 @@ async function upsertRomanticPartnerMappings(ctx: MutationCtx, romanticPartnerJi
       .first();
     if (!personalitySetting) {
       await ctx.db.insert("threadPersonalitySettings", {
+        tenantId: threadByJid.tenantId || tenantId,
         threadId: threadByJid._id,
         profileSlug: ROMANTIC_PARTNER_PROFILE_SLUG,
         intensity: ROMANTIC_PARTNER_DEFAULT_INTENSITY,
@@ -157,14 +191,16 @@ async function upsertRomanticPartnerMappings(ctx: MutationCtx, romanticPartnerJi
 }
 
 export const get = query({
-  args: {},
-  handler: async (ctx) => {
-    return await getConfig(ctx);
+  args: tenantScopeArgs,
+  handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForQuery(ctx, args);
+    return await getConfig(ctx, tenantId);
   },
 });
 
 export const saveOnboardingPreset = mutation({
   args: {
+    ...tenantScopeArgs,
     autonomyMode: v.union(v.literal("review_first"), v.literal("autopilot")),
     replyPace: v.union(v.literal("measured"), v.literal("deliberate"), v.literal("unhurried")),
     quietHoursEnabled: v.boolean(),
@@ -173,37 +209,42 @@ export const saveOnboardingPreset = mutation({
     memesEnabled: v.boolean(),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForOptionalMutation(ctx, args);
     const pace = resolveOnboardingReplyPacePreset(args.replyPace);
     const quietHoursStartHour = clampInt(args.quietHoursStartHour, 0, 23);
     const quietHoursEndHour = clampInt(args.quietHoursEndHour, 0, 23);
 
-    await setConfigValue(ctx, "autonomyPaused", args.autonomyMode === "review_first" ? "true" : "false");
-    await setConfigValue(ctx, "humanDelayMinMs", String(pace.humanDelayMinMs));
-    await setConfigValue(ctx, "humanDelayMaxMs", String(pace.humanDelayMaxMs));
-    await setConfigValue(ctx, "humanTypingMinMs", String(pace.humanTypingMinMs));
-    await setConfigValue(ctx, "humanTypingMaxMs", String(pace.humanTypingMaxMs));
-    await setConfigValue(ctx, "quietHoursEnabled", args.quietHoursEnabled ? "true" : "false");
-    await setConfigValue(ctx, "quietHoursStartHour", String(quietHoursStartHour));
-    await setConfigValue(ctx, "quietHoursEndHour", String(quietHoursEndHour));
-    await setConfigValue(ctx, "memesEnabled", args.memesEnabled ? "true" : "false");
+    await setScopedConfigValue(ctx, tenantId, "autonomyPaused", args.autonomyMode === "review_first" ? "true" : "false");
+    await setScopedConfigValue(ctx, tenantId, "humanDelayMinMs", String(pace.humanDelayMinMs));
+    await setScopedConfigValue(ctx, tenantId, "humanDelayMaxMs", String(pace.humanDelayMaxMs));
+    await setScopedConfigValue(ctx, tenantId, "humanTypingMinMs", String(pace.humanTypingMinMs));
+    await setScopedConfigValue(ctx, tenantId, "humanTypingMaxMs", String(pace.humanTypingMaxMs));
+    await setScopedConfigValue(ctx, tenantId, "quietHoursEnabled", args.quietHoursEnabled ? "true" : "false");
+    await setScopedConfigValue(ctx, tenantId, "quietHoursStartHour", String(quietHoursStartHour));
+    await setScopedConfigValue(ctx, tenantId, "quietHoursEndHour", String(quietHoursEndHour));
+    await setScopedConfigValue(ctx, tenantId, "memesEnabled", args.memesEnabled ? "true" : "false");
     await ctx.db.insert("systemEvents", {
+      tenantId,
       source: "dashboard",
       eventType: "setup.onboarding_preferences.saved",
       detail: `mode=${args.autonomyMode} pace=${args.replyPace} quiet_hours=${args.quietHoursEnabled ? `${quietHoursStartHour}-${quietHoursEndHour}` : "off"} memes=${args.memesEnabled ? "on" : "off"}`,
       createdAt: Date.now(),
     });
 
-    return await getConfig(ctx);
+    return await getConfig(ctx, tenantId);
   },
 });
 
 export const setStatusBuilderEnabled = mutation({
   args: {
+    ...tenantScopeArgs,
     enabled: v.boolean(),
   },
   handler: async (ctx, args) => {
-    await setConfigValue(ctx, "statusBuilderEnabled", args.enabled ? "true" : "false");
+    const tenantId = await resolveTenantForOptionalMutation(ctx, args);
+    await setScopedConfigValue(ctx, tenantId, "statusBuilderEnabled", args.enabled ? "true" : "false");
     await ctx.db.insert("systemEvents", {
+      tenantId,
       source: "dashboard",
       eventType: args.enabled ? "status_builder.enabled" : "status_builder.disabled",
       detail: `Auto status posting ${args.enabled ? "enabled" : "disabled"} from Status page.`,
@@ -215,6 +256,7 @@ export const setStatusBuilderEnabled = mutation({
 
 export const save = mutation({
   args: {
+    ...tenantScopeArgs,
     ignoreGroupsByDefault: v.boolean(),
     reactionsEnabled: v.boolean(),
     stickersEnabled: v.boolean(),
@@ -329,6 +371,7 @@ export const save = mutation({
     instagramStoryDailyMaxPosts: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForOptionalMutation(ctx, args);
     const romanticPartnerJids = [...new Set((args.romanticPartnerJids || []).map((item) => item.trim().toLowerCase()).filter(Boolean))].slice(
       0,
       300,
@@ -638,86 +681,86 @@ export const save = mutation({
       normalized.instagramTypingMaxMs = swapped;
     }
 
-    const romanticSyncResult = await upsertRomanticPartnerMappings(ctx, normalized.romanticPartnerJids);
+    const romanticSyncResult = await upsertRomanticPartnerMappings(ctx, normalized.romanticPartnerJids, tenantId);
 
-    await setConfigValue(ctx, "ignoreGroupsByDefault", normalized.ignoreGroupsByDefault ? "true" : "false");
-    await setConfigValue(ctx, "reactionsEnabled", normalized.reactionsEnabled ? "true" : "false");
-    await setConfigValue(ctx, "stickersEnabled", normalized.stickersEnabled ? "true" : "false");
-    await setConfigValue(ctx, "memesEnabled", normalized.memesEnabled ? "true" : "false");
-    await setConfigValue(ctx, "generatedMemesEnabled", normalized.generatedMemesEnabled ? "true" : "false");
-    await setConfigValue(ctx, "generatedMemesAutoSendEnabled", normalized.generatedMemesAutoSendEnabled ? "true" : "false");
-    await setConfigValue(ctx, "memeThreadCooldownMs", String(normalized.memeThreadCooldownMs));
-    await setConfigValue(ctx, "memeSendProbability", String(normalized.memeSendProbability));
-    await setConfigValue(ctx, "soulModeEnabled", normalized.soulModeEnabled ? "true" : "false");
-    await setConfigValue(ctx, "humorLearningEnabled", normalized.humorLearningEnabled ? "true" : "false");
-    await setConfigValue(ctx, "selfRoastModeEnabled", normalized.selfRoastModeEnabled ? "true" : "false");
-    await setConfigValue(ctx, "statusAutoReplyEnabled", normalized.statusAutoReplyEnabled ? "true" : "false");
-    await setConfigValue(ctx, "statusReplyRequireFunny", normalized.statusReplyRequireFunny ? "true" : "false");
-    await setConfigValue(ctx, "captureGroupMediaEnabled", normalized.captureGroupMediaEnabled ? "true" : "false");
-    await setConfigValue(ctx, "funnyStatusKeywords", normalized.funnyStatusKeywords.join("\n"));
-    await setConfigValue(ctx, "funnyStatusEmojis", normalized.funnyStatusEmojis.join("\n"));
-    await setConfigValue(ctx, "aiFallbackMode", normalized.aiFallbackMode);
-    await setConfigValue(ctx, "aiModelFirstEnabled", normalized.aiModelFirstEnabled ? "true" : "false");
-    await setConfigValue(ctx, "aiDeterministicModes", normalized.aiDeterministicModes.join("\n"));
-    await setConfigValue(ctx, "aiAckRoutingEnabled", normalized.aiAckRoutingEnabled ? "true" : "false");
-    await setConfigValue(ctx, "aiTemperature", String(normalized.aiTemperature));
-    await setConfigValue(ctx, "aiMaxOutputTokens", String(normalized.aiMaxOutputTokens));
-    await setConfigValue(ctx, "aiMaxReplyChars", String(normalized.aiMaxReplyChars));
-    await setConfigValue(ctx, "aiHistoryLineLimit", String(normalized.aiHistoryLineLimit));
-    await setConfigValue(ctx, "aiPrimaryConfidence", String(normalized.aiPrimaryConfidence));
-    await setConfigValue(ctx, "aiFallbackConfidence", String(normalized.aiFallbackConfidence));
-    await setConfigValue(ctx, "aiReplyPolicy", normalized.aiReplyPolicy);
-    await setConfigValue(ctx, "aiSystemInstruction", normalized.aiSystemInstruction);
-    await setConfigValue(ctx, "activePersonaPackId", normalized.activePersonaPackId);
-    await setConfigValue(ctx, "activePersonaPackIdsByProfile", JSON.stringify(normalized.activePersonaPackIdsByProfile));
-    await setConfigValue(ctx, "qualityGateMode", normalized.qualityGateMode);
-    await setConfigValue(ctx, "qualityGateThreshold", String(normalized.qualityGateThreshold));
-    await setConfigValue(ctx, "humanDelayMinMs", String(normalized.humanDelayMinMs));
-    await setConfigValue(ctx, "humanDelayMaxMs", String(normalized.humanDelayMaxMs));
-    await setConfigValue(ctx, "humanTypingMinMs", String(normalized.humanTypingMinMs));
-    await setConfigValue(ctx, "humanTypingMaxMs", String(normalized.humanTypingMaxMs));
-    await setConfigValue(ctx, "outboxClaimLimit", String(normalized.outboxClaimLimit));
-    await setConfigValue(ctx, "outboxPollMs", String(normalized.outboxPollMs));
-    await setConfigValue(ctx, "inboundMergeWindowMs", String(normalized.inboundMergeWindowMs));
-    await setConfigValue(ctx, "manualInterventionCooldownMs", String(normalized.manualInterventionCooldownMs));
-    await setConfigValue(ctx, "inboundConcurrency", String(normalized.inboundConcurrency));
-    await setConfigValue(ctx, "outboxSendConcurrency", String(normalized.outboxSendConcurrency));
-    await setConfigValue(ctx, "statusRetentionMs", String(normalized.statusRetentionMs));
-    await setConfigValue(ctx, "statusCleanupIntervalMs", String(normalized.statusCleanupIntervalMs));
-    await setConfigValue(ctx, "statusCleanupBatchLimit", String(normalized.statusCleanupBatchLimit));
-    await setConfigValue(ctx, "statusContextKeepPerThread", String(normalized.statusContextKeepPerThread));
-    await setConfigValue(ctx, "groupContextKeepPerThread", String(normalized.groupContextKeepPerThread));
-    await setConfigValue(ctx, "contextCompactionIntervalMs", String(normalized.contextCompactionIntervalMs));
-    await setConfigValue(ctx, "contextCompactionMaxThreads", String(normalized.contextCompactionMaxThreads));
-    await setConfigValue(ctx, "contextCompactionMaxDeletes", String(normalized.contextCompactionMaxDeletes));
-    await setConfigValue(ctx, "compactContextGroupJids", normalized.compactContextGroupJids.join("\n"));
-    await setConfigValue(ctx, "quietHoursEnabled", normalized.quietHoursEnabled ? "true" : "false");
-    await setConfigValue(ctx, "quietHoursStartHour", String(normalized.quietHoursStartHour));
-    await setConfigValue(ctx, "quietHoursEndHour", String(normalized.quietHoursEndHour));
-    await setConfigValue(ctx, "autoMarkReadEnabled", normalized.autoMarkReadEnabled ? "true" : "false");
-    await setConfigValue(ctx, "autoMarkReadGroups", normalized.autoMarkReadGroups ? "true" : "false");
-    await setConfigValue(ctx, "autoMarkReadStatus", normalized.autoMarkReadStatus ? "true" : "false");
-    await setConfigValue(ctx, "presenceSubscribeEnabled", normalized.presenceSubscribeEnabled ? "true" : "false");
-    await setConfigValue(ctx, "chatModifyQuietHoursEnabled", normalized.chatModifyQuietHoursEnabled ? "true" : "false");
-    await setConfigValue(ctx, "aboutAutomationEnabled", normalized.aboutAutomationEnabled ? "true" : "false");
-    await setConfigValue(ctx, "aboutAutomationIntervalMinutes", String(normalized.aboutAutomationIntervalMinutes));
-    await setConfigValue(ctx, "aboutAutomationTemplate", normalized.aboutAutomationTemplate);
-    await setConfigValue(ctx, "sendRateWindowMinutes", String(normalized.sendRateWindowMinutes));
-    await setConfigValue(ctx, "sendMaxPerThreadInWindow", String(normalized.sendMaxPerThreadInWindow));
-    await setConfigValue(ctx, "sendMaxGlobalInWindow", String(normalized.sendMaxGlobalInWindow));
-    await setConfigValue(ctx, "voiceNotesAutoEnabled", normalized.voiceNotesAutoEnabled ? "true" : "false");
-    await setConfigValue(ctx, "voiceNotesAutoProbability", String(normalized.voiceNotesAutoProbability));
+    await setScopedConfigValue(ctx, tenantId, "ignoreGroupsByDefault", normalized.ignoreGroupsByDefault ? "true" : "false");
+    await setScopedConfigValue(ctx, tenantId, "reactionsEnabled", normalized.reactionsEnabled ? "true" : "false");
+    await setScopedConfigValue(ctx, tenantId, "stickersEnabled", normalized.stickersEnabled ? "true" : "false");
+    await setScopedConfigValue(ctx, tenantId, "memesEnabled", normalized.memesEnabled ? "true" : "false");
+    await setScopedConfigValue(ctx, tenantId, "generatedMemesEnabled", normalized.generatedMemesEnabled ? "true" : "false");
+    await setScopedConfigValue(ctx, tenantId, "generatedMemesAutoSendEnabled", normalized.generatedMemesAutoSendEnabled ? "true" : "false");
+    await setScopedConfigValue(ctx, tenantId, "memeThreadCooldownMs", String(normalized.memeThreadCooldownMs));
+    await setScopedConfigValue(ctx, tenantId, "memeSendProbability", String(normalized.memeSendProbability));
+    await setScopedConfigValue(ctx, tenantId, "soulModeEnabled", normalized.soulModeEnabled ? "true" : "false");
+    await setScopedConfigValue(ctx, tenantId, "humorLearningEnabled", normalized.humorLearningEnabled ? "true" : "false");
+    await setScopedConfigValue(ctx, tenantId, "selfRoastModeEnabled", normalized.selfRoastModeEnabled ? "true" : "false");
+    await setScopedConfigValue(ctx, tenantId, "statusAutoReplyEnabled", normalized.statusAutoReplyEnabled ? "true" : "false");
+    await setScopedConfigValue(ctx, tenantId, "statusReplyRequireFunny", normalized.statusReplyRequireFunny ? "true" : "false");
+    await setScopedConfigValue(ctx, tenantId, "captureGroupMediaEnabled", normalized.captureGroupMediaEnabled ? "true" : "false");
+    await setScopedConfigValue(ctx, tenantId, "funnyStatusKeywords", normalized.funnyStatusKeywords.join("\n"));
+    await setScopedConfigValue(ctx, tenantId, "funnyStatusEmojis", normalized.funnyStatusEmojis.join("\n"));
+    await setScopedConfigValue(ctx, tenantId, "aiFallbackMode", normalized.aiFallbackMode);
+    await setScopedConfigValue(ctx, tenantId, "aiModelFirstEnabled", normalized.aiModelFirstEnabled ? "true" : "false");
+    await setScopedConfigValue(ctx, tenantId, "aiDeterministicModes", normalized.aiDeterministicModes.join("\n"));
+    await setScopedConfigValue(ctx, tenantId, "aiAckRoutingEnabled", normalized.aiAckRoutingEnabled ? "true" : "false");
+    await setScopedConfigValue(ctx, tenantId, "aiTemperature", String(normalized.aiTemperature));
+    await setScopedConfigValue(ctx, tenantId, "aiMaxOutputTokens", String(normalized.aiMaxOutputTokens));
+    await setScopedConfigValue(ctx, tenantId, "aiMaxReplyChars", String(normalized.aiMaxReplyChars));
+    await setScopedConfigValue(ctx, tenantId, "aiHistoryLineLimit", String(normalized.aiHistoryLineLimit));
+    await setScopedConfigValue(ctx, tenantId, "aiPrimaryConfidence", String(normalized.aiPrimaryConfidence));
+    await setScopedConfigValue(ctx, tenantId, "aiFallbackConfidence", String(normalized.aiFallbackConfidence));
+    await setScopedConfigValue(ctx, tenantId, "aiReplyPolicy", normalized.aiReplyPolicy);
+    await setScopedConfigValue(ctx, tenantId, "aiSystemInstruction", normalized.aiSystemInstruction);
+    await setScopedConfigValue(ctx, tenantId, "activePersonaPackId", normalized.activePersonaPackId);
+    await setScopedConfigValue(ctx, tenantId, "activePersonaPackIdsByProfile", JSON.stringify(normalized.activePersonaPackIdsByProfile));
+    await setScopedConfigValue(ctx, tenantId, "qualityGateMode", normalized.qualityGateMode);
+    await setScopedConfigValue(ctx, tenantId, "qualityGateThreshold", String(normalized.qualityGateThreshold));
+    await setScopedConfigValue(ctx, tenantId, "humanDelayMinMs", String(normalized.humanDelayMinMs));
+    await setScopedConfigValue(ctx, tenantId, "humanDelayMaxMs", String(normalized.humanDelayMaxMs));
+    await setScopedConfigValue(ctx, tenantId, "humanTypingMinMs", String(normalized.humanTypingMinMs));
+    await setScopedConfigValue(ctx, tenantId, "humanTypingMaxMs", String(normalized.humanTypingMaxMs));
+    await setScopedConfigValue(ctx, tenantId, "outboxClaimLimit", String(normalized.outboxClaimLimit));
+    await setScopedConfigValue(ctx, tenantId, "outboxPollMs", String(normalized.outboxPollMs));
+    await setScopedConfigValue(ctx, tenantId, "inboundMergeWindowMs", String(normalized.inboundMergeWindowMs));
+    await setScopedConfigValue(ctx, tenantId, "manualInterventionCooldownMs", String(normalized.manualInterventionCooldownMs));
+    await setScopedConfigValue(ctx, tenantId, "inboundConcurrency", String(normalized.inboundConcurrency));
+    await setScopedConfigValue(ctx, tenantId, "outboxSendConcurrency", String(normalized.outboxSendConcurrency));
+    await setScopedConfigValue(ctx, tenantId, "statusRetentionMs", String(normalized.statusRetentionMs));
+    await setScopedConfigValue(ctx, tenantId, "statusCleanupIntervalMs", String(normalized.statusCleanupIntervalMs));
+    await setScopedConfigValue(ctx, tenantId, "statusCleanupBatchLimit", String(normalized.statusCleanupBatchLimit));
+    await setScopedConfigValue(ctx, tenantId, "statusContextKeepPerThread", String(normalized.statusContextKeepPerThread));
+    await setScopedConfigValue(ctx, tenantId, "groupContextKeepPerThread", String(normalized.groupContextKeepPerThread));
+    await setScopedConfigValue(ctx, tenantId, "contextCompactionIntervalMs", String(normalized.contextCompactionIntervalMs));
+    await setScopedConfigValue(ctx, tenantId, "contextCompactionMaxThreads", String(normalized.contextCompactionMaxThreads));
+    await setScopedConfigValue(ctx, tenantId, "contextCompactionMaxDeletes", String(normalized.contextCompactionMaxDeletes));
+    await setScopedConfigValue(ctx, tenantId, "compactContextGroupJids", normalized.compactContextGroupJids.join("\n"));
+    await setScopedConfigValue(ctx, tenantId, "quietHoursEnabled", normalized.quietHoursEnabled ? "true" : "false");
+    await setScopedConfigValue(ctx, tenantId, "quietHoursStartHour", String(normalized.quietHoursStartHour));
+    await setScopedConfigValue(ctx, tenantId, "quietHoursEndHour", String(normalized.quietHoursEndHour));
+    await setScopedConfigValue(ctx, tenantId, "autoMarkReadEnabled", normalized.autoMarkReadEnabled ? "true" : "false");
+    await setScopedConfigValue(ctx, tenantId, "autoMarkReadGroups", normalized.autoMarkReadGroups ? "true" : "false");
+    await setScopedConfigValue(ctx, tenantId, "autoMarkReadStatus", normalized.autoMarkReadStatus ? "true" : "false");
+    await setScopedConfigValue(ctx, tenantId, "presenceSubscribeEnabled", normalized.presenceSubscribeEnabled ? "true" : "false");
+    await setScopedConfigValue(ctx, tenantId, "chatModifyQuietHoursEnabled", normalized.chatModifyQuietHoursEnabled ? "true" : "false");
+    await setScopedConfigValue(ctx, tenantId, "aboutAutomationEnabled", normalized.aboutAutomationEnabled ? "true" : "false");
+    await setScopedConfigValue(ctx, tenantId, "aboutAutomationIntervalMinutes", String(normalized.aboutAutomationIntervalMinutes));
+    await setScopedConfigValue(ctx, tenantId, "aboutAutomationTemplate", normalized.aboutAutomationTemplate);
+    await setScopedConfigValue(ctx, tenantId, "sendRateWindowMinutes", String(normalized.sendRateWindowMinutes));
+    await setScopedConfigValue(ctx, tenantId, "sendMaxPerThreadInWindow", String(normalized.sendMaxPerThreadInWindow));
+    await setScopedConfigValue(ctx, tenantId, "sendMaxGlobalInWindow", String(normalized.sendMaxGlobalInWindow));
+    await setScopedConfigValue(ctx, tenantId, "voiceNotesAutoEnabled", normalized.voiceNotesAutoEnabled ? "true" : "false");
+    await setScopedConfigValue(ctx, tenantId, "voiceNotesAutoProbability", String(normalized.voiceNotesAutoProbability));
     await setConfigValue(
       ctx,
       "voiceNotesAutoMaxPerThreadPerDay",
       String(normalized.voiceNotesAutoMaxPerThreadPerDay),
     );
-    await setConfigValue(ctx, "voiceNotesAutoNeedKeywords", normalized.voiceNotesAutoNeedKeywords.join("\n"));
-    await setConfigValue(ctx, "romanticPartnerJids", normalized.romanticPartnerJids.join("\n"));
-    await setConfigValue(ctx, "romanticMorningEnabled", normalized.romanticMorningEnabled ? "true" : "false");
-    await setConfigValue(ctx, "romanticMorningStartHour", String(normalized.romanticMorningStartHour));
-    await setConfigValue(ctx, "romanticMorningEndHour", String(normalized.romanticMorningEndHour));
-    await setConfigValue(ctx, "romanticMorningLeadRatio", String(normalized.romanticMorningLeadRatio));
+    await setScopedConfigValue(ctx, tenantId, "voiceNotesAutoNeedKeywords", normalized.voiceNotesAutoNeedKeywords.join("\n"));
+    await setScopedConfigValue(ctx, tenantId, "romanticPartnerJids", normalized.romanticPartnerJids.join("\n"));
+    await setScopedConfigValue(ctx, tenantId, "romanticMorningEnabled", normalized.romanticMorningEnabled ? "true" : "false");
+    await setScopedConfigValue(ctx, tenantId, "romanticMorningStartHour", String(normalized.romanticMorningStartHour));
+    await setScopedConfigValue(ctx, tenantId, "romanticMorningEndHour", String(normalized.romanticMorningEndHour));
+    await setScopedConfigValue(ctx, tenantId, "romanticMorningLeadRatio", String(normalized.romanticMorningLeadRatio));
     await setConfigValue(
       ctx,
       "romanticMorningCollisionCooldownHours",
@@ -728,50 +771,51 @@ export const save = mutation({
       "romanticMorningMaxPerThreadPerDay",
       String(normalized.romanticMorningMaxPerThreadPerDay),
     );
-    await setConfigValue(ctx, "outreachEnabled", normalized.outreachEnabled ? "true" : "false");
-    await setConfigValue(ctx, "outreachCadenceHours", String(normalized.outreachCadenceHours));
-    await setConfigValue(ctx, "outreachMaxContactsPerRun", String(normalized.outreachMaxContactsPerRun));
-    await setConfigValue(ctx, "outreachContactJids", normalized.outreachContactJids.join("\n"));
-    await setConfigValue(ctx, "outreachStarterTemplate", normalized.outreachStarterTemplate);
+    await setScopedConfigValue(ctx, tenantId, "outreachEnabled", normalized.outreachEnabled ? "true" : "false");
+    await setScopedConfigValue(ctx, tenantId, "outreachCadenceHours", String(normalized.outreachCadenceHours));
+    await setScopedConfigValue(ctx, tenantId, "outreachMaxContactsPerRun", String(normalized.outreachMaxContactsPerRun));
+    await setScopedConfigValue(ctx, tenantId, "outreachContactJids", normalized.outreachContactJids.join("\n"));
+    await setScopedConfigValue(ctx, tenantId, "outreachStarterTemplate", normalized.outreachStarterTemplate);
     await setConfigValue(
       ctx,
       "conversationIntelligenceEnabled",
       normalized.conversationIntelligenceEnabled ? "true" : "false",
     );
-    await setConfigValue(ctx, "checkInRecencyTargetDays", String(normalized.checkInRecencyTargetDays));
-    await setConfigValue(ctx, "topicDyingAckStreakThreshold", String(normalized.topicDyingAckStreakThreshold));
-    await setConfigValue(ctx, "topicLaneMaxActive", String(normalized.topicLaneMaxActive));
-    await setConfigValue(ctx, "pivotReplyEnabled", normalized.pivotReplyEnabled ? "true" : "false");
-    await setConfigValue(ctx, "antiDwellingEnabled", normalized.antiDwellingEnabled ? "true" : "false");
+    await setScopedConfigValue(ctx, tenantId, "checkInRecencyTargetDays", String(normalized.checkInRecencyTargetDays));
+    await setScopedConfigValue(ctx, tenantId, "topicDyingAckStreakThreshold", String(normalized.topicDyingAckStreakThreshold));
+    await setScopedConfigValue(ctx, tenantId, "topicLaneMaxActive", String(normalized.topicLaneMaxActive));
+    await setScopedConfigValue(ctx, tenantId, "pivotReplyEnabled", normalized.pivotReplyEnabled ? "true" : "false");
+    await setScopedConfigValue(ctx, tenantId, "antiDwellingEnabled", normalized.antiDwellingEnabled ? "true" : "false");
     await setConfigValue(
       ctx,
       "antiDwellingEndgameCloseCooldownMinutes",
       String(normalized.antiDwellingEndgameCloseCooldownMinutes),
     );
-    await setConfigValue(ctx, "antiDwellingTopicTurnSoftLimit", String(normalized.antiDwellingTopicTurnSoftLimit));
-    await setConfigValue(ctx, "antiDwellingTopicTurnHardLimit", String(normalized.antiDwellingTopicTurnHardLimit));
-    await setConfigValue(ctx, "topicLeadPivotEnabled", normalized.topicLeadPivotEnabled ? "true" : "false");
-    await setConfigValue(ctx, "topicLeadPivotMinVibeScore", String(normalized.topicLeadPivotMinVibeScore));
-    await setConfigValue(ctx, "topicLeadPivotCooldownMinutes", String(normalized.topicLeadPivotCooldownMinutes));
-    await setConfigValue(ctx, "statusBuilderEnabled", normalized.statusBuilderEnabled ? "true" : "false");
-    await setConfigValue(ctx, "statusBuilderCadenceHours", String(normalized.statusBuilderCadenceHours));
-    await setConfigValue(ctx, "statusBuilderDailyMaxPosts", String(normalized.statusBuilderDailyMaxPosts));
-    await setConfigValue(ctx, "statusBuilderTextPostRatio", String(normalized.statusBuilderTextPostRatio));
-    await setConfigValue(ctx, "statusBuilderReviewRatio", String(normalized.statusBuilderReviewRatio));
-    await setConfigValue(ctx, "statusPostAudienceMode", normalized.statusPostAudienceMode);
-    await setConfigValue(ctx, "statusBuilderAudienceJids", normalized.statusBuilderAudienceJids.join("\n"));
-    await setConfigValue(ctx, "statusBuilderAudienceSampleSize", String(normalized.statusBuilderAudienceSampleSize));
-    await setConfigValue(ctx, "instagramDmDelayMinMs", String(normalized.instagramDmDelayMinMs));
-    await setConfigValue(ctx, "instagramDmDelayMaxMs", String(normalized.instagramDmDelayMaxMs));
-    await setConfigValue(ctx, "instagramTypingMinMs", String(normalized.instagramTypingMinMs));
-    await setConfigValue(ctx, "instagramTypingMaxMs", String(normalized.instagramTypingMaxMs));
-    await setConfigValue(ctx, "instagramSendRateWindowMinutes", String(normalized.instagramSendRateWindowMinutes));
-    await setConfigValue(ctx, "instagramSendMaxPerThreadInWindow", String(normalized.instagramSendMaxPerThreadInWindow));
-    await setConfigValue(ctx, "instagramSendMaxGlobalInWindow", String(normalized.instagramSendMaxGlobalInWindow));
-    await setConfigValue(ctx, "instagramStoryCadenceHours", String(normalized.instagramStoryCadenceHours));
-    await setConfigValue(ctx, "instagramStoryDailyMaxPosts", String(normalized.instagramStoryDailyMaxPosts));
+    await setScopedConfigValue(ctx, tenantId, "antiDwellingTopicTurnSoftLimit", String(normalized.antiDwellingTopicTurnSoftLimit));
+    await setScopedConfigValue(ctx, tenantId, "antiDwellingTopicTurnHardLimit", String(normalized.antiDwellingTopicTurnHardLimit));
+    await setScopedConfigValue(ctx, tenantId, "topicLeadPivotEnabled", normalized.topicLeadPivotEnabled ? "true" : "false");
+    await setScopedConfigValue(ctx, tenantId, "topicLeadPivotMinVibeScore", String(normalized.topicLeadPivotMinVibeScore));
+    await setScopedConfigValue(ctx, tenantId, "topicLeadPivotCooldownMinutes", String(normalized.topicLeadPivotCooldownMinutes));
+    await setScopedConfigValue(ctx, tenantId, "statusBuilderEnabled", normalized.statusBuilderEnabled ? "true" : "false");
+    await setScopedConfigValue(ctx, tenantId, "statusBuilderCadenceHours", String(normalized.statusBuilderCadenceHours));
+    await setScopedConfigValue(ctx, tenantId, "statusBuilderDailyMaxPosts", String(normalized.statusBuilderDailyMaxPosts));
+    await setScopedConfigValue(ctx, tenantId, "statusBuilderTextPostRatio", String(normalized.statusBuilderTextPostRatio));
+    await setScopedConfigValue(ctx, tenantId, "statusBuilderReviewRatio", String(normalized.statusBuilderReviewRatio));
+    await setScopedConfigValue(ctx, tenantId, "statusPostAudienceMode", normalized.statusPostAudienceMode);
+    await setScopedConfigValue(ctx, tenantId, "statusBuilderAudienceJids", normalized.statusBuilderAudienceJids.join("\n"));
+    await setScopedConfigValue(ctx, tenantId, "statusBuilderAudienceSampleSize", String(normalized.statusBuilderAudienceSampleSize));
+    await setScopedConfigValue(ctx, tenantId, "instagramDmDelayMinMs", String(normalized.instagramDmDelayMinMs));
+    await setScopedConfigValue(ctx, tenantId, "instagramDmDelayMaxMs", String(normalized.instagramDmDelayMaxMs));
+    await setScopedConfigValue(ctx, tenantId, "instagramTypingMinMs", String(normalized.instagramTypingMinMs));
+    await setScopedConfigValue(ctx, tenantId, "instagramTypingMaxMs", String(normalized.instagramTypingMaxMs));
+    await setScopedConfigValue(ctx, tenantId, "instagramSendRateWindowMinutes", String(normalized.instagramSendRateWindowMinutes));
+    await setScopedConfigValue(ctx, tenantId, "instagramSendMaxPerThreadInWindow", String(normalized.instagramSendMaxPerThreadInWindow));
+    await setScopedConfigValue(ctx, tenantId, "instagramSendMaxGlobalInWindow", String(normalized.instagramSendMaxGlobalInWindow));
+    await setScopedConfigValue(ctx, tenantId, "instagramStoryCadenceHours", String(normalized.instagramStoryCadenceHours));
+    await setScopedConfigValue(ctx, tenantId, "instagramStoryDailyMaxPosts", String(normalized.instagramStoryDailyMaxPosts));
 
     await ctx.db.insert("systemEvents", {
+      tenantId,
       source: "dashboard",
       eventType: "settings.updated",
       detail: `Runtime settings updated from Settings page. Romantic partner threads synced: ${romanticSyncResult.matchedThreads}.`,

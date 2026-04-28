@@ -1,5 +1,6 @@
 import { v } from "convex/values";
 import { internalMutation } from "./_generated/server";
+import { assertTenantBillingActive } from "./lib/billingAccess";
 
 export const summarize = internalMutation({
   args: {
@@ -8,6 +9,11 @@ export const summarize = internalMutation({
   handler: async (ctx, args) => {
     const thread = await ctx.db.get(args.threadId);
     if (!thread) {
+      return null;
+    }
+    try {
+      await assertTenantBillingActive(ctx, thread.tenantId);
+    } catch {
       return null;
     }
 

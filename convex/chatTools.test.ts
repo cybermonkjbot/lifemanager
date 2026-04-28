@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { judgeFactCandidate, planToolRouterSteps, selectActiveFactsForUse, toolRouterPlan } from "./chatTools";
+import {
+  hasSufficientContactMemoryForAmbientSkip,
+  inferAmbientContactFacts,
+  judgeFactCandidate,
+  planToolRouterSteps,
+  selectActiveFactsForUse,
+  toolRouterPlan,
+} from "./chatTools";
 
 type ToolRouterHandler = (
   ctx: {
@@ -298,4 +305,72 @@ test("selectActiveFactsForUse ignores superseded and expired rows", () => {
 
   assert.equal(selected.length, 1);
   assert.equal(selected[0]?.factValue, "Port Harcourt");
+});
+
+test("inferAmbientContactFacts learns soft status and sticker signals without sensitive claims", () => {
+  const now = Date.now();
+  const stickerAssetId = "asset_sticker" as never;
+  const facts = inferAmbientContactFacts({
+    messages: [
+      {
+        _id: "msg_1" as never,
+        text: "This meme is too funny 😂",
+        messageType: "text",
+        isStatus: true,
+        messageAt: now,
+      },
+      {
+        _id: "msg_2" as never,
+        text: "At church today, prayer changes everything",
+        messageType: "text",
+        isStatus: true,
+        messageAt: now,
+      },
+      {
+        _id: "msg_3" as never,
+        text: "[Sticker]",
+        messageType: "sticker",
+        mediaAssetId: stickerAssetId,
+        isStatus: false,
+        messageAt: now,
+      },
+    ],
+    assetsById: new Map([
+      [
+        stickerAssetId,
+        {
+          _id: stickerAssetId,
+          kind: "sticker",
+          tags: ["sticker"],
+          contextTags: ["playful"],
+          contextSummary: "Use for funny banter.",
+          contextConfidence: 0.8,
+          contextSource: "vision_ai",
+        },
+      ],
+    ]),
+  });
+
+  assert.equal(facts.some((fact) => fact.key === "profile_status_humor_style"), true);
+  assert.equal(facts.some((fact) => fact.key === "preference_sticker_tone_playful"), true);
+  assert.equal(facts.some((fact) => /church|prayer/i.test(fact.value)), false);
+});
+
+test("hasSufficientContactMemoryForAmbientSkip gates ambient inference when memory is already rich", () => {
+  const now = Date.now();
+  const rows = Array.from({ length: 10 }, (_, index) => ({
+    _id: `fact_${index}` as never,
+    _creationTime: now - index,
+    threadId: "thread_1" as never,
+    factKey: `preference_item_${index}`,
+    factValue: `Useful preference ${index}`,
+    factType: "preference" as const,
+    confidence: 0.7,
+    factStatus: "active" as const,
+    createdAt: now - index,
+    updatedAt: now - index,
+  }));
+
+  assert.equal(hasSufficientContactMemoryForAmbientSkip({ rows, nowMs: now }), true);
+  assert.equal(hasSufficientContactMemoryForAmbientSkip({ rows: rows.slice(0, 4), nowMs: now }), false);
 });

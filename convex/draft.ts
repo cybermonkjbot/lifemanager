@@ -1,8 +1,10 @@
 import { v } from "convex/values";
 import { makeFunctionReference } from "convex/server";
+import type { Doc } from "./_generated/dataModel";
 import { internal } from "./_generated/api";
 import { action, internalAction, internalQuery, mutation } from "./_generated/server";
 import { contextPackValidator, outreachModeValidator, resolveFeedbackPath, resolveOutreachModeWithFallback } from "./lib/aiSmartness";
+import { assertTenantBillingActive, isTenantBillingActive, tenantBillingInactiveReason } from "./lib/billingAccess";
 import { getConfig } from "./lib/config";
 import { estimateHumanTiming, evaluateGuardrail, looksLikeQuestion } from "./lib/heuristics";
 import { enqueueOutbox } from "./lib/outboxEnqueue";
@@ -12,6 +14,7 @@ const refSystemRecordEvent = makeFunctionReference<"mutation">("system:recordEve
 const refCreateGuardrailHold = makeFunctionReference<"mutation">("draft:createGuardrailHold");
 const refSaveGenerated = makeFunctionReference<"mutation">("draft:saveGenerated");
 const refGetAutonomyConfig = makeFunctionReference<"query">("draft:getAutonomyConfig");
+const refGetThreadBillingGate = makeFunctionReference<"query">("draft:getThreadBillingGate");
 const refApproveDraft = makeFunctionReference<"mutation">("draft:approve");
 const refGenerateDraft = makeFunctionReference<"action">("draft:generate");
 
@@ -20,6 +23,19 @@ function heuristicReply(input: string) {
     return "Yeah that works on my side. Give me a bit and I'll send the details.";
   }
   return "Noted. I’m on it and I’ll circle back shortly.";
+}
+
+async function assertDraftBillingActive(
+  ctx: Parameters<typeof assertTenantBillingActive>[0],
+  draft: Pick<Doc<"replyDrafts">, "tenantId" | "threadId">,
+  now = Date.now(),
+) {
+  if (draft.tenantId) {
+    await assertTenantBillingActive(ctx, draft.tenantId, now);
+    return;
+  }
+  const thread = await ctx.db.get(draft.threadId);
+  await assertTenantBillingActive(ctx, thread?.tenantId, now);
 }
 
 export const generate = internalAction({
@@ -35,6 +51,14 @@ export const generate = internalAction({
 
     if (!context) {
       return null;
+    }
+
+    const billingGate = await ctx.runQuery(refGetThreadBillingGate, { threadId: args.threadId });
+    if (!billingGate.active) {
+      return {
+        blocked: true,
+        reason: "billing_required",
+      };
     }
 
     const sourceText = context.sourceMessage.text;
@@ -122,6 +146,26 @@ export const getAutonomyConfig = internalQuery({
   },
 });
 
+export const getThreadBillingGate = internalQuery({
+  args: {
+    threadId: v.id("threads"),
+  },
+  handler: async (ctx, args) => {
+    const thread = await ctx.db.get(args.threadId);
+    if (!thread?.tenantId) {
+      return { active: true as const };
+    }
+    const tenant = await ctx.db.get(thread.tenantId);
+    if (tenant && isTenantBillingActive(tenant)) {
+      return { active: true as const };
+    }
+    return {
+      active: false as const,
+      reason: tenant ? tenantBillingInactiveReason(tenant) : "Tenant subscription is not active.",
+    };
+  },
+});
+
 export const saveGenerated = mutation({
   args: {
     threadId: v.id("threads"),
@@ -144,9 +188,11 @@ export const saveGenerated = mutation({
   handler: async (ctx, args) => {
     const now = Date.now();
     const thread = await ctx.db.get(args.threadId);
+    await assertTenantBillingActive(ctx, thread?.tenantId, now);
     const messageProvider = thread?.provider || "whatsapp";
     const draftId = await ctx.db.insert("replyDrafts", {
       ...args,
+      tenantId: thread?.tenantId,
       messageProvider,
       sendKind: args.sendKind || "text",
       status: "pending",
@@ -179,8 +225,9 @@ export const saveOrReplacePending = mutation({
   },
   handler: async (ctx, args) => {
     const now = Date.now();
-    const config = await getConfig(ctx);
     const thread = await ctx.db.get(args.threadId);
+    await assertTenantBillingActive(ctx, thread?.tenantId, now);
+    const config = await getConfig(ctx);
     const messageProvider = thread?.provider || "whatsapp";
     const sendKind = args.sendKind || "text";
     const mergeWindowMs = Math.max(2_000, Math.min(config.inboundMergeWindowMs, 180_000));
@@ -298,6 +345,7 @@ export const saveOrReplacePending = mutation({
 
     const draftId = await ctx.db.insert("replyDrafts", {
       ...args,
+      tenantId: thread?.tenantId,
       messageProvider,
       sendKind,
       status: "approved",
@@ -355,8 +403,10 @@ export const createGuardrailHold = mutation({
   handler: async (ctx, args) => {
     const now = Date.now();
     const thread = await ctx.db.get(args.threadId);
+    await assertTenantBillingActive(ctx, thread?.tenantId, now);
     const messageProvider = thread?.provider || "whatsapp";
     const draftId = await ctx.db.insert("replyDrafts", {
+      tenantId: thread?.tenantId,
       messageProvider,
       threadId: args.threadId,
       sourceMessageId: args.sourceMessageId,
@@ -402,6 +452,7 @@ export const approve = mutation({
     const nextTypingMs = sendImmediately ? 0 : draft.typingMs;
     const nextSendAt = now + nextDelayMs;
     const thread = await ctx.db.get(draft.threadId);
+    await assertTenantBillingActive(ctx, draft.tenantId || thread?.tenantId, now);
     const messageProvider = draft.messageProvider || thread?.provider || "whatsapp";
     const existingOutbox = await ctx.db
       .query("outbox")
@@ -562,6 +613,7 @@ export const updateDraftContent = mutation({
     }
 
     const now = Date.now();
+    await assertDraftBillingActive(ctx, draft, now);
     await ctx.db.patch(draft._id, {
       text: nextText,
       updatedAt: now,
@@ -639,6 +691,7 @@ export const reject = mutation({
       return null;
     }
 
+    await assertDraftBillingActive(ctx, draft);
     await ctx.db.patch(draft._id, {
       status: "rejected",
       updatedAt: Date.now(),
@@ -653,19 +706,28 @@ export const reject = mutation({
 
 export const clearAllPending = mutation({
   args: {
+    tenantId: v.optional(v.id("tenantAccounts")),
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const now = Date.now();
+    await assertTenantBillingActive(ctx, args.tenantId, now);
     const batchSize = Math.min(Math.max(5, Math.round(args.limit ?? 80)), 200);
-    const drafts = await ctx.db
-      .query("replyDrafts")
-      .withIndex("by_status", (q) => q.eq("status", "pending"))
-      .order("desc")
-      .take(batchSize);
+    const drafts = args.tenantId
+      ? await ctx.db
+          .query("replyDrafts")
+          .withIndex("by_tenantId_and_status", (q) => q.eq("tenantId", args.tenantId).eq("status", "pending"))
+          .order("desc")
+          .take(batchSize)
+      : await ctx.db
+          .query("replyDrafts")
+          .withIndex("by_status", (q) => q.eq("status", "pending"))
+          .order("desc")
+          .take(batchSize);
 
     const affectedThreadIds = new Set<(typeof drafts)[number]["threadId"]>();
     for (const draft of drafts) {
+      await assertDraftBillingActive(ctx, draft, now);
       await ctx.db.patch(draft._id, {
         status: "rejected",
         updatedAt: now,
@@ -704,6 +766,7 @@ export const snooze = mutation({
       return null;
     }
     const thread = await ctx.db.get(draft.threadId);
+    await assertTenantBillingActive(ctx, draft.tenantId || thread?.tenantId);
     const messageProvider = draft.messageProvider || thread?.provider || "whatsapp";
 
     const now = Date.now();

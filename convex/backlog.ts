@@ -3,9 +3,11 @@ import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { internalMutation, mutation, query } from "./_generated/server";
+import { assertTenantBillingActive, assertThreadTenantBillingActive } from "./lib/billingAccess";
 import { detectPromiseOrPlan, detectTodoCandidate, estimateHumanTiming, evaluateGuardrail, looksLikeQuestion } from "./lib/heuristics";
 import { classifyThreadKind, directIgnoreRuleCandidates } from "./lib/threadEligibility";
 import { setConfigValue } from "./lib/config";
+import { resolveTenantForQuery } from "./lib/tenantSecurity";
 
 type RelationshipKind = "girlfriend" | "relationship" | "friendship" | "casual" | "family" | "business";
 type ImportanceKind = "critical" | "high" | "medium" | "low";
@@ -462,6 +464,11 @@ async function refreshThreadSnapshot(ctx: MutationCtx, threadId: Id<"threads">) 
   if (!thread) {
     return null;
   }
+  try {
+    await assertTenantBillingActive(ctx, thread.tenantId);
+  } catch {
+    return null;
+  }
 
   const existing = await ctx.db
     .query("backlogThreadState")
@@ -604,6 +611,8 @@ function buildRestartDraftText(args: {
 
 export const list = query({
   args: {
+    tenantId: v.optional(v.id("tenantAccounts")),
+    connectorTokenHash: v.optional(v.string()),
     provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("all"))),
     limit: v.optional(v.number()),
     importance: v.optional(importanceOrAllValidator),
@@ -615,6 +624,7 @@ export const list = query({
     search: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForQuery(ctx, args);
     const provider = args.provider || "all";
     const limit = clamp(Math.round(args.limit ?? 80), 1, 200);
     const importanceFilter = args.importance || "all";
@@ -636,6 +646,9 @@ export const list = query({
       stateRows.map(async (state) => {
         const thread = await ctx.db.get(state.threadId);
         if (!thread || resolveThreadKind(thread) === "group") {
+          return null;
+        }
+        if (tenantId && thread.tenantId !== tenantId) {
           return null;
         }
         if (provider !== "all" && (thread.provider || "whatsapp") !== provider) {
@@ -759,6 +772,7 @@ export const setImportanceOverride = mutation({
     if (!thread) {
       throw new Error("Thread not found");
     }
+    await assertTenantBillingActive(ctx, thread.tenantId);
 
     const existing = await ctx.db
       .query("backlogThreadState")
@@ -813,6 +827,7 @@ export const setRelationshipOverride = mutation({
     if (!thread) {
       throw new Error("Thread not found");
     }
+    await assertTenantBillingActive(ctx, thread.tenantId);
 
     const existing = await ctx.db
       .query("backlogThreadState")
@@ -869,6 +884,7 @@ export const snooze = mutation({
     if (!thread) {
       throw new Error("Thread not found");
     }
+    await assertTenantBillingActive(ctx, thread.tenantId);
 
     const now = Date.now();
     const snoozedUntil = args.until || now + Math.max(5, Math.round(args.minutes ?? 24 * 60)) * 60 * 1000;
@@ -929,6 +945,7 @@ export const unsnooze = mutation({
     threadId: v.id("threads"),
   },
   handler: async (ctx, args) => {
+    await assertThreadTenantBillingActive(ctx, args.threadId);
     const existing = await ctx.db
       .query("backlogThreadState")
       .withIndex("by_threadId", (q) => q.eq("threadId", args.threadId))
@@ -961,6 +978,7 @@ export const ignoreThread = mutation({
     if (!thread) {
       throw new Error("Thread not found");
     }
+    await assertTenantBillingActive(ctx, thread.tenantId);
 
     const now = Date.now();
     await ctx.db.patch(thread._id, {
@@ -1024,6 +1042,7 @@ export const createDraft = mutation({
     mode: v.union(v.literal("answer"), v.literal("restart")),
   },
   handler: async (ctx, args) => {
+    await assertThreadTenantBillingActive(ctx, args.threadId);
     const existingDrafts = await ctx.db
       .query("replyDrafts")
       .withIndex("by_thread", (q) => q.eq("threadId", args.threadId))
@@ -1072,6 +1091,7 @@ export const createDraft = mutation({
     const timing = estimateHumanTiming(text);
 
     const draftId = await ctx.db.insert("replyDrafts", {
+      tenantId: thread.tenantId,
       threadId: thread._id,
       sourceMessageId: source._id,
       text,
@@ -1109,9 +1129,12 @@ export const createDraft = mutation({
 });
 
 export const clearAll = mutation({
-  args: {},
-  handler: async (ctx) => {
+  args: {
+    tenantId: v.optional(v.id("tenantAccounts")),
+  },
+  handler: async (ctx, args) => {
     const now = Date.now();
+    await assertTenantBillingActive(ctx, args.tenantId, now);
     await setConfigValue(ctx, BACKLOG_CLEARED_BEFORE_CONFIG_KEY, String(now));
 
     const deleted = await deleteBacklogStateBatch(ctx);
@@ -1167,6 +1190,11 @@ export const refreshRecent = mutation({
     let refreshed = 0;
     for (const thread of threads) {
       if (resolveThreadKind(thread) === "group") {
+        continue;
+      }
+      try {
+        await assertTenantBillingActive(ctx, thread.tenantId);
+      } catch {
         continue;
       }
       await refreshThreadSnapshot(ctx, thread._id);

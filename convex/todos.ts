@@ -1,7 +1,21 @@
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
+import { assertTenantBillingActive, assertThreadTenantBillingActive } from "./lib/billingAccess";
 import { judgeActualTodoCandidate } from "./lib/heuristics";
 import { isTodoCandidateStale } from "./lib/staleness";
+import { resolveTenantForQuery } from "./lib/tenantSecurity";
+
+async function assertCandidateBillingActive(
+  ctx: Parameters<typeof assertTenantBillingActive>[0],
+  candidate: { tenantId?: Parameters<typeof assertTenantBillingActive>[1]; threadId: Parameters<typeof assertThreadTenantBillingActive>[1] },
+  now = Date.now(),
+) {
+  if (candidate.tenantId) {
+    await assertTenantBillingActive(ctx, candidate.tenantId, now);
+    return;
+  }
+  await assertThreadTenantBillingActive(ctx, candidate.threadId, now);
+}
 
 function parseIsoDate(value: string) {
   const normalized = value.trim();
@@ -28,23 +42,38 @@ function parseIsoDate(value: string) {
 
 export const list = query({
   args: {
+    tenantId: v.optional(v.id("tenantAccounts")),
+    connectorTokenHash: v.optional(v.string()),
     todoLimit: v.optional(v.number()),
     candidateLimit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const now = Date.now();
+    const tenantId = await resolveTenantForQuery(ctx, args);
     const todoLimit = Math.min(args.todoLimit ?? 100, 250);
     const candidateLimit = Math.min(args.candidateLimit ?? 80, 200);
-    const todos = await ctx.db
-      .query("todos")
-      .withIndex("by_status", (q) => q.eq("status", "open"))
-      .order("desc")
-      .take(todoLimit);
-    const candidates = await ctx.db
-      .query("todoCandidates")
-      .withIndex("by_status", (q) => q.eq("status", "suggested"))
-      .order("desc")
-      .take(candidateLimit);
+    const todos = tenantId
+      ? await ctx.db
+          .query("todos")
+          .withIndex("by_tenantId_and_status", (q) => q.eq("tenantId", tenantId).eq("status", "open"))
+          .order("desc")
+          .take(todoLimit)
+      : await ctx.db
+          .query("todos")
+          .withIndex("by_status", (q) => q.eq("status", "open"))
+          .order("desc")
+          .take(todoLimit);
+    const candidates = tenantId
+      ? await ctx.db
+          .query("todoCandidates")
+          .withIndex("by_tenantId_and_status", (q) => q.eq("tenantId", tenantId).eq("status", "suggested"))
+          .order("desc")
+          .take(candidateLimit)
+      : await ctx.db
+          .query("todoCandidates")
+          .withIndex("by_status", (q) => q.eq("status", "suggested"))
+          .order("desc")
+          .take(candidateLimit);
     const activeCandidates = (
       await Promise.all(
         candidates.map(async (candidate) => {
@@ -84,6 +113,7 @@ export const fromCandidate = mutation({
       ctx.db.get(candidate.threadId),
       ctx.db.get(candidate.sourceMessageId),
     ]);
+    await assertTenantBillingActive(ctx, candidate.tenantId || thread?.tenantId);
     const stale = await isTodoCandidateStale({
       ctx,
       candidate,
@@ -129,6 +159,7 @@ export const fromCandidate = mutation({
     });
 
     const todoId = await ctx.db.insert("todos", {
+      tenantId: candidate.tenantId || thread?.tenantId,
       threadId: candidate.threadId,
       sourceMessageId: candidate.sourceMessageId,
       title: todoJudge.title,
@@ -144,6 +175,7 @@ export const fromCandidate = mutation({
 
 export const createAgendaRange = mutation({
   args: {
+    tenantId: v.optional(v.id("tenantAccounts")),
     agenda: v.string(),
     entries: v.array(
       v.object({
@@ -168,6 +200,7 @@ export const createAgendaRange = mutation({
     }
 
     const now = Date.now();
+    await assertTenantBillingActive(ctx, args.tenantId, now);
     const seenDates = new Set<string>();
     const todoIds = [];
     for (const entry of args.entries) {
@@ -183,6 +216,7 @@ export const createAgendaRange = mutation({
       }
       seenDates.add(date);
       const todoId = await ctx.db.insert("todos", {
+        tenantId: args.tenantId,
         title: agenda,
         dueAt: Math.round(entry.dueAt),
         status: "open",
@@ -209,6 +243,11 @@ export const setTodoStatus = mutation({
     if (!todo) {
       throw new Error("Todo not found");
     }
+    if (todo.tenantId) {
+      await assertTenantBillingActive(ctx, todo.tenantId);
+    } else if (todo.threadId) {
+      await assertThreadTenantBillingActive(ctx, todo.threadId);
+    }
     await ctx.db.patch(todo._id, {
       status: args.status,
       updatedAt: Date.now(),
@@ -230,6 +269,7 @@ export const updateCandidateTitle = mutation({
     if (candidate.status !== "suggested") {
       throw new Error("Candidate is no longer open for review");
     }
+    await assertCandidateBillingActive(ctx, candidate);
 
     const title = args.title.trim().replace(/\s+/g, " ");
     if (!title) {
@@ -258,6 +298,7 @@ export const dismissCandidate = mutation({
       return null;
     }
 
+    await assertCandidateBillingActive(ctx, candidate);
     await ctx.db.patch(candidate._id, {
       status: "dismissed",
       updatedAt: Date.now(),
@@ -269,23 +310,37 @@ export const dismissCandidate = mutation({
 
 export const clearAll = mutation({
   args: {
+    tenantId: v.optional(v.id("tenantAccounts")),
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const now = Date.now();
+    await assertTenantBillingActive(ctx, args.tenantId, now);
     const batchSize = Math.min(Math.max(5, Math.round(args.limit ?? 80)), 200);
 
-    const openTodos = await ctx.db
-      .query("todos")
-      .withIndex("by_status", (q) => q.eq("status", "open"))
-      .order("desc")
-      .take(batchSize);
+    const openTodos = args.tenantId
+      ? await ctx.db
+          .query("todos")
+          .withIndex("by_tenantId_and_status", (q) => q.eq("tenantId", args.tenantId).eq("status", "open"))
+          .order("desc")
+          .take(batchSize)
+      : await ctx.db
+          .query("todos")
+          .withIndex("by_status", (q) => q.eq("status", "open"))
+          .order("desc")
+          .take(batchSize);
 
-    const suggestedCandidates = await ctx.db
-      .query("todoCandidates")
-      .withIndex("by_status", (q) => q.eq("status", "suggested"))
-      .order("desc")
-      .take(batchSize);
+    const suggestedCandidates = args.tenantId
+      ? await ctx.db
+          .query("todoCandidates")
+          .withIndex("by_tenantId_and_status", (q) => q.eq("tenantId", args.tenantId).eq("status", "suggested"))
+          .order("desc")
+          .take(batchSize)
+      : await ctx.db
+          .query("todoCandidates")
+          .withIndex("by_status", (q) => q.eq("status", "suggested"))
+          .order("desc")
+          .take(batchSize);
 
     for (const todo of openTodos) {
       await ctx.db.patch(todo._id, {

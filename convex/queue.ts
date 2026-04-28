@@ -2,7 +2,9 @@ import { v } from "convex/values";
 import type { Id } from "./_generated/dataModel";
 import { internal } from "./_generated/api";
 import { internalMutation, mutation, query } from "./_generated/server";
+import { assertTenantBillingActive, assertThreadTenantBillingActive } from "./lib/billingAccess";
 import { isQueueDraftStale, isTodoCandidateStale } from "./lib/staleness";
+import { resolveTenantForQuery } from "./lib/tenantSecurity";
 
 const UNSENT_DRAFT_CLEANUP_MIN_AGE_MS = 20 * 60 * 1000;
 const GUARDRAIL_REASON_PATTERNS = [
@@ -27,6 +29,8 @@ function looksLikeUnsentHardStopOrGuardrailDraft(args: {
 
 export const list = query({
   args: {
+    tenantId: v.optional(v.id("tenantAccounts")),
+    connectorTokenHash: v.optional(v.string()),
     provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("all"))),
     draftLimit: v.optional(v.number()),
     followupLimit: v.optional(v.number()),
@@ -36,6 +40,7 @@ export const list = query({
   },
   handler: async (ctx, args) => {
     const now = Date.now();
+    const tenantId = await resolveTenantForQuery(ctx, args);
     const messageProvider = args.provider || "all";
     const draftLimit = Math.min(args.draftLimit ?? 40, 100);
     const followupLimit = Math.min(args.followupLimit ?? 40, 100);
@@ -43,8 +48,17 @@ export const list = query({
     const guardrailLimit = Math.min(args.guardrailLimit ?? 20, 100);
     const includeResolvedGuardrails = Boolean(args.includeResolvedGuardrails);
 
-    const pendingDrafts =
-      messageProvider === "all"
+    const pendingDrafts = tenantId
+      ? (
+          await ctx.db
+            .query("replyDrafts")
+            .withIndex("by_tenantId_and_status", (q) => q.eq("tenantId", tenantId).eq("status", "pending"))
+            .order("desc")
+            .take(Math.max(draftLimit, 100))
+        )
+          .filter((draft) => messageProvider === "all" || draft.messageProvider === messageProvider)
+          .slice(0, draftLimit)
+      : messageProvider === "all"
         ? await ctx.db
             .query("replyDrafts")
             .withIndex("by_status", (q) => q.eq("status", "pending"))
@@ -56,19 +70,31 @@ export const list = query({
             .order("desc")
             .take(draftLimit);
 
-    const followupConfirmations = await ctx.db
-      .query("followUps")
-      .withIndex("by_status_dueAt", (q) => q.eq("status", "suggested"))
-      .order("asc")
-      .take(followupLimit);
+    const followupConfirmations = tenantId
+      ? await ctx.db
+          .query("followUps")
+          .withIndex("by_tenantId_and_status_and_dueAt", (q) => q.eq("tenantId", tenantId).eq("status", "suggested"))
+          .order("asc")
+          .take(followupLimit)
+      : await ctx.db
+          .query("followUps")
+          .withIndex("by_status_dueAt", (q) => q.eq("status", "suggested"))
+          .order("asc")
+          .take(followupLimit);
 
-    const todoCandidates = await ctx.db
-      .query("todoCandidates")
-      .withIndex("by_status", (q) => q.eq("status", "suggested"))
-      .order("desc")
-      .take(todoLimit);
+    const todoCandidates = tenantId
+      ? await ctx.db
+          .query("todoCandidates")
+          .withIndex("by_tenantId_and_status", (q) => q.eq("tenantId", tenantId).eq("status", "suggested"))
+          .order("desc")
+          .take(todoLimit)
+      : await ctx.db
+          .query("todoCandidates")
+          .withIndex("by_status", (q) => q.eq("status", "suggested"))
+          .order("desc")
+          .take(todoLimit);
 
-    const guardrailFlags = includeResolvedGuardrails
+    const guardrailFlagWindow = includeResolvedGuardrails
       ? await ctx.db
           .query("guardrailEvents")
           .withIndex("by_createdAt")
@@ -79,6 +105,19 @@ export const list = query({
           .withIndex("by_resolvedAt_and_createdAt", (q) => q.eq("resolvedAt", undefined))
           .order("desc")
           .take(guardrailLimit);
+    const guardrailFlags = tenantId
+      ? (
+          await Promise.all(
+            guardrailFlagWindow.map(async (event) => {
+              if (!event.threadId) {
+                return null;
+              }
+              const thread = await ctx.db.get(event.threadId);
+              return thread?.tenantId === tenantId ? event : null;
+            }),
+          )
+        ).filter((event): event is (typeof guardrailFlagWindow)[number] => Boolean(event))
+      : guardrailFlagWindow;
 
     const mediaPreviewCache = new Map<
       Id<"mediaAssets">,
@@ -231,27 +270,41 @@ export const list = query({
 
 export const removeStaleQueueEntries = internalMutation({
   args: {
+    tenantId: v.optional(v.id("tenantAccounts")),
     draftLimit: v.optional(v.number()),
     todoLimit: v.optional(v.number()),
     guardrailLimit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const now = Date.now();
+    await assertTenantBillingActive(ctx, args.tenantId, now);
     const draftLimit = Math.min(Math.max(5, Math.round(args.draftLimit ?? 40)), 200);
     const todoLimit = Math.min(Math.max(5, Math.round(args.todoLimit ?? 40)), 200);
     const guardrailLimit = Math.min(Math.max(10, Math.round(args.guardrailLimit ?? 80)), 240);
 
     const [pendingDrafts, suggestedTodos, unresolvedGuardrails] = await Promise.all([
-      ctx.db
-        .query("replyDrafts")
-        .withIndex("by_status", (q) => q.eq("status", "pending"))
-        .order("desc")
-        .take(draftLimit),
-      ctx.db
-        .query("todoCandidates")
-        .withIndex("by_status", (q) => q.eq("status", "suggested"))
-        .order("desc")
-        .take(todoLimit),
+      args.tenantId
+        ? ctx.db
+            .query("replyDrafts")
+            .withIndex("by_tenantId_and_status", (q) => q.eq("tenantId", args.tenantId).eq("status", "pending"))
+            .order("desc")
+            .take(draftLimit)
+        : ctx.db
+            .query("replyDrafts")
+            .withIndex("by_status", (q) => q.eq("status", "pending"))
+            .order("desc")
+            .take(draftLimit),
+      args.tenantId
+        ? ctx.db
+            .query("todoCandidates")
+            .withIndex("by_tenantId_and_status", (q) => q.eq("tenantId", args.tenantId).eq("status", "suggested"))
+            .order("desc")
+            .take(todoLimit)
+        : ctx.db
+            .query("todoCandidates")
+            .withIndex("by_status", (q) => q.eq("status", "suggested"))
+            .order("desc")
+            .take(todoLimit),
       ctx.db
         .query("guardrailEvents")
         .withIndex("by_resolvedAt_and_createdAt", (q) => q.eq("resolvedAt", undefined))
@@ -268,6 +321,11 @@ export const removeStaleQueueEntries = internalMutation({
 
     for (const draft of pendingDrafts) {
       const [thread, sourceMessage] = await Promise.all([ctx.db.get(draft.threadId), ctx.db.get(draft.sourceMessageId)]);
+      try {
+        await assertTenantBillingActive(ctx, draft.tenantId || thread?.tenantId, now);
+      } catch {
+        continue;
+      }
       const stale = await isQueueDraftStale({
         ctx,
         draft,
@@ -308,6 +366,11 @@ export const removeStaleQueueEntries = internalMutation({
 
     for (const candidate of suggestedTodos) {
       const [thread, sourceMessage] = await Promise.all([ctx.db.get(candidate.threadId), ctx.db.get(candidate.sourceMessageId)]);
+      try {
+        await assertTenantBillingActive(ctx, candidate.tenantId || thread?.tenantId, now);
+      } catch {
+        continue;
+      }
       const stale = await isTodoCandidateStale({
         ctx,
         candidate,
@@ -331,6 +394,29 @@ export const removeStaleQueueEntries = internalMutation({
         continue;
       }
       const draft = await ctx.db.get(event.draftId);
+      if (args.tenantId) {
+        if (event.threadId) {
+          const thread = await ctx.db.get(event.threadId);
+          if (thread?.tenantId !== args.tenantId) {
+            continue;
+          }
+        } else if (draft?.tenantId !== args.tenantId) {
+          continue;
+        }
+      }
+      if (event.threadId) {
+        try {
+          await assertThreadTenantBillingActive(ctx, event.threadId, now);
+        } catch {
+          continue;
+        }
+      } else if (draft) {
+        try {
+          await assertTenantBillingActive(ctx, draft.tenantId, now);
+        } catch {
+          continue;
+        }
+      }
       const eventAgeMs = now - Math.max(event.createdAt || 0, 0);
       const draftStillActionable = Boolean(draft && draft.status === "pending");
       if (draftStillActionable && eventAgeMs < UNSENT_DRAFT_CLEANUP_MIN_AGE_MS) {
@@ -392,6 +478,12 @@ export const resolveGuardrail = mutation({
     }
 
     const now = Date.now();
+    if (row.threadId) {
+      await assertThreadTenantBillingActive(ctx, row.threadId, now);
+    } else if (row.draftId) {
+      const draft = await ctx.db.get(row.draftId);
+      await assertTenantBillingActive(ctx, draft?.tenantId, now);
+    }
     await ctx.db.patch(row._id, {
       resolvedAt: now,
       resolvedBy: "dashboard",
@@ -423,12 +515,14 @@ export const resolveGuardrail = mutation({
 
 export const clearAllGuardrails = mutation({
   args: {
+    tenantId: v.optional(v.id("tenantAccounts")),
     limit: v.optional(v.number()),
     closeDraft: v.optional(v.boolean()),
     resolutionNote: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const now = Date.now();
+    await assertTenantBillingActive(ctx, args.tenantId, now);
     const batchSize = Math.min(Math.max(5, Math.round(args.limit ?? 80)), 200);
     const closeDraft = args.closeDraft !== false;
     const resolutionNote = args.resolutionNote?.trim() || "Bulk resolved from queue.";
@@ -439,8 +533,26 @@ export const clearAllGuardrails = mutation({
       .order("desc")
       .take(batchSize);
 
+    const scopedRows = args.tenantId
+      ? (
+          await Promise.all(
+            rows.map(async (row) => {
+              if (row.threadId) {
+                const thread = await ctx.db.get(row.threadId);
+                return thread?.tenantId === args.tenantId ? row : null;
+              }
+              if (row.draftId) {
+                const draft = await ctx.db.get(row.draftId);
+                return draft?.tenantId === args.tenantId ? row : null;
+              }
+              return null;
+            }),
+          )
+        ).filter((row): row is (typeof rows)[number] => Boolean(row))
+      : rows;
+
     let closedDrafts = 0;
-    for (const row of rows) {
+    for (const row of scopedRows) {
       await ctx.db.patch(row._id, {
         resolvedAt: now,
         resolvedBy: "dashboard",
@@ -460,17 +572,17 @@ export const clearAllGuardrails = mutation({
       }
     }
 
-    if (rows.length > 0) {
+    if (scopedRows.length > 0) {
       await ctx.db.insert("systemEvents", {
         source: "dashboard",
         eventType: "guardrail.cleared",
-        detail: `Bulk resolved ${rows.length} guardrail event(s); closed ${closedDrafts} draft(s).`,
+        detail: `Bulk resolved ${scopedRows.length} guardrail event(s); closed ${closedDrafts} draft(s).`,
         createdAt: now,
       });
     }
 
     return {
-      cleared: rows.length,
+      cleared: scopedRows.length,
       closedDrafts,
       hasMore: rows.length === batchSize,
     };

@@ -1,6 +1,7 @@
 import { v } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel";
 import { internalMutation, mutation, query, type MutationCtx } from "./_generated/server";
+import { assertTenantBillingActive, assertThreadTenantBillingActive, listHostedTenantBillingScopes } from "./lib/billingAccess";
 import { getConfig } from "./lib/config";
 import { classifyThreadKind } from "./lib/threadEligibility";
 import { GOOD_MORNING_OUTREACH_REASON_PREFIX, isConversationStarterReason } from "./lib/outreachModes";
@@ -148,13 +149,26 @@ export function hasConversationStarterCollision(
   });
 }
 
-async function getThreadByJid(ctx: MutationCtx, jid: string) {
-  const directProviderMatch = await ctx.db
-    .query("threads")
-    .withIndex("by_provider_and_jid", (q) => q.eq("provider", "whatsapp").eq("jid", jid))
-    .first();
+async function getThreadByJid(ctx: MutationCtx, jid: string, tenantId?: Id<"tenantAccounts">) {
+  const directProviderMatch = tenantId
+    ? await ctx.db
+        .query("threads")
+        .withIndex("by_tenantId_and_provider_and_jid", (q) =>
+          q.eq("tenantId", tenantId).eq("provider", "whatsapp").eq("jid", jid),
+        )
+        .first()
+    : await ctx.db
+        .query("threads")
+        .withIndex("by_provider_and_jid", (q) => q.eq("provider", "whatsapp").eq("jid", jid))
+        .first();
   if (directProviderMatch) {
     return directProviderMatch;
+  }
+  if (tenantId) {
+    return await ctx.db
+      .query("threads")
+      .withIndex("by_tenantId_and_jid", (q) => q.eq("tenantId", tenantId).eq("jid", jid))
+      .first();
   }
   return await ctx.db
     .query("threads")
@@ -330,6 +344,7 @@ export const recordHydration = mutation({
     promptFingerprint: v.string(),
   },
   handler: async (ctx, args) => {
+    await assertThreadTenantBillingActive(ctx, args.threadId);
     const now = Date.now();
     const existing = await getRomanceState(ctx, args.threadId);
     if (!existing) {
@@ -354,11 +369,10 @@ export const recordHydration = mutation({
   },
 });
 
-export const run = internalMutation({
-  args: {},
-  handler: async (ctx) => {
+async function runRomanceMorning(ctx: MutationCtx, tenantId?: Id<"tenantAccounts">) {
     const now = Date.now();
-    const config = await getConfig(ctx);
+    await assertTenantBillingActive(ctx, tenantId, now);
+    const config = await getConfig(ctx, tenantId);
     const nowHour = new Date(now).getHours();
 
     if (!config.romanticMorningEnabled) {
@@ -376,14 +390,14 @@ export const run = internalMutation({
 
     const listThreadIds: string[] = [];
     for (const jid of romanticPartnerJids) {
-      const thread = await getThreadByJid(ctx, jid);
+      const thread = await getThreadByJid(ctx, jid, tenantId);
       if (!thread) {
         continue;
       }
       listThreadIds.push(String(thread._id));
     }
 
-    const romanticBacklogThreadIds = (
+    const romanticBacklogRows = (
       await Promise.all([
         ctx.db
           .query("backlogThreadState")
@@ -396,11 +410,19 @@ export const run = internalMutation({
           .order("desc")
           .take(MAX_SIGNAL_ROWS),
       ])
-    )
-      .flat()
-      .map((row) => String(row.threadId));
+    ).flat();
+    const romanticBacklogThreadIds: string[] = [];
+    for (const row of romanticBacklogRows) {
+      if (tenantId) {
+        const thread = await ctx.db.get(row.threadId);
+        if (thread?.tenantId !== tenantId) {
+          continue;
+        }
+      }
+      romanticBacklogThreadIds.push(String(row.threadId));
+    }
 
-    const romanticProfileThreadIds = (
+    const romanticProfileRows = (
       await Promise.all([
         ctx.db
           .query("threadPersonalitySettings")
@@ -411,9 +433,17 @@ export const run = internalMutation({
           .withIndex("by_profileSlug", (q) => q.eq("profileSlug", "relationship"))
           .take(MAX_SIGNAL_ROWS),
       ])
-    )
-      .flat()
-      .map((row) => String(row.threadId));
+    ).flat();
+    const romanticProfileThreadIds: string[] = [];
+    for (const row of romanticProfileRows) {
+      if (tenantId) {
+        const thread = await ctx.db.get(row.threadId);
+        if (thread?.tenantId !== tenantId) {
+          continue;
+        }
+      }
+      romanticProfileThreadIds.push(String(row.threadId));
+    }
 
     const candidateThreadIds = mergeUniqueThreadIds([
       listThreadIds,
@@ -423,6 +453,7 @@ export const run = internalMutation({
 
     if (candidateThreadIds.length === 0) {
       await ctx.db.insert("systemEvents", {
+        tenantId,
         source: "convex",
         eventType: "romance_morning.no_candidates",
         detail: `No eligible romantic morning targets. configured_jids=${romanticPartnerJids.length}; backlog_candidates=${romanticBacklogThreadIds.length}; profile_candidates=${romanticProfileThreadIds.length}.`,
@@ -450,6 +481,10 @@ export const run = internalMutation({
       const threadId = threadIdRaw as Id<"threads">;
       const thread = await ctx.db.get(threadId);
       if (!thread || !isDirectWhatsAppThread(thread) || thread.isIgnored || thread.isArchived) {
+        summary.skippedThreadState += 1;
+        continue;
+      }
+      if (tenantId && thread.tenantId !== tenantId) {
         summary.skippedThreadState += 1;
         continue;
       }
@@ -613,6 +648,7 @@ export const run = internalMutation({
       const messageProvider = thread.provider || "whatsapp";
 
       const draftId = await ctx.db.insert("replyDrafts", {
+        tenantId: thread.tenantId,
         messageProvider,
         threadId,
         sourceMessageId: latestMessage._id,
@@ -662,6 +698,7 @@ export const run = internalMutation({
       }
 
       await ctx.db.insert("systemEvents", {
+        tenantId: thread.tenantId,
         source: "convex",
         eventType: "romance_morning.queued",
         threadId,
@@ -673,6 +710,7 @@ export const run = internalMutation({
     }
 
     await ctx.db.insert("systemEvents", {
+      tenantId,
       source: "convex",
       eventType: "romance_morning.batch",
       detail: `queued=${summary.queued}; considered=${summary.considered}; pending=${summary.skippedPendingOutbox}; queued_today=${summary.skippedMorningAlreadyQueued}; collision=${summary.skippedConversationStarterCollision}; pushiness=${summary.skippedPushinessCooldown}; holdout=${summary.skippedHoldout}; ignoredPause=${summary.skippedIgnoredPause}; suppressedIgnoredPause=${summary.suppressedOutboxIgnoredPause}; forcedWarmPlanCooldown=${summary.forcedWarmPlanCooldown}; invalid=${summary.skippedThreadState}`,
@@ -680,5 +718,24 @@ export const run = internalMutation({
     });
 
     return summary;
+}
+
+export const run = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const scopes = await listHostedTenantBillingScopes(ctx);
+    if (!scopes.hasHostedTenants) {
+      return await runRomanceMorning(ctx);
+    }
+    const results = [];
+    for (const tenantId of scopes.activeTenantIds) {
+      results.push(await runRomanceMorning(ctx, tenantId));
+    }
+    return {
+      queued: results.reduce((sum, result) => sum + result.queued, 0),
+      considered: results.reduce((sum, result) => sum + result.considered, 0),
+      tenantCount: scopes.activeTenantIds.length,
+      results,
+    };
   },
 });

@@ -1,7 +1,10 @@
 import { v } from "convex/values";
+import type { Id } from "./_generated/dataModel";
 import { mutation, query } from "./_generated/server";
+import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { getConfig, setConfigValue } from "./lib/config";
-import { resolveTenantForMutation } from "./lib/tenantSecurity";
+import { assertTenantBillingActive, isTenantBillingActive, tenantBillingInactiveReason } from "./lib/billingAccess";
+import { resolveTenantForMutation, resolveTenantForQuery } from "./lib/tenantSecurity";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const SPENDING_WINDOWS = {
@@ -11,34 +14,203 @@ const SPENDING_WINDOWS = {
   all: null,
 } as const;
 
+function readAdminSecret() {
+  return process.env.ODOGWU_CONVEX_ADMIN_SECRET || process.env.ODOGWU_ADMIN_SECRET || process.env.SLM_ADMIN_SECRET || "";
+}
+
+function requireAdmin(adminSecret: string) {
+  const expected = readAdminSecret();
+  if (!expected || adminSecret !== expected) {
+    throw new Error("Unauthorized.");
+  }
+}
+
+const tenantScopeArgs = {
+  tenantId: v.optional(v.id("tenantAccounts")),
+  connectorTokenHash: v.optional(v.string()),
+};
+
+async function getProviderConnectionHistory(
+  ctx: QueryCtx,
+  tenantId: Id<"tenantAccounts"> | undefined,
+  provider: "whatsapp" | "instagram",
+) {
+  const history: {
+    hasConnectedBefore: boolean;
+    lastConnectedAt?: number;
+    lastDisconnectedAt?: number;
+  } = {
+    hasConnectedBefore: false,
+  };
+
+  if (tenantId) {
+    const accounts = await ctx.db
+      .query("tenantConnectedAccounts")
+      .withIndex("by_tenantId_and_provider", (q) => q.eq("tenantId", tenantId).eq("provider", provider))
+      .take(25);
+
+    for (const account of accounts) {
+      if (account.connectedAt !== undefined || account.authState === "connected") {
+        history.hasConnectedBefore = true;
+      }
+      if (account.connectedAt !== undefined) {
+        history.lastConnectedAt = Math.max(history.lastConnectedAt ?? 0, account.connectedAt);
+      }
+      if (account.disconnectedAt !== undefined) {
+        history.lastDisconnectedAt = Math.max(history.lastDisconnectedAt ?? 0, account.disconnectedAt);
+      }
+    }
+  }
+
+  if (!history.hasConnectedBefore) {
+    const providerCandidates = provider === "whatsapp" ? ([provider, undefined] as const) : ([provider] as const);
+    for (const threadProvider of providerCandidates) {
+      const existingThread = tenantId
+        ? await ctx.db
+            .query("threads")
+            .withIndex("by_tenantId_and_provider_and_jid", (q) => q.eq("tenantId", tenantId).eq("provider", threadProvider))
+            .first()
+        : await ctx.db
+            .query("threads")
+            .withIndex("by_provider_and_lastMessageAt", (q) => q.eq("provider", threadProvider))
+            .first();
+
+      if (existingThread) {
+        history.hasConnectedBefore = true;
+        history.lastConnectedAt = Math.max(history.lastConnectedAt ?? 0, existingThread.lastMessageAt || existingThread.updatedAt);
+        break;
+      }
+    }
+  }
+
+  return history;
+}
+
+async function resolveTenantForOptionalQuery(
+  ctx: QueryCtx,
+  args: { tenantId?: Id<"tenantAccounts">; connectorTokenHash?: string },
+) {
+  if (args.connectorTokenHash) {
+    return await resolveTenantForQuery(ctx, args);
+  }
+  return args.tenantId;
+}
+
+async function resolveTenantForOptionalMutation(
+  ctx: MutationCtx,
+  args: { tenantId?: Id<"tenantAccounts">; connectorTokenHash?: string },
+) {
+  if (args.connectorTokenHash) {
+    return await resolveTenantForMutation(ctx, args);
+  }
+  await assertTenantBillingActive(ctx, args.tenantId);
+  return args.tenantId;
+}
+
+async function getOutboxRowsByTenantAndStatus(
+  ctx: QueryCtx,
+  tenantId: Id<"tenantAccounts">,
+  status: "pending" | "failed",
+  limit: number,
+) {
+  const rows = await Promise.all(
+    (["whatsapp", "instagram", undefined] as const).map((messageProvider) =>
+      ctx.db
+        .query("outbox")
+        .withIndex("by_tenantId_and_messageProvider_and_status_and_sendAt", (q) =>
+          q.eq("tenantId", tenantId).eq("messageProvider", messageProvider).eq("status", status),
+        )
+        .order(status === "pending" ? "asc" : "desc")
+        .take(limit),
+    ),
+  );
+  return rows.flat().sort((a, b) => (status === "pending" ? a.sendAt - b.sendAt : b.sendAt - a.sendAt)).slice(0, limit);
+}
+
+function withoutTenantScope<T extends { tenantId?: Id<"tenantAccounts">; connectorTokenHash?: string }>(args: T) {
+  const payload = { ...args };
+  delete payload.tenantId;
+  delete payload.connectorTokenHash;
+  return payload;
+}
+
+async function getTenantBillingBlock(ctx: QueryCtx | MutationCtx, tenantId: Id<"tenantAccounts"> | undefined) {
+  if (!tenantId) {
+    return null;
+  }
+  const tenant = await ctx.db.get(tenantId);
+  if (!tenant || isTenantBillingActive(tenant)) {
+    return null;
+  }
+  return {
+    status: tenant.billingStatus,
+    reason: tenantBillingInactiveReason(tenant),
+  };
+}
+
 export const health = query({
-  args: {},
-  handler: async (ctx) => {
+  args: tenantScopeArgs,
+  handler: async (ctx, args) => {
     const now = Date.now();
-    const config = await getConfig(ctx);
-    const latestEvents = await ctx.db
-      .query("systemEvents")
-      .withIndex("by_createdAt")
-      .order("desc")
-      .take(30);
-    const latestTranscriptions = (await ctx.db.query("systemEvents").withIndex("by_createdAt").order("desc").take(220))
+    const tenantId = await resolveTenantForOptionalQuery(ctx, args);
+    const rawConfig = await getConfig(ctx, tenantId);
+    const billingBlock = await getTenantBillingBlock(ctx, tenantId);
+    const config = billingBlock ? { ...rawConfig, autonomyPaused: true } : rawConfig;
+    const latestEvents = tenantId
+      ? await ctx.db
+          .query("systemEvents")
+          .withIndex("by_tenantId_and_createdAt", (q) => q.eq("tenantId", tenantId))
+          .order("desc")
+          .take(30)
+      : await ctx.db
+          .query("systemEvents")
+          .withIndex("by_createdAt")
+          .order("desc")
+          .take(30);
+    const transcriptionEventWindow = tenantId
+      ? await ctx.db
+          .query("systemEvents")
+          .withIndex("by_tenantId_and_createdAt", (q) => q.eq("tenantId", tenantId))
+          .order("desc")
+          .take(220)
+      : await ctx.db.query("systemEvents").withIndex("by_createdAt").order("desc").take(220);
+    const latestTranscriptions = transcriptionEventWindow
       .filter((event) => event.eventType.startsWith("inbound.audio.transcription") || event.eventType === "inbound.audio.transcribed")
       .slice(0, 40);
 
-    const latestProviderRuns = await ctx.db
-      .query("providerRuns")
-      .withIndex("by_createdAt")
-      .order("desc")
-      .take(12);
-    const followupEventWindow = (await ctx.db.query("systemEvents").withIndex("by_createdAt").order("desc").take(900))
+    const latestProviderRuns = tenantId
+      ? await ctx.db
+          .query("providerRuns")
+          .withIndex("by_tenantId_and_createdAt", (q) => q.eq("tenantId", tenantId))
+          .order("desc")
+          .take(12)
+      : await ctx.db
+          .query("providerRuns")
+          .withIndex("by_createdAt")
+          .order("desc")
+          .take(12);
+    const followupSourceWindow = tenantId
+      ? await ctx.db
+          .query("systemEvents")
+          .withIndex("by_tenantId_and_createdAt", (q) => q.eq("tenantId", tenantId))
+          .order("desc")
+          .take(900)
+      : await ctx.db.query("systemEvents").withIndex("by_createdAt").order("desc").take(900);
+    const followupEventWindow = followupSourceWindow
       .filter((event) => event.eventType.startsWith("followup."))
       .slice(0, 500);
 
-    const providerWindow = await ctx.db
-      .query("providerRuns")
-      .withIndex("by_createdAt")
-      .order("desc")
-      .take(240);
+    const providerWindow = tenantId
+      ? await ctx.db
+          .query("providerRuns")
+          .withIndex("by_tenantId_and_createdAt", (q) => q.eq("tenantId", tenantId))
+          .order("desc")
+          .take(240)
+      : await ctx.db
+          .query("providerRuns")
+          .withIndex("by_createdAt")
+          .order("desc")
+          .take(240);
     const successCount = providerWindow.filter((row) => row.status === "success").length;
     const errorCount = providerWindow.filter((row) => row.status === "error").length;
     const totalProviderRuns = providerWindow.length;
@@ -59,16 +231,31 @@ export const health = query({
     ).length;
     const pricedRuns = providerWindow.filter((row) => row.estimatedCostUsd !== undefined).length;
 
-    const openGuardrails = await ctx.db
+    const openGuardrailWindow = await ctx.db
       .query("guardrailEvents")
       .withIndex("by_resolvedAt_and_createdAt", (q) => q.eq("resolvedAt", undefined))
       .order("desc")
       .take(300);
-    const pendingOutbox = await ctx.db
-      .query("outbox")
-      .withIndex("by_status_sendAt", (q) => q.eq("status", "pending"))
-      .order("asc")
-      .take(250);
+    const openGuardrails = tenantId
+      ? (
+          await Promise.all(
+            openGuardrailWindow.map(async (event) => {
+              if (!event.threadId) {
+                return null;
+              }
+              const thread = await ctx.db.get(event.threadId);
+              return thread?.tenantId === tenantId ? event : null;
+            }),
+          )
+        ).filter((event): event is (typeof openGuardrailWindow)[number] => Boolean(event))
+      : openGuardrailWindow;
+    const pendingOutbox = tenantId
+      ? await getOutboxRowsByTenantAndStatus(ctx, tenantId, "pending", 250)
+      : await ctx.db
+          .query("outbox")
+          .withIndex("by_status_sendAt", (q) => q.eq("status", "pending"))
+          .order("asc")
+          .take(250);
     let dueNow = 0;
     for (const row of pendingOutbox) {
       if (row.sendAt > now) {
@@ -76,19 +263,31 @@ export const health = query({
       }
       dueNow += 1;
     }
-    const failedOutbox = await ctx.db
-      .query("outbox")
-      .withIndex("by_status_sendAt", (q) => q.eq("status", "failed"))
-      .order("desc")
-      .take(120);
-    const overdueSuggested = await ctx.db
-      .query("followUps")
-      .withIndex("by_status_dueAt", (q) => q.eq("status", "suggested").lte("dueAt", now))
-      .take(260);
-    const overdueConfirmed = await ctx.db
-      .query("followUps")
-      .withIndex("by_status_dueAt", (q) => q.eq("status", "confirmed").lte("dueAt", now))
-      .take(260);
+    const failedOutbox = tenantId
+      ? await getOutboxRowsByTenantAndStatus(ctx, tenantId, "failed", 120)
+      : await ctx.db
+          .query("outbox")
+          .withIndex("by_status_sendAt", (q) => q.eq("status", "failed"))
+          .order("desc")
+          .take(120);
+    const overdueSuggested = tenantId
+      ? await ctx.db
+          .query("followUps")
+          .withIndex("by_tenantId_and_status_and_dueAt", (q) => q.eq("tenantId", tenantId).eq("status", "suggested").lte("dueAt", now))
+          .take(260)
+      : await ctx.db
+          .query("followUps")
+          .withIndex("by_status_dueAt", (q) => q.eq("status", "suggested").lte("dueAt", now))
+          .take(260);
+    const overdueConfirmed = tenantId
+      ? await ctx.db
+          .query("followUps")
+          .withIndex("by_tenantId_and_status_and_dueAt", (q) => q.eq("tenantId", tenantId).eq("status", "confirmed").lte("dueAt", now))
+          .take(260)
+      : await ctx.db
+          .query("followUps")
+          .withIndex("by_status_dueAt", (q) => q.eq("status", "confirmed").lte("dueAt", now))
+          .take(260);
     const followupDetected = followupEventWindow.filter((event) => event.eventType === "followup.detected").length;
     const followupConfirmed = followupEventWindow.filter((event) => event.eventType === "followup.confirmed").length;
     const followupDismissed = followupEventWindow.filter((event) => event.eventType === "followup.dismissed").length;
@@ -118,6 +317,15 @@ export const health = query({
 
     return {
       config,
+      billing: billingBlock
+        ? {
+            blocked: true,
+            status: billingBlock.status,
+            reason: billingBlock.reason,
+          }
+        : {
+            blocked: false,
+          },
       latestEvents,
       latestTranscriptions,
       latestProviderRuns,
@@ -172,6 +380,7 @@ export const health = query({
 
 export const azureSpendingAnalytics = query({
   args: {
+    ...tenantScopeArgs,
     window: v.optional(v.union(v.literal("7d"), v.literal("30d"), v.literal("90d"), v.literal("all"))),
     runCap: v.optional(v.number()),
     modelLimit: v.optional(v.number()),
@@ -180,6 +389,7 @@ export const azureSpendingAnalytics = query({
   },
   handler: async (ctx, args) => {
     const now = Date.now();
+    const tenantId = await resolveTenantForOptionalQuery(ctx, args);
     const window = args.window ?? "30d";
     const windowDays = SPENDING_WINDOWS[window];
     const windowStartAt = windowDays === null ? null : now - windowDays * DAY_MS;
@@ -252,13 +462,22 @@ export const azureSpendingAnalytics = query({
       }
     >();
 
-    const azureRuns = ctx.db
-      .query("providerRuns")
-      .withIndex("by_provider_and_createdAt", (q) => q.eq("provider", "azure"))
-      .order("desc");
+    const azureRuns = tenantId
+      ? ctx.db
+          .query("providerRuns")
+          .withIndex("by_tenantId_and_createdAt", (q) => q.eq("tenantId", tenantId))
+          .order("desc")
+      : ctx.db
+          .query("providerRuns")
+          .withIndex("by_provider_and_createdAt", (q) => q.eq("provider", "azure"))
+          .order("desc");
 
     for await (const row of azureRuns) {
       scannedRuns += 1;
+
+      if (tenantId && row.provider !== "azure") {
+        continue;
+      }
 
       if (windowStartAt !== null && row.createdAt < windowStartAt) {
         break;
@@ -478,25 +697,171 @@ export const azureSpendingAnalytics = query({
   },
 });
 
+export const adminOverviewMetrics = query({
+  args: {
+    adminSecret: v.string(),
+    days: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    requireAdmin(args.adminSecret);
+    const days = Math.min(Math.max(Math.floor(args.days ?? 14), 7), 30);
+    const now = Date.now();
+    const todayStartAt = Math.floor(now / DAY_MS) * DAY_MS;
+    const startAt = todayStartAt - (days - 1) * DAY_MS;
+    const buckets = new Map<
+      number,
+      {
+        dayStartAt: number;
+        inboundMessages: number;
+        outboundMessages: number;
+        totalMessages: number;
+        aiRuns: number;
+        aiErrors: number;
+        inputTokens: number;
+        outputTokens: number;
+        totalTokens: number;
+        estimatedCostUsd: number;
+      }
+    >();
+
+    for (let index = 0; index < days; index += 1) {
+      const dayStartAt = startAt + index * DAY_MS;
+      buckets.set(dayStartAt, {
+        dayStartAt,
+        inboundMessages: 0,
+        outboundMessages: 0,
+        totalMessages: 0,
+        aiRuns: 0,
+        aiErrors: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        estimatedCostUsd: 0,
+      });
+    }
+
+    let scannedMessages = 0;
+    for await (const message of ctx.db.query("messages").withIndex("by_createdAt").order("desc")) {
+      if (message.createdAt < startAt) {
+        break;
+      }
+      scannedMessages += 1;
+      if (scannedMessages > 30_000) {
+        break;
+      }
+      const dayStartAt = Math.floor(message.createdAt / DAY_MS) * DAY_MS;
+      const bucket = buckets.get(dayStartAt);
+      if (!bucket) {
+        continue;
+      }
+      bucket.totalMessages += 1;
+      if (message.direction === "inbound") {
+        bucket.inboundMessages += 1;
+      } else {
+        bucket.outboundMessages += 1;
+      }
+    }
+
+    let scannedRuns = 0;
+    for await (const run of ctx.db.query("providerRuns").withIndex("by_createdAt").order("desc")) {
+      if (run.createdAt < startAt) {
+        break;
+      }
+      scannedRuns += 1;
+      if (scannedRuns > 30_000) {
+        break;
+      }
+      const dayStartAt = Math.floor(run.createdAt / DAY_MS) * DAY_MS;
+      const bucket = buckets.get(dayStartAt);
+      if (!bucket) {
+        continue;
+      }
+      bucket.aiRuns += 1;
+      if (run.status === "error") {
+        bucket.aiErrors += 1;
+      }
+      const inputTokens = run.inputTokens || 0;
+      const outputTokens = run.outputTokens || 0;
+      bucket.inputTokens += inputTokens;
+      bucket.outputTokens += outputTokens;
+      bucket.totalTokens += run.totalTokens ?? inputTokens + outputTokens;
+      bucket.estimatedCostUsd += run.estimatedCostUsd || 0;
+    }
+
+    const daily = Array.from(buckets.values()).map((bucket) => ({
+      ...bucket,
+      date: new Date(bucket.dayStartAt).toISOString().slice(0, 10),
+      estimatedCostUsd: Number(bucket.estimatedCostUsd.toFixed(8)),
+    }));
+
+    return {
+      days,
+      startAt,
+      generatedAt: now,
+      scannedMessages,
+      scannedRuns,
+      totals: daily.reduce(
+        (totals, bucket) => ({
+          inboundMessages: totals.inboundMessages + bucket.inboundMessages,
+          outboundMessages: totals.outboundMessages + bucket.outboundMessages,
+          totalMessages: totals.totalMessages + bucket.totalMessages,
+          aiRuns: totals.aiRuns + bucket.aiRuns,
+          aiErrors: totals.aiErrors + bucket.aiErrors,
+          inputTokens: totals.inputTokens + bucket.inputTokens,
+          outputTokens: totals.outputTokens + bucket.outputTokens,
+          totalTokens: totals.totalTokens + bucket.totalTokens,
+          estimatedCostUsd: Number((totals.estimatedCostUsd + bucket.estimatedCostUsd).toFixed(8)),
+        }),
+        {
+          inboundMessages: 0,
+          outboundMessages: 0,
+          totalMessages: 0,
+          aiRuns: 0,
+          aiErrors: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          totalTokens: 0,
+          estimatedCostUsd: 0,
+        },
+      ),
+      daily,
+    };
+  },
+});
+
 export const logFeed = query({
   args: {
+    ...tenantScopeArgs,
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForOptionalQuery(ctx, args);
     const limit = Math.min(args.limit ?? 60, 200);
     const providerLimit = Math.max(10, Math.ceil(limit / 2));
 
-    const latestEvents = await ctx.db
-      .query("systemEvents")
-      .withIndex("by_createdAt")
-      .order("desc")
-      .take(limit);
+    const latestEvents = tenantId
+      ? await ctx.db
+          .query("systemEvents")
+          .withIndex("by_tenantId_and_createdAt", (q) => q.eq("tenantId", tenantId))
+          .order("desc")
+          .take(limit)
+      : await ctx.db
+          .query("systemEvents")
+          .withIndex("by_createdAt")
+          .order("desc")
+          .take(limit);
 
-    const latestProviderRuns = await ctx.db
-      .query("providerRuns")
-      .withIndex("by_createdAt")
-      .order("desc")
-      .take(providerLimit);
+    const latestProviderRuns = tenantId
+      ? await ctx.db
+          .query("providerRuns")
+          .withIndex("by_tenantId_and_createdAt", (q) => q.eq("tenantId", tenantId))
+          .order("desc")
+          .take(providerLimit)
+      : await ctx.db
+          .query("providerRuns")
+          .withIndex("by_createdAt")
+          .order("desc")
+          .take(providerLimit);
 
     const eventItems = latestEvents.map((event) => ({
       id: event._id,
@@ -526,6 +891,7 @@ export const logFeed = query({
 
 export const recordEvent = mutation({
   args: {
+    ...tenantScopeArgs,
     source: v.union(v.literal("worker"), v.literal("convex"), v.literal("dashboard"), v.literal("ai")),
     eventType: v.string(),
     detail: v.string(),
@@ -534,8 +900,10 @@ export const recordEvent = mutation({
     outboxId: v.optional(v.id("outbox")),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForOptionalMutation(ctx, args);
     return await ctx.db.insert("systemEvents", {
-      ...args,
+      ...withoutTenantScope(args),
+      tenantId,
       createdAt: Date.now(),
     });
   },
@@ -543,6 +911,7 @@ export const recordEvent = mutation({
 
 export const recordProviderRun = mutation({
   args: {
+    ...tenantScopeArgs,
     threadId: v.optional(v.id("threads")),
     draftId: v.optional(v.id("replyDrafts")),
     provider: v.union(v.literal("azure"), v.literal("codex"), v.literal("heuristic")),
@@ -559,8 +928,10 @@ export const recordProviderRun = mutation({
     pricingVersion: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForOptionalMutation(ctx, args);
     return await ctx.db.insert("providerRuns", {
-      ...args,
+      ...withoutTenantScope(args),
+      tenantId,
       createdAt: Date.now(),
     });
   },
@@ -568,6 +939,7 @@ export const recordProviderRun = mutation({
 
 export const recordToolRun = mutation({
   args: {
+    ...tenantScopeArgs,
     threadId: v.optional(v.id("threads")),
     toolRunId: v.optional(v.string()),
     plannerSource: v.optional(v.union(v.literal("deterministic"), v.literal("hybrid"))),
@@ -585,18 +957,22 @@ export const recordToolRun = mutation({
     outputSummary: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForOptionalMutation(ctx, args);
     return await ctx.db.insert("toolRuns", {
-      ...args,
+      ...withoutTenantScope(args),
+      tenantId,
       createdAt: Date.now(),
     });
   },
 });
 
 export const pauseAutonomy = mutation({
-  args: {},
-  handler: async (ctx) => {
-    await setConfigValue(ctx, "autonomyPaused", "true");
+  args: tenantScopeArgs,
+  handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForOptionalMutation(ctx, args);
+    await setConfigValue(ctx, "autonomyPaused", "true", tenantId);
     await ctx.db.insert("systemEvents", {
+      tenantId,
       source: "dashboard",
       eventType: "autonomy.paused",
       detail: "Autonomy manually paused by operator.",
@@ -607,10 +983,25 @@ export const pauseAutonomy = mutation({
 });
 
 export const resumeAutonomy = mutation({
-  args: {},
-  handler: async (ctx) => {
-    await setConfigValue(ctx, "autonomyPaused", "false");
+  args: tenantScopeArgs,
+  handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForOptionalMutation(ctx, args);
+    const billingBlock = await getTenantBillingBlock(ctx, tenantId);
+    if (billingBlock) {
+      await setConfigValue(ctx, "autonomyPaused", "true", tenantId);
+      await ctx.db.insert("systemEvents", {
+        tenantId,
+        source: "dashboard",
+        eventType: "autonomy.resume_blocked.billing",
+        detail: billingBlock.reason,
+        createdAt: Date.now(),
+      });
+      throw new Error(`${billingBlock.reason} Restore billing before enabling automation.`);
+    }
+
+    await setConfigValue(ctx, "autonomyPaused", "false", tenantId);
     await ctx.db.insert("systemEvents", {
+      tenantId,
       source: "dashboard",
       eventType: "autonomy.resumed",
       detail: "Autonomy manually resumed by operator.",
@@ -632,22 +1023,51 @@ export const setIgnoreGroupsByDefault = mutation({
 
 export const setupStatus = query({
   args: {
+    ...tenantScopeArgs,
     provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForOptionalQuery(ctx, args);
     const provider = args.provider || "whatsapp";
-    let record = await ctx.db
-      .query("setupRuntime")
-      .withIndex("by_provider", (q) => q.eq("provider", provider))
-      .first();
-    if (!record && provider === "whatsapp") {
+    const connectionHistory = await getProviderConnectionHistory(ctx, tenantId, provider);
+    let record = tenantId
+      ? await ctx.db
+          .query("setupRuntime")
+          .withIndex("by_tenantId_and_provider", (q) => q.eq("tenantId", tenantId).eq("provider", provider))
+          .first()
+      : await ctx.db
+          .query("setupRuntime")
+          .withIndex("by_provider", (q) => q.eq("provider", provider))
+          .first();
+    if (!record && !tenantId && provider === "whatsapp") {
       record = await ctx.db
         .query("setupRuntime")
         .withIndex("by_key", (q) => q.eq("key", "whatsapp"))
         .first();
     }
 
-    return record || null;
+    if (record) {
+      return {
+        ...record,
+        ...connectionHistory,
+      };
+    }
+
+    if (connectionHistory.hasConnectedBefore) {
+      const syntheticRecord = {
+        key: provider,
+        provider,
+        status: "idle" as const,
+        mode: provider === "instagram" ? ("password" as const) : ("qr" as const),
+        message: "Setup not started.",
+        hasAuth: false,
+        updatedAt: connectionHistory.lastDisconnectedAt || connectionHistory.lastConnectedAt || Date.now(),
+        ...connectionHistory,
+      };
+      return tenantId ? { ...syntheticRecord, tenantId } : syntheticRecord;
+    }
+
+    return null;
   },
 });
 

@@ -11,7 +11,7 @@ import {
   eligibilityReasonLabel,
   resolveThreadEligibility,
 } from "./lib/threadEligibility";
-import { assertTenantOwned, resolveTenantForQuery } from "./lib/tenantSecurity";
+import { assertTenantOwned, resolveTenantForMutation, resolveTenantForQuery } from "./lib/tenantSecurity";
 
 function clampInt(value: number | undefined, fallback: number, min: number, max: number) {
   if (!Number.isFinite(value)) {
@@ -73,6 +73,46 @@ function summarizeMessagePreview(args: {
 
 const IGNORE_CONTACT_FALLBACK_SCAN_LIMIT = 1000;
 
+const tenantScopeArgs = {
+  tenantId: v.optional(v.id("tenantAccounts")),
+  connectorTokenHash: v.optional(v.string()),
+};
+
+async function avatarPreviewForThread(ctx: QueryCtx, avatarMediaAssetId?: Id<"mediaAssets">) {
+  if (!avatarMediaAssetId) {
+    return null;
+  }
+  const asset = await ctx.db.get(avatarMediaAssetId);
+  if (!asset) {
+    return null;
+  }
+  const url = await ctx.storage.getUrl(asset.fileId);
+  if (!url) {
+    return null;
+  }
+  return {
+    assetId: asset._id,
+    url,
+    mimeType: asset.mimeType,
+    updatedAt: asset.updatedAt,
+  };
+}
+
+async function mediaPreviewForAsset(ctx: QueryCtx, assetId: Id<"mediaAssets">) {
+  const asset = await ctx.db.get(assetId);
+  if (!asset) {
+    return null;
+  }
+  const url = await ctx.storage.getUrl(asset.fileId);
+  return {
+    assetId,
+    kind: asset.kind,
+    mimeType: asset.mimeType,
+    label: asset.label,
+    url,
+  };
+}
+
 async function findExplicitIgnoreRule(args: {
   ctx: QueryCtx;
   threadKind: "direct" | "group" | "broadcast_or_system";
@@ -127,14 +167,26 @@ async function findExplicitIgnoreRule(args: {
 
 export const list = query({
   args: {
+    tenantId: v.optional(v.id("tenantAccounts")),
+    connectorTokenHash: v.optional(v.string()),
     limit: v.optional(v.number()),
     provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("all"))),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForQuery(ctx, args);
     const limit = Math.min(args.limit ?? 30, 100);
     const provider = args.provider || "all";
-    const threads =
-      provider === "all"
+    const threads = tenantId
+      ? (
+          await ctx.db
+            .query("threads")
+            .withIndex("by_tenantId_and_jid", (q) => q.eq("tenantId", tenantId))
+            .take(Math.max(limit * 4, 200))
+        )
+          .filter((thread) => provider === "all" || thread.provider === provider)
+          .sort((a, b) => b.lastMessageAt - a.lastMessageAt)
+          .slice(0, limit)
+      : provider === "all"
         ? await ctx.db
             .query("threads")
             .withIndex("by_lastMessageAt")
@@ -174,6 +226,7 @@ export const list = query({
           ...thread,
           isGroup: threadKind === "group",
           threadKind,
+          avatarPreview: await avatarPreviewForThread(ctx, thread.avatarMediaAssetId),
           latestDraft: drafts[0] ?? null,
           latestMessage: latestMessage
             ? {
@@ -190,14 +243,26 @@ export const list = query({
 
 export const listContacts = query({
   args: {
+    tenantId: v.optional(v.id("tenantAccounts")),
+    connectorTokenHash: v.optional(v.string()),
     limit: v.optional(v.number()),
     provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("all"))),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForQuery(ctx, args);
     const limit = Math.min(args.limit ?? 200, 500);
     const provider = args.provider || "all";
-    const directCandidates =
-      provider === "all"
+    const directCandidates = tenantId
+      ? (
+          await ctx.db
+            .query("threads")
+            .withIndex("by_tenantId_and_jid", (q) => q.eq("tenantId", tenantId))
+            .take(Math.max(limit * 4, 300))
+        )
+          .filter((thread) => (provider === "all" || thread.provider === provider) && thread.threadKind === "direct")
+          .sort((a, b) => b.lastMessageAt - a.lastMessageAt)
+          .slice(0, limit)
+      : provider === "all"
         ? await ctx.db
             .query("threads")
             .withIndex("by_threadKind_and_lastMessageAt", (q) => q.eq("threadKind", "direct"))
@@ -274,6 +339,98 @@ export const listContacts = query({
         isGroup: false,
         threadKind: "direct" as const,
       }));
+  },
+});
+
+export const getAvatarCache = query({
+  args: {
+    ...tenantScopeArgs,
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
+    threadJid: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForQuery(ctx, args);
+    const provider = args.provider || "whatsapp";
+    let thread = await ctx.db
+      .query("threads")
+      .withIndex("by_provider_and_jid", (q) => q.eq("provider", provider).eq("jid", args.threadJid))
+      .first();
+    if (!thread) {
+      thread = await ctx.db
+        .query("threads")
+        .withIndex("by_jid", (q) => q.eq("jid", args.threadJid))
+        .first();
+    }
+    if (!thread) {
+      return null;
+    }
+    assertTenantOwned(tenantId, thread.tenantId);
+    return {
+      threadId: thread._id,
+      avatarMediaAssetId: thread.avatarMediaAssetId,
+      avatarContentHash: thread.avatarContentHash,
+      avatarLastFetchedAt: thread.avatarLastFetchedAt,
+      avatarUpdatedAt: thread.avatarUpdatedAt,
+      avatarStatus: thread.avatarStatus,
+    };
+  },
+});
+
+export const updateAvatarCache = mutation({
+  args: {
+    ...tenantScopeArgs,
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
+    threadId: v.optional(v.id("threads")),
+    threadJid: v.optional(v.string()),
+    avatarMediaAssetId: v.optional(v.id("mediaAssets")),
+    avatarContentHash: v.optional(v.string()),
+    avatarStatus: v.union(v.literal("available"), v.literal("missing"), v.literal("blocked"), v.literal("error")),
+    fetchedAt: v.number(),
+  },
+  handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForMutation(ctx, args);
+    const provider = args.provider || "whatsapp";
+    let thread = args.threadId ? await ctx.db.get(args.threadId) : null;
+    if (!thread && args.threadJid) {
+      thread = await ctx.db
+        .query("threads")
+        .withIndex("by_provider_and_jid", (q) => q.eq("provider", provider).eq("jid", args.threadJid || ""))
+        .first();
+      if (!thread) {
+        thread = await ctx.db
+          .query("threads")
+          .withIndex("by_jid", (q) => q.eq("jid", args.threadJid || ""))
+          .first();
+      }
+    }
+    if (!thread) {
+      return null;
+    }
+    assertTenantOwned(tenantId, thread.tenantId);
+
+    const normalizedHash = args.avatarContentHash?.trim() || undefined;
+    await ctx.db.patch(thread._id, {
+      avatarMediaAssetId:
+        args.avatarStatus === "available"
+          ? args.avatarMediaAssetId
+          : args.avatarStatus === "error"
+            ? thread.avatarMediaAssetId
+            : undefined,
+      avatarContentHash:
+        args.avatarStatus === "available"
+          ? normalizedHash
+          : args.avatarStatus === "error"
+            ? thread.avatarContentHash
+            : undefined,
+      avatarLastFetchedAt: Math.max(0, args.fetchedAt),
+      avatarUpdatedAt:
+        args.avatarStatus === "available" && normalizedHash && normalizedHash !== thread.avatarContentHash
+          ? Math.max(0, args.fetchedAt)
+          : thread.avatarUpdatedAt,
+      avatarStatus: args.avatarStatus,
+      updatedAt: Date.now(),
+    });
+    return thread._id;
   },
 });
 
@@ -415,6 +572,10 @@ export const upsertMetadata = mutation({
     isArchived: v.optional(v.boolean()),
     archivedAt: v.optional(v.number()),
     lastMessageAt: v.optional(v.number()),
+    baileysChatName: v.optional(v.string()),
+    baileysConversationName: v.optional(v.string()),
+    baileysSubject: v.optional(v.string()),
+    baileysUnreadCount: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const now = Date.now();
@@ -444,6 +605,11 @@ export const upsertMetadata = mutation({
         provider,
         jid: args.threadJid,
         title: args.title,
+        baileysChatName: args.baileysChatName,
+        baileysConversationName: args.baileysConversationName,
+        baileysSubject: args.baileysSubject,
+        baileysUnreadCount: args.baileysUnreadCount,
+        baileysMetadataUpdatedAt: now,
         isGroup: threadKind === "group",
         isIgnored: threadKind === "group" ? config.ignoreGroupsByDefault : false,
         threadKind,
@@ -458,6 +624,17 @@ export const upsertMetadata = mutation({
     await ctx.db.patch(existing._id, {
       provider: existing.provider || provider,
       title: args.title ?? existing.title,
+      baileysChatName: args.baileysChatName ?? existing.baileysChatName,
+      baileysConversationName: args.baileysConversationName ?? existing.baileysConversationName,
+      baileysSubject: args.baileysSubject ?? existing.baileysSubject,
+      baileysUnreadCount: args.baileysUnreadCount ?? existing.baileysUnreadCount,
+      baileysMetadataUpdatedAt:
+        args.baileysChatName !== undefined ||
+        args.baileysConversationName !== undefined ||
+        args.baileysSubject !== undefined ||
+        args.baileysUnreadCount !== undefined
+          ? now
+          : existing.baileysMetadataUpdatedAt,
       isGroup: threadKind === "group",
       threadKind,
       isArchived: args.isArchived === undefined ? existing.isArchived : args.isArchived,
@@ -472,6 +649,65 @@ export const upsertMetadata = mutation({
     });
 
     return existing._id;
+  },
+});
+
+export const upsertContactMetadata = mutation({
+  args: {
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
+    jids: v.array(v.string()),
+    savedName: v.optional(v.string()),
+    notifyName: v.optional(v.string()),
+    verifiedName: v.optional(v.string()),
+    phoneNumber: v.optional(v.string()),
+    lid: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const provider = args.provider || "whatsapp";
+    const now = Date.now();
+    const candidateJids = [...new Set(args.jids.map((jid) => jid.trim()).filter(Boolean))].slice(0, 8);
+    if (candidateJids.length === 0) {
+      return null;
+    }
+
+    let thread = null;
+    for (const jid of candidateJids) {
+      thread = await ctx.db
+        .query("threads")
+        .withIndex("by_provider_and_jid", (q) => q.eq("provider", provider).eq("jid", jid))
+        .first();
+      if (thread) {
+        break;
+      }
+    }
+    if (!thread) {
+      for (const jid of candidateJids) {
+        thread = await ctx.db
+          .query("threads")
+          .withIndex("by_jid", (q) => q.eq("jid", jid))
+          .first();
+        if (thread) {
+          break;
+        }
+      }
+    }
+    if (!thread) {
+      return null;
+    }
+
+    await ctx.db.patch(thread._id, {
+      provider: thread.provider || provider,
+      baileysSavedName: args.savedName ?? thread.baileysSavedName,
+      baileysNotifyName: args.notifyName ?? thread.baileysNotifyName,
+      baileysVerifiedName: args.verifiedName ?? thread.baileysVerifiedName,
+      baileysPhoneNumber: args.phoneNumber ?? thread.baileysPhoneNumber,
+      baileysLid: args.lid ?? thread.baileysLid,
+      baileysMetadataUpdatedAt: now,
+      title: thread.title || args.savedName || args.notifyName || args.verifiedName,
+      updatedAt: now,
+    });
+
+    return thread._id;
   },
 });
 
@@ -801,15 +1037,19 @@ export const backfillLastMessageAtFromNonStatus = mutation({
 
 export const get = query({
   args: {
+    tenantId: v.optional(v.id("tenantAccounts")),
+    connectorTokenHash: v.optional(v.string()),
     threadId: v.id("threads"),
     includeStatusMessages: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const now = Date.now();
+    const tenantId = await resolveTenantForQuery(ctx, args);
     const thread = await ctx.db.get(args.threadId);
     if (!thread) {
       return null;
     }
+    assertTenantOwned(tenantId, thread.tenantId);
     const threadKind =
       thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup, provider: thread.provider });
 
@@ -951,8 +1191,19 @@ export const get = query({
         url: string | null;
       }
     >();
+    const mediaMessageRows = await ctx.db
+      .query("messages")
+      .withIndex("by_thread_messageAt", (q) => q.eq("threadId", args.threadId))
+      .order("desc")
+      .take(500);
+    const threadMediaMessages = mediaMessageRows.filter((message) => Boolean(message.mediaAssetId)).slice(0, 120);
     const mediaAssetIds = new Set<Id<"mediaAssets">>();
     for (const message of visibleMessages) {
+      if (message.mediaAssetId) {
+        mediaAssetIds.add(message.mediaAssetId);
+      }
+    }
+    for (const message of threadMediaMessages) {
       if (message.mediaAssetId) {
         mediaAssetIds.add(message.mediaAssetId);
       }
@@ -970,18 +1221,10 @@ export const get = query({
 
     await Promise.all(
       [...mediaAssetIds].map(async (assetId) => {
-        const asset = await ctx.db.get(assetId);
-        if (!asset) {
-          return;
+        const preview = await mediaPreviewForAsset(ctx, assetId);
+        if (preview) {
+          mediaById.set(assetId, preview);
         }
-        const url = await ctx.storage.getUrl(asset.fileId);
-        mediaById.set(assetId, {
-          assetId,
-          kind: asset.kind,
-          mimeType: asset.mimeType,
-          label: asset.label,
-          url,
-        });
       }),
     );
 
@@ -1213,6 +1456,7 @@ export const get = query({
         ...thread,
         isGroup: threadKind === "group",
         threadKind,
+        avatarPreview: await avatarPreviewForThread(ctx, thread.avatarMediaAssetId),
       },
       messages: visibleMessages
         .reverse()
@@ -1220,6 +1464,16 @@ export const get = query({
           ...message,
           mediaPreview: message.mediaAssetId ? mediaById.get(message.mediaAssetId) || null : null,
         })),
+      threadMedia: threadMediaMessages.map((message) => ({
+        _id: message._id,
+        direction: message.direction,
+        text: message.text,
+        messageType: message.messageType,
+        mediaCaption: message.mediaCaption,
+        messageAt: message.messageAt,
+        mediaAssetId: message.mediaAssetId,
+        mediaPreview: message.mediaAssetId ? mediaById.get(message.mediaAssetId) || null : null,
+      })),
       reactions,
       memory,
       grounding: grounding || null,
@@ -1243,14 +1497,18 @@ export const get = query({
 
 export const getToolEvents = query({
   args: {
+    tenantId: v.optional(v.id("tenantAccounts")),
+    connectorTokenHash: v.optional(v.string()),
     threadId: v.id("threads"),
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForQuery(ctx, args);
     const thread = await ctx.db.get(args.threadId);
     if (!thread) {
       return [];
     }
+    assertTenantOwned(tenantId, thread.tenantId);
 
     const limit = clampInt(args.limit, 220, 30, 500);
     const toolRuns = await ctx.db

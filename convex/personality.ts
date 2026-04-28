@@ -1,10 +1,12 @@
 import { v } from "convex/values";
-import type { Doc } from "./_generated/dataModel";
+import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { mutation, query } from "./_generated/server";
 import { setConfigValue, getConfig } from "./lib/config";
 import { assessProfessionalConversation, type MemePolicyMode } from "./lib/memePolicy";
 import { DEFAULT_PERSONA_PACK_ID, PERSONA_PACKS, getPersonaPackById } from "./lib/personaPacks";
+import { assertTenantOwned, resolveTenantForMutation, resolveTenantForQuery } from "./lib/tenantSecurity";
+import { assertTenantBillingActive } from "./lib/billingAccess";
 
 type DefaultPersonalityProfile = {
   slug: string;
@@ -31,6 +33,10 @@ const MAX_PROMPT_PROFILE_CHARS = 8000;
 const EMOJI_REGEX = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu;
 const AUTO_IMPROVEMENT_BLOCK_START = "[auto-improve-history:start]";
 const AUTO_IMPROVEMENT_BLOCK_END = "[auto-improve-history:end]";
+const tenantScopeArgs = {
+  tenantId: v.optional(v.id("tenantAccounts")),
+  connectorTokenHash: v.optional(v.string()),
+};
 
 const DEFAULT_PERSONALITY_PROFILES: DefaultPersonalityProfile[] = [
   {
@@ -112,6 +118,17 @@ function clamp01(value: number) {
     return 0.7;
   }
   return Math.max(0, Math.min(value, 1));
+}
+
+async function resolveTenantForOptionalMutation(
+  ctx: MutationCtx,
+  args: { tenantId?: Id<"tenantAccounts">; connectorTokenHash?: string },
+) {
+  if (args.connectorTokenHash) {
+    return await resolveTenantForMutation(ctx, args);
+  }
+  await assertTenantBillingActive(ctx, args.tenantId);
+  return args.tenantId;
 }
 
 function normalizeSlug(value: string) {
@@ -237,8 +254,13 @@ function fromDefaultProfile(profile: DefaultPersonalityProfile): PersonalityProf
   };
 }
 
-async function getMergedProfiles(ctx: QueryCtx | MutationCtx): Promise<PersonalityProfileView[]> {
-  const storedProfiles = await ctx.db.query("personalityProfiles").withIndex("by_slug").take(100);
+async function getMergedProfiles(ctx: QueryCtx | MutationCtx, tenantId?: Id<"tenantAccounts">): Promise<PersonalityProfileView[]> {
+  const storedProfiles = tenantId
+    ? await ctx.db
+        .query("personalityProfiles")
+        .withIndex("by_tenantId_and_slug", (q) => q.eq("tenantId", tenantId))
+        .take(100)
+    : await ctx.db.query("personalityProfiles").withIndex("by_slug").take(100);
   const storedBySlug = new Map(storedProfiles.map((profile) => [profile.slug, profile]));
 
   const mergedDefaults = DEFAULT_PERSONALITY_PROFILES.map((profile) => {
@@ -257,12 +279,20 @@ function getFallbackProfile(profiles: PersonalityProfileView[]) {
   return profiles.find((profile) => profile.slug === "casual") || profiles[0] || null;
 }
 
-async function getNextProfileVersionNumber(ctx: QueryCtx | MutationCtx, profileSlug: string) {
-  const latest = await ctx.db
-    .query("personalityProfileVersions")
-    .withIndex("by_profileSlug_and_versionNumber", (q) => q.eq("profileSlug", profileSlug))
-    .order("desc")
-    .take(1);
+async function getNextProfileVersionNumber(ctx: QueryCtx | MutationCtx, profileSlug: string, tenantId?: Id<"tenantAccounts">) {
+  const latest = tenantId
+    ? await ctx.db
+        .query("personalityProfileVersions")
+        .withIndex("by_tenantId_and_profileSlug_and_versionNumber", (q) =>
+          q.eq("tenantId", tenantId).eq("profileSlug", profileSlug),
+        )
+        .order("desc")
+        .take(1)
+    : await ctx.db
+        .query("personalityProfileVersions")
+        .withIndex("by_profileSlug_and_versionNumber", (q) => q.eq("profileSlug", profileSlug))
+        .order("desc")
+        .take(1);
   const currentMax = latest[0]?.versionNumber || 0;
   return currentMax + 1;
 }
@@ -272,8 +302,9 @@ async function saveProfileVersionSnapshot(
   profile: Doc<"personalityProfiles">,
   reason?: string,
 ) {
-  const versionNumber = await getNextProfileVersionNumber(ctx, profile.slug);
+  const versionNumber = await getNextProfileVersionNumber(ctx, profile.slug, profile.tenantId);
   await ctx.db.insert("personalityProfileVersions", {
+    tenantId: profile.tenantId,
     profileSlug: profile.slug,
     versionNumber,
     name: profile.name,
@@ -289,19 +320,26 @@ async function saveProfileVersionSnapshot(
 async function ensureThreadSetting(
   ctx: MutationCtx,
   threadId: Doc<"threadPersonalitySettings">["threadId"],
+  tenantId?: Id<"tenantAccounts">,
 ) {
-  const existing = await ctx.db
-    .query("threadPersonalitySettings")
-    .withIndex("by_thread", (q) => q.eq("threadId", threadId))
-    .first();
+  const existing = tenantId
+    ? await ctx.db
+        .query("threadPersonalitySettings")
+        .withIndex("by_tenantId_and_thread", (q) => q.eq("tenantId", tenantId).eq("threadId", threadId))
+        .first()
+    : await ctx.db
+        .query("threadPersonalitySettings")
+        .withIndex("by_thread", (q) => q.eq("threadId", threadId))
+        .first();
   if (existing) {
     return existing;
   }
 
-  const profiles = await getMergedProfiles(ctx);
+  const profiles = await getMergedProfiles(ctx, tenantId);
   const fallbackProfile = getFallbackProfile(profiles);
   const now = Date.now();
   const id = await ctx.db.insert("threadPersonalitySettings", {
+    tenantId,
     threadId,
     profileSlug: fallbackProfile?.slug || "casual",
     intensity: clamp01(fallbackProfile?.defaultIntensity ?? 0.58),
@@ -313,6 +351,7 @@ async function ensureThreadSetting(
   return {
     _id: id,
     _creationTime: now,
+    tenantId,
     threadId,
     profileSlug: fallbackProfile?.slug || "casual",
     intensity: clamp01(fallbackProfile?.defaultIntensity ?? 0.58),
@@ -521,13 +560,14 @@ async function savePromptProfile(
   ctx: MutationCtx,
   args: {
     threadId: Doc<"threadPersonalitySettings">["threadId"];
+    tenantId?: Id<"tenantAccounts">;
     promptProfile: string;
     source?: PromptProfileSource;
     lookbackDays?: number;
     messageCount?: number;
   },
 ) {
-  const setting = await ensureThreadSetting(ctx, args.threadId);
+  const setting = await ensureThreadSetting(ctx, args.threadId, args.tenantId);
   const now = Date.now();
   const promptProfile = normalizePromptProfile(args.promptProfile);
 
@@ -555,16 +595,18 @@ async function savePromptProfile(
 }
 
 export const listProfiles = query({
-  args: {},
-  handler: async (ctx) => {
-    return await getMergedProfiles(ctx);
+  args: tenantScopeArgs,
+  handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForQuery(ctx, args);
+    return await getMergedProfiles(ctx, tenantId);
   },
 });
 
 export const listPersonaPacks = query({
-  args: {},
-  handler: async (ctx) => {
-    const config = await getConfig(ctx);
+  args: tenantScopeArgs,
+  handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForQuery(ctx, args);
+    const config = await getConfig(ctx, tenantId);
     const activePersonaPackIdsByProfile = config.activePersonaPackIdsByProfile || {};
     return {
       activePersonaPackId: config.activePersonaPackId || "",
@@ -588,6 +630,7 @@ export const listPersonaPacks = query({
 
 export const upsertProfile = mutation({
   args: {
+    ...tenantScopeArgs,
     slug: v.string(),
     name: v.string(),
     description: v.string(),
@@ -595,6 +638,7 @@ export const upsertProfile = mutation({
     defaultIntensity: v.number(),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForOptionalMutation(ctx, args);
     const slug = normalizeSlug(args.slug);
     if (!slug) {
       throw new Error("Profile slug is required.");
@@ -610,10 +654,15 @@ export const upsertProfile = mutation({
       updatedAt: now,
     };
 
-    const existing = await ctx.db
-      .query("personalityProfiles")
-      .withIndex("by_slug", (q) => q.eq("slug", slug))
-      .first();
+    const existing = tenantId
+      ? await ctx.db
+          .query("personalityProfiles")
+          .withIndex("by_tenantId_and_slug", (q) => q.eq("tenantId", tenantId).eq("slug", slug))
+          .first()
+      : await ctx.db
+          .query("personalityProfiles")
+          .withIndex("by_slug", (q) => q.eq("slug", slug))
+          .first();
 
     if (existing) {
       const changed =
@@ -630,6 +679,7 @@ export const upsertProfile = mutation({
     }
 
     const profileId = await ctx.db.insert("personalityProfiles", {
+      tenantId,
       ...payload,
       createdAt: now,
     });
@@ -643,38 +693,53 @@ export const upsertProfile = mutation({
 
 export const listProfileVersions = query({
   args: {
+    ...tenantScopeArgs,
     slug: v.string(),
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForQuery(ctx, args);
     const slug = normalizeSlug(args.slug);
     if (!slug) {
       return [];
     }
     const limit = Math.max(1, Math.min(Math.round(args.limit ?? 20), 100));
-    return await ctx.db
-      .query("personalityProfileVersions")
-      .withIndex("by_profileSlug_and_createdAt", (q) => q.eq("profileSlug", slug))
-      .order("desc")
-      .take(limit);
+    return tenantId
+      ? await ctx.db
+          .query("personalityProfileVersions")
+          .withIndex("by_tenantId_and_profileSlug_and_createdAt", (q) => q.eq("tenantId", tenantId).eq("profileSlug", slug))
+          .order("desc")
+          .take(limit)
+      : await ctx.db
+          .query("personalityProfileVersions")
+          .withIndex("by_profileSlug_and_createdAt", (q) => q.eq("profileSlug", slug))
+          .order("desc")
+          .take(limit);
   },
 });
 
 export const rollbackProfileVersion = mutation({
   args: {
+    ...tenantScopeArgs,
     slug: v.string(),
     versionId: v.id("personalityProfileVersions"),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForOptionalMutation(ctx, args);
     const slug = normalizeSlug(args.slug);
     if (!slug) {
       throw new Error("Profile slug is required.");
     }
 
-    const profile = await ctx.db
-      .query("personalityProfiles")
-      .withIndex("by_slug", (q) => q.eq("slug", slug))
-      .first();
+    const profile = tenantId
+      ? await ctx.db
+          .query("personalityProfiles")
+          .withIndex("by_tenantId_and_slug", (q) => q.eq("tenantId", tenantId).eq("slug", slug))
+          .first()
+      : await ctx.db
+          .query("personalityProfiles")
+          .withIndex("by_slug", (q) => q.eq("slug", slug))
+          .first();
     if (!profile) {
       throw new Error("Profile not found.");
     }
@@ -683,6 +748,7 @@ export const rollbackProfileVersion = mutation({
     if (!version || version.profileSlug !== slug) {
       throw new Error("Profile version not found.");
     }
+    assertTenantOwned(tenantId, version.tenantId);
 
     await saveProfileVersionSnapshot(ctx, profile, `rollback-from-v${version.versionNumber}`);
 
@@ -700,9 +766,11 @@ export const rollbackProfileVersion = mutation({
 
 export const deleteProfile = mutation({
   args: {
+    ...tenantScopeArgs,
     slug: v.string(),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForOptionalMutation(ctx, args);
     const slug = normalizeSlug(args.slug);
     if (!slug) {
       throw new Error("Profile slug is required.");
@@ -712,20 +780,30 @@ export const deleteProfile = mutation({
       throw new Error("Default profiles cannot be deleted.");
     }
 
-    const existing = await ctx.db
-      .query("personalityProfiles")
-      .withIndex("by_slug", (q) => q.eq("slug", slug))
-      .first();
+    const existing = tenantId
+      ? await ctx.db
+          .query("personalityProfiles")
+          .withIndex("by_tenantId_and_slug", (q) => q.eq("tenantId", tenantId).eq("slug", slug))
+          .first()
+      : await ctx.db
+          .query("personalityProfiles")
+          .withIndex("by_slug", (q) => q.eq("slug", slug))
+          .first();
     if (!existing) {
       return null;
     }
 
-    const fallback = getFallbackProfile(await getMergedProfiles(ctx));
+    const fallback = getFallbackProfile(await getMergedProfiles(ctx, tenantId));
     const now = Date.now();
-    const settings = await ctx.db
-      .query("threadPersonalitySettings")
-      .withIndex("by_profileSlug", (q) => q.eq("profileSlug", slug))
-      .take(4000);
+    const settings = tenantId
+      ? await ctx.db
+          .query("threadPersonalitySettings")
+          .withIndex("by_tenantId_and_profileSlug", (q) => q.eq("tenantId", tenantId).eq("profileSlug", slug))
+          .take(4000)
+      : await ctx.db
+          .query("threadPersonalitySettings")
+          .withIndex("by_profileSlug", (q) => q.eq("profileSlug", slug))
+          .take(4000);
     for (const setting of settings) {
       await ctx.db.patch(setting._id, {
         profileSlug: fallback?.slug || "casual",
@@ -741,10 +819,12 @@ export const deleteProfile = mutation({
 
 export const installPersonaPack = mutation({
   args: {
+    ...tenantScopeArgs,
     packId: v.optional(v.string()),
     autoActivate: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForOptionalMutation(ctx, args);
     const selectedPackId = (args.packId || DEFAULT_PERSONA_PACK_ID).trim();
     const pack = getPersonaPackById(selectedPackId);
     if (!pack) {
@@ -755,10 +835,15 @@ export const installPersonaPack = mutation({
 
     let profileUpdates = 0;
     for (const slug of pack.personalityPatch.appendToSlugs) {
-      const existing = await ctx.db
-        .query("personalityProfiles")
-        .withIndex("by_slug", (q) => q.eq("slug", slug))
-        .first();
+      const existing = tenantId
+        ? await ctx.db
+            .query("personalityProfiles")
+            .withIndex("by_tenantId_and_slug", (q) => q.eq("tenantId", tenantId).eq("slug", slug))
+            .first()
+        : await ctx.db
+            .query("personalityProfiles")
+            .withIndex("by_slug", (q) => q.eq("slug", slug))
+            .first();
       const defaultProfile = DEFAULT_PERSONALITY_PROFILES.find((profile) => profile.slug === slug);
       const currentPrompt = existing?.prompt || defaultProfile?.prompt || "";
       const nextPrompt = upsertPersonaPackPromptBlock(currentPrompt, pack.id, pack.personalityPatch.promptBlock);
@@ -777,6 +862,7 @@ export const installPersonaPack = mutation({
       }
 
       const profileId = await ctx.db.insert("personalityProfiles", {
+        tenantId,
         slug,
         name: defaultProfile?.name || slug,
         description: defaultProfile?.description || "Persona-managed profile.",
@@ -794,20 +880,21 @@ export const installPersonaPack = mutation({
 
     const autoActivate = args.autoActivate ?? true;
     if (autoActivate) {
-      const config = await getConfig(ctx);
+      const config = await getConfig(ctx, tenantId);
       const nextActiveByProfile = {
         ...(config.activePersonaPackIdsByProfile || {}),
       };
       for (const slug of pack.activation.allowedProfileSlugs) {
         nextActiveByProfile[slug] = pack.id;
       }
-      await setConfigValue(ctx, "activePersonaPackIdsByProfile", JSON.stringify(nextActiveByProfile));
-      await setConfigValue(ctx, "qualityGateMode", "auto_rewrite_once");
-      await setConfigValue(ctx, "qualityGateThreshold", String(pack.checklist.passThreshold));
+      await setConfigValue(ctx, "activePersonaPackIdsByProfile", JSON.stringify(nextActiveByProfile), tenantId);
+      await setConfigValue(ctx, "qualityGateMode", "auto_rewrite_once", tenantId);
+      await setConfigValue(ctx, "qualityGateThreshold", String(pack.checklist.passThreshold), tenantId);
     }
-    await setConfigValue(ctx, "personaPackLastInstalledAt", String(now));
+    await setConfigValue(ctx, "personaPackLastInstalledAt", String(now), tenantId);
 
     await ctx.db.insert("systemEvents", {
+      tenantId,
       source: "dashboard",
       eventType: "persona.pack.installed",
       detail: `Installed ${pack.id} (autoActivate=${autoActivate ? "true" : "false"})`,
@@ -826,9 +913,11 @@ export const installPersonaPack = mutation({
 
 export const cleanupPersonaPackGlobalStyleTraits = mutation({
   args: {
+    ...tenantScopeArgs,
     packId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForOptionalMutation(ctx, args);
     const now = Date.now();
     const packs = args.packId ? [getPersonaPackById(args.packId)] : PERSONA_PACKS;
     if (packs.some((pack) => !pack)) {
@@ -836,10 +925,15 @@ export const cleanupPersonaPackGlobalStyleTraits = mutation({
     }
     const resolvedPacks = packs as typeof PERSONA_PACKS;
 
-    const styleProfile = await ctx.db
-      .query("styleProfiles")
-      .withIndex("by_scope", (q) => q.eq("scope", "global"))
-      .first();
+    const styleProfile = tenantId
+      ? await ctx.db
+          .query("styleProfiles")
+          .withIndex("by_tenantId_and_scope", (q) => q.eq("tenantId", tenantId).eq("scope", "global"))
+          .first()
+      : await ctx.db
+          .query("styleProfiles")
+          .withIndex("by_scope", (q) => q.eq("scope", "global"))
+          .first();
     if (!styleProfile) {
       return { updated: false, removedCount: 0 };
     }
@@ -870,6 +964,7 @@ export const cleanupPersonaPackGlobalStyleTraits = mutation({
     }
 
     await ctx.db.insert("styleProfileHistory", {
+      tenantId: styleProfile.tenantId,
       scope: styleProfile.scope,
       threadId: styleProfile.threadId,
       mimicryLevel: styleProfile.mimicryLevel,
@@ -894,25 +989,46 @@ export const cleanupPersonaPackGlobalStyleTraits = mutation({
 
 export const getThreadSetting = query({
   args: {
+    ...tenantScopeArgs,
     threadId: v.id("threads"),
   },
   handler: async (ctx, args) => {
-    const profiles = await getMergedProfiles(ctx);
+    const tenantId = await resolveTenantForQuery(ctx, args);
+    const thread = await ctx.db.get(args.threadId);
+    if (!thread) {
+      throw new Error("Thread not found.");
+    }
+    assertTenantOwned(tenantId, thread.tenantId);
+    const resolvedTenantId = tenantId || thread.tenantId;
+    const profiles = await getMergedProfiles(ctx, resolvedTenantId);
     const profileBySlug = new Map(profiles.map((profile) => [profile.slug, profile]));
     const fallbackProfile = getFallbackProfile(profiles);
 
-    const setting = await ctx.db
-      .query("threadPersonalitySettings")
-      .withIndex("by_thread", (q) => q.eq("threadId", args.threadId))
-      .first();
+    const setting = resolvedTenantId
+      ? await ctx.db
+          .query("threadPersonalitySettings")
+          .withIndex("by_tenantId_and_thread", (q) => q.eq("tenantId", resolvedTenantId).eq("threadId", args.threadId))
+          .first()
+      : await ctx.db
+          .query("threadPersonalitySettings")
+          .withIndex("by_thread", (q) => q.eq("threadId", args.threadId))
+          .first();
 
     if (!setting) {
       const fallback = fallbackProfile;
-      const recentMessages = await ctx.db
-        .query("messages")
-        .withIndex("by_thread_messageAt", (q) => q.eq("threadId", args.threadId))
-        .order("desc")
-        .take(60);
+      const recentMessages = resolvedTenantId
+        ? await ctx.db
+            .query("messages")
+            .withIndex("by_tenantId_and_threadId_and_messageAt", (q) =>
+              q.eq("tenantId", resolvedTenantId).eq("threadId", args.threadId),
+            )
+            .order("desc")
+            .take(60)
+        : await ctx.db
+            .query("messages")
+            .withIndex("by_thread_messageAt", (q) => q.eq("threadId", args.threadId))
+            .order("desc")
+            .take(60);
       const latestInboundText = recentMessages.find((message) => message.direction === "inbound")?.text || "";
       const professionalAssessment = assessProfessionalConversation({
         messages: recentMessages.reverse().map((message) => ({
@@ -941,11 +1057,19 @@ export const getThreadSetting = query({
     }
 
     const selectedProfile = profileBySlug.get(setting.profileSlug) || fallbackProfile;
-    const recentMessages = await ctx.db
-      .query("messages")
-      .withIndex("by_thread_messageAt", (q) => q.eq("threadId", args.threadId))
-      .order("desc")
-      .take(60);
+    const recentMessages = resolvedTenantId
+      ? await ctx.db
+          .query("messages")
+          .withIndex("by_tenantId_and_threadId_and_messageAt", (q) =>
+            q.eq("tenantId", resolvedTenantId).eq("threadId", args.threadId),
+          )
+          .order("desc")
+          .take(60)
+      : await ctx.db
+          .query("messages")
+          .withIndex("by_thread_messageAt", (q) => q.eq("threadId", args.threadId))
+          .order("desc")
+          .take(60);
     const latestInboundText = recentMessages.find((message) => message.direction === "inbound")?.text || "";
     const professionalAssessment = assessProfessionalConversation({
       messages: recentMessages.reverse().map((message) => ({
@@ -978,6 +1102,7 @@ export const getThreadSetting = query({
 
 export const setThreadSetting = mutation({
   args: {
+    ...tenantScopeArgs,
     threadId: v.id("threads"),
     profileSlug: v.string(),
     intensity: v.number(),
@@ -985,12 +1110,19 @@ export const setThreadSetting = mutation({
     memePolicyMode: v.optional(v.union(v.literal("auto"), v.literal("always_allow"), v.literal("always_block"))),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForOptionalMutation(ctx, args);
+    const thread = await ctx.db.get(args.threadId);
+    if (!thread) {
+      throw new Error("Thread not found.");
+    }
+    assertTenantOwned(tenantId, thread.tenantId);
+    const resolvedTenantId = tenantId || thread.tenantId;
     const profileSlug = normalizeSlug(args.profileSlug);
     if (!profileSlug) {
       throw new Error("Profile slug is required.");
     }
 
-    const availableProfiles = await getMergedProfiles(ctx);
+    const availableProfiles = await getMergedProfiles(ctx, resolvedTenantId);
     const profileExists = availableProfiles.some((profile) => profile.slug === profileSlug);
     if (!profileExists) {
       throw new Error("Selected personality profile does not exist.");
@@ -1005,10 +1137,15 @@ export const setThreadSetting = mutation({
       updatedAt: now,
     };
 
-    const existing = await ctx.db
-      .query("threadPersonalitySettings")
-      .withIndex("by_thread", (q) => q.eq("threadId", args.threadId))
-      .first();
+    const existing = resolvedTenantId
+      ? await ctx.db
+          .query("threadPersonalitySettings")
+          .withIndex("by_tenantId_and_thread", (q) => q.eq("tenantId", resolvedTenantId).eq("threadId", args.threadId))
+          .first()
+      : await ctx.db
+          .query("threadPersonalitySettings")
+          .withIndex("by_thread", (q) => q.eq("threadId", args.threadId))
+          .first();
 
     if (existing) {
       await ctx.db.patch(existing._id, payload);
@@ -1016,6 +1153,7 @@ export const setThreadSetting = mutation({
     }
 
     return await ctx.db.insert("threadPersonalitySettings", {
+      tenantId: resolvedTenantId,
       threadId: args.threadId,
       createdAt: now,
       ...payload,
@@ -1025,12 +1163,20 @@ export const setThreadSetting = mutation({
 
 export const setThreadPromptProfile = mutation({
   args: {
+    ...tenantScopeArgs,
     threadId: v.id("threads"),
     promptProfile: v.string(),
   },
   handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForOptionalMutation(ctx, args);
+    const thread = await ctx.db.get(args.threadId);
+    if (!thread) {
+      throw new Error("Thread not found.");
+    }
+    assertTenantOwned(tenantId, thread.tenantId);
     return await savePromptProfile(ctx, {
       threadId: args.threadId,
+      tenantId: tenantId || thread.tenantId,
       promptProfile: args.promptProfile,
       source: "manual",
     });
@@ -1039,15 +1185,29 @@ export const setThreadPromptProfile = mutation({
 
 export const autoBuildThreadPromptProfile = mutation({
   args: {
+    ...tenantScopeArgs,
     threadId: v.id("threads"),
     lookbackDays: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const existingSetting = await ensureThreadSetting(ctx, args.threadId);
+    const tenantId = await resolveTenantForOptionalMutation(ctx, args);
+    const thread = await ctx.db.get(args.threadId);
+    if (!thread) {
+      throw new Error("Thread not found.");
+    }
+    assertTenantOwned(tenantId, thread.tenantId);
+    const resolvedTenantId = tenantId || thread.tenantId;
+    const existingSetting = await ensureThreadSetting(ctx, args.threadId, resolvedTenantId);
     const messages: Doc<"messages">[] = [];
-    const source = ctx.db
-      .query("messages")
-      .withIndex("by_thread_messageAt", (q) => q.eq("threadId", args.threadId));
+    const source = resolvedTenantId
+      ? ctx.db
+          .query("messages")
+          .withIndex("by_tenantId_and_threadId_and_messageAt", (q) =>
+            q.eq("tenantId", resolvedTenantId).eq("threadId", args.threadId),
+          )
+      : ctx.db
+          .query("messages")
+          .withIndex("by_thread_messageAt", (q) => q.eq("threadId", args.threadId));
     let syncedHistoryCount = 0;
     for await (const message of source) {
       if (message.origin === "history_sync" || message.origin === "history_fetch") {
@@ -1069,6 +1229,7 @@ export const autoBuildThreadPromptProfile = mutation({
     const nextSource: PromptProfileSource = hasSavedManualPrompt ? "manual" : "auto";
     const settingId = await savePromptProfile(ctx, {
       threadId: args.threadId,
+      tenantId: resolvedTenantId,
       promptProfile: nextPromptProfile,
       source: nextSource,
       lookbackDays: args.lookbackDays,

@@ -128,6 +128,22 @@ type ThreadStyleProfilePayload = {
 type ContactMemoryFactType = "preference" | "profile" | "schedule" | "relationship" | "promise" | "other";
 type ContactMemoryFactRow = Doc<"contactMemoryFacts">;
 type FactJudgeDecision = "accept" | "accept_with_ttl" | "reject" | "quarantine";
+type ExtractedContactFact = {
+  key: string;
+  value: string;
+  type: ContactMemoryFactType;
+  confidence: number;
+};
+type AmbientSignalMessage = Pick<
+  Doc<"messages">,
+  "_id" | "text" | "messageType" | "mediaAssetId" | "isStatus" | "messageAt"
+>;
+type AmbientSignalAsset = Pick<
+  Doc<"mediaAssets">,
+  "_id" | "kind" | "tags" | "contextSummary" | "contextTags" | "contextConfidence" | "contextSource"
+>;
+const AMBIENT_MEMORY_SUFFICIENCY_FACTS = 10;
+const AMBIENT_MEMORY_SUFFICIENCY_SCAN_LIMIT = 80;
 
 type ParsedExportEntry = {
   senderName: string;
@@ -196,6 +212,28 @@ function compactText(value: string, maxChars: number) {
     return normalized;
   }
   return `${normalized.slice(0, Math.max(0, maxChars - 3)).trim()}...`;
+}
+
+function dedupeFacts(facts: ExtractedContactFact[]) {
+  const byKey = new Map<string, ExtractedContactFact>();
+  for (const fact of facts) {
+    const key = slugify(fact.key, "fact");
+    const value = normalizeSpace(fact.value).slice(0, 320);
+    if (!value) {
+      continue;
+    }
+    const normalized = {
+      ...fact,
+      key,
+      value,
+      confidence: clamp(fact.confidence, 0, 1),
+    };
+    const existing = byKey.get(key);
+    if (!existing || normalized.confidence > existing.confidence) {
+      byKey.set(key, normalized);
+    }
+  }
+  return [...byKey.values()];
 }
 
 const READ_ONLY_ROUTER_TOOLS = new Set<RouterToolName>([
@@ -967,7 +1005,7 @@ function buildThreadStyleProfileFromMessages(args: {
 
 function extractFactsFromText(text: string) {
   const normalized = normalizeSpace(text);
-  const facts: Array<{ key: string; value: string; type: ContactMemoryFactType; confidence: number }> = [];
+  const facts: ExtractedContactFact[] = [];
 
   const birthday = normalized.match(/\bmy birthday is\s+([^.!,\n]{3,60})/i);
   if (birthday) {
@@ -1030,7 +1068,223 @@ function extractFactsFromText(text: string) {
     });
   }
 
-  return facts;
+  return dedupeFacts(facts);
+}
+
+const SENSITIVE_AMBIENT_SIGNAL_PATTERN =
+  /\b(church|mosque|temple|bible|quran|koran|allah|jesus|christ|god|prayer|pray|islam|muslim|christian|catholic|pastor|imam|politic|politics|party|election|vote|voted|tribe|ethnic|race|gay|lesbian|queer|trans|depressed|anxiety|diagnosed|therapy|medication|pregnant)\b/i;
+
+const STATUS_THEME_CATALOG: Array<{
+  key: string;
+  value: string;
+  patterns: RegExp[];
+  confidence: number;
+}> = [
+  {
+    key: "status_humor_style",
+    value: "Often posts playful or funny statuses.",
+    patterns: [/\b(lol|lmao|haha|funny|joke|meme|banter|dead|wild|cruise|wahala)\b/i, /[😂🤣😅😄😁]/u],
+    confidence: 0.62,
+  },
+  {
+    key: "status_motivational_style",
+    value: "Sometimes posts motivational or reflective statuses.",
+    patterns: [/\b(grind|growth|discipline|focus|mindset|healing|peace|gratitude|blessed|thankful|quote|lesson|journey)\b/i],
+    confidence: 0.58,
+  },
+  {
+    key: "status_food_interest",
+    value: "Food or eating-out content shows up in their statuses.",
+    patterns: [/\b(food|brunch|lunch|dinner|restaurant|cafe|cook|cooking|shawarma|pizza|rice|suya|amala|jollof)\b/i],
+    confidence: 0.56,
+  },
+  {
+    key: "status_music_interest",
+    value: "Music, shows, or nightlife content shows up in their statuses.",
+    patterns: [/\b(song|music|playlist|album|concert|club|party|dj|vibes|dance)\b/i],
+    confidence: 0.56,
+  },
+  {
+    key: "status_travel_interest",
+    value: "Travel, outings, or places show up in their statuses.",
+    patterns: [/\b(trip|travel|airport|flight|beach|hotel|roadtrip|vacation|outside|outing)\b/i],
+    confidence: 0.57,
+  },
+  {
+    key: "status_fitness_lifestyle",
+    value: "Fitness, sport, or active-lifestyle content shows up in their statuses.",
+    patterns: [/\b(gym|workout|run|running|football|basketball|training|fitness|match|game day)\b/i],
+    confidence: 0.57,
+  },
+  {
+    key: "status_work_study_lifestyle",
+    value: "Work, school, or productivity content shows up in their statuses.",
+    patterns: [/\b(work|office|client|meeting|class|exam|study|deadline|project|lecture|assignment)\b/i],
+    confidence: 0.55,
+  },
+  {
+    key: "status_family_social_lifestyle",
+    value: "Family, friendship, or social-life content shows up in their statuses.",
+    patterns: [/\b(family|friend|bestie|birthday|wedding|hangout|link up|squad|reunion)\b/i],
+    confidence: 0.55,
+  },
+  {
+    key: "status_style_fashion_interest",
+    value: "Style, beauty, or fashion content shows up in their statuses.",
+    patterns: [/\b(outfit|fit check|fashion|makeup|hair|nails|skincare|style|drip|fresh cut)\b/i],
+    confidence: 0.55,
+  },
+];
+
+const STICKER_TONE_LABELS: Record<string, string> = {
+  playful: "Likes playful or funny stickers.",
+  celebratory: "Likes celebratory stickers for wins or good news.",
+  affectionate: "Likes warm or affectionate stickers.",
+  supportive: "Likes supportive or reassuring stickers.",
+  frustrated: "Uses mild-frustration or disbelief stickers.",
+  neutral_reaction: "Uses neutral visual-reaction stickers.",
+};
+
+function isSensitiveAmbientSignalText(text: string) {
+  return SENSITIVE_AMBIENT_SIGNAL_PATTERN.test(text);
+}
+
+function inferStatusSignalFacts(text: string): ExtractedContactFact[] {
+  const normalized = normalizeSpace(text);
+  if (!normalized || isSensitiveAmbientSignalText(normalized)) {
+    return [];
+  }
+
+  const facts: ExtractedContactFact[] = [];
+  for (const theme of STATUS_THEME_CATALOG) {
+    if (theme.patterns.some((pattern) => pattern.test(normalized))) {
+      const type = theme.key.includes("interest") || theme.key.includes("lifestyle") ? "preference" : "profile";
+      facts.push({
+        key: `${type}_${theme.key}`,
+        value: theme.value,
+        type,
+        confidence: theme.confidence,
+      });
+    }
+  }
+  return dedupeFacts(facts);
+}
+
+function inferAssetSignalFacts(args: {
+  message: AmbientSignalMessage;
+  asset?: AmbientSignalAsset;
+  source: "sticker" | "status_media" | "avatar";
+}): ExtractedContactFact[] {
+  const asset = args.asset;
+  if (!asset) {
+    return [];
+  }
+  const text = normalizeSpace(
+    [
+      ...(asset.tags || []),
+      ...(asset.contextTags || []),
+      asset.contextSummary || "",
+    ]
+      .filter(Boolean)
+      .join(" "),
+  );
+  if (!text || isSensitiveAmbientSignalText(text)) {
+    return [];
+  }
+
+  const facts: ExtractedContactFact[] = [];
+  if (args.source === "sticker" || asset.kind === "sticker") {
+    const tags = new Set((asset.contextTags || []).map((tag) => normalizeSpace(tag).toLowerCase()));
+    for (const [tag, value] of Object.entries(STICKER_TONE_LABELS)) {
+      if (tags.has(tag) || new RegExp(`\\b${tag.replace(/_/g, "[ _-]?")}\\b`, "i").test(text)) {
+        facts.push({
+          key: `preference_sticker_tone_${tag}`,
+          value,
+          type: "preference",
+          confidence: clamp((asset.contextConfidence ?? 0.55) * 0.9, 0.5, 0.78),
+        });
+      }
+    }
+  }
+
+  if (args.source === "status_media") {
+    facts.push(...inferStatusSignalFacts(text).map((fact) => ({ ...fact, confidence: Math.min(fact.confidence, 0.58) })));
+  }
+
+  if (args.source === "avatar" && /avatar|profile-picture|profile picture|selfie|portrait|outfit|travel|sport|music/i.test(text)) {
+    facts.push({
+      key: "profile_avatar_visual_style",
+      value: `Profile picture visual cue: ${compactText(asset.contextSummary || text, 140)}`,
+      type: "profile",
+      confidence: clamp((asset.contextConfidence ?? 0.5) * 0.72, 0.36, 0.62),
+    });
+  }
+
+  return dedupeFacts(facts);
+}
+
+export function inferAmbientContactFacts(args: {
+  messages: AmbientSignalMessage[];
+  assetsById?: Map<Id<"mediaAssets">, AmbientSignalAsset>;
+  avatarAsset?: AmbientSignalAsset;
+}) {
+  const facts: ExtractedContactFact[] = [];
+  let statusCount = 0;
+
+  for (const message of args.messages) {
+    if (message.isStatus) {
+      statusCount += 1;
+      facts.push(...inferStatusSignalFacts(message.text || ""));
+      if (message.mediaAssetId) {
+        facts.push(
+          ...inferAssetSignalFacts({
+            message,
+            asset: args.assetsById?.get(message.mediaAssetId),
+            source: "status_media",
+          }),
+        );
+      }
+      continue;
+    }
+
+    if (message.messageType === "sticker" && message.mediaAssetId) {
+      facts.push(
+        ...inferAssetSignalFacts({
+          message,
+          asset: args.assetsById?.get(message.mediaAssetId),
+          source: "sticker",
+        }),
+      );
+    }
+  }
+
+  if (statusCount >= 3) {
+    facts.push({
+      key: "profile_status_presence",
+      value: "They post statuses often enough to treat status tone as useful context.",
+      type: "profile",
+      confidence: clamp(0.5 + Math.min(statusCount, 8) * 0.025, 0.55, 0.7),
+    });
+  }
+
+  if (args.avatarAsset) {
+    facts.push(
+      ...inferAssetSignalFacts({
+        message: {
+          _id: "" as Id<"messages">,
+          text: "",
+          messageType: "image",
+          mediaAssetId: args.avatarAsset._id,
+          isStatus: false,
+          messageAt: Date.now(),
+        },
+        asset: args.avatarAsset,
+        source: "avatar",
+      }),
+    );
+  }
+
+  return dedupeFacts(facts).slice(0, 18);
 }
 
 function normalizeFactText(value: string) {
@@ -1112,6 +1366,98 @@ async function supersedeConflictingFactSlots(args: {
   }
 }
 
+async function upsertExtractedContactFact(args: {
+  ctx: MutationCtx;
+  threadId: Id<"threads">;
+  fact: ExtractedContactFact;
+  sourceMessage?: Pick<Doc<"messages">, "_id" | "text" | "messageAt">;
+  sourceExcerpt?: string;
+  now: number;
+}) {
+  const factKey = slugify(args.fact.key, "fact");
+  const factValue = normalizeSpace(args.fact.value).slice(0, 320);
+  if (!factValue) {
+    return "skipped" as const;
+  }
+
+  const existing = await args.ctx.db
+    .query("contactMemoryFacts")
+    .withIndex("by_thread_and_key", (q) => q.eq("threadId", args.threadId).eq("factKey", factKey))
+    .first();
+
+  const sourceText = args.sourceExcerpt || args.sourceMessage?.text || factValue;
+  const judge = judgeFactCandidate({
+    text: sourceText,
+    factType: args.fact.type,
+    factKey,
+    factValue,
+  });
+  if (judge.decision === "reject") {
+    return "skipped" as const;
+  }
+
+  const ttlMs = resolveFactTtlMs({
+    factType: args.fact.type,
+    factKey,
+  } as Pick<ContactMemoryFactRow, "factType" | "factKey">);
+  const expiresAt = ttlMs === undefined ? undefined : args.now + ttlMs;
+  const factStatus = resolveFactStatusFromJudgeDecision({
+    decision: judge.decision,
+    expiresAt,
+    now: args.now,
+  });
+  const slot = toComparableFactSlot({
+    factType: args.fact.type,
+    factKey,
+  } as Pick<ContactMemoryFactRow, "factType" | "factKey">);
+  const patch = {
+    factValue,
+    factType: args.fact.type,
+    confidence: clamp(args.fact.confidence * judge.confidenceScale, 0, 1),
+    sourceMessageId: args.sourceMessage?._id,
+    sourceMessageAt: args.sourceMessage?.messageAt,
+    sourceExcerpt: sourceText ? compactText(sourceText, 220) : undefined,
+    factStatus,
+    expiresAt,
+    supersededAt: undefined,
+    supersededByFactKey: undefined,
+    updatedAt: args.now,
+  };
+
+  if (existing) {
+    await args.ctx.db.patch(existing._id, patch);
+    if (factStatus === "active") {
+      await supersedeConflictingFactSlots({
+        ctx: args.ctx,
+        threadId: args.threadId,
+        slot,
+        keepFactId: existing._id,
+        keepFactKey: factKey,
+        now: args.now,
+      });
+    }
+    return "updated" as const;
+  }
+
+  const insertedId = await args.ctx.db.insert("contactMemoryFacts", {
+    threadId: args.threadId,
+    factKey,
+    ...patch,
+    createdAt: args.now,
+  });
+  if (factStatus === "active") {
+    await supersedeConflictingFactSlots({
+      ctx: args.ctx,
+      threadId: args.threadId,
+      slot,
+      keepFactId: insertedId,
+      keepFactKey: factKey,
+      now: args.now,
+    });
+  }
+  return "inserted" as const;
+}
+
 export function judgeFactCandidate(args: {
   text: string;
   factType: ContactMemoryFactType;
@@ -1186,6 +1532,19 @@ export function selectActiveFactsForUse(args: {
   }
 
   return [...bySlot.values()].sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0));
+}
+
+export function hasSufficientContactMemoryForAmbientSkip(args: {
+  rows: ContactMemoryFactRow[];
+  nowMs?: number;
+  minFacts?: number;
+}) {
+  const selected = selectActiveFactsForUse({
+    rows: args.rows,
+    nowMs: args.nowMs,
+    minConfidence: 0.5,
+  });
+  return selected.length >= Math.max(1, args.minFacts ?? AMBIENT_MEMORY_SUFFICIENCY_FACTS);
 }
 
 async function fetchJsonWithTimeout(url: string, timeoutMs: number, init?: RequestInit) {
@@ -1765,6 +2124,34 @@ export const extractContactMemoryFacts = mutation({
       .order("desc")
       .take(lookback);
 
+    const existingMemoryRows = await ctx.db
+      .query("contactMemoryFacts")
+      .withIndex("by_thread_and_updatedAt", (q) => q.eq("threadId", args.threadId))
+      .order("desc")
+      .take(AMBIENT_MEMORY_SUFFICIENCY_SCAN_LIMIT);
+    const skipAmbientInference = hasSufficientContactMemoryForAmbientSkip({
+      rows: existingMemoryRows,
+      nowMs: Date.now(),
+    });
+    const assetsById = new Map<Id<"mediaAssets">, AmbientSignalAsset>();
+    if (!skipAmbientInference) {
+      const candidateAssetIds = new Set<Id<"mediaAssets">>();
+      for (const row of rows) {
+        if ((row.messageType === "sticker" || row.isStatus) && row.mediaAssetId) {
+          candidateAssetIds.add(row.mediaAssetId);
+        }
+      }
+      if (thread.avatarMediaAssetId) {
+        candidateAssetIds.add(thread.avatarMediaAssetId);
+      }
+      for (const assetId of [...candidateAssetIds].slice(0, 40)) {
+        const asset = await ctx.db.get(assetId);
+        if (asset) {
+          assetsById.set(asset._id, asset);
+        }
+      }
+    }
+
     let inserted = 0;
     let updated = 0;
 
@@ -1774,86 +2161,42 @@ export const extractContactMemoryFacts = mutation({
       }
       const facts = extractFactsFromText(row.text || "");
       for (const fact of facts) {
-        const existing = await ctx.db
-          .query("contactMemoryFacts")
-          .withIndex("by_thread_and_key", (q) => q.eq("threadId", args.threadId).eq("factKey", fact.key))
-          .first();
-
-        const patch = {
-          factValue: fact.value,
-          factType: fact.type,
-          confidence: fact.confidence,
-          sourceMessageId: row._id,
-          sourceMessageAt: row.messageAt,
-          sourceExcerpt: compactText(row.text || "", 220),
-          updatedAt: Date.now(),
-        };
-        const judge = judgeFactCandidate({
-          text: row.text || "",
-          factType: fact.type,
-          factKey: fact.key,
-          factValue: fact.value,
+        const result = await upsertExtractedContactFact({
+          ctx,
+          threadId: args.threadId,
+          fact,
+          sourceMessage: row,
+          now: Date.now(),
         });
-        if (judge.decision === "reject") {
-          continue;
-        }
-        const now = Date.now();
-        const ttlMs = resolveFactTtlMs({
-          factType: fact.type,
-          factKey: fact.key,
-        } as Pick<ContactMemoryFactRow, "factType" | "factKey">);
-        const expiresAt = ttlMs === undefined ? undefined : now + ttlMs;
-        const factStatus = resolveFactStatusFromJudgeDecision({
-          decision: judge.decision,
-          expiresAt,
-          now,
-        });
-        const slot = toComparableFactSlot({
-          factType: fact.type,
-          factKey: fact.key,
-        } as Pick<ContactMemoryFactRow, "factType" | "factKey">);
-        const judgedPatch = {
-          ...patch,
-          confidence: clamp(patch.confidence * judge.confidenceScale, 0, 1),
-          factStatus,
-          expiresAt,
-          supersededAt: undefined,
-          supersededByFactKey: undefined,
-          updatedAt: now,
-        };
-
-        if (existing) {
-          await ctx.db.patch(existing._id, judgedPatch);
-          if (factStatus === "active") {
-            await supersedeConflictingFactSlots({
-              ctx,
-              threadId: args.threadId,
-              slot,
-              keepFactId: existing._id,
-              keepFactKey: fact.key,
-              now,
-            });
-          }
+        if (result === "updated") {
           updated += 1;
-        } else {
-          const insertedId = await ctx.db.insert("contactMemoryFacts", {
-            threadId: args.threadId,
-            factKey: fact.key,
-            ...judgedPatch,
-            createdAt: now,
-          });
-          if (factStatus === "active") {
-            await supersedeConflictingFactSlots({
-              ctx,
-              threadId: args.threadId,
-              slot,
-              keepFactId: insertedId,
-              keepFactKey: fact.key,
-              now,
-            });
-          }
+        } else if (result === "inserted") {
           inserted += 1;
         }
+      }
+    }
+
+    const ambientFacts = skipAmbientInference
+      ? []
+      : inferAmbientContactFacts({
+          messages: rows,
+          assetsById,
+          avatarAsset: thread.avatarMediaAssetId ? assetsById.get(thread.avatarMediaAssetId) : undefined,
+        });
+    for (const fact of ambientFacts) {
+      const sourceMessage = rows.find((row) => row.isStatus || (row.messageType === "sticker" && Boolean(row.mediaAssetId)));
+      const result = await upsertExtractedContactFact({
+        ctx,
+        threadId: args.threadId,
+        fact,
+        sourceMessage,
+        sourceExcerpt: fact.value,
+        now: Date.now(),
+      });
+      if (result === "updated") {
+        updated += 1;
+      } else if (result === "inserted") {
+        inserted += 1;
       }
     }
 
@@ -1862,6 +2205,8 @@ export const extractContactMemoryFacts = mutation({
       threadJid: thread.jid,
       inserted,
       updated,
+      ambientSignals: ambientFacts.length,
+      ambientSkipped: skipAmbientInference,
     };
   },
 });

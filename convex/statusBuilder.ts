@@ -1,5 +1,6 @@
 import { internalMutation, type MutationCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
+import { assertTenantBillingActive, listHostedTenantBillingScopes } from "./lib/billingAccess";
 import { getConfig } from "./lib/config";
 import { classifyThreadKind } from "./lib/threadEligibility";
 import { enqueueOutbox } from "./lib/outboxEnqueue";
@@ -147,11 +148,18 @@ export function extractKeywords(text: string) {
     .filter((word) => word.length >= 3 && !STOPWORDS.has(word));
 }
 
-async function ensureStatusThread(args: { ctx: MutationCtx; now: number }) {
-  const existing = await args.ctx.db
-    .query("threads")
-    .withIndex("by_provider_and_jid", (q) => q.eq("provider", "whatsapp").eq("jid", STATUS_JID))
-    .first();
+async function ensureStatusThread(args: { ctx: MutationCtx; now: number; tenantId?: Id<"tenantAccounts"> }) {
+  const existing = args.tenantId
+    ? await args.ctx.db
+        .query("threads")
+        .withIndex("by_tenantId_and_provider_and_jid", (q) =>
+          q.eq("tenantId", args.tenantId).eq("provider", "whatsapp").eq("jid", STATUS_JID),
+        )
+        .first()
+    : await args.ctx.db
+        .query("threads")
+        .withIndex("by_provider_and_jid", (q) => q.eq("provider", "whatsapp").eq("jid", STATUS_JID))
+        .first();
 
   if (existing) {
     await args.ctx.db.patch(existing._id, {
@@ -169,6 +177,7 @@ async function ensureStatusThread(args: { ctx: MutationCtx; now: number }) {
   }
 
   return (await args.ctx.db.insert("threads", {
+    tenantId: args.tenantId,
     provider: "whatsapp",
     jid: STATUS_JID,
     title: "My Status",
@@ -185,11 +194,10 @@ async function ensureStatusThread(args: { ctx: MutationCtx; now: number }) {
   })) as Id<"threads">;
 }
 
-export const run = internalMutation({
-  args: {},
-  handler: async (ctx) => {
+async function runStatusBuilder(ctx: MutationCtx, tenantId?: Id<"tenantAccounts">) {
     const now = Date.now();
-    const config = await getConfig(ctx);
+    await assertTenantBillingActive(ctx, tenantId, now);
+    const config = await getConfig(ctx, tenantId);
     const nowHour = new Date(now).getHours();
     const shouldLogSkip = async (reason: string) => {
       const recentEvents = await ctx.db
@@ -207,6 +215,7 @@ export const run = internalMutation({
         return;
       }
       await ctx.db.insert("systemEvents", {
+        tenantId,
         source: "convex",
         eventType: "status_builder.skipped",
         detail: `reason=${reason}`,
@@ -230,7 +239,7 @@ export const run = internalMutation({
       return { queued: false, reason: "quiet_hours" as const };
     }
 
-    const statusThreadId = await ensureStatusThread({ ctx, now });
+    const statusThreadId = await ensureStatusThread({ ctx, now, tenantId });
     const statusThread = await ctx.db.get(statusThreadId);
     if (!statusThread) {
       return { queued: false, reason: "status_thread_missing" as const };
@@ -304,7 +313,9 @@ export const run = internalMutation({
       .withIndex("by_provider_and_threadKind_and_lastMessageAt", (q) => q.eq("provider", "whatsapp").eq("threadKind", "direct"))
       .order("desc")
       .take(260);
-    const directThreads = [...indexedDirectThreads];
+    const directThreads = tenantId
+      ? indexedDirectThreads.filter((thread) => thread.tenantId === tenantId)
+      : [...indexedDirectThreads];
     if (directThreads.length < 40) {
       const fallbackScan = await ctx.db
         .query("threads")
@@ -314,6 +325,9 @@ export const run = internalMutation({
       const seen = new Set(directThreads.map((thread) => thread._id));
       for (const thread of fallbackScan) {
         if (seen.has(thread._id)) {
+          continue;
+        }
+        if (tenantId && thread.tenantId !== tenantId) {
           continue;
         }
         const kind = thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup });
@@ -399,6 +413,8 @@ export const run = internalMutation({
     const requiresReview = reviewRoll < config.statusBuilderReviewRatio;
 
     const sourceMessageId = await ctx.db.insert("messages", {
+      tenantId,
+      provider: "whatsapp",
       threadId: statusThreadId,
       direction: "inbound",
       origin: "live",
@@ -411,6 +427,7 @@ export const run = internalMutation({
     });
 
     const draftId = await ctx.db.insert("replyDrafts", {
+      tenantId,
       threadId: statusThreadId,
       sourceMessageId,
       text: AI_STATUS_PLACEHOLDER,
@@ -443,12 +460,13 @@ export const run = internalMutation({
       statusFormat,
       statusReviewRequired: requiresReview,
       sendAt: now + 1200,
-      idempotencyKey: `status-builder:${cadenceBucket}:${statusFormat}`,
+      idempotencyKey: `status-builder:${tenantId || "legacy"}:${cadenceBucket}:${statusFormat}`,
       provider: "heuristic",
       now,
     });
 
     await ctx.db.insert("systemEvents", {
+      tenantId,
       source: "convex",
       eventType: "status_builder.queued",
       threadId: statusThreadId,
@@ -466,6 +484,24 @@ export const run = internalMutation({
       trendTheme,
       demographic: dominantRelationship,
       sampleKeywords: topKeywords,
+    };
+}
+
+export const run = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const scopes = await listHostedTenantBillingScopes(ctx);
+    if (!scopes.hasHostedTenants) {
+      return await runStatusBuilder(ctx);
+    }
+    const results = [];
+    for (const tenantId of scopes.activeTenantIds) {
+      results.push(await runStatusBuilder(ctx, tenantId));
+    }
+    return {
+      queued: results.some((result) => result.queued),
+      tenantCount: scopes.activeTenantIds.length,
+      results,
     };
   },
 });
