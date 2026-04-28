@@ -1,9 +1,11 @@
 "use client";
 
 import { ActionNotices } from "@/components/action-notices";
+import { EmptyState } from "@/components/empty-state";
 import { LoadingBlock } from "@/components/loading-state";
 import { SharedMediaPreview } from "@/components/media-preview";
 import { ProviderFilter, type ProviderFilterValue } from "@/components/provider-filter";
+import { useTenantScopeArgs } from "@/components/tenant-scope-provider";
 import { formatDateTime, trim } from "@/lib/format";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
 import { api } from "../../convex/_generated/api";
@@ -71,11 +73,6 @@ type QueuePayload = {
   needsReply: QueueNeedsReplyItem[];
 };
 
-type StatusSettingsPayload = {
-  statusBuilderEnabled: boolean;
-  statusPostAudienceMode?: "whatsapp_privacy" | "manual_allowlist";
-};
-
 function statusMessageText(message: ThreadMessage) {
   const normalizedText = message.text.trim();
   if (normalizedText) {
@@ -110,17 +107,14 @@ function resolveStatusDraftProvider(item: QueueNeedsReplyItem): "whatsapp" | "in
 }
 
 export function LiveStatus() {
+  const tenantScope = useTenantScopeArgs();
   const [providerFilter, setProviderFilter] = useState<ProviderFilterValue>("all");
-  const [statusPostingPending, setStatusPostingPending] = useState(false);
-  const [statusPostingError, setStatusPostingError] = useState<string | null>(null);
   const approveDraft = useMutation(api.draft.approve);
   const snoozeDraft = useMutation(api.draft.snooze);
   const rejectDraft = useMutation(api.draft.reject);
-  const setStatusPostingEnabled = useMutation(api.settings.setStatusBuilderEnabled);
   const { runAction, getRecord, notices, dismissNotice } = useActionStateRegistry();
-  const statusSettings = useQuery(api.settings.get, {}) as StatusSettingsPayload | undefined;
 
-  const threads = useQuery(api.threads.list, { limit: 260, provider: providerFilter }) as ThreadSummary[] | undefined;
+  const threads = useQuery(api.threads.list, { ...tenantScope, limit: 260, provider: providerFilter }) as ThreadSummary[] | undefined;
   const statusThread = useMemo(() => {
     const rows = threads || [];
     if (providerFilter === "whatsapp") {
@@ -138,38 +132,14 @@ export function LiveStatus() {
   const statusThreadId = statusThread?._id;
   const statusData = useQuery(
     api.threads.get,
-    statusThreadId ? { threadId: statusThreadId as Id<"threads"> } : "skip",
+    statusThreadId ? { ...tenantScope, threadId: statusThreadId as Id<"threads"> } : "skip",
   ) as StatusThreadPayload | undefined;
 
   const queue = useQuery(api.queue.list, {
+    ...tenantScope,
     draftLimit: 120,
     provider: providerFilter,
   }) as QueuePayload | undefined;
-
-  const statusPostingEnabled = statusSettings?.statusBuilderEnabled ?? true;
-  const statusAudienceMode = statusSettings?.statusPostAudienceMode || "whatsapp_privacy";
-  const statusPostingLabel = statusSettings === undefined
-    ? "Loading…"
-    : statusPostingPending
-      ? "Saving…"
-      : statusPostingEnabled
-        ? "Enabled"
-        : "Disabled";
-
-  const onStatusPostingToggle = async (enabled: boolean) => {
-    if (statusPostingPending || statusSettings === undefined || enabled === statusPostingEnabled) {
-      return;
-    }
-    setStatusPostingPending(true);
-    setStatusPostingError(null);
-    try {
-      await setStatusPostingEnabled({ enabled });
-    } catch (error) {
-      setStatusPostingError(error instanceof Error ? error.message : "Could not update auto status posting.");
-    } finally {
-      setStatusPostingPending(false);
-    }
-  };
 
   const onApproveStatusDraft = (draftId: string) => {
     const key = `status:approve:${draftId}`;
@@ -266,43 +236,10 @@ export function LiveStatus() {
         </p>
       </div>
 
-      <article className="panel-card">
-        <div className="status-section-heading">
-          <h3>Auto Status Posting</h3>
-          <span className={`status-pill ${statusPostingEnabled ? "status-active" : "status-paused"}`}>
-            {statusPostingLabel}
-          </span>
-        </div>
-        <div className="stack compact">
-          <label className="stack compact">
-            <span className="queue-meta">Allow approved status drafts to post automatically</span>
-            <select
-              value={statusPostingEnabled ? "true" : "false"}
-              onChange={(event) => void onStatusPostingToggle(event.target.value === "true")}
-              disabled={statusPostingPending || statusSettings === undefined}
-              aria-disabled={statusPostingPending || statusSettings === undefined}
-            >
-              <option value="true">Yes</option>
-              <option value="false">No</option>
-            </select>
-          </label>
-          <p className="queue-meta">
-            {statusAudienceMode === "manual_allowlist"
-              ? "Only allowlisted recipients can receive auto status posts. An empty allowlist skips posting."
-              : "Posting uses your current WhatsApp status privacy setting."}
-          </p>
-          {statusPostingError ? (
-            <p className="queue-meta" role="alert">
-              {trim(statusPostingError, 220)}
-            </p>
-          ) : null}
-        </div>
-      </article>
-
       <div className="panel-grid split-view status-split-view">
         <article className="panel-card">
           <div className="status-section-heading">
-            <h3>Queue</h3>
+            <h3>Review</h3>
             <span className="status-count-chip">{pendingCountLabel}</span>
           </div>
           <ProviderFilter
@@ -311,21 +248,28 @@ export function LiveStatus() {
             label="Status provider filter"
           />
           <div className="stack compact">
-            <div className="queue-actions">
-              <Link href="/queue" className="btn btn-primary">
-                Open Queue
-              </Link>
-              {statusThreadId ? (
-                <Link href={`/conversations?threadId=${statusThreadId}`} className="btn btn-ghost">
-                  Open in Conversations
+            {pendingStatusDrafts.length > 0 ? (
+              <div className="queue-actions">
+                <Link href="/review" className="btn btn-primary">
+                  Open Review
                 </Link>
-              ) : null}
-            </div>
+                {statusThreadId ? (
+                  <Link href={`/conversations?threadId=${statusThreadId}`} className="btn btn-ghost">
+                    Open in Conversations
+                  </Link>
+                ) : null}
+              </div>
+            ) : null}
 
             {queueLoading ? (
               <LoadingBlock label="Loading status queue…" rows={2} compact />
             ) : pendingStatusDrafts.length === 0 ? (
-              <p className="empty-line">No status drafts waiting for approval.</p>
+              <EmptyState
+                variant="status"
+                compact
+                title="No status drafts waiting."
+                description="Status drafts will appear here when there is something ready to approve, snooze, or discard."
+              />
             ) : (
               <div className="stack compact">
                 {pendingStatusDrafts.map((item) => (
@@ -400,18 +344,25 @@ export function LiveStatus() {
             <LoadingBlock label="Loading statuses..." rows={3} />
           ) : !statusThread ? (
             <div className="status-empty-shell">
-              <p className="empty-line">No status thread has been captured yet.</p>
-              <p className="queue-meta">Once a status post is detected, its history will appear here.</p>
+              <EmptyState
+                variant="status"
+                title="No status thread captured yet."
+                description="Once a status post is detected, its history will appear here."
+              />
             </div>
           ) : timeline.length === 0 ? (
             <div className="status-empty-shell">
-              <p className="empty-line">No posted status updates yet.</p>
-              <p className="queue-meta">Approve a status draft to start building timeline history.</p>
-              <div className="queue-actions">
-                <Link href="/queue" className="btn btn-ghost">
-                  Review pending drafts
-                </Link>
-              </div>
+              <EmptyState
+                variant="status"
+                title="No posted status updates yet."
+                description="Approve a status draft to start building timeline history."
+              >
+                {pendingStatusDrafts.length > 0 ? (
+                  <Link href="/review" className="btn btn-ghost">
+                    Review pending drafts
+                  </Link>
+                ) : null}
+              </EmptyState>
             </div>
           ) : (
             <div className="stack">

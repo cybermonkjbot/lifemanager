@@ -88,26 +88,6 @@ type VerifiedTenantLogin = {
   trialEndsAt: number;
 };
 
-function tenantNeedsBilling(verified: VerifiedTenantLogin) {
-  if (verified.accessStatus === "billing_required") {
-    return true;
-  }
-  if (verified.billingStatus !== "active" && verified.billingStatus !== "trialing") {
-    return true;
-  }
-  return verified.billingStatus === "trialing" && verified.trialEndsAt < Date.now();
-}
-
-function billingRequiredMessage(status: VerifiedTenantLogin["billingStatus"]) {
-  if (status === "past_due") {
-    return "Your account's subscription did not go through. Continue to billing to update payment.";
-  }
-  if (status === "canceled") {
-    return "Your account's subscription is canceled. Continue to billing to restart it.";
-  }
-  return "Your account's free trial is over. Continue to billing to choose a plan.";
-}
-
 async function attachLoginCookies(
   response: NextResponse,
   tenantSessionIdentity?: {
@@ -197,11 +177,12 @@ export async function POST(request: NextRequest) {
       createdAt: config?.createdAt || now,
       updatedAt: now,
       pin: config?.pin || null,
+      legalAcceptance: config?.legalAcceptance,
       preferences: config?.preferences || DEFAULT_INSTANCE_SETUP_PREFERENCES,
       account: sanitizeInstanceAccountProfile({
         ...(config?.account || {}),
-        email: config?.account?.email || verified.email,
-        displayName: config?.account?.displayName || verified.displayName,
+        email: verified.email,
+        displayName: verified.displayName,
         tenantId: verified.tenantId,
         deviceId,
         billingStatus: verified.billingStatus,
@@ -217,21 +198,6 @@ export async function POST(request: NextRequest) {
       isSuperAdmin: verified.isSuperAdmin,
     };
 
-    if (tenantNeedsBilling(verified)) {
-      const billingPath = `/billing/restore?next=${encodeURIComponent(next)}`;
-      const response = wantsJsonResponse(request)
-        ? NextResponse.json({
-            ok: false,
-            error: "billing_required",
-            paymentRequired: true,
-            billingStatus: verified.billingStatus,
-            message: billingRequiredMessage(verified.billingStatus),
-            next: billingPath,
-          }, { status: 402 })
-        : NextResponse.redirect(new URL(billingPath, request.url), 303);
-      await attachLoginCookies(response, tenantSessionIdentity);
-      return response;
-    }
   } else if (!(await matchesInstancePin(pin))) {
     return loginErrorResponse(request, next, "invalid_login", 401, email);
   }

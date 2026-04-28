@@ -855,7 +855,7 @@ function formatQueueSnapshot(snapshot: unknown) {
   const guardrails = asArray(data.guardrailFlags);
   const topDrafts = needsReply.slice(0, 3).map((item, index) => `${index + 1}. ${getThreadLabel(item)}`);
   return [
-    `Queue: ${needsReply.length} replies, ${followups.length} follow-up confirmations, ${todos.length} task suggestions, ${guardrails.length} safety flags.`,
+    `Review: ${needsReply.length} replies, ${followups.length} follow-up confirmations, ${todos.length} task suggestions, ${guardrails.length} safety flags.`,
     topDrafts.length ? `Top reply threads:\n${topDrafts.join("\n")}` : "No reply drafts are currently waiting.",
   ].join("\n");
 }

@@ -1,6 +1,7 @@
 "use client";
 
 import { LoadingBlock } from "@/components/loading-state";
+import { useTenantScopeArgs } from "@/components/tenant-scope-provider";
 import { formatDateTime, trim } from "@/lib/format";
 import { api } from "../../convex/_generated/api";
 import { useQuery } from "convex/react";
@@ -20,7 +21,8 @@ type LogWatcherProps = {
 
 export function LogWatcher({ defaultExpanded = true }: LogWatcherProps) {
   const [expanded, setExpanded] = useState(defaultExpanded);
-  const logs = useQuery(api.system.logFeed, { limit: 70 }) as
+  const tenantScope = useTenantScopeArgs();
+  const logs = useQuery(api.system.logFeed, { ...tenantScope, limit: 70 }) as
     | Array<{
         id: string;
         source: string;

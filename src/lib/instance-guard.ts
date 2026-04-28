@@ -76,6 +76,7 @@ function hasValidAdminMasqueradeSession(adminToken: string | undefined, masquera
 }
 
 export async function requireInstancePageAccess(options: PageAccessOptions = {}) {
+  void options;
   const gate = await resolveInstanceGateState();
   if (!gate.setupCompleted) {
     redirect("/setup");
@@ -90,9 +91,6 @@ export async function requireInstancePageAccess(options: PageAccessOptions = {})
   const validAdminMasquerade = hasValidAdminMasqueradeSession(adminToken, masqueradeToken);
 
   if (validTenantSession || validAdminMasquerade) {
-    if (validTenantSession && !validAdminMasquerade && !options.allowBillingRequired && await currentTenantNeedsBilling()) {
-      redirect("/billing/restore");
-    }
     return;
   }
 

@@ -1,8 +1,11 @@
 "use client";
 
 import { ActionNotices } from "@/components/action-notices";
+import { SegmentedControl } from "@/components/app-ui";
+import { EmptyState } from "@/components/empty-state";
 import { LoadingBlock, LoadingIndicator } from "@/components/loading-state";
 import { ProviderFilter, type ProviderFilterValue } from "@/components/provider-filter";
+import { useTenantScopeArgs } from "@/components/tenant-scope-provider";
 import { formatDateTimeWithRelative, trim } from "@/lib/format";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
 import { createFollowupActionHandlers, followupCommitmentLabel, followupStatusLabel, type FollowupItem } from "@/lib/ui/followups";
@@ -148,13 +151,14 @@ function parseQuickRescheduleHours(input: string) {
 function TimelineCard(args: {
   item: TimelineItem;
   now: number;
+  tone?: "priority" | "standard";
   onConfirm: (id: string) => void;
   onSnooze: (id: string, minutes: number) => void;
   onReschedule: (id: string, hoursAhead: number) => void;
   onDismiss: (id: string) => void;
   getRecord: ReturnType<typeof useActionStateRegistry>["getRecord"];
 }) {
-  const { item, now, onConfirm, onSnooze, onReschedule, onDismiss, getRecord } = args;
+  const { item, now, tone = "standard", onConfirm, onSnooze, onReschedule, onDismiss, getRecord } = args;
   const [quickReschedule, setQuickReschedule] = useState("");
   const confirmRecord = getRecord(`followup:${item._id}`);
   const snoozeRecord = getRecord(`followup:snooze:${item._id}`);
@@ -166,105 +170,111 @@ function TimelineCard(args: {
   const confidence = typeof item.confidence === "number" ? Math.round(item.confidence * 100) : null;
   const quickRescheduleHours = parseQuickRescheduleHours(quickReschedule);
   const quickRescheduleInvalid = quickReschedule.trim().length > 0 && quickRescheduleHours === null;
+  const isPriority = tone === "priority";
 
   return (
-    <div className="queue-item" aria-busy={busy}>
-      <p className="queue-title">{item.thread?.title || item.thread?.jid || "Unknown thread"}</p>
-      <p className="queue-meta">
-        {followupCommitmentLabel(item)} · {followupStatusLabel(item.status)} · Due {formatDateTimeWithRelative(item.dueAt, now)}
-      </p>
-      <p className="queue-body">{item.reason}</p>
-      {sourceText ? <p className="queue-meta">Source: {trim(sourceText, 220)}</p> : null}
-      {confidence !== null ? <p className="queue-meta">Detector confidence: {confidence}%</p> : null}
-      {quickRescheduleInvalid ? (
-        <p className="queue-meta action-inline-error" role="status">
-          Use values like `6h`, `2d`, `30m`, or `tomorrow`.
+    <div className={`followup-item ${isPriority ? "followup-item-priority" : ""}`} aria-busy={busy}>
+      <div className="followup-item-copy">
+        <p className="followup-item-kicker">{followupCommitmentLabel(item)}</p>
+        <h3>{item.thread?.title || item.thread?.jid || "Unknown thread"}</h3>
+        <p className="followup-item-due">
+          {followupStatusLabel(item.status)} · Due {formatDateTimeWithRelative(item.dueAt, now)}
         </p>
-      ) : null}
-
-      <div className="queue-actions followups-primary-actions">
-        {item.status === "suggested" ? (
-          <button
-            type="button"
-            className="btn btn-primary"
-            onClick={() => onConfirm(item._id)}
-            disabled={confirmRecord.pending}
-            aria-disabled={confirmRecord.pending}
-          >
-            {confirmRecord.pending ? "Confirming…" : "Confirm"}
-          </button>
-        ) : null}
-        <button
-          type="button"
-          className="btn btn-ghost"
-          onClick={() => onSnooze(item._id, 24 * 60)}
-          disabled={busy || closed}
-          aria-disabled={busy || closed}
-        >
-          Snooze 1d
-        </button>
-        <button
-          type="button"
-          className="btn btn-ghost"
-          onClick={() => onReschedule(item._id, 24)}
-          disabled={busy || closed}
-          aria-disabled={busy || closed}
-        >
-          +24h
-        </button>
-        <button
-          type="button"
-          className="btn btn-ghost"
-          onClick={() => onReschedule(item._id, 72)}
-          disabled={busy || closed}
-          aria-disabled={busy || closed}
-        >
-          +72h
-        </button>
-        <button
-          type="button"
-          className="btn btn-ghost"
-          onClick={() => onDismiss(item._id)}
-          disabled={busy || closed}
-          aria-disabled={busy || closed}
-        >
-          Dismiss
-        </button>
-        {item.thread?._id ? (
-          <Link href={`/conversations?threadId=${item.thread._id}`} className="btn btn-ghost">
-            Open Thread
-          </Link>
+        <p className="followup-item-reason">{item.reason}</p>
+        {sourceText ? <p className="followup-item-source">Source: {trim(sourceText, isPriority ? 260 : 180)}</p> : null}
+        {confidence !== null ? <p className="followup-item-source">Confidence: {confidence}%</p> : null}
+        {quickRescheduleInvalid ? (
+          <p className="queue-meta action-inline-error" role="status">
+            Use values like `6h`, `2d`, `30m`, or `tomorrow`.
+          </p>
         ) : null}
       </div>
-      <div className="followups-reschedule-inline">
-        <label htmlFor={`followup-reschedule-${item._id}`} className="sr-only">
-          Quick reschedule
-        </label>
-        <input
-          id={`followup-reschedule-${item._id}`}
-          type="text"
-          className="input"
-          value={quickReschedule}
-          onChange={(event) => setQuickReschedule(event.target.value)}
-          placeholder="6h, 2d, tomorrow"
-          aria-label="Quick reschedule"
-          disabled={busy || closed}
-        />
-        <button
-          type="button"
-          className="btn btn-ghost"
-          onClick={() => {
-            if (!quickRescheduleHours) {
-              return;
-            }
-            onReschedule(item._id, quickRescheduleHours);
-            setQuickReschedule("");
-          }}
-          disabled={busy || closed || quickRescheduleHours === null}
-          aria-disabled={busy || closed || quickRescheduleHours === null}
-        >
-          Apply
-        </button>
+
+      <div className="followup-item-actions">
+        <div className="queue-actions followups-primary-actions">
+          {item.status === "suggested" ? (
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => onConfirm(item._id)}
+              disabled={confirmRecord.pending}
+              aria-disabled={confirmRecord.pending}
+            >
+              {confirmRecord.pending ? "Confirming…" : "Confirm"}
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={() => onSnooze(item._id, 24 * 60)}
+            disabled={busy || closed}
+            aria-disabled={busy || closed}
+          >
+            Snooze 1d
+          </button>
+          <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={() => onReschedule(item._id, 24)}
+            disabled={busy || closed}
+            aria-disabled={busy || closed}
+          >
+            +24h
+          </button>
+          <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={() => onReschedule(item._id, 72)}
+            disabled={busy || closed}
+            aria-disabled={busy || closed}
+          >
+            +72h
+          </button>
+          <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={() => onDismiss(item._id)}
+            disabled={busy || closed}
+            aria-disabled={busy || closed}
+          >
+            Dismiss
+          </button>
+          {item.thread?._id ? (
+            <Link href={`/conversations?threadId=${item.thread._id}`} className="btn btn-ghost">
+              Open Thread
+            </Link>
+          ) : null}
+        </div>
+        <div className="followups-reschedule-inline">
+          <label htmlFor={`followup-reschedule-${item._id}`} className="sr-only">
+            Quick reschedule
+          </label>
+          <input
+            id={`followup-reschedule-${item._id}`}
+            type="text"
+            className="input"
+            value={quickReschedule}
+            onChange={(event) => setQuickReschedule(event.target.value)}
+            placeholder="6h, 2d, tomorrow"
+            aria-label="Quick reschedule"
+            disabled={busy || closed}
+          />
+          <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={() => {
+              if (!quickRescheduleHours) {
+                return;
+              }
+              onReschedule(item._id, quickRescheduleHours);
+              setQuickReschedule("");
+            }}
+            disabled={busy || closed || quickRescheduleHours === null}
+            aria-disabled={busy || closed || quickRescheduleHours === null}
+          >
+            Apply
+          </button>
+        </div>
       </div>
 
       {confirmRecord.error ? (
@@ -292,6 +302,7 @@ function TimelineCard(args: {
 }
 
 function FollowupsContent() {
+  const tenantScope = useTenantScopeArgs();
   const confirmFollowup = useMutation(api.followups.confirm);
   const rescheduleFollowup = useMutation(api.followups.reschedule);
   const snoozeFollowup = useMutation(api.followups.snooze);
@@ -310,11 +321,13 @@ function FollowupsContent() {
   const [weekdaysOnly, setWeekdaysOnly] = useState(false);
 
   const timeline = useQuery(api.followups.timeline, {
+    ...tenantScope,
     limit: 180,
     filter,
     provider: providerFilter,
   }) as TimelinePayload | undefined;
   const todoPayload = useQuery(api.todos.list, {
+    ...tenantScope,
     todoLimit: 220,
     candidateLimit: 1,
   }) as { todos: TodoItem[] } | undefined;
@@ -327,6 +340,35 @@ function FollowupsContent() {
       .filter((todo) => todo.status === "open")
       .sort((a, b) => (a.dueAt ?? Number.MAX_SAFE_INTEGER) - (b.dueAt ?? Number.MAX_SAFE_INTEGER));
   }, [todoPayload?.todos]);
+  const priorityFollowup = useMemo(() => {
+    return sections.overdue[0] || sections.today[0] || sections.upcoming[0] || null;
+  }, [sections.overdue, sections.today, sections.upcoming]);
+  const prioritySection = useMemo(() => {
+    if (!priorityFollowup) {
+      return "";
+    }
+    if (sections.overdue.some((item) => item._id === priorityFollowup._id)) {
+      return "Overdue";
+    }
+    if (sections.today.some((item) => item._id === priorityFollowup._id)) {
+      return "Today";
+    }
+    return "Upcoming";
+  }, [priorityFollowup, sections.overdue, sections.today]);
+  const quietSections = useMemo(
+    () => ({
+      overdue: priorityFollowup
+        ? sections.overdue.filter((item) => item._id !== priorityFollowup._id)
+        : sections.overdue,
+      today: priorityFollowup
+        ? sections.today.filter((item) => item._id !== priorityFollowup._id)
+        : sections.today,
+      upcoming: priorityFollowup
+        ? sections.upcoming.filter((item) => item._id !== priorityFollowup._id)
+        : sections.upcoming,
+    }),
+    [priorityFollowup, sections.overdue, sections.today, sections.upcoming],
+  );
 
   const headerCounts = useMemo(() => {
     return {
@@ -336,6 +378,14 @@ function FollowupsContent() {
       visible: timeline?.totals.visible || 0,
     };
   }, [sections.overdue.length, sections.today.length, sections.upcoming.length, timeline?.totals.visible]);
+  const timelineFilters = [
+    { id: "needs_review", label: "Needs review" },
+    { id: "confirmed", label: "Confirmed" },
+    { id: "queued_sent", label: "Queued/Sent" },
+    { id: "failed", label: "Failed" },
+    { id: "dismissed", label: "Dismissed" },
+    { id: "all", label: "All" },
+  ] satisfies Array<{ id: TimelineFilter; label: string }>;
 
   const { onConfirm, onSnooze, onReschedule, onDismiss } = createFollowupActionHandlers({
     runAction,
@@ -364,6 +414,7 @@ function FollowupsContent() {
 
           for (let i = 0; i < 20; i += 1) {
             const batch = (await clearAllFollowups({
+              ...tenantScope,
               limit: 30,
             })) as ClearAllBatchResult;
             totalCleared += batch.cleared;
@@ -410,6 +461,7 @@ function FollowupsContent() {
           throw new Error("Enter an agenda title.");
         }
         return await createAgendaRange({
+          ...tenantScope,
           agenda: title,
           entries,
         });
@@ -441,9 +493,12 @@ function FollowupsContent() {
   };
 
   const renderSection = (title: string, items: TimelineItem[]) => (
-    <article className="panel-card followups-section-card">
-      <h3>{title}</h3>
-      <div className="stack">
+    <section className="followups-drip-section">
+      <div className="followups-drip-heading">
+        <h3>{title}</h3>
+        <span>{items.length}</span>
+      </div>
+      <div className="followups-drip-list">
         {loading ? <LoadingBlock label={`Loading ${title.toLowerCase()} follow-ups…`} rows={2} compact /> : null}
         {items.map((item) => (
           <TimelineCard
@@ -457,176 +512,183 @@ function FollowupsContent() {
             getRecord={getRecord}
           />
         ))}
-        {!loading && items.length === 0 ? <p className="empty-line">No follow-ups in this section.</p> : null}
+        {!loading && items.length === 0 && !priorityFollowup ? (
+          <EmptyState
+            variant="followups"
+            compact
+            title={`No ${title.toLowerCase()} follow-ups.`}
+            description="Follow-ups will move into this section as they become due or need review."
+          />
+        ) : null}
       </div>
-    </article>
+    </section>
   );
 
   return (
     <section className="followups-workspace">
       <ActionNotices notices={notices} onDismiss={dismissNotice} />
 
-      <div className="followups-control-deck">
-        <article className="panel-card followups-control-card">
-          <h3>Agenda Planner</h3>
-          <p className="queue-meta">Create repeated agenda tasks across a selected date range.</p>
-          <form className="stack followups-agenda-form" onSubmit={onCreateAgenda}>
-            <label className="stack compact" htmlFor="agenda-title-input">
-              <span className="queue-meta">Agenda</span>
-              <input
-                id="agenda-title-input"
-                className="input"
-                placeholder="Morning deep work, outreach, and workout"
-                value={agendaTitle}
-                onChange={(event) => setAgendaTitle(event.target.value)}
-              />
-            </label>
-            <div className="followups-agenda-grid">
-              <label className="stack compact" htmlFor="agenda-start-date">
-                <span className="queue-meta">Start</span>
-                <input id="agenda-start-date" className="input" type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} />
-              </label>
-              <label className="stack compact" htmlFor="agenda-end-date">
-                <span className="queue-meta">End</span>
-                <input id="agenda-end-date" className="input" type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} />
-              </label>
-              <label className="stack compact" htmlFor="agenda-time">
-                <span className="queue-meta">Time</span>
-                <input id="agenda-time" className="input" type="time" value={agendaTime} onChange={(event) => setAgendaTime(event.target.value)} />
-              </label>
+      <div className="followups-canvas">
+        <div className="followups-main-stage">
+          <section className="followups-priority-panel" aria-live="polite">
+            <div className="followups-priority-head">
+              <div>
+                <p className="settings-eyebrow">Next follow-up</p>
+                <h2>{priorityFollowup ? prioritySection : "Clear for now"}</h2>
+              </div>
+              <dl className="followups-priority-counts" aria-label="Follow-up counts">
+                <div>
+                  <dt>Overdue</dt>
+                  <dd>{headerCounts.overdue}</dd>
+                </div>
+                <div>
+                  <dt>Today</dt>
+                  <dd>{headerCounts.today}</dd>
+                </div>
+                <div>
+                  <dt>Later</dt>
+                  <dd>{headerCounts.upcoming}</dd>
+                </div>
+              </dl>
             </div>
-            <label className="followups-weekdays-toggle">
-              <input type="checkbox" checked={weekdaysOnly} onChange={(event) => setWeekdaysOnly(event.target.checked)} />
-              <span>Weekdays only</span>
-            </label>
-            <div className="queue-actions">
+            {loading ? <LoadingBlock label="Loading next follow-up…" rows={3} /> : null}
+            {!loading && priorityFollowup ? (
+              <TimelineCard
+                item={priorityFollowup}
+                now={now}
+                tone="priority"
+                onConfirm={onConfirm}
+                onSnooze={onSnooze}
+                onReschedule={onReschedule}
+                onDismiss={onDismiss}
+                getRecord={getRecord}
+              />
+            ) : null}
+            {!loading && !priorityFollowup ? (
+              <EmptyState
+                variant="followups"
+                title="No follow-ups need attention."
+                description="When a reminder needs review, it will appear here first."
+              />
+            ) : null}
+          </section>
+
+          <div className="followups-stream">
+            <div className="followups-stream-head">
+              <div>
+                <p className="settings-eyebrow">Coming next</p>
+                <h3>Everything else</h3>
+              </div>
+              {loading ? <LoadingIndicator label="Refreshing…" /> : null}
+            </div>
+            {renderSection("Overdue", quietSections.overdue)}
+            {renderSection("Today", quietSections.today)}
+            {renderSection("Upcoming", quietSections.upcoming)}
+          </div>
+        </div>
+
+        <aside className="followups-command-rail" aria-label="Follow-up controls">
+          <section className="followups-rail-section">
+            <h3>View</h3>
+            <ProviderFilter value={providerFilter} onChange={setProviderFilter} label="Follow-ups provider filter" />
+            <SegmentedControl label="Follow-up timeline filters" value={filter} options={timelineFilters} onChange={setFilter} className="followups-tab-row" />
+            <p className="queue-meta">
+              {headerCounts.visible} visible · {openAgendaTodos.length} agenda item{openAgendaTodos.length === 1 ? "" : "s"}
+            </p>
+            {headerCounts.visible > 0 ? (
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={onClearAll}
+                disabled={loading || clearAllRecord.pending}
+                aria-disabled={loading || clearAllRecord.pending}
+              >
+                {clearAllRecord.pending ? "Dismissing…" : "Dismiss all open"}
+              </button>
+            ) : null}
+            {clearAllRecord.error ? (
+              <p className="queue-meta action-inline-error" role="alert">
+                {clearAllRecord.error}
+              </p>
+            ) : null}
+          </section>
+
+          <section className="followups-rail-section">
+            <h3>Agenda</h3>
+            <form className="stack followups-agenda-form" onSubmit={onCreateAgenda}>
+              <label className="stack compact" htmlFor="agenda-title-input">
+                <span className="queue-meta">Agenda</span>
+                <input
+                  id="agenda-title-input"
+                  className="input"
+                  placeholder="Morning deep work"
+                  value={agendaTitle}
+                  onChange={(event) => setAgendaTitle(event.target.value)}
+                />
+              </label>
+              <div className="followups-agenda-grid">
+                <label className="stack compact" htmlFor="agenda-start-date">
+                  <span className="queue-meta">Start</span>
+                  <input id="agenda-start-date" className="input" type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} />
+                </label>
+                <label className="stack compact" htmlFor="agenda-end-date">
+                  <span className="queue-meta">End</span>
+                  <input id="agenda-end-date" className="input" type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} />
+                </label>
+                <label className="stack compact" htmlFor="agenda-time">
+                  <span className="queue-meta">Time</span>
+                  <input id="agenda-time" className="input" type="time" value={agendaTime} onChange={(event) => setAgendaTime(event.target.value)} />
+                </label>
+              </div>
+              <label className="followups-weekdays-toggle">
+                <input type="checkbox" checked={weekdaysOnly} onChange={(event) => setWeekdaysOnly(event.target.checked)} />
+                <span>Weekdays only</span>
+              </label>
               <button
                 type="submit"
                 className="btn btn-primary"
                 disabled={getRecord("agenda:create-range").pending}
                 aria-disabled={getRecord("agenda:create-range").pending}
               >
-                {getRecord("agenda:create-range").pending ? "Scheduling…" : "Schedule agenda"}
+                {getRecord("agenda:create-range").pending ? "Scheduling…" : "Schedule"}
               </button>
-            </div>
-          </form>
+            </form>
+          </section>
 
           <details className="followups-control-section">
             <summary className="followups-control-summary">Open agenda items ({openAgendaTodos.length})</summary>
             <div className="stack">
               {openAgendaTodos.slice(0, 20).map((todo) => (
-                <div key={todo._id} className="queue-item">
+                <div key={todo._id} className="followups-agenda-item">
                   <p className="queue-title">{todo.title}</p>
                   <p className="queue-meta">
                     {todo.dueAt ? `Due ${formatDateTimeWithRelative(todo.dueAt, now)}` : "No due date"}
                   </p>
-                  <div className="queue-actions">
-                    <button
-                      type="button"
-                      className="btn btn-ghost"
-                      onClick={() => onMarkTodoDone(todo._id)}
-                      disabled={getRecord(`agenda:done:${todo._id}`).pending}
-                      aria-disabled={getRecord(`agenda:done:${todo._id}`).pending}
-                    >
-                      {getRecord(`agenda:done:${todo._id}`).pending ? "Updating…" : "Mark done"}
-                    </button>
-                  </div>
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    onClick={() => onMarkTodoDone(todo._id)}
+                    disabled={getRecord(`agenda:done:${todo._id}`).pending}
+                    aria-disabled={getRecord(`agenda:done:${todo._id}`).pending}
+                  >
+                    {getRecord(`agenda:done:${todo._id}`).pending ? "Updating…" : "Done"}
+                  </button>
                 </div>
               ))}
               {openAgendaTodos.length > 20 ? (
                 <p className="queue-meta">Showing first 20 items. Remaining: {openAgendaTodos.length - 20}.</p>
               ) : null}
-              {openAgendaTodos.length === 0 ? <p className="empty-line">No open agenda tasks yet.</p> : null}
+              {openAgendaTodos.length === 0 ? (
+                <EmptyState
+                  variant="tasks"
+                  compact
+                  title="No open agenda tasks yet."
+                  description="Scheduled agenda items will collect here until they are completed."
+                />
+              ) : null}
             </div>
           </details>
-        </article>
-
-        <article className="panel-card followups-control-card">
-          <h3>Timeline Overview</h3>
-          <ProviderFilter value={providerFilter} onChange={setProviderFilter} label="Follow-ups provider filter" />
-          <p className="queue-meta">
-            Visible: {headerCounts.visible} · Overdue: {headerCounts.overdue} · Today: {headerCounts.today} · Upcoming: {headerCounts.upcoming}
-          </p>
-          <div className="queue-actions">
-            <button
-              type="button"
-              className="btn btn-ghost"
-              onClick={onClearAll}
-              disabled={loading || clearAllRecord.pending}
-              aria-disabled={loading || clearAllRecord.pending}
-            >
-              {clearAllRecord.pending ? "Dismissing…" : "Dismiss all open"}
-            </button>
-          </div>
-          {clearAllRecord.error ? (
-            <p className="queue-meta action-inline-error" role="alert">
-              {clearAllRecord.error}
-            </p>
-          ) : null}
-          <div className="queue-focus-tabs followups-tab-row" role="tablist" aria-label="Follow-up timeline filters">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={filter === "needs_review"}
-              className={`btn ${filter === "needs_review" ? "btn-primary" : "btn-ghost"}`}
-              onClick={() => setFilter("needs_review")}
-            >
-              Needs review
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={filter === "confirmed"}
-              className={`btn ${filter === "confirmed" ? "btn-primary" : "btn-ghost"}`}
-              onClick={() => setFilter("confirmed")}
-            >
-              Confirmed
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={filter === "queued_sent"}
-              className={`btn ${filter === "queued_sent" ? "btn-primary" : "btn-ghost"}`}
-              onClick={() => setFilter("queued_sent")}
-            >
-              Queued/Sent
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={filter === "failed"}
-              className={`btn ${filter === "failed" ? "btn-primary" : "btn-ghost"}`}
-              onClick={() => setFilter("failed")}
-            >
-              Failed
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={filter === "dismissed"}
-              className={`btn ${filter === "dismissed" ? "btn-primary" : "btn-ghost"}`}
-              onClick={() => setFilter("dismissed")}
-            >
-              Dismissed
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={filter === "all"}
-              className={`btn ${filter === "all" ? "btn-primary" : "btn-ghost"}`}
-              onClick={() => setFilter("all")}
-            >
-              All
-            </button>
-          </div>
-          {loading ? <LoadingIndicator label="Loading follow-up timeline…" /> : null}
-        </article>
-      </div>
-
-      <div className="followups-stream">
-        {renderSection("Overdue", sections.overdue)}
-        {renderSection("Today", sections.today)}
-        {renderSection("Upcoming", sections.upcoming)}
+        </aside>
       </div>
     </section>
   );

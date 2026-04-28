@@ -1,7 +1,9 @@
 "use client";
 
+import { useTenantScopeArgs } from "@/components/tenant-scope-provider";
 import { api } from "../../convex/_generated/api";
 import { useQuery } from "convex/react";
+import { useState } from "react";
 
 type SetupStatus =
   | "idle"
@@ -18,11 +20,19 @@ type SetupSnapshot = {
   status?: SetupStatus;
   message?: string;
   hasAuth?: boolean;
+  hasConnectedBefore?: boolean;
   listenerActive?: boolean;
   listenerMessage?: string;
 } | null;
 
 type RuntimeState = "normal" | "paused" | "offline" | "error";
+
+type ProviderIssue = {
+  provider: "whatsapp" | "instagram";
+  state: Exclude<RuntimeState, "normal" | "paused">;
+  detail: string;
+  hasAuth: boolean;
+};
 
 const TRANSITIONAL_SETUP_STATES = new Set<SetupStatus>([
   "starting",
@@ -49,8 +59,10 @@ function evaluateProviderState(provider: "whatsapp" | "instagram", setup: SetupS
   if (!setup) {
     return provider === "whatsapp"
       ? {
+          provider,
           state: "offline" as const,
           detail: `${label} is not connected yet.`,
+          hasAuth: false,
         }
       : null;
   }
@@ -58,6 +70,7 @@ function evaluateProviderState(provider: "whatsapp" | "instagram", setup: SetupS
   const status = setup.status || "idle";
   const listenerActive = setup.listenerActive === true;
   const hasAuth = setup.hasAuth === true;
+  const hasConnectedBefore = setup.hasConnectedBefore === true || hasAuth || status === "connected";
   const combinedMessage = compactMessage(
     [setup.message, setup.listenerMessage].filter(Boolean).join(" · "),
     220,
@@ -68,8 +81,10 @@ function evaluateProviderState(provider: "whatsapp" | "instagram", setup: SetupS
       return null;
     }
     return {
+      provider,
       state: "error" as const,
       detail: combinedMessage || `${label} has a setup error.`,
+      hasAuth,
     };
   }
 
@@ -86,15 +101,23 @@ function evaluateProviderState(provider: "whatsapp" | "instagram", setup: SetupS
   }
 
   return {
+    provider,
     state: "offline" as const,
-    detail: combinedMessage || `${label} is currently offline.`,
+    detail:
+      provider === "whatsapp" && hasConnectedBefore && !hasAuth
+        ? "WhatsApp is disconnected. Reconnect WhatsApp to resume automation."
+        : combinedMessage || `${label} is currently offline.`,
+    hasAuth,
   };
 }
 
-export function RuntimeStateOverlay() {
-  const whatsappSetup = useQuery(api.system.setupStatus, { provider: "whatsapp" }) as SetupSnapshot | undefined;
-  const instagramSetup = useQuery(api.system.setupStatus, { provider: "instagram" }) as SetupSnapshot | undefined;
-  const health = useQuery(api.system.health, {}) as
+export function RuntimeStateOverlay({ canManageRuntime = true }: { canManageRuntime?: boolean }) {
+  const tenantScope = useTenantScopeArgs();
+  const [reconnectPending, setReconnectPending] = useState(false);
+  const [reconnectError, setReconnectError] = useState("");
+  const whatsappSetup = useQuery(api.system.setupStatus, { ...tenantScope, provider: "whatsapp" }) as SetupSnapshot | undefined;
+  const instagramSetup = useQuery(api.system.setupStatus, { ...tenantScope, provider: "instagram" }) as SetupSnapshot | undefined;
+  const health = useQuery(api.system.health, tenantScope) as
     | {
         config?: {
           autonomyPaused?: boolean;
@@ -109,11 +132,12 @@ export function RuntimeStateOverlay() {
   const issues = [
     evaluateProviderState("whatsapp", whatsappSetup),
     evaluateProviderState("instagram", instagramSetup),
-  ].filter(Boolean) as Array<{ state: Exclude<RuntimeState, "normal" | "paused">; detail: string }>;
+  ].filter(Boolean) as ProviderIssue[];
 
   const autonomyPaused = Boolean(health?.config?.autonomyPaused);
   const hasError = issues.some((issue) => issue.state === "error");
   const hasOffline = issues.some((issue) => issue.state === "offline");
+  const whatsappIssue = issues.find((issue) => issue.provider === "whatsapp");
 
   const state: RuntimeState = hasError ? "error" : hasOffline ? "offline" : autonomyPaused ? "paused" : "normal";
 
@@ -126,13 +150,61 @@ export function RuntimeStateOverlay() {
     state === "paused"
       ? "Automation is paused. Resume it when you are ready to send automatically."
       : compactMessage(issues.map((issue) => issue.detail).join(" | "), 260);
+  const showWhatsAppReconnect = canManageRuntime && Boolean(whatsappIssue) && state !== "paused";
+
+  const reconnectWhatsApp = async () => {
+    if (!whatsappIssue) {
+      return;
+    }
+    setReconnectError("");
+    if (!whatsappIssue.hasAuth) {
+      window.location.href = "/setup?connect=whatsapp";
+      return;
+    }
+    setReconnectPending(true);
+    try {
+      const response = await fetch("/api/setup/whatsapp/restart-worker", {
+        method: "POST",
+      });
+      const payload = (await response.json()) as { status?: string; message?: string; redirectPath?: string; error?: string };
+      if (!response.ok || payload.status === "error") {
+        if (payload.redirectPath) {
+          window.location.href = payload.redirectPath;
+          return;
+        }
+        throw new Error(payload.message || payload.error || "Could not reconnect WhatsApp.");
+      }
+    } catch (error) {
+      setReconnectError(error instanceof Error ? error.message : "Could not reconnect WhatsApp.");
+    } finally {
+      setReconnectPending(false);
+    }
+  };
 
   return (
     <div className={`runtime-state-overlay runtime-state-${state}`} aria-live="polite">
       <div className="runtime-state-backdrop" />
       <div className="runtime-state-banner">
-        <p className="runtime-state-title">{title}</p>
-        <p className="runtime-state-detail">{detail}</p>
+        <div className="runtime-state-copy">
+          <p className="runtime-state-title">{title}</p>
+          <p className="runtime-state-detail">{detail}</p>
+          {reconnectError ? (
+            <p className="runtime-state-action-error" role="alert">
+              {reconnectError}
+            </p>
+          ) : null}
+        </div>
+        {showWhatsAppReconnect ? (
+          <button
+            type="button"
+            className="btn btn-primary runtime-state-action"
+            onClick={reconnectWhatsApp}
+            disabled={reconnectPending}
+            aria-disabled={reconnectPending}
+          >
+            {reconnectPending ? "Reconnecting..." : whatsappIssue?.hasAuth ? "Reconnect WhatsApp" : "Connect WhatsApp"}
+          </button>
+        ) : null}
       </div>
     </div>
   );

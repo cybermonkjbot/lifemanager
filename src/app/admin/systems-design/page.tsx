@@ -3,7 +3,14 @@ import { LiveSystemsDesign } from "@/components/live-systems-design";
 
 export default async function AdminSystemsDesignPage() {
   return (
-    <AdminLivePage title="Systems Design" nextPath="/admin/systems-design" showLogWatcher logWatcherDefaultExpanded={false}>
+    <AdminLivePage
+      title="Service Topology"
+      nextPath="/admin/systems-design"
+      eyebrow="Architecture Operations"
+      description="Map runtime services, dependencies, recent logs, and hot paths for admin diagnosis."
+      showLogWatcher
+      logWatcherDefaultExpanded={false}
+    >
       <LiveSystemsDesign />
     </AdminLivePage>
   );

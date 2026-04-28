@@ -18,5 +18,5 @@ export async function POST(request: Request) {
     await upsertIgnoreTarget(targetValue, enabled, targetType);
   }
 
-  return NextResponse.redirect(new URL("/rules", request.url));
+  return NextResponse.redirect(new URL("/settings?section=rules", request.url));
 }

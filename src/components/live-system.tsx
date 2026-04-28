@@ -1,6 +1,7 @@
 "use client";
 
 import { ActionNotices } from "@/components/action-notices";
+import { SearchableSelect } from "@/components/app-ui";
 import { LoadingBlock } from "@/components/loading-state";
 import { formatDateTime, trim } from "@/lib/format";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
@@ -180,7 +181,7 @@ function AiTestBench() {
 
         <label className="stack compact">
           <span className="queue-meta">Conversation context (optional)</span>
-          <select
+          <SearchableSelect
             value={threadId}
             onChange={(event) => setThreadId(event.target.value)}
             disabled={record.pending || contactsLoading}
@@ -192,7 +193,7 @@ function AiTestBench() {
                 {(contact.title?.trim() || contact.jid).slice(0, 100)}
               </option>
             ))}
-          </select>
+          </SearchableSelect>
         </label>
 
         <button type="submit" className="btn btn-primary" disabled={!canSubmit} aria-disabled={!canSubmit}>

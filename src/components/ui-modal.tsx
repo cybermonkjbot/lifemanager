@@ -1,6 +1,14 @@
 "use client";
 
-import { type KeyboardEvent as ReactKeyboardEvent, type ReactNode, useEffect, useId, useRef, useState } from "react";
+import {
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+} from "react";
 
 type ModalProps = {
   open: boolean;
@@ -41,7 +49,7 @@ function getFocusableElements(container: HTMLElement | null) {
 export function UIModal({ open, onClose, title, description, size = "default", children }: ModalProps) {
   const titleId = useId();
   const descriptionId = useId();
-  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const dialogRef = useRef<HTMLDialogElement | null>(null);
   const previouslyFocusedRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
@@ -55,14 +63,11 @@ export function UIModal({ open, onClose, title, description, size = "default", c
     }
 
     previouslyFocusedRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    if (!dialog.open) {
+      dialog.showModal();
+    }
 
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onClose();
-        return;
-      }
-
       if (event.key !== "Tab") {
         return;
       }
@@ -96,52 +101,75 @@ export function UIModal({ open, onClose, title, description, size = "default", c
     document.body.style.overflow = "hidden";
     window.addEventListener("keydown", onKeyDown);
 
-    const focusable = getFocusableElements(dialog);
+    const body = dialog.querySelector<HTMLElement>(".ui-modal-body");
+    const focusable = getFocusableElements(body ?? dialog);
     const initialFocus = focusable[0] ?? dialog;
     initialFocus.focus();
 
     return () => {
       document.body.style.overflow = previousOverflow;
       window.removeEventListener("keydown", onKeyDown);
+      if (dialog.open) {
+        dialog.close();
+      }
       if (previouslyFocusedRef.current && document.contains(previouslyFocusedRef.current)) {
         previouslyFocusedRef.current.focus();
       }
       previouslyFocusedRef.current = null;
     };
-  }, [open, onClose]);
+  }, [open]);
 
   if (!open) {
     return null;
   }
 
+  const onDialogClick = (event: ReactMouseEvent<HTMLDialogElement>) => {
+    if (event.target !== event.currentTarget) {
+      return;
+    }
+
+    const rect = event.currentTarget.getBoundingClientRect();
+    const clickedInDialog =
+      event.clientX >= rect.left &&
+      event.clientX <= rect.right &&
+      event.clientY >= rect.top &&
+      event.clientY <= rect.bottom;
+
+    if (!clickedInDialog) {
+      onClose();
+    }
+  };
+
   return (
-    <div className="ui-modal-backdrop" role="presentation" onClick={onClose}>
-      <div
-        ref={dialogRef}
-        className={`ui-modal ${size === "wide" ? "ui-modal-wide" : ""}`}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        aria-describedby={description ? descriptionId : undefined}
-        tabIndex={-1}
-        onClick={(event) => event.stopPropagation()}
-      >
-        <div className="ui-modal-header">
-          <div>
-            <h3 id={titleId}>{title}</h3>
-            {description ? (
-              <p id={descriptionId} className="queue-meta">
-                {description}
-              </p>
-            ) : null}
-          </div>
-          <button type="button" className="btn btn-ghost" onClick={onClose}>
-            Close
-          </button>
+    <dialog
+      ref={dialogRef}
+      className={`ui-modal ${size === "wide" ? "ui-modal-wide" : ""}`}
+      aria-labelledby={titleId}
+      aria-describedby={description ? descriptionId : undefined}
+      tabIndex={-1}
+      onCancel={(event) => {
+        event.preventDefault();
+        onClose();
+      }}
+      onClick={onDialogClick}
+    >
+      <div className="ui-modal-header">
+        <div className="ui-modal-title-group">
+          <h2 id={titleId}>{title}</h2>
+          {description ? (
+            <p id={descriptionId} className="ui-modal-description">
+              {description}
+            </p>
+          ) : null}
         </div>
-        <div className="ui-modal-body">{children}</div>
+        <button type="button" className="ui-modal-close" onClick={onClose} aria-label="Close dialog" title="Close">
+          <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+            <path d="M5.5 5.5L14.5 14.5M14.5 5.5L5.5 14.5" />
+          </svg>
+        </button>
       </div>
-    </div>
+      <div className="ui-modal-body">{children}</div>
+    </dialog>
   );
 }
 

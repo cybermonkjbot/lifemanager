@@ -1,7 +1,10 @@
 "use client";
 
+import { SegmentedControl } from "@/components/app-ui";
+import { EmptyState } from "@/components/empty-state";
 import { LoadingBlock } from "@/components/loading-state";
 import { SharedMediaPreview } from "@/components/media-preview";
+import { useTenantScopeArgs } from "@/components/tenant-scope-provider";
 import { UIModal } from "@/components/ui-modal";
 import { formatDateTime, trim } from "@/lib/format";
 import type { UnifiedMediaItem } from "@/lib/ui/media";
@@ -30,12 +33,14 @@ const FILTERS: Array<{ id: MediaFilter; label: string }> = [
 ];
 
 export function LiveMedia() {
+  const tenantScope = useTenantScopeArgs();
   const [filter, setFilter] = useState<MediaFilter>("all");
   const [limit, setLimit] = useState(240);
   const [search, setSearch] = useState("");
   const [mediaPreview, setMediaPreview] = useState<MediaPreview | null>(null);
 
   const mediaItems = useQuery(api.media.listUnifiedMedia, {
+    ...tenantScope,
     filter,
     limit,
   }) as UnifiedMediaItem[] | undefined;
@@ -71,25 +76,17 @@ export function LiveMedia() {
   }, [mediaItems, normalizedSearch]);
 
   return (
-    <section className="panel-grid">
+    <section className="panel-grid media-workspace">
       <article className="panel-card">
         <h3>Library Feed</h3>
         <p className="queue-meta">
           Browse captured media, preview inline, and jump to the source thread.
         </p>
+        <p className="queue-meta">
+          Labels, tags, and availability now live in <Link href="/settings?section=media">Media Settings</Link>.
+        </p>
 
-        <div className="queue-focus-tabs media-filter-tabs">
-          {FILTERS.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className={`btn ${filter === item.id ? "btn-primary" : "btn-ghost"}`}
-              onClick={() => setFilter(item.id)}
-            >
-              {item.label}
-            </button>
-          ))}
-        </div>
+        <SegmentedControl label="Media filters" value={filter} options={FILTERS} onChange={setFilter} className="media-filter-tabs" />
 
         <div className="thread-list-footer">
           <input
@@ -100,16 +97,24 @@ export function LiveMedia() {
             onChange={(event) => setSearch(event.target.value)}
             aria-label="Search media library"
           />
-          <button type="button" className="btn btn-ghost" onClick={() => setLimit((prev) => Math.min(prev + 160, 400))}>
-            Load more
-          </button>
+          {(mediaItems || []).length >= limit && limit < 400 ? (
+            <button type="button" className="btn btn-ghost" onClick={() => setLimit((prev) => Math.min(prev + 160, 400))}>
+              Load more
+            </button>
+          ) : null}
         </div>
         <p className="queue-meta">
           Showing {visibleItems.length} of {(mediaItems || []).length} item{(mediaItems || []).length === 1 ? "" : "s"}
         </p>
 
         {loading ? <LoadingBlock label="Loading media…" rows={4} /> : null}
-        {!loading && visibleItems.length === 0 ? <p className="empty-line">No captured media matches this filter or search.</p> : null}
+        {!loading && visibleItems.length === 0 ? (
+          <EmptyState
+            variant="media"
+            title="No captured media matches this view."
+            description="Try another filter or search. New stickers, memes, images, and files will appear here after they are captured."
+          />
+        ) : null}
 
         <div className="stack">
           {visibleItems.map((item) => {
@@ -145,8 +150,7 @@ export function LiveMedia() {
                       {item.label || item.kind} · {item.kind}
                     </p>
                     <p className="queue-meta">
-                      {item.source === "message" ? "Message timeline" : "Media library"} · {formatDateTime(item.createdAt)} ·{" "}
-                      {item.enabled ? "Enabled" : "Disabled"}
+                      {item.source === "message" ? "Message timeline" : "Media library"} · {formatDateTime(item.createdAt)}
                     </p>
                     <p className="queue-meta">{item.mimeType || "unknown mime type"}</p>
                     {item.tags?.length ? <p className="queue-meta">Tags: {item.tags.join(", ")}</p> : null}
@@ -207,7 +211,12 @@ export function LiveMedia() {
             </a>
           </div>
         ) : (
-          <p className="empty-line">Media preview unavailable.</p>
+          <EmptyState
+            variant="media"
+            compact
+            title="Media preview unavailable."
+            description="The file can stay listed even when a preview URL is missing."
+          />
         )}
       </UIModal>
     </section>

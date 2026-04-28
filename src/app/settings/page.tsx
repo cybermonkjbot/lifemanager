@@ -3,7 +3,7 @@ import { LiveSettings } from "@/components/live-settings";
 
 export default async function SettingsPage() {
   return (
-    <DashboardPage title="Settings" subtitle="Adjust runtime defaults, automation thresholds, and shared media.">
+    <DashboardPage title="Settings" subtitle="Choose how OdogwuHQ replies, waits, and uses media.">
       <LiveSettings />
     </DashboardPage>
   );

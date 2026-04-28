@@ -1172,10 +1172,6 @@ export function HomeScreen() {
     <section className="home-shell home-ai-shell" aria-label="AI chat with Odogwu HQ">
       <div className="home-ai-chat">
         <header className="home-ai-header">
-          <div>
-            <p className="home-chat-kicker">Home</p>
-            <h1 className="home-chat-title">Ask Odogwu HQ</h1>
-          </div>
           <div className="home-ai-header-actions">
             <p className={`home-ai-status home-command-${feedback.kind}`}>{feedback.message}</p>
             {canFinishSession ? (
@@ -1426,8 +1422,8 @@ export function HomeScreen() {
         <UIModal
           open={doneConfirmOpen}
           onClose={() => setDoneConfirmOpen(false)}
-          title="Finish This Ask Odogwu HQ Session?"
-          description="This clears the current chat transcript and returns Home to the empty state for a new conversation."
+          title="Finish This Session?"
+          description="This clears the current chat transcript and returns to the empty state for a new conversation."
         >
           <div className="home-ai-done-confirm">
             <p>Are you sure you are done with this process?</p>

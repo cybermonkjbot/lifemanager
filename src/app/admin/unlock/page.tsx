@@ -28,7 +28,9 @@ export default async function AdminUnlockPage({ searchParams }: AdminUnlockPageP
       <div className="admin-console-grid" aria-hidden="true" />
       <section className="admin-unlock-panel">
         <div className="admin-unlock-brief">
-          <h1>Admin Access</h1>
+          <p className="admin-kicker">Restricted Console</p>
+          <h1>Admin Console</h1>
+          <p>Sign in with an approved admin account to manage tenants, secrets, runtime health, and billing operations.</p>
         </div>
 
         <form className="admin-unlock-form" action="/api/admin/session" method="post">

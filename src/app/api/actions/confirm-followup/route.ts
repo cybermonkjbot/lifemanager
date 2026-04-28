@@ -15,5 +15,5 @@ export async function POST(request: Request) {
     await confirmFollowup(followUpId);
   }
 
-  return NextResponse.redirect(new URL("/followups", request.url));
+  return NextResponse.redirect(new URL("/review?tab=followups", request.url));
 }

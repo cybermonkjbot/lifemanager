@@ -1,7 +1,9 @@
 "use client";
 
 import { ActionNotices } from "@/components/action-notices";
+import { SearchableSelect } from "@/components/app-ui";
 import { LoadingIndicator } from "@/components/loading-state";
+import { useTenantScopeArgs } from "@/components/tenant-scope-provider";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
@@ -44,7 +46,8 @@ function jsonOutput(value: unknown) {
 }
 
 export function LiveTools() {
-  const contacts = useQuery(api.threads.listContacts, { limit: 300 }) as KnownContact[] | undefined;
+  const tenantScope = useTenantScopeArgs();
+  const contacts = useQuery(api.threads.listContacts, { ...tenantScope, limit: 300 }) as KnownContact[] | undefined;
   const contactOptions = contacts || [];
   const contactsLoading = contacts === undefined;
 
@@ -382,7 +385,7 @@ export function LiveTools() {
         <div className="stack compact" style={{ marginTop: 10 }}>
           <label className="setup-input-group">
             <span className="queue-meta">Thread</span>
-            <select
+            <SearchableSelect
               value={selectedThreadId}
               onChange={(event) => {
                 const nextThreadId = event.target.value;
@@ -402,7 +405,7 @@ export function LiveTools() {
                   {contact.title?.trim() || contact.jid}
                 </option>
               ))}
-            </select>
+            </SearchableSelect>
           </label>
 
           <label className="setup-input-group">
@@ -510,14 +513,14 @@ export function LiveTools() {
         </label>
         <label className="setup-input-group">
           <span className="queue-meta">Fact type</span>
-          <select value={factType} onChange={(event) => setFactType(event.target.value)}>
+          <SearchableSelect value={factType} onChange={(event) => setFactType(event.target.value)}>
             <option value="preference">preference</option>
             <option value="profile">profile</option>
             <option value="schedule">schedule</option>
             <option value="relationship">relationship</option>
             <option value="promise">promise</option>
             <option value="other">other</option>
-          </select>
+          </SearchableSelect>
         </label>
         <label className="setup-input-group">
           <span className="queue-meta">Confidence (0-1)</span>

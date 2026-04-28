@@ -1,6 +1,7 @@
 "use client";
 
 import { ActionNotices } from "@/components/action-notices";
+import { useTenantScopeArgs } from "@/components/tenant-scope-provider";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
 import { api } from "../../convex/_generated/api";
 import { useMutation, useQuery } from "convex/react";
@@ -12,6 +13,9 @@ type AutonomyControlsProps = {
 
 function ControlsView({
   autonomyPaused,
+  statusTone,
+  toggleDisabled,
+  toggleLabel,
   pending,
   pendingLabel,
   restartPending,
@@ -24,6 +28,9 @@ function ControlsView({
   statusLabel,
 }: {
   autonomyPaused: boolean;
+  statusTone?: "active" | "paused";
+  toggleDisabled?: boolean;
+  toggleLabel?: string;
   pending: boolean;
   pendingLabel?: string;
   restartPending?: boolean;
@@ -35,9 +42,12 @@ function ControlsView({
   showFormFallback?: boolean;
   statusLabel?: string;
 }) {
+  const effectiveStatusTone = statusTone ?? (autonomyPaused ? "paused" : "active");
+  const toggleIsDisabled = pending || Boolean(toggleDisabled);
+
   return (
     <div className="topbar-controls" aria-busy={pending}>
-      <span className={`status-pill ${autonomyPaused ? "status-paused" : "status-active"}`}>
+      <span className={`status-pill ${effectiveStatusTone === "active" ? "status-active" : "status-paused"}`}>
         {statusLabel || (autonomyPaused ? "Automation Paused" : "Automation Active")}
       </span>
 
@@ -46,10 +56,10 @@ function ControlsView({
           type="button"
           className="btn btn-primary"
           onClick={onToggle}
-          disabled={pending}
-          aria-disabled={pending}
+          disabled={toggleIsDisabled}
+          aria-disabled={toggleIsDisabled}
         >
-          {pending ? pendingLabel || "Working..." : autonomyPaused ? "Resume" : "Pause"}
+          {pending ? pendingLabel || "Working..." : toggleLabel || (autonomyPaused ? "Resume" : "Pause")}
         </button>
       ) : showFormFallback ? (
         <form action={autonomyPaused ? "/api/actions/resume-autonomy" : "/api/actions/pause-autonomy"} method="post">
@@ -85,24 +95,48 @@ function ControlsView({
 }
 
 function ControlsRealtime({ fallbackPaused }: { fallbackPaused?: boolean }) {
+  const tenantScope = useTenantScopeArgs();
   const pauseAutonomy = useMutation(api.system.pauseAutonomy);
   const resumeAutonomy = useMutation(api.system.resumeAutonomy);
-  const setup = useQuery(api.system.setupStatus, {}) as
+  const setup = useQuery(api.system.setupStatus, { ...tenantScope, provider: "whatsapp" }) as
     | {
         hasAuth?: boolean;
+        listenerActive?: boolean;
+      }
+    | null
+    | undefined;
+  const instagramSetup = useQuery(api.system.setupStatus, { ...tenantScope, provider: "instagram" }) as
+    | {
+        listenerActive?: boolean;
       }
     | null
     | undefined;
 
-  const health = useQuery(api.system.health, {}) as
+  const health = useQuery(api.system.health, tenantScope) as
     | {
         config?: { autonomyPaused?: boolean };
+        billing?: {
+          blocked?: boolean;
+          reason?: string;
+        };
       }
     | undefined;
   const healthLoading = health === undefined;
-  const setupLoading = setup === undefined;
+  const setupLoading = setup === undefined || instagramSetup === undefined;
 
-  const autonomyPaused = health?.config?.autonomyPaused ?? fallbackPaused ?? false;
+  const billingBlocked = health?.billing?.blocked === true;
+  const autonomyPaused = billingBlocked || (health?.config?.autonomyPaused ?? fallbackPaused ?? false);
+  const anyWorkerConnected = setup?.listenerActive === true || instagramSetup?.listenerActive === true;
+  const statusLabel = healthLoading || setupLoading
+    ? "Loading..."
+    : billingBlocked
+      ? "Automation Billing Blocked"
+    : autonomyPaused
+      ? "Automation Paused"
+      : anyWorkerConnected
+        ? "Automation Active"
+        : "Automation Offline";
+  const statusTone = !autonomyPaused && anyWorkerConnected ? "active" : "paused";
   const key = "autonomy:toggle";
   const restartKey = "worker:restart";
 
@@ -116,9 +150,9 @@ function ControlsRealtime({ fallbackPaused }: { fallbackPaused?: boolean }) {
       key,
       async () => {
         if (autonomyPaused) {
-          await resumeAutonomy({});
+          await resumeAutonomy(tenantScope);
         } else {
-          await pauseAutonomy({});
+          await pauseAutonomy(tenantScope);
         }
       },
       {
@@ -151,15 +185,18 @@ function ControlsRealtime({ fallbackPaused }: { fallbackPaused?: boolean }) {
     <div className="topbar-controls-shell">
       <ControlsView
         autonomyPaused={autonomyPaused}
+        statusTone={statusTone}
+        toggleDisabled={billingBlocked}
+        toggleLabel={billingBlocked ? "Billing Required" : undefined}
         pending={record.pending || healthLoading}
         pendingLabel={record.pendingLabel}
         restartPending={restartRecord.pending || setupLoading}
         restartPendingLabel={restartRecord.pendingLabel}
         canRestartWorker={canRestartWorker && !setupLoading}
-        error={record.error}
+        error={record.error || (billingBlocked ? health?.billing?.reason : undefined)}
         onToggle={healthLoading ? undefined : toggle}
         onRestartWorker={setupLoading ? undefined : restartWorker}
-        statusLabel={healthLoading ? "Loading..." : undefined}
+        statusLabel={statusLabel}
       />
       <ActionNotices notices={notices} onDismiss={dismissNotice} />
     </div>

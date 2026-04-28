@@ -1,9 +1,11 @@
 "use client";
 
 import { ActionNotices } from "@/components/action-notices";
+import { SearchableSelect } from "@/components/app-ui";
 import { LoadingBlock, LoadingIndicator } from "@/components/loading-state";
 import { SharedMediaPreview } from "@/components/media-preview";
 import { ProviderFilter, type ProviderFilterValue } from "@/components/provider-filter";
+import { useTenantScopeArgs } from "@/components/tenant-scope-provider";
 import { ModalTabs, UIModal } from "@/components/ui-modal";
 import { followupRescheduleDueAt, generateFollowupReasonWithAi } from "@/lib/ui/followups";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
@@ -148,6 +150,13 @@ type IdentityCorrectionFormProps = {
 
 type MessageMediaPreview = MediaPreviewResource;
 
+type ThreadAvatarPreview = {
+  assetId: string;
+  url: string;
+  mimeType: string;
+  updatedAt?: number;
+} | null;
+
 type ConversationMessageType =
   | "text"
   | "reaction"
@@ -168,6 +177,17 @@ type ThreadMessage = {
   messageType?: ConversationMessageType;
   reactionEmoji?: string;
   reactionTargetWhatsAppMessageId?: string;
+  mediaAssetId?: string;
+  mediaCaption?: string;
+  mediaPreview?: MessageMediaPreview | null;
+  messageAt: number;
+};
+
+type ThreadMediaItem = {
+  _id: string;
+  direction: "inbound" | "outbound";
+  text: string;
+  messageType?: ConversationMessageType;
   mediaAssetId?: string;
   mediaCaption?: string;
   mediaPreview?: MessageMediaPreview | null;
@@ -610,6 +630,20 @@ function renderMessageMediaPreview(message: ThreadMessage, onOpenImagePreview?: 
   );
 }
 
+function renderThreadAvatar(label: string, avatarPreview?: ThreadAvatarPreview, className = "") {
+  const fallback = (label || "?").charAt(0).toUpperCase();
+  return (
+    <span className={`thread-row-avatar${className ? ` ${className}` : ""}`} aria-hidden="true">
+      {avatarPreview?.url ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={avatarPreview.url} alt="" loading="lazy" decoding="async" />
+      ) : (
+        fallback
+      )}
+    </span>
+  );
+}
+
 function clamp01(value: number) {
   if (!Number.isFinite(value)) {
     return 0.7;
@@ -766,7 +800,7 @@ function ThreadPersonalityForm({
 
       <label className="setup-input-group">
         <span className="queue-meta">Profile</span>
-        <select
+        <SearchableSelect
           value={profileSlug}
           onChange={(event) => setProfileSlug(event.target.value)}
           disabled={pending}
@@ -777,7 +811,7 @@ function ThreadPersonalityForm({
               {profile.name}
             </option>
           ))}
-        </select>
+        </SearchableSelect>
       </label>
 
       <label className="setup-input-group">
@@ -808,7 +842,7 @@ function ThreadPersonalityForm({
 
       <label className="setup-input-group">
         <span className="queue-meta">Meme policy</span>
-        <select
+        <SearchableSelect
           value={memePolicyMode}
           onChange={(event) =>
             setMemePolicyMode(
@@ -821,7 +855,7 @@ function ThreadPersonalityForm({
           <option value="auto">Auto</option>
           <option value="always_allow">Always allow</option>
           <option value="always_block">Always block</option>
-        </select>
+        </SearchableSelect>
       </label>
 
       <p className="queue-meta">
@@ -996,7 +1030,7 @@ function IdentityCorrectionForm({ facts, loading, pending, onSaveGender }: Ident
 
         <label className="setup-input-group">
           <span className="queue-meta">Correct gender cue</span>
-          <select
+          <SearchableSelect
             value={gender}
             onChange={(event) => setGender(event.target.value as CorrectableGender)}
             disabled={pending}
@@ -1006,7 +1040,7 @@ function IdentityCorrectionForm({ facts, loading, pending, onSaveGender }: Ident
             <option value="female">Female</option>
             <option value="male">Male</option>
             <option value="nonbinary">Nonbinary</option>
-          </select>
+          </SearchableSelect>
         </label>
       </div>
 
@@ -1051,6 +1085,7 @@ function IdentityCorrectionForm({ facts, loading, pending, onSaveGender }: Ident
 }
 
 function ConversationsContent({ initialThreadId }: { initialThreadId?: string }) {
+  const tenantScope = useTenantScopeArgs();
   type ThreadListItem = {
     _id: string;
     provider?: "whatsapp" | "instagram";
@@ -1059,6 +1094,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
     threadKind?: "direct" | "group" | "broadcast_or_system";
     isArchived?: boolean;
     lastMessageAt: number;
+    avatarPreview?: ThreadAvatarPreview;
     latestDraft?: { text?: string } | null;
     latestMessage?: { text?: string | null; direction?: "inbound" | "outbound"; messageAt?: number } | null;
   };
@@ -1067,7 +1103,9 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
   const [threadSearch, setThreadSearch] = useState(() => readStoredThreadSearch());
   const [providerFilter, setProviderFilter] = useState<ProviderFilterValue>(() => readStoredProviderFilter());
   const [isMobileViewport, setIsMobileViewport] = useState(false);
-  const threads = useQuery(api.threads.list, { limit: 500, provider: providerFilter }) as
+  const [desktopInspectorOpen, setDesktopInspectorOpen] = useState(false);
+  const [mobileInspectorOpen, setMobileInspectorOpen] = useState(false);
+  const threads = useQuery(api.threads.list, { ...tenantScope, limit: 500, provider: providerFilter }) as
     | ThreadListItem[]
     | undefined;
   const visibleThreads = threads || [];
@@ -1108,7 +1146,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
     return () => mediaQuery.removeEventListener("change", syncViewport);
   }, []);
 
-  const profilesQuery = useQuery(api.personality.listProfiles, {}) as PersonalityProfile[] | undefined;
+  const profilesQuery = useQuery(api.personality.listProfiles, tenantScope) as PersonalityProfile[] | undefined;
   const profilesLoading = profilesQuery === undefined;
   const profiles = profilesQuery || [];
   const approveDraft = useMutation(api.draft.approve);
@@ -1135,21 +1173,34 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
   const selectedThreadId =
     (initialThreadId && threadList.some((thread) => thread._id === initialThreadId) ? initialThreadId : undefined) ||
     (!isMobileViewport ? threadList[0]?._id : undefined);
-  const thread = useQuery(
-    api.threads.get,
-    selectedThreadId ? { threadId: selectedThreadId as Id<"threads"> } : "skip",
+
+	  const thread = useQuery(
+	    api.threads.get,
+	    selectedThreadId ? { ...tenantScope, threadId: selectedThreadId as Id<"threads"> } : "skip",
   ) as
     | {
         thread: {
           title?: string;
+          baileysSavedName?: string;
+          baileysNotifyName?: string;
+          baileysVerifiedName?: string;
+          baileysPhoneNumber?: string;
+          baileysLid?: string;
+          baileysChatName?: string;
+          baileysConversationName?: string;
+          baileysSubject?: string;
+          baileysUnreadCount?: number;
+          baileysMetadataUpdatedAt?: number;
           jid: string;
           provider?: "whatsapp" | "instagram";
           threadKind?: "direct" | "group" | "broadcast_or_system";
           isArchived?: boolean;
           isIgnored?: boolean;
           lastMessageAt?: number;
+          avatarPreview?: ThreadAvatarPreview;
         };
         messages: ThreadMessage[];
+        threadMedia?: ThreadMediaItem[];
         reactions: Array<{
           messageId: string;
           actorJid: string;
@@ -1197,7 +1248,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
 
   const threadPersonality = useQuery(
     api.personality.getThreadSetting,
-    selectedThreadId ? { threadId: selectedThreadId as Id<"threads"> } : "skip",
+    selectedThreadId ? { ...tenantScope, threadId: selectedThreadId as Id<"threads"> } : "skip",
   ) as ThreadPersonalitySetting | null | undefined;
   const threadLoading = Boolean(selectedThreadId) && thread === undefined;
   const threadMissing = Boolean(selectedThreadId) && thread === null;
@@ -1210,9 +1261,9 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
     api.chatTools.contactMemoryFactsList,
     selectedThreadId ? { threadId: selectedThreadId as Id<"threads">, factType: "profile", limit: 80 } : "skip",
   ) as ContactMemoryFactsPayload | undefined;
-  const threadToolEvents = useQuery(
-    api.threads.getToolEvents,
-    selectedThreadId ? { threadId: selectedThreadId as Id<"threads">, limit: 260 } : "skip",
+	  const threadToolEvents = useQuery(
+	    api.threads.getToolEvents,
+	    selectedThreadId ? { ...tenantScope, threadId: selectedThreadId as Id<"threads">, limit: 260 } : "skip",
   ) as ThreadToolEvent[] | undefined;
   const relationshipState = useQuery(
     api.relationshipState.getThreadState,
@@ -1254,12 +1305,13 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
 
     lastLoadStartedThreadRef.current = selectedThreadId;
     void recordEvent({
+      ...tenantScope,
       source: "dashboard",
       eventType: "conversation.load.start",
       detail: "Loading conversation timeline...",
       threadId: selectedThreadId as Id<"threads">,
     });
-  }, [recordEvent, selectedThreadId]);
+  }, [recordEvent, selectedThreadId, tenantScope]);
 
   useEffect(() => {
     if (!selectedThreadId || !thread || lastLoadedThreadRef.current === selectedThreadId) {
@@ -1268,12 +1320,13 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
 
     lastLoadedThreadRef.current = selectedThreadId;
     void recordEvent({
+      ...tenantScope,
       source: "dashboard",
       eventType: "conversation.load.ready",
       detail: `Conversation loaded (${thread.messages?.length ?? 0} messages).`,
       threadId: selectedThreadId as Id<"threads">,
     });
-  }, [recordEvent, selectedThreadId, thread]);
+  }, [recordEvent, selectedThreadId, tenantScope, thread]);
 
   const draftEditKey = (draftId: string) => {
     return `${selectedThreadId || "none"}:${draftId}`;
@@ -1312,6 +1365,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
       settingsKey,
       async () => {
         await setThreadPersonality({
+          ...tenantScope,
           threadId: selectedThreadId as Id<"threads">,
           profileSlug: values.profileSlug,
           intensity: clamp01(values.intensity),
@@ -1335,6 +1389,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
       promptProfileKey,
       async () => {
         await setThreadPromptProfile({
+          ...tenantScope,
           threadId: selectedThreadId as Id<"threads">,
           promptProfile,
         });
@@ -1359,6 +1414,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
       promptProfileKey,
       async () => {
         await autoBuildThreadPromptProfile({
+          ...tenantScope,
           threadId: selectedThreadId as Id<"threads">,
         });
       },
@@ -1756,6 +1812,15 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
     todoCandidates: [],
     guardrailFlags: [],
   };
+  const reviewItemCount =
+    threadReviewQueue.needsReply.length +
+    threadReviewQueue.followupConfirmations.length +
+    threadReviewQueue.todoCandidates.length +
+    threadReviewQueue.guardrailFlags.length;
+  const contactFacts = contactMemoryFacts?.facts || [];
+  const profileFacts = contactFacts.filter((fact) => fact.factType === "profile").slice(0, 5);
+  const selectedProfile = profiles.find((profile) => profile.slug === (threadPersonality?.profileSlug || "casual"));
+  const latestThreadMessage = thread?.messages?.[thread.messages.length - 1];
   const mutualCheckInAgeDays = useMemo(() => {
     const at = thread?.conversationState?.lastMutualCheckInAt;
     if (!Number.isFinite(at) || (at || 0) <= 0) {
@@ -1777,6 +1842,42 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
       })
       .join(" · ");
   }, [thread?.topicLanes]);
+  const threadMedia = useMemo(() => thread?.threadMedia || [], [thread?.threadMedia]);
+  const mediaKindCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const item of threadMedia) {
+      const kind = messageKindLabel(item.messageType || item.mediaPreview?.kind).toLowerCase();
+      counts.set(kind, (counts.get(kind) || 0) + 1);
+    }
+    return [...counts.entries()]
+      .sort((left, right) => right[1] - left[1])
+      .slice(0, 4)
+      .map(([kind, count]) => `${count} ${kind}${count === 1 ? "" : "s"}`)
+      .join(" · ");
+  }, [threadMedia]);
+  const baileysMetadataRows = useMemo(() => {
+    if (!thread) {
+      return [] as Array<{ label: string; value: string }>;
+    }
+    return [
+      { label: "Saved name", value: thread.thread.baileysSavedName },
+      { label: "WhatsApp name", value: thread.thread.baileysNotifyName },
+      { label: "Verified name", value: thread.thread.baileysVerifiedName },
+      { label: "Chat name", value: thread.thread.baileysChatName },
+      { label: "Conversation", value: thread.thread.baileysConversationName },
+      { label: "Subject", value: thread.thread.baileysSubject },
+      { label: "Phone", value: thread.thread.baileysPhoneNumber },
+      { label: "LID", value: thread.thread.baileysLid },
+      {
+        label: "Unread",
+        value: typeof thread.thread.baileysUnreadCount === "number" ? String(thread.thread.baileysUnreadCount) : undefined,
+      },
+      {
+        label: "Metadata seen",
+        value: thread.thread.baileysMetadataUpdatedAt ? formatDateTime(thread.thread.baileysMetadataUpdatedAt) : undefined,
+      },
+    ].filter((row): row is { label: string; value: string } => Boolean(row.value && row.value.trim()));
+  }, [thread]);
 
   useEffect(() => {
     if (!selectedThreadId) {
@@ -2228,11 +2329,21 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
     );
   };
 
+  const showThreadSidebar = !isMobileViewport || !selectedThreadId;
+  const showConversationPane = !isMobileViewport || (Boolean(selectedThreadId) && !mobileInspectorOpen);
+  const showInspectorPane = Boolean(selectedThreadId) && (isMobileViewport ? mobileInspectorOpen : desktopInspectorOpen);
+
   return (
-    <section className="panel-grid split-view conversations-split-view">
-      {!isMobileViewport || !selectedThreadId ? (
-      <article className="panel-card">
-        <h3>Threads</h3>
+    <section className={`conversations-workspace${showInspectorPane ? " inspector-open" : ""}`}>
+      {showThreadSidebar ? (
+      <article className="conversation-sidebar" aria-label="Conversation threads">
+        <div className="conversation-sidebar-header">
+          <div>
+            <p className="conversation-kicker">Messages</p>
+            <h3>Conversations</h3>
+          </div>
+          <span className="conversation-count-pill">{filteredThreadList.length}</span>
+        </div>
         <ProviderFilter
           value={providerFilter}
           onChange={setProviderFilter}
@@ -2262,10 +2373,12 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
                 href={`/conversations?threadId=${item._id}`}
                 className={`thread-row${item._id === selectedThreadId ? " active" : ""}`}
                 aria-current={item._id === selectedThreadId ? "page" : undefined}
+                onClick={() => setMobileInspectorOpen(false)}
               >
+                {renderThreadAvatar(item.title || item.jid, item.avatarPreview)}
                 <div className="thread-row-header">
                   <p className="queue-title">{item.title || item.jid}</p>
-                  <p className="queue-meta">Last activity: {formatDateTime(item.lastMessageAt)}</p>
+                  <p className="queue-meta">{formatDateTime(item.lastMessageAt)}</p>
                 </div>
                 <p className="queue-meta">
                   {(item.provider || "whatsapp") === "instagram" ? "Instagram" : "WhatsApp"} ·{" "}
@@ -2277,14 +2390,12 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
             );
           })}
           {!threadsLoading && threadList.length === 0 ? <p className="empty-line">No threads yet.</p> : null}
-          {!threadsLoading ? (
+          {!threadsLoading && threadList.length < filteredThreadList.length ? (
             <div className="thread-list-footer">
               <button
                 type="button"
                 className="btn btn-ghost"
                 onClick={() => setThreadVisibleCount((prev) => Math.min(prev + 80, 500))}
-                disabled={threadList.length >= filteredThreadList.length}
-                aria-disabled={threadList.length >= filteredThreadList.length}
               >
                 Load More
               </button>
@@ -2294,8 +2405,8 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
       </article>
       ) : null}
 
-      {!isMobileViewport || selectedThreadId ? (
-      <article className="panel-card" aria-busy={threadLoading}>
+      {showConversationPane ? (
+      <article className="conversation-main" aria-busy={threadLoading}>
         <ActionNotices notices={notices} onDismiss={dismissNotice} />
         {isMobileViewport && selectedThreadId ? (
           <div className="conversation-mobile-back-row">
@@ -2304,7 +2415,6 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
             </Link>
           </div>
         ) : null}
-        <h3>Timeline</h3>
         {threadLoading ? (
           <LoadingBlock label="Loading timeline..." rows={4} />
         ) : thread ? (
@@ -2314,6 +2424,11 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
                 <div className="conversation-chat-header-top">
                   <p className="queue-title">{thread.thread.title || thread.thread.jid}</p>
                   <p className="queue-meta">{thread.thread.jid}</p>
+                  <p className="conversation-toolbar-summary">
+                    {(thread.thread.provider || "whatsapp") === "instagram" ? "Instagram" : "WhatsApp"} ·{" "}
+                    {thread.thread.isIgnored ? "Auto-reply off" : "Auto-reply on"}
+                    {reviewItemCount > 0 ? ` · ${reviewItemCount} to review` : ""}
+                  </p>
                 </div>
                 <div className="conversation-chat-header-actions">
                   <button
@@ -2330,6 +2445,20 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
                       : thread.thread.isIgnored
                         ? "Allow Auto-Respond"
                         : "Do Not Auto-Respond"}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    onClick={() => {
+                      if (isMobileViewport) {
+                        setMobileInspectorOpen(true);
+                        return;
+                      }
+                      setDesktopInspectorOpen((open) => !open);
+                    }}
+                    aria-expanded={showInspectorPane}
+                  >
+                    {showInspectorPane ? "Hide Details" : "Details"}
                   </button>
                   <button
                     type="button"
@@ -2946,6 +3075,308 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
           ) : null}
         </UIModal>
       </article>
+      ) : null}
+      {showInspectorPane ? (
+        <aside className="conversation-inspector" aria-label="Conversation details">
+          {isMobileViewport ? (
+            <div className="conversation-mobile-back-row">
+              <button type="button" className="btn btn-ghost" onClick={() => setMobileInspectorOpen(false)}>
+                Back to Conversation
+              </button>
+            </div>
+          ) : null}
+
+          {thread ? (
+            <>
+              <header className="conversation-inspector-header">
+                {renderThreadAvatar(thread.thread.title || thread.thread.jid, thread.thread.avatarPreview, "conversation-inspector-avatar")}
+                <div>
+                  <p className="conversation-kicker">Person Summary</p>
+                  <h3>{threadGrounding?.theirName?.trim() || thread.thread.title || thread.thread.jid}</h3>
+                  <p className="queue-meta">{thread.thread.jid}</p>
+                </div>
+              </header>
+
+              <div className="conversation-inspector-stats" aria-label="Conversation status">
+                <div>
+                  <span>Auto-reply</span>
+                  <strong>{thread.thread.isIgnored ? "Off" : "On"}</strong>
+                </div>
+                <div>
+                  <span>Review</span>
+                  <strong>{reviewItemCount}</strong>
+                </div>
+                <div>
+                  <span>Trust</span>
+                  <strong>{relationshipState ? `${Math.round(relationshipState.trustScore * 100)}%` : "-"}</strong>
+                </div>
+              </div>
+
+              <section className="conversation-inspector-section">
+                <div className="conversation-inspector-section-head">
+                  <p className="queue-title">Context</p>
+                  <span className={`conversation-chip ${relationshipState?.conflictFlag || relationshipState?.repairNeeded ? "warn" : "ok"}`}>
+                    {relationshipState?.conflictFlag || relationshipState?.repairNeeded ? "Needs care" : "Clear"}
+                  </span>
+                </div>
+                <dl className="conversation-inspector-list">
+                  <div>
+                    <dt>Channel</dt>
+                    <dd>{(thread.thread.provider || "whatsapp") === "instagram" ? "Instagram" : "WhatsApp"}</dd>
+                  </div>
+                  <div>
+                    <dt>Type</dt>
+                    <dd>
+                      {thread.thread.threadKind === "broadcast_or_system"
+                        ? "Broadcast/System"
+                        : thread.thread.threadKind === "group"
+                          ? "Group"
+                          : "Direct"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Last message</dt>
+                    <dd>{formatDateTime(latestThreadMessage?.messageAt || thread.thread.lastMessageAt)}</dd>
+                  </div>
+                  <div>
+                    <dt>Next move</dt>
+                    <dd>{thread.conversationState?.nextMove ? thread.conversationState.nextMove.replace("_", " ") : "None"}</dd>
+                  </div>
+                  <div>
+                    <dt>Mutual check-in</dt>
+                    <dd>{mutualCheckInAgeDays === undefined ? "None" : `${mutualCheckInAgeDays}d ago`}</dd>
+                  </div>
+                </dl>
+                {relationshipState?.lastReason ? <p className="queue-meta">{trim(relationshipState.lastReason, 180)}</p> : null}
+              </section>
+
+              <section className="conversation-inspector-section">
+                <div className="conversation-inspector-section-head">
+                  <p className="queue-title">Style</p>
+                  {!isMobileViewport ? (
+                    <button type="button" className="btn btn-ghost" onClick={() => setSettingsModalOpen(true)}>
+                      Full Settings
+                    </button>
+                  ) : null}
+                </div>
+                <dl className="conversation-inspector-list">
+                  <div>
+                    <dt>Profile</dt>
+                    <dd>{selectedProfile?.name || threadPersonality?.profileSlug || "Casual"}</dd>
+                  </div>
+                  <div>
+                    <dt>Intensity</dt>
+                    <dd>{Math.round((threadPersonality?.intensity ?? 0.6) * 100)}%</dd>
+                  </div>
+                  <div>
+                    <dt>Names</dt>
+                    <dd>
+                      {[threadGrounding?.myName, threadGrounding?.theirName].filter(Boolean).join(" / ") || "Not set"}
+                    </dd>
+                  </div>
+                </dl>
+                {threadGrounding?.vibeNotes?.trim() ? <p className="queue-body">{trim(threadGrounding.vibeNotes.trim(), 220)}</p> : null}
+              </section>
+
+              <section className="conversation-inspector-section">
+                <div className="conversation-inspector-section-head">
+                  <div>
+                    <p className="queue-title">Media</p>
+                    <p className="queue-meta">{threadMedia.length ? mediaKindCounts || `${threadMedia.length} attachments` : "No exchanged media yet"}</p>
+                  </div>
+                  <Link href="/media" className="btn btn-ghost">
+                    Library
+                  </Link>
+                </div>
+                {threadMedia.length > 0 ? (
+                  <div className="conversation-media-grid">
+                    {threadMedia.slice(0, 18).map((item) => (
+                      <div className="conversation-media-item" key={`${item._id}:${item.mediaAssetId || "asset"}`}>
+                        <SharedMediaPreview
+                          preview={item.mediaPreview}
+                          mediaAssetId={item.mediaAssetId}
+                          onOpenImagePreview={(preview) => setMediaPreviewModal(preview)}
+                          imageButtonClassName="conversation-media-open"
+                          imageClassName="conversation-media-image"
+                          attachmentText={messageKindLabel(item.messageType)}
+                        />
+                        <p className="queue-meta">
+                          {item.direction === "outbound" ? "You" : "Them"} · {formatDateTime(item.messageAt)}
+                        </p>
+                        {item.mediaCaption?.trim() || item.text.trim() ? (
+                          <p className="conversation-media-caption">{trim(item.mediaCaption?.trim() || item.text.trim(), 72)}</p>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="empty-line">Photos, stickers, voice notes, videos, and documents from this thread will appear here.</p>
+                )}
+              </section>
+
+              <details className="conversation-inspector-section" open={baileysMetadataRows.length > 0}>
+                <summary>Baileys Metadata</summary>
+                {baileysMetadataRows.length > 0 ? (
+                  <dl className="conversation-inspector-list">
+                    {baileysMetadataRows.map((row) => (
+                      <div key={row.label}>
+                        <dt>{row.label}</dt>
+                        <dd>{row.value}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                ) : (
+                  <p className="empty-line">No extra WhatsApp metadata has been captured for this thread yet.</p>
+                )}
+              </details>
+
+              <details className="conversation-inspector-section">
+                <summary>Pending Review</summary>
+                {reviewItemCount > 0 ? (
+                  <div className="conversation-inspector-review-list">
+                    {threadReviewBySourceMessageId.unanchored.map((entry) => renderThreadReviewEntry(entry))}
+                    {[...threadReviewBySourceMessageId.bySource.values()].flat().map((entry) => renderThreadReviewEntry(entry))}
+                  </div>
+                ) : (
+                  <p className="empty-line">No pending review items.</p>
+                )}
+              </details>
+
+              <details className="conversation-inspector-section">
+                <summary>Memory</summary>
+                {profileFacts.length > 0 ? (
+                  <div className="identity-fact-list">
+                    {profileFacts.map((fact) => (
+                      <div className="identity-fact-row" key={fact._id}>
+                        <span>{factLabel(fact.factKey)}</span>
+                        <p>{fact.factValue}</p>
+                        <em>{typeof fact.updatedAt === "number" ? formatDateTime(fact.updatedAt) : "Saved memory"}</em>
+                      </div>
+                    ))}
+                  </div>
+                ) : contactMemoryFacts === undefined ? (
+                  <LoadingIndicator label="Loading memory..." />
+                ) : (
+                  <p className="empty-line">No saved profile memory yet.</p>
+                )}
+              </details>
+
+              <details className="conversation-inspector-section">
+                <summary>Style And Identity</summary>
+                {selectedThreadId && (threadPersonalityLoading || profilesLoading) ? (
+                  <LoadingIndicator label="Loading personality settings..." />
+                ) : null}
+                {selectedThreadId && !threadLoading && !threadMissing ? (
+                  <ModalTabs
+                    label="Conversation inspector settings sections"
+                    tabs={[
+                      {
+                        id: "personality",
+                        label: "Personality",
+                        content:
+                          !threadPersonalityLoading && profiles.length > 0 ? (
+                            <ThreadPersonalityForm
+                              key={`inspector:${threadSettingKey}`}
+                              profiles={profiles}
+                              initialProfileSlug={threadPersonality?.profileSlug || "casual"}
+                              initialIntensity={threadPersonality?.intensity ?? 0.6}
+                              initialCustomPrompt={threadPersonality?.customPrompt || ""}
+                              initialMemePolicyMode={threadPersonality?.memePolicyMode || "auto"}
+                              autoProfessional={threadPersonality?.memeAutoProfessional}
+                              autoProfessionalScore={threadPersonality?.memeAutoProfessionalScore}
+                              autoProfessionalSignals={threadPersonality?.memeAutoProfessionalSignals}
+                              pending={settingsRecord.pending}
+                              onSave={saveThreadSetting}
+                            />
+                          ) : (
+                            <p className="empty-line">Personality settings are still loading.</p>
+                          ),
+                      },
+                      {
+                        id: "prompt",
+                        label: "Prompt",
+                        content: !threadPersonalityLoading ? (
+                          <PromptProfileForm
+                            key={`inspector:${promptProfileFormKey}`}
+                            initialPromptProfile={threadPersonality?.threadPromptProfile || ""}
+                            source={threadPersonality?.threadPromptProfileSource}
+                            messageCount={threadPersonality?.threadPromptProfileMessageCount}
+                            updatedAt={threadPersonality?.threadPromptProfileUpdatedAt}
+                            pending={promptProfileRecord.pending}
+                            onAutoBuild={autoBuildPromptProfile}
+                            onSaveManual={savePromptProfile}
+                          />
+                        ) : (
+                          <p className="empty-line">Prompt profile is still loading.</p>
+                        ),
+                      },
+                      {
+                        id: "grounding",
+                        label: "Grounding",
+                        content: (
+                          <GroundingForm
+                            key={`inspector:${selectedThreadId}:${threadGrounding?.myName || ""}:${threadGrounding?.theirName || ""}:${threadGrounding?.vibeNotes || ""}`}
+                            initialMyName={threadGrounding?.myName || ""}
+                            initialTheirName={threadGrounding?.theirName || ""}
+                            initialVibeNotes={threadGrounding?.vibeNotes || ""}
+                            autoAliases={threadGrounding?.autoAliases || []}
+                            pending={groundingRecord.pending}
+                            onSave={saveGrounding}
+                          />
+                        ),
+                      },
+                      {
+                        id: "identity",
+                        label: "Identity",
+                        content: (
+                          <IdentityCorrectionForm
+                            key={`inspector:${selectedThreadId}:${(contactMemoryFacts?.facts || [])
+                              .filter((fact) => fact.factKey === "profile_gender_override" || fact.factKey === "inferred_gender")
+                              .map((fact) => `${fact.factKey}:${fact.factValue}`)
+                              .join("|")}`}
+                            facts={contactMemoryFacts?.facts || []}
+                            loading={contactMemoryFacts === undefined}
+                            pending={identityCorrectionRecord.pending}
+                            onSaveGender={saveIdentityCorrection}
+                          />
+                        ),
+                      },
+                    ]}
+                  />
+                ) : null}
+              </details>
+
+              <details className="conversation-inspector-section">
+                <summary>Diagnostics</summary>
+                <dl className="conversation-inspector-list">
+                  <div>
+                    <dt>Tool events</dt>
+                    <dd>{threadToolEvents?.length ?? 0}</dd>
+                  </div>
+                  <div>
+                    <dt>Unmatched</dt>
+                    <dd>{toolEventSummary.unmatchedEvents.length}</dd>
+                  </div>
+                  <div>
+                    <dt>Topic lanes</dt>
+                    <dd>{laneSummary || "None"}</dd>
+                  </div>
+                </dl>
+                {thread.checkInDiagnostics ? (
+                  <p className="queue-meta">
+                    Check-ins: prompts {thread.checkInDiagnostics.promptDetectionsRecent || 0} · responses{" "}
+                    {thread.checkInDiagnostics.responseDetectionsRecent || 0} · mutual{" "}
+                    {thread.checkInDiagnostics.mutualUpdatesRecent || 0}
+                  </p>
+                ) : null}
+              </details>
+            </>
+          ) : threadLoading ? (
+            <LoadingBlock label="Loading details..." rows={4} compact />
+          ) : (
+            <p className="empty-line">Select a conversation to see context.</p>
+          )}
+        </aside>
       ) : null}
     </section>
   );

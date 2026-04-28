@@ -1,9 +1,12 @@
 "use client";
 
 import { ActionNotices } from "@/components/action-notices";
+import { SegmentedControl } from "@/components/app-ui";
+import { EmptyState } from "@/components/empty-state";
 import { LoadingBlock } from "@/components/loading-state";
 import { SharedMediaPreview } from "@/components/media-preview";
 import { ProviderFilter, type ProviderFilterValue } from "@/components/provider-filter";
+import { useTenantScopeArgs } from "@/components/tenant-scope-provider";
 import { ModalTabs, UIModal } from "@/components/ui-modal";
 import { formatDateTime, formatDateTimeWithRelative, trim } from "@/lib/format";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
@@ -14,7 +17,7 @@ import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { useMutation, useQuery } from "convex/react";
 import Link from "next/link";
-import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
+import { type KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type NeedsReplyItem = {
   _id: string;
@@ -77,6 +80,12 @@ type QueueData = {
 
 type QueueTab = "needsReply" | "followups" | "todos" | "guardrails";
 
+const EMPTY_NEEDS_REPLY: NeedsReplyItem[] = [];
+const EMPTY_FOLLOWUPS: FollowupConfirmationItem[] = [];
+const EMPTY_TODO_CANDIDATES: TodoCandidateItem[] = [];
+const EMPTY_OPEN_TODOS: OpenTodoItem[] = [];
+const EMPTY_GUARDRAILS: GuardrailFlagItem[] = [];
+
 type QueueReviewState =
   | { kind: "needsReply"; item: NeedsReplyItem }
   | { kind: "followups"; item: FollowupConfirmationItem }
@@ -84,7 +93,12 @@ type QueueReviewState =
   | { kind: "guardrails"; item: GuardrailFlagItem }
   | null;
 
+function isQueueTab(value: string | null): value is QueueTab {
+  return value === "needsReply" || value === "followups" || value === "todos" || value === "guardrails";
+}
+
 function QueueContent() {
+  const tenantScope = useTenantScopeArgs();
   const approveDraft = useMutation(api.draft.approve);
   const snoozeDraft = useMutation(api.draft.snooze);
   const rejectDraft = useMutation(api.draft.reject);
@@ -114,17 +128,41 @@ function QueueContent() {
   const autoTodoAttemptedRef = useRef<Set<string>>(new Set());
   const autoFollowupAttemptedRef = useRef<Set<string>>(new Set());
 
-  const queue = useQuery(api.queue.list, { provider: providerFilter }) as QueueData | undefined;
-  const todosData = useQuery(api.todos.list, { todoLimit: 120, candidateLimit: 1 }) as
+  const selectTab = useCallback((nextTab: QueueTab) => {
+    setTab(nextTab);
+    if (typeof window === "undefined") {
+      return;
+    }
+    const url = new URL(window.location.href);
+    url.searchParams.set("tab", nextTab);
+    window.history.replaceState(null, "", `${url.pathname}?${url.searchParams.toString()}${url.hash}`);
+  }, []);
+
+  const queue = useQuery(api.queue.list, { ...tenantScope, provider: providerFilter }) as QueueData | undefined;
+  const todosData = useQuery(api.todos.list, { ...tenantScope, todoLimit: 120, candidateLimit: 1 }) as
     | { todos: OpenTodoItem[]; candidates: TodoCandidateItem[] }
     | undefined;
   const queueLoading = queue === undefined;
   const todosLoading = todosData === undefined;
-  const needsReply = queue?.needsReply || [];
-  const followupConfirmations = queue?.followupConfirmations || [];
-  const todoCandidates = queue?.todoCandidates || [];
-  const openTodos = todosData?.todos || [];
-  const guardrailFlags = queue?.guardrailFlags || [];
+  const needsReply = queue?.needsReply ?? EMPTY_NEEDS_REPLY;
+  const followupConfirmations = queue?.followupConfirmations ?? EMPTY_FOLLOWUPS;
+  const todoCandidates = queue?.todoCandidates ?? EMPTY_TODO_CANDIDATES;
+  const openTodos = todosData?.todos ?? EMPTY_OPEN_TODOS;
+  const guardrailFlags = queue?.guardrailFlags ?? EMPTY_GUARDRAILS;
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const initialTab = new URLSearchParams(window.location.search).get("tab");
+    if (!isQueueTab(initialTab)) {
+      return;
+    }
+    const frameId = window.requestAnimationFrame(() => {
+      setTab(initialTab);
+    });
+    return () => window.cancelAnimationFrame(frameId);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -477,13 +515,13 @@ function QueueContent() {
       async () => {
         let cleared = 0;
         for (let pass = 0; pass < 20; pass += 1) {
-          const result = await clearAllPendingDrafts({ limit: 80 });
+          const result = await clearAllPendingDrafts({ ...tenantScope, limit: 80 });
           cleared += result.cleared;
           if (!result.hasMore) {
             break;
           }
         }
-        await clearAllBacklog({});
+        await clearAllBacklog(tenantScope);
         pushNotice("info", `Discarded ${cleared} pending draft${cleared === 1 ? "" : "s"}.`);
       },
       {
@@ -503,7 +541,7 @@ function QueueContent() {
       async () => {
         let cleared = 0;
         for (let pass = 0; pass < 20; pass += 1) {
-          const result = await clearAllFollowups({ limit: 60 });
+          const result = await clearAllFollowups({ ...tenantScope, limit: 60 });
           cleared += result.cleared;
           if (!result.hasMore) {
             break;
@@ -529,7 +567,7 @@ function QueueContent() {
         let clearedTodos = 0;
         let clearedCandidates = 0;
         for (let pass = 0; pass < 20; pass += 1) {
-          const result = await clearAllTodos({ limit: 80 });
+          const result = await clearAllTodos({ ...tenantScope, limit: 80 });
           clearedTodos += result.clearedTodos;
           clearedCandidates += result.clearedCandidates;
           if (!result.hasMore) {
@@ -557,6 +595,7 @@ function QueueContent() {
         let closedDrafts = 0;
         for (let pass = 0; pass < 20; pass += 1) {
           const result = await clearAllGuardrails({
+            ...tenantScope,
             limit: 80,
             closeDraft: true,
             resolutionNote: "Bulk cleared from queue.",
@@ -578,7 +617,7 @@ function QueueContent() {
 
   const renderNeedsReply = () => (
     <div className="stack">
-      {queueLoading ? <LoadingBlock label="Loading reply queue…" rows={3} compact /> : null}
+      {queueLoading ? <LoadingBlock label="Loading replies…" rows={3} compact /> : null}
       {needsReply.map((item) => {
         const sendKey = `send:${item._id}`;
         const snoozeKey = `snooze:${item._id}`;
@@ -599,7 +638,14 @@ function QueueContent() {
           </div>
         );
       })}
-      {!queueLoading && needsReply.length === 0 ? <p className="empty-line">No reply drafts waiting for review.</p> : null}
+      {!queueLoading && needsReply.length === 0 ? (
+        <EmptyState
+          variant="queue"
+          compact
+          title="No reply drafts waiting."
+          description="New drafts will appear here only when there is something ready for review."
+        />
+      ) : null}
     </div>
   );
 
@@ -647,7 +693,14 @@ function QueueContent() {
           </div>
         );
       })}
-      {!queueLoading && followupConfirmations.length === 0 ? <p className="empty-line">No follow-ups waiting for review.</p> : null}
+      {!queueLoading && followupConfirmations.length === 0 ? (
+        <EmptyState
+          variant="followups"
+          compact
+          title="No follow-ups waiting."
+          description="Confirmed reminders and suggested follow-ups will show up here when they need attention."
+        />
+      ) : null}
     </div>
   );
 
@@ -672,7 +725,14 @@ function QueueContent() {
           </button>
         </div>
       ))}
-      {!todosLoading && openTodos.length === 0 ? <p className="empty-line">No open conversation tasks.</p> : null}
+      {!todosLoading && openTodos.length === 0 ? (
+        <EmptyState
+          variant="tasks"
+          compact
+          title="No open conversation tasks."
+          description="Tasks created from conversations will collect here until they are marked done."
+        />
+      ) : null}
 
       <p className="queue-meta">Suggested tasks ({todoCandidates.length})</p>
       {queueLoading ? <LoadingBlock label="Loading task suggestions…" rows={2} compact /> : null}
@@ -694,7 +754,14 @@ function QueueContent() {
           </div>
         );
       })}
-      {!queueLoading && todoCandidates.length === 0 ? <p className="empty-line">No task suggestions need review.</p> : null}
+      {!queueLoading && todoCandidates.length === 0 ? (
+        <EmptyState
+          variant="tasks"
+          compact
+          title="No task suggestions need review."
+          description="When Odogwu HQ spots a useful task candidate, it will hold it here first."
+        />
+      ) : null}
     </div>
   );
 
@@ -712,9 +779,23 @@ function QueueContent() {
           </button>
         </div>
       ))}
-      {!queueLoading && guardrailFlags.length === 0 ? <p className="empty-line">No safety flags need review.</p> : null}
+      {!queueLoading && guardrailFlags.length === 0 ? (
+        <EmptyState
+          variant="rules"
+          compact
+          title="No safety flags need review."
+          description="Guardrail holds will appear here only when something needs a manual decision."
+        />
+      ) : null}
     </div>
   );
+
+  const queueTabs = [
+    { id: "needsReply", label: "Needs reply", count: counts.needsReply },
+    { id: "followups", label: "Follow-ups", count: counts.followups },
+    { id: "todos", label: "Tasks", count: counts.todos },
+    { id: "guardrails", label: "Safety", count: counts.guardrails },
+  ] satisfies Array<{ id: QueueTab; label: string; count: number }>;
 
   return (
     <>
@@ -722,51 +803,14 @@ function QueueContent() {
 
       <section className="panel-card queue-workspace">
         <div className="queue-control-deck">
-          <ProviderFilter
-            value={providerFilter}
-            onChange={setProviderFilter}
-            label="Queue provider filter"
-          />
-          <div className="queue-focus-tabs" role="tablist" aria-label="Action queue categories">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={tab === "needsReply"}
-              className={`btn ${tab === "needsReply" ? "btn-primary" : "btn-ghost"}`}
-              onClick={() => setTab("needsReply")}
-            >
-              Needs reply ({counts.needsReply})
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={tab === "followups"}
-              className={`btn ${tab === "followups" ? "btn-primary" : "btn-ghost"}`}
-              onClick={() => setTab("followups")}
-            >
-              Follow-ups ({counts.followups})
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={tab === "todos"}
-              className={`btn ${tab === "todos" ? "btn-primary" : "btn-ghost"}`}
-              onClick={() => setTab("todos")}
-            >
-              Tasks ({counts.todos})
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={tab === "guardrails"}
-              className={`btn ${tab === "guardrails" ? "btn-primary" : "btn-ghost"}`}
-              onClick={() => setTab("guardrails")}
-            >
-              Safety ({counts.guardrails})
-            </button>
-          </div>
+            <ProviderFilter
+              value={providerFilter}
+              onChange={setProviderFilter}
+            label="Review provider filter"
+            />
+          <SegmentedControl label="Review categories" value={tab} options={queueTabs} onChange={selectTab} />
 
-          {tab === "needsReply" ? (
+          {tab === "needsReply" && needsReply.length > 0 ? (
             <div className="queue-actions">
               <button
                 type="button"
@@ -798,7 +842,7 @@ function QueueContent() {
             </div>
           ) : null}
 
-          {tab === "followups" ? (
+          {tab === "followups" && followupConfirmations.length > 0 ? (
             <div className="queue-actions">
               <button
                 type="button"
@@ -812,7 +856,7 @@ function QueueContent() {
             </div>
           ) : null}
 
-          {tab === "todos" ? (
+          {tab === "todos" && openTodos.length + todoCandidates.length > 0 ? (
             <div className="queue-actions">
               <button
                 type="button"
@@ -826,7 +870,7 @@ function QueueContent() {
             </div>
           ) : null}
 
-          {tab === "guardrails" ? (
+          {tab === "guardrails" && guardrailFlags.length > 0 ? (
             <div className="queue-actions">
               <button
                 type="button"

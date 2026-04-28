@@ -1,12 +1,18 @@
 "use client";
 
 import { ActionNotices } from "@/components/action-notices";
+import { SearchableSelect } from "@/components/app-ui";
+import { EmptyState } from "@/components/empty-state";
+import { LiveRules } from "@/components/live-rules";
+import { LiveStyleLab } from "@/components/live-style-lab";
 import { LoadingBlock } from "@/components/loading-state";
+import { useTenantScopeArgs } from "@/components/tenant-scope-provider";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
 import { formatDateTime } from "@/lib/format";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { useMutation, useQuery } from "convex/react";
+import Link from "next/link";
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type SettingsState = {
@@ -217,14 +223,26 @@ type SetupState = {
   listenerActive?: boolean;
 };
 
-type SettingsTab = "runtime" | "automation" | "personality" | "media";
+type SettingsTab = "runtime" | "automation" | "voice" | "personality" | "media" | "style" | "rules";
 
 const SETTINGS_TABS: Array<{ id: SettingsTab; label: string }> = [
-  { id: "runtime", label: "Runtime" },
+  { id: "runtime", label: "AI Runtime" },
   { id: "automation", label: "Automation" },
+  { id: "voice", label: "Voice" },
   { id: "personality", label: "Personality" },
   { id: "media", label: "Media" },
+  { id: "style", label: "Style" },
+  { id: "rules", label: "Rules" },
 ];
+const SETTINGS_TAB_SUMMARIES: Record<SettingsTab, string> = {
+  runtime: "Model, reply limits, and quality checks.",
+  automation: "Quiet hours, pacing, outreach, and posting.",
+  voice: "Voice sample and local Vox generation.",
+  personality: "Tone profiles used across conversations.",
+  media: "Stickers, memes, uploads, and cleanup.",
+  style: "Voice matching, learned traits, and packs.",
+  rules: "Ignored contacts, groups, and boundaries.",
+};
 const SETTINGS_TAB_KEYWORDS: Record<SettingsTab, string[]> = {
   runtime: ["ai", "temperature", "tokens", "confidence", "quality gate", "reply", "instruction", "runtime"],
   automation: [
@@ -245,8 +263,11 @@ const SETTINGS_TAB_KEYWORDS: Record<SettingsTab, string[]> = {
     "voice",
     "voxcpm",
   ],
+  voice: ["voice", "voice note", "sample", "record", "microphone", "vox", "voxcpm", "local"],
   personality: ["profile", "persona", "intensity", "prompt", "tone", "personality"],
   media: ["media", "meme", "sticker", "asset", "merge", "context", "library"],
+  style: ["style", "mimicry", "learned", "traits", "phrase", "persona pack", "rollback", "voice"],
+  rules: ["rules", "ignore", "ignored", "contact", "group", "boundaries", "jid"],
 };
 const SETTINGS_TAB_FIELDS: Record<SettingsTab, Array<keyof SettingsState>> = {
   runtime: [
@@ -266,6 +287,7 @@ const SETTINGS_TAB_FIELDS: Record<SettingsTab, Array<keyof SettingsState>> = {
     "qualityGateMode",
     "qualityGateThreshold",
   ],
+  voice: [],
   automation: [
     "ignoreGroupsByDefault",
     "reactionsEnabled",
@@ -362,11 +384,17 @@ const SETTINGS_TAB_FIELDS: Record<SettingsTab, Array<keyof SettingsState>> = {
   ],
   personality: [],
   media: [],
+  style: [],
+  rules: [],
 };
 const SETTINGS_SEARCH_STORAGE_KEY = "slm.settings.search";
 
 function fieldValueChanged<T extends keyof SettingsState>(field: T, draft: SettingsState, remote: SettingsState) {
   return JSON.stringify(draft[field]) !== JSON.stringify(remote[field]);
+}
+
+function isSettingsTab(value: string | null): value is SettingsTab {
+  return SETTINGS_TABS.some((tab) => tab.id === value);
 }
 
 const STATUS_BUILDER_MAX_TEXT_POST_RATIO = 0.45;
@@ -639,6 +667,169 @@ function parseContactJids(value: string) {
   ];
 }
 
+function normalizeContactJid(value: string) {
+  return value.trim().toLowerCase();
+}
+
+function contactFallbackName(jid: string) {
+  const normalized = normalizeContactJid(jid);
+  if (normalized === "status@broadcast") {
+    return "WhatsApp Status";
+  }
+  if (normalized === "ig:story:broadcast") {
+    return "Instagram Story";
+  }
+  const local = normalized.split("@")[0] || normalized;
+  if (/^\d+$/.test(local)) {
+    return `+${local}`;
+  }
+  return local.replace(/[-_.]+/g, " ");
+}
+
+function contactDisplayName(contact?: KnownContact | null, jid?: string) {
+  const title = contact?.title?.trim();
+  if (title) {
+    return title;
+  }
+  return contactFallbackName(contact?.jid || jid || "");
+}
+
+function RecipientPickerField({
+  label,
+  helper,
+  contacts,
+  selectedJids,
+  disabled,
+  contactsLoading,
+  addPlaceholder = "Add from previous contacts",
+  inputPlaceholder = "Paste one or more contacts",
+  emptyLabel = "No contacts selected.",
+  contactFilter,
+  onAdd,
+  onRemove,
+}: {
+  label: string;
+  helper?: string;
+  contacts: KnownContact[];
+  selectedJids: string[];
+  disabled?: boolean;
+  contactsLoading?: boolean;
+  addPlaceholder?: string;
+  inputPlaceholder?: string;
+  emptyLabel?: string;
+  contactFilter?: (contact: KnownContact) => boolean;
+  onAdd: (jid: string) => void;
+  onRemove: (jid: string) => void;
+}) {
+  const [manualInput, setManualInput] = useState("");
+  const selectedSet = useMemo(() => new Set(selectedJids.map(normalizeContactJid)), [selectedJids]);
+  const contactsByJid = useMemo(() => {
+    const map = new Map<string, KnownContact>();
+    for (const contact of contacts) {
+      map.set(normalizeContactJid(contact.jid), contact);
+    }
+    return map;
+  }, [contacts]);
+  const availableContacts = useMemo(
+    () =>
+      contacts
+        .filter((contact) => (contactFilter ? contactFilter(contact) : true))
+        .filter((contact) => !selectedSet.has(normalizeContactJid(contact.jid)))
+        .sort((a, b) => contactDisplayName(a).localeCompare(contactDisplayName(b))),
+    [contactFilter, contacts, selectedSet],
+  );
+
+  const commitManualInput = () => {
+    const values = parseContactJids(manualInput);
+    if (values.length === 0) {
+      return;
+    }
+    values.forEach(onAdd);
+    setManualInput("");
+  };
+
+  return (
+    <div className="stack compact recipient-picker-field">
+      <span className="queue-meta">{label}</span>
+      <SearchableSelect
+        value=""
+        onChange={(event) => {
+          if (!event.target.value) {
+            return;
+          }
+          onAdd(event.target.value);
+        }}
+        disabled={disabled || contactsLoading}
+        aria-disabled={disabled || contactsLoading}
+      >
+        <option value="">{contactsLoading ? "Loading contacts..." : addPlaceholder}</option>
+        {availableContacts.map((contact) => (
+          <option key={contact._id} value={contact.jid}>
+            {contactDisplayName(contact)}
+          </option>
+        ))}
+      </SearchableSelect>
+
+      <div className="recipient-manual-row">
+        <input
+          type="text"
+          value={manualInput}
+          onChange={(event) => setManualInput(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter") {
+              return;
+            }
+            event.preventDefault();
+            commitManualInput();
+          }}
+          placeholder={inputPlaceholder}
+          disabled={disabled}
+          aria-disabled={disabled}
+        />
+        <button
+          type="button"
+          className="btn btn-ghost"
+          onClick={commitManualInput}
+          disabled={disabled || manualInput.trim().length === 0}
+          aria-disabled={disabled || manualInput.trim().length === 0}
+        >
+          Add
+        </button>
+      </div>
+
+      {helper ? <span className="queue-meta">{helper}</span> : null}
+
+      {selectedJids.length > 0 ? (
+        <div className="recipient-chip-list" aria-label={`${label} selected contacts`}>
+          {selectedJids.map((jid) => {
+            const normalized = normalizeContactJid(jid);
+            const contact = contactsByJid.get(normalized);
+            return (
+              <span key={jid} className="recipient-chip">
+                <span className="recipient-chip-copy">
+                  <strong>{contactDisplayName(contact, jid)}</strong>
+                  <small>{normalized}</small>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => onRemove(jid)}
+                  disabled={disabled}
+                  aria-disabled={disabled}
+                  aria-label={`Remove ${contactDisplayName(contact, jid)}`}
+                >
+                  ×
+                </button>
+              </span>
+            );
+          })}
+        </div>
+      ) : (
+        <p className="queue-meta">{emptyLabel}</p>
+      )}
+    </div>
+  );
+}
+
 function parseSimpleList(value: string, lowercase = false) {
   const normalized = value
     .split(/[\n,]/)
@@ -779,31 +970,39 @@ function ProfileEditorForm({ profile, pending, error, onSave }: ProfileEditorFor
   }, [defaultIntensity, description, name, profile.defaultIntensity, profile.description, profile.name, profile.prompt, prompt]);
 
   return (
-    <div className="personality-config-block">
-      <h3>Edit Profile</h3>
+    <div className="personality-editor-form">
+      <div className="personality-section-head">
+        <div>
+          <h3>Edit selected profile</h3>
+          <p className="queue-meta">These changes affect replies that use this voice.</p>
+        </div>
+        <span className="personality-inline-badge">{profile.isDefault ? "Default" : "Custom"}</span>
+      </div>
       <label className="setup-input-group">
-        <span className="queue-meta">Display Name</span>
+        <span className="queue-meta">Name shown in Settings</span>
         <input type="text" value={name} onChange={(event) => setName(event.target.value)} disabled={pending} aria-disabled={pending} />
       </label>
 
       <label className="setup-input-group">
-        <span className="queue-meta">Description</span>
+        <span className="queue-meta">When to use it</span>
         <input
           type="text"
           value={description}
           onChange={(event) => setDescription(event.target.value)}
           disabled={pending}
           aria-disabled={pending}
+          placeholder="Warm with family, concise at work, playful with close friends."
         />
       </label>
 
       <label className="setup-input-group">
-        <span className="queue-meta">Behavior Prompt</span>
+        <span className="queue-meta">How replies should sound</span>
         <textarea rows={4} value={prompt} onChange={(event) => setPrompt(event.target.value)} disabled={pending} aria-disabled={pending} />
+        <span className="queue-meta">Use plain language: tone, phrases to prefer, and things to avoid.</span>
       </label>
 
       <label className="setup-input-group">
-        <span className="queue-meta">Default Intensity: {Math.round(defaultIntensity * 100)}%</span>
+        <span className="queue-meta">Style strength: {Math.round(defaultIntensity * 100)}%</span>
         <input
           type="range"
           min="0"
@@ -814,6 +1013,7 @@ function ProfileEditorForm({ profile, pending, error, onSave }: ProfileEditorFor
           disabled={pending}
           aria-disabled={pending}
         />
+        <span className="queue-meta">Lower is subtle. Higher makes this profile more noticeable.</span>
       </label>
 
       <button
@@ -831,7 +1031,7 @@ function ProfileEditorForm({ profile, pending, error, onSave }: ProfileEditorFor
         disabled={!hasChanged || pending}
         aria-disabled={!hasChanged || pending}
       >
-        {pending ? "Saving..." : "Save Profile"}
+        {pending ? "Saving..." : "Save profile"}
       </button>
 
       {error ? (
@@ -844,6 +1044,7 @@ function ProfileEditorForm({ profile, pending, error, onSave }: ProfileEditorFor
 }
 
 export function LiveSettings() {
+  const tenantScope = useTenantScopeArgs();
   const saveSettings = useMutation(api.settings.save);
   const upsertPersonalityProfile = useMutation(api.personality.upsertProfile);
   const deletePersonalityProfile = useMutation(api.personality.deleteProfile);
@@ -854,16 +1055,28 @@ export function LiveSettings() {
   const updateAssetMetadata = useMutation(api.media.updateAssetMetadata);
   const mergeMediaAssets = useMutation(api.media.mergeAssets);
   const deleteAsset = useMutation(api.media.deleteAsset);
-  const settings = useQuery(api.settings.get, {}) as SettingsState | undefined;
+  const settings = useQuery(api.settings.get, tenantScope) as SettingsState | undefined;
   const defaults = useQuery(api.settings.defaults, {}) as SettingsState | undefined;
-  const instagramSetup = useQuery(api.system.setupStatus, { provider: "instagram" }) as SetupState | null | undefined;
-  const contacts = useQuery(api.threads.listContacts, { limit: 300 }) as KnownContact[] | undefined;
-  const profilesQuery = useQuery(api.personality.listProfiles, {}) as PersonalityProfile[] | undefined;
-  const personaPacks = useQuery(api.personality.listPersonaPacks, {}) as PersonaPacksPayload | undefined;
-  const mediaAssets = useQuery(api.media.listAssets, {}) as MediaAsset[] | undefined;
+  const instagramSetup = useQuery(api.system.setupStatus, { ...tenantScope, provider: "instagram" }) as SetupState | null | undefined;
+  const contacts = useQuery(api.threads.listContacts, { ...tenantScope, limit: 300 }) as KnownContact[] | undefined;
+  const profilesQuery = useQuery(api.personality.listProfiles, tenantScope) as PersonalityProfile[] | undefined;
+  const personaPacks = useQuery(api.personality.listPersonaPacks, tenantScope) as PersonaPacksPayload | undefined;
+  const mediaAssets = useQuery(api.media.listAssets, tenantScope) as MediaAsset[] | undefined;
   const curatedMediaAssets = useMemo(
     () => (mediaAssets || []).filter((asset) => asset.kind === "sticker" || asset.kind === "meme"),
     [mediaAssets],
+  );
+  const enabledMediaCount = useMemo(
+    () => curatedMediaAssets.filter((asset) => asset.enabled).length,
+    [curatedMediaAssets],
+  );
+  const stickerCount = useMemo(
+    () => curatedMediaAssets.filter((asset) => asset.kind === "sticker").length,
+    [curatedMediaAssets],
+  );
+  const memeCount = useMemo(
+    () => curatedMediaAssets.filter((asset) => asset.kind === "meme").length,
+    [curatedMediaAssets],
   );
   const visualHashAttemptedRef = useRef<Set<string>>(new Set());
   const [visualHashByAssetId, setVisualHashByAssetId] = useState<Record<string, string>>({});
@@ -1101,7 +1314,7 @@ export function LiveSettings() {
   );
   const profileVersions = useQuery(
     api.personality.listProfileVersions,
-    selectedEditorProfile ? { slug: selectedEditorProfile.slug, limit: 20 } : "skip",
+    selectedEditorProfile ? { ...tenantScope, slug: selectedEditorProfile.slug, limit: 20 } : "skip",
   ) as PersonalityProfileVersion[] | undefined;
   const profileVersionsLoading = Boolean(selectedEditorProfile) && profileVersions === undefined;
 
@@ -1111,14 +1324,21 @@ export function LiveSettings() {
   const mediaRecord = getRecord(mediaKey);
   const showRuntime = tab === "runtime";
   const showAutomation = tab === "automation";
+  const showVoice = tab === "voice";
   const showPersonality = tab === "personality";
   const showMedia = tab === "media";
+  const showStyle = tab === "style";
+  const showRules = tab === "rules";
+  const showDraftActions = showRuntime || showAutomation;
   const tabDirtyMap = useMemo<Record<SettingsTab, boolean>>(() => {
     return {
       runtime: SETTINGS_TAB_FIELDS.runtime.some((field) => fieldValueChanged(field, draft, remoteState)),
       automation: SETTINGS_TAB_FIELDS.automation.some((field) => fieldValueChanged(field, draft, remoteState)),
+      voice: false,
       personality: false,
       media: false,
+      style: false,
+      rules: false,
     };
   }, [draft, remoteState]);
   const dirtyTabCount = useMemo(
@@ -1140,14 +1360,35 @@ export function LiveSettings() {
     });
   }, [normalizedSettingsSearch]);
 
+  const selectTab = useCallback((nextTab: SettingsTab) => {
+    setTab(nextTab);
+    if (typeof window === "undefined") {
+      return;
+    }
+    const url = new URL(window.location.href);
+    url.searchParams.set("section", nextTab);
+    window.history.replaceState(null, "", `${url.pathname}?${url.searchParams.toString()}${url.hash}`);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const params = new URLSearchParams(window.location.search);
+    const section = params.get("section") || params.get("tab");
+    if (isSettingsTab(section)) {
+      setTab(section);
+    }
+  }, []);
+
   useEffect(() => {
     if (!normalizedSettingsSearch || visibleTabs.length !== 1) {
       return;
     }
     if (visibleTabs[0].id !== tab) {
-      setTab(visibleTabs[0].id);
+      selectTab(visibleTabs[0].id);
     }
-  }, [normalizedSettingsSearch, tab, visibleTabs]);
+  }, [normalizedSettingsSearch, selectTab, tab, visibleTabs]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1165,6 +1406,7 @@ export function LiveSettings() {
       key,
       async () => {
         await saveSettings({
+          ...tenantScope,
           ignoreGroupsByDefault: draft.ignoreGroupsByDefault,
           reactionsEnabled: draft.reactionsEnabled,
           stickersEnabled: draft.stickersEnabled,
@@ -1292,7 +1534,7 @@ export function LiveSettings() {
   };
 
   const addRomanticPartner = (jid: string) => {
-    const normalized = jid.trim().toLowerCase();
+    const normalized = normalizeContactJid(jid);
     if (!normalized) {
       return;
     }
@@ -1315,8 +1557,32 @@ export function LiveSettings() {
     }));
   };
 
+  const addCompactContextGroup = (jid: string) => {
+    const normalized = normalizeContactJid(jid);
+    if (!normalized) {
+      return;
+    }
+
+    setDraft((prev) => {
+      if (prev.compactContextGroupJids.includes(normalized)) {
+        return prev;
+      }
+      return {
+        ...prev,
+        compactContextGroupJids: [...prev.compactContextGroupJids, normalized],
+      };
+    });
+  };
+
+  const removeCompactContextGroup = (jid: string) => {
+    setDraft((prev) => ({
+      ...prev,
+      compactContextGroupJids: prev.compactContextGroupJids.filter((item) => item !== jid),
+    }));
+  };
+
   const addOutreachContact = (jid: string) => {
-    const normalized = jid.trim().toLowerCase();
+    const normalized = normalizeContactJid(jid);
     if (!normalized) {
       return;
     }
@@ -1340,7 +1606,7 @@ export function LiveSettings() {
   };
 
   const addStatusAudience = (jid: string) => {
-    const normalized = jid.trim();
+    const normalized = normalizeContactJid(jid);
     if (!normalized) {
       return;
     }
@@ -1374,6 +1640,7 @@ export function LiveSettings() {
       profileKey,
       async () => {
         await upsertPersonalityProfile({
+          ...tenantScope,
           slug: values.slug,
           name: values.name.trim(),
           description: values.description.trim(),
@@ -1401,6 +1668,7 @@ export function LiveSettings() {
       profileKey,
       async () => {
         await upsertPersonalityProfile({
+          ...tenantScope,
           slug,
           name,
           description: description || "Custom profile",
@@ -1424,7 +1692,7 @@ export function LiveSettings() {
     void runAction(
       profileKey,
       async () => {
-        await deletePersonalityProfile({ slug });
+        await deletePersonalityProfile({ ...tenantScope, slug });
       },
       {
         pendingLabel: "Deleting profile...",
@@ -1441,6 +1709,7 @@ export function LiveSettings() {
       profileKey,
       async () => {
         await rollbackProfileVersion({
+          ...tenantScope,
           slug: selectedEditorProfile.slug,
           versionId: versionId as Id<"personalityProfileVersions">,
         });
@@ -1480,6 +1749,7 @@ export function LiveSettings() {
         }
 
         await registerAssetIfMissing({
+          ...tenantScope,
           kind: assetKind,
           label: assetLabel.trim() || assetFile.name,
           tags: parseTagInput(assetTags),
@@ -1538,6 +1808,7 @@ export function LiveSettings() {
       mediaKey,
       async () => {
         await updateAssetMetadata({
+          ...tenantScope,
           assetId: assetId as Id<"mediaAssets">,
           label: editAssetLabel.trim(),
           tags: parseSimpleList(editAssetTags, true).slice(0, 20),
@@ -1573,6 +1844,7 @@ export function LiveSettings() {
       mediaKey,
       async () => {
         await mergeMediaAssets({
+          ...tenantScope,
           sourceAssetId: source._id as Id<"mediaAssets">,
           targetAssetId: target._id as Id<"mediaAssets">,
         });
@@ -1605,6 +1877,7 @@ export function LiveSettings() {
         for (const suggestion of queuedSuggestions) {
           try {
             await mergeMediaAssets({
+              ...tenantScope,
               sourceAssetId: suggestion.sourceAssetId as Id<"mediaAssets">,
               targetAssetId: suggestion.targetAssetId as Id<"mediaAssets">,
             });
@@ -1657,9 +1930,10 @@ export function LiveSettings() {
     mediaKey,
     mergeMediaAssets,
     pushNotice,
-    runAction,
-    suggestedMerges,
-  ]);
+	    runAction,
+	    suggestedMerges,
+	    tenantScope,
+	  ]);
 
   useEffect(() => {
     if (suggestedMerges.length === 0) {
@@ -1679,14 +1953,14 @@ export function LiveSettings() {
 
   if (settingsLoading) {
     return (
-      <section className="panel-grid two-col">
+      <section className="panel-grid two-col settings-workspace">
         <article className="panel-card">
           <ActionNotices notices={notices} onDismiss={dismissNotice} />
           <h3>AI Runtime</h3>
           <LoadingBlock label="Loading settings…" rows={3} />
         </article>
         <article className="panel-card">
-          <h3>Pacing & Queue</h3>
+          <h3>Pacing & Review</h3>
           <LoadingBlock label="Loading worker defaults…" rows={3} />
         </article>
       </section>
@@ -1694,62 +1968,73 @@ export function LiveSettings() {
   }
 
   return (
-    <section className="stack settings-workspace">
-      <article className="panel-card settings-control-deck">
-        <div className="settings-control-topline">
-          <div className="queue-focus-tabs settings-tab-strip" role="tablist" aria-label="Settings sections">
-            {visibleTabs.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                role="tab"
-                aria-selected={tab === item.id}
-                className={`btn ${tab === item.id ? "btn-primary" : "btn-ghost"}`}
-                onClick={() => setTab(item.id)}
-              >
-                {item.label}
-                {tabDirtyMap[item.id] ? " *" : ""}
-              </button>
-            ))}
-          </div>
-          <p className="queue-meta settings-control-meta">
-            Active: {activeTabLabel} ·{" "}
-            {dirtyTabCount > 0
-              ? `${dirtyTabCount} section${dirtyTabCount === 1 ? "" : "s"} with unsaved edits`
-              : "No unsaved edits"}
-          </p>
-        </div>
-        <div className="settings-control-row">
-          <label className="setup-input-group inline search-field-group settings-search-field">
-            <span className="queue-meta">Find settings section</span>
+    <section className="settings-workspace">
+      <div className="settings-window">
+        <aside className="settings-sidebar" aria-label="Settings sections">
+          <label className="settings-search-field">
+            <span className="sr-only">Search settings</span>
             <input
               type="search"
               value={settingsSearch}
               onChange={(event) => setSettingsSearch(event.target.value)}
-              placeholder="Search sections: quiet hours, persona, media..."
+              placeholder="Search settings"
             />
           </label>
-          <div className="topbar-controls settings-primary-actions">
-            <button
-              type="button"
-              className="btn btn-primary"
-              onClick={saveDraft}
-              disabled={record.pending || !hasChanged}
-              aria-disabled={record.pending || !hasChanged}
-            >
-              {record.pending ? "Saving..." : "Save Settings"}
-            </button>
-            <button type="button" className="btn" onClick={restoreDefaults} disabled={record.pending} aria-disabled={record.pending}>
-              Restore Defaults
-            </button>
-          </div>
-        </div>
-        {normalizedSettingsSearch && visibleTabs.length === 0 ? (
-          <p className="queue-meta">No settings section matches this search.</p>
-        ) : null}
-      </article>
+          <nav className="settings-sidebar-list">
+            {visibleTabs.map((item) => {
+              const selected = item.id === tab;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  className={`settings-sidebar-item ${selected ? "settings-sidebar-item-active" : ""}`}
+                  aria-current={selected ? "page" : undefined}
+                  onClick={() => selectTab(item.id)}
+                >
+                  <span>
+                    <strong>{item.label}</strong>
+                    <small>{SETTINGS_TAB_SUMMARIES[item.id]}</small>
+                  </span>
+                  {tabDirtyMap[item.id] ? <em>Edited</em> : null}
+                </button>
+              );
+            })}
+          </nav>
+          {normalizedSettingsSearch && visibleTabs.length === 0 ? (
+            <p className="queue-meta settings-empty-search">No section matches this search.</p>
+          ) : null}
+        </aside>
 
-      <div className="panel-grid two-col settings-panel-grid">
+        <div className="settings-detail">
+          <header className="settings-detail-header">
+            <div>
+              <p className="settings-eyebrow">Settings</p>
+              <h2>{activeTabLabel}</h2>
+              <p className="queue-meta">
+                {dirtyTabCount > 0
+                  ? `${dirtyTabCount} section${dirtyTabCount === 1 ? "" : "s"} need saving.`
+                  : "Everything is saved."}
+              </p>
+            </div>
+            {showDraftActions ? (
+              <div className="topbar-controls settings-primary-actions">
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={saveDraft}
+                  disabled={record.pending || !hasChanged}
+                  aria-disabled={record.pending || !hasChanged}
+                >
+                  {record.pending ? "Saving..." : "Save"}
+                </button>
+                <button type="button" className="btn" onClick={restoreDefaults} disabled={record.pending} aria-disabled={record.pending}>
+                  Restore
+                </button>
+              </div>
+            ) : null}
+          </header>
+
+          <div className="panel-grid two-col settings-panel-grid">
         {showRuntime ? (
           <>
             <article className="panel-card">
@@ -1814,7 +2099,7 @@ export function LiveSettings() {
 
           <label className="stack compact">
             <span className="queue-meta">Fallback mode</span>
-            <select
+            <SearchableSelect
               value={draft.aiFallbackMode}
               onChange={(event) =>
                 setDraft((prev) => ({
@@ -1827,12 +2112,12 @@ export function LiveSettings() {
             >
               <option value="all">Allow Codex + heuristic fallback</option>
               <option value="azure_only">Azure only (disable all fallback providers)</option>
-            </select>
+            </SearchableSelect>
           </label>
 
           <label className="stack compact">
             <span className="queue-meta">Model-first generation</span>
-            <select
+            <SearchableSelect
               value={draft.aiModelFirstEnabled ? "true" : "false"}
               onChange={(event) =>
                 setDraft((prev) => ({
@@ -1845,12 +2130,12 @@ export function LiveSettings() {
             >
               <option value="false">Disabled (use legacy steering flow)</option>
               <option value="true">Enabled (GPT-5.4 first)</option>
-            </select>
+            </SearchableSelect>
           </label>
 
           <label className="stack compact">
             <span className="queue-meta">Model acknowledgment routing</span>
-            <select
+            <SearchableSelect
               value={draft.aiAckRoutingEnabled ? "true" : "false"}
               onChange={(event) =>
                 setDraft((prev) => ({
@@ -1863,7 +2148,7 @@ export function LiveSettings() {
             >
               <option value="false">Disabled (always use reaction heuristic)</option>
               <option value="true">Enabled (model picks reaction or text)</option>
-            </select>
+            </SearchableSelect>
           </label>
 
           <label className="stack compact">
@@ -1941,7 +2226,7 @@ export function LiveSettings() {
 
           <label className="stack compact">
             <span className="queue-meta">Active persona pack (optional)</span>
-            <select
+            <SearchableSelect
               name="activePersonaPackId"
               value={draft.activePersonaPackId}
               onChange={(event) => setDraft((prev) => ({ ...prev, activePersonaPackId: event.target.value }))}
@@ -1958,7 +2243,7 @@ export function LiveSettings() {
                   {pack.name} ({pack.version})
                 </option>
               ))}
-            </select>
+            </SearchableSelect>
             {draft.activePersonaPackId ? (
               <span className="queue-meta">
                 {availablePersonaPacks.find((pack) => pack.id === draft.activePersonaPackId)?.description || "Persona pack selected."}
@@ -1968,7 +2253,7 @@ export function LiveSettings() {
 
           <label className="stack compact">
             <span className="queue-meta">Quality gate mode</span>
-            <select
+            <SearchableSelect
               value={draft.qualityGateMode}
               onChange={(event) =>
                 setDraft((prev) => ({
@@ -1987,7 +2272,7 @@ export function LiveSettings() {
               <option value="auto_rewrite_once">Auto rewrite once</option>
               <option value="manual_review">Manual review</option>
               <option value="log_only">Log only</option>
-            </select>
+            </SearchableSelect>
           </label>
 
           <label className="stack compact">
@@ -2010,17 +2295,17 @@ export function LiveSettings() {
           </label>
 
           <button type="submit" className="btn btn-primary" disabled={record.pending || !hasChanged} aria-disabled={record.pending || !hasChanged}>
-            {record.pending ? "Saving..." : "Save Settings"}
+            {record.pending ? "Saving..." : "Save"}
           </button>
         </form>
       </article>
 
       <article className="panel-card">
-        <h3>Pacing & Queue</h3>
+        <h3>Pacing & Review</h3>
         <div className="stack compact">
           <label className="stack compact">
             <span className="queue-meta">Ignore groups by default</span>
-            <select
+            <SearchableSelect
               value={draft.ignoreGroupsByDefault ? "true" : "false"}
               onChange={(event) =>
                 setDraft((prev) => ({
@@ -2033,12 +2318,12 @@ export function LiveSettings() {
             >
               <option value="true">Yes</option>
               <option value="false">No</option>
-            </select>
+            </SearchableSelect>
           </label>
 
           <label className="stack compact">
             <span className="queue-meta">Enable reactions</span>
-            <select
+            <SearchableSelect
               value={draft.reactionsEnabled ? "true" : "false"}
               onChange={(event) =>
                 setDraft((prev) => ({
@@ -2051,12 +2336,12 @@ export function LiveSettings() {
             >
               <option value="true">Yes</option>
               <option value="false">No</option>
-            </select>
+            </SearchableSelect>
           </label>
 
           <label className="stack compact">
             <span className="queue-meta">Enable stickers</span>
-            <select
+            <SearchableSelect
               value={draft.stickersEnabled ? "true" : "false"}
               onChange={(event) =>
                 setDraft((prev) => ({
@@ -2069,12 +2354,12 @@ export function LiveSettings() {
             >
               <option value="true">Yes</option>
               <option value="false">No</option>
-            </select>
+            </SearchableSelect>
           </label>
 
           <label className="stack compact">
             <span className="queue-meta">Enable memes</span>
-            <select
+            <SearchableSelect
               value={draft.memesEnabled ? "true" : "false"}
               onChange={(event) =>
                 setDraft((prev) => ({
@@ -2087,12 +2372,12 @@ export function LiveSettings() {
             >
               <option value="true">Yes</option>
               <option value="false">No</option>
-            </select>
+            </SearchableSelect>
           </label>
 
           <label className="stack compact">
             <span className="queue-meta">Enable generated memes</span>
-            <select
+            <SearchableSelect
               value={draft.generatedMemesEnabled ? "true" : "false"}
               onChange={(event) =>
                 setDraft((prev) => ({
@@ -2105,12 +2390,12 @@ export function LiveSettings() {
             >
               <option value="true">Yes</option>
               <option value="false">No</option>
-            </select>
+            </SearchableSelect>
           </label>
 
           <label className="stack compact">
             <span className="queue-meta">Auto-send generated memes</span>
-            <select
+            <SearchableSelect
               value={draft.generatedMemesAutoSendEnabled ? "true" : "false"}
               onChange={(event) =>
                 setDraft((prev) => ({
@@ -2123,7 +2408,7 @@ export function LiveSettings() {
             >
               <option value="false">No (staged/manual first)</option>
               <option value="true">Yes (auto-send allowed)</option>
-            </select>
+            </SearchableSelect>
           </label>
 
           <label className="stack compact">
@@ -2160,7 +2445,7 @@ export function LiveSettings() {
 
           <label className="stack compact">
             <span className="queue-meta">Identity-led voice</span>
-            <select
+            <SearchableSelect
               value={draft.soulModeEnabled ? "true" : "false"}
               onChange={(event) =>
                 setDraft((prev) => ({
@@ -2173,12 +2458,12 @@ export function LiveSettings() {
             >
               <option value="true">On (prioritize your tone and phrasing)</option>
               <option value="false">Off (use neutral tone)</option>
-            </select>
+            </SearchableSelect>
           </label>
 
           <label className="stack compact">
             <span className="queue-meta">Humor learning</span>
-            <select
+            <SearchableSelect
               value={draft.humorLearningEnabled ? "true" : "false"}
               onChange={(event) =>
                 setDraft((prev) => ({
@@ -2191,12 +2476,12 @@ export function LiveSettings() {
             >
               <option value="true">On (learn from positive funny signals)</option>
               <option value="false">Off</option>
-            </select>
+            </SearchableSelect>
           </label>
 
           <label className="stack compact">
             <span className="queue-meta">Self-roast mode (safe)</span>
-            <select
+            <SearchableSelect
               value={draft.selfRoastModeEnabled ? "true" : "false"}
               onChange={(event) =>
                 setDraft((prev) => ({
@@ -2209,12 +2494,12 @@ export function LiveSettings() {
             >
               <option value="false">Off</option>
               <option value="true">On (allow playful self-roast, keep profile facts accurate)</option>
-            </select>
+            </SearchableSelect>
           </label>
 
           <label className="stack compact">
             <span className="queue-meta">Status auto-replies</span>
-            <select
+            <SearchableSelect
               value={draft.statusAutoReplyEnabled ? "true" : "false"}
               onChange={(event) =>
                 setDraft((prev) => ({
@@ -2227,12 +2512,12 @@ export function LiveSettings() {
             >
               <option value="true">On</option>
               <option value="false">Off</option>
-            </select>
+            </SearchableSelect>
           </label>
 
           <label className="stack compact">
             <span className="queue-meta">Status auto-reply scope</span>
-            <select
+            <SearchableSelect
               value={draft.statusReplyRequireFunny ? "true" : "false"}
               onChange={(event) =>
                 setDraft((prev) => ({
@@ -2245,14 +2530,14 @@ export function LiveSettings() {
             >
               <option value="true">Playful + science/tech + market signals</option>
               <option value="false">Any status text</option>
-            </select>
+            </SearchableSelect>
             {!draft.statusAutoReplyEnabled ? <span className="queue-meta">Enable status auto-replies to use this.</span> : null}
             <span className="queue-meta">Status replies are skipped when a status contains a link or email.</span>
           </label>
 
           <label className="stack compact">
             <span className="queue-meta">Capture media from group chats</span>
-            <select
+            <SearchableSelect
               value={draft.captureGroupMediaEnabled ? "true" : "false"}
               onChange={(event) =>
                 setDraft((prev) => ({
@@ -2265,7 +2550,7 @@ export function LiveSettings() {
             >
               <option value="false">No (lower storage)</option>
               <option value="true">Yes (capture group media)</option>
-            </select>
+            </SearchableSelect>
           </label>
 
           <label className="stack compact">
@@ -2398,23 +2683,20 @@ export function LiveSettings() {
             />
           </label>
 
-          <label className="stack compact">
-            <span className="queue-meta">Group IDs for aggressive context cleanup (optional, one per line)</span>
-            <textarea
-              rows={4}
-              placeholder={"1234567890-123456789@g.us\n9876543210-111222333@g.us"}
-              value={draft.compactContextGroupJids.join("\n")}
-              onChange={(event) =>
-                setDraft((prev) => ({
-                  ...prev,
-                  compactContextGroupJids: parseContactJids(event.target.value),
-                }))
-              }
-              disabled={record.pending}
-              aria-disabled={record.pending}
-            />
-            <span className="queue-meta">Leave empty to apply the cleanup policy to all recent groups.</span>
-          </label>
+          <RecipientPickerField
+            label="Groups for aggressive context cleanup"
+            helper="Leave empty to apply the cleanup policy to all recent groups."
+            contacts={knownContacts}
+            selectedJids={draft.compactContextGroupJids}
+            disabled={record.pending}
+            contactsLoading={contactsLoading}
+            addPlaceholder="Add from previous groups"
+            inputPlaceholder="Paste a group address"
+            emptyLabel="No groups selected."
+            contactFilter={(contact) => normalizeContactJid(contact.jid).endsWith("@g.us")}
+            onAdd={addCompactContextGroup}
+            onRemove={removeCompactContextGroup}
+          />
 
           <label className="stack compact">
             <span className="queue-meta">Funny status keywords (comma or new line)</span>
@@ -2578,7 +2860,7 @@ export function LiveSettings() {
 
           <label className="stack compact">
             <span className="queue-meta">Quiet hours for automatic sends</span>
-            <select
+            <SearchableSelect
               value={draft.quietHoursEnabled ? "true" : "false"}
               onChange={(event) =>
                 setDraft((prev) => ({
@@ -2591,7 +2873,7 @@ export function LiveSettings() {
             >
               <option value="false">Disabled</option>
               <option value="true">Enabled</option>
-            </select>
+            </SearchableSelect>
           </label>
 
           <label className="stack compact">
@@ -2629,7 +2911,7 @@ export function LiveSettings() {
 
           <label className="stack compact">
             <span className="queue-meta">Auto-mark inbound as read</span>
-            <select
+            <SearchableSelect
               value={draft.autoMarkReadEnabled ? "true" : "false"}
               onChange={(event) =>
                 setDraft((prev) => ({
@@ -2642,12 +2924,12 @@ export function LiveSettings() {
             >
               <option value="true">Enabled</option>
               <option value="false">Disabled</option>
-            </select>
+            </SearchableSelect>
           </label>
 
           <label className="stack compact">
             <span className="queue-meta">Auto-mark group chats as read</span>
-            <select
+            <SearchableSelect
               value={draft.autoMarkReadGroups ? "true" : "false"}
               onChange={(event) =>
                 setDraft((prev) => ({
@@ -2660,12 +2942,12 @@ export function LiveSettings() {
             >
               <option value="false">Disabled</option>
               <option value="true">Enabled</option>
-            </select>
+            </SearchableSelect>
           </label>
 
           <label className="stack compact">
             <span className="queue-meta">Auto-mark status as read</span>
-            <select
+            <SearchableSelect
               value={draft.autoMarkReadStatus ? "true" : "false"}
               onChange={(event) =>
                 setDraft((prev) => ({
@@ -2678,12 +2960,12 @@ export function LiveSettings() {
             >
               <option value="false">Disabled</option>
               <option value="true">Enabled</option>
-            </select>
+            </SearchableSelect>
           </label>
 
           <label className="stack compact">
             <span className="queue-meta">Presence subscribe before typing</span>
-            <select
+            <SearchableSelect
               value={draft.presenceSubscribeEnabled ? "true" : "false"}
               onChange={(event) =>
                 setDraft((prev) => ({
@@ -2696,12 +2978,12 @@ export function LiveSettings() {
             >
               <option value="true">Enabled</option>
               <option value="false">Disabled</option>
-            </select>
+            </SearchableSelect>
           </label>
 
           <label className="stack compact">
             <span className="queue-meta">Sync chat mute during quiet hours</span>
-            <select
+            <SearchableSelect
               value={draft.chatModifyQuietHoursEnabled ? "true" : "false"}
               onChange={(event) =>
                 setDraft((prev) => ({
@@ -2714,13 +2996,13 @@ export function LiveSettings() {
             >
               <option value="false">Disabled</option>
               <option value="true">Enabled (mute/unmute chats)</option>
-            </select>
+            </SearchableSelect>
             {!draft.quietHoursEnabled ? <span className="queue-meta">Enable quiet hours to use chat mute sync.</span> : null}
           </label>
 
           <label className="stack compact">
             <span className="queue-meta">Allow WhatsApp About text updates</span>
-            <select
+            <SearchableSelect
               value={draft.aboutAutomationEnabled ? "true" : "false"}
               onChange={(event) =>
                 setDraft((prev) => ({
@@ -2733,7 +3015,7 @@ export function LiveSettings() {
             >
               <option value="false">Disabled</option>
               <option value="true">Enabled</option>
-            </select>
+            </SearchableSelect>
           </label>
 
           <label className="stack compact">
@@ -2830,7 +3112,7 @@ export function LiveSettings() {
 
           <label className="stack compact">
             <span className="queue-meta">Allow automatic voice note replies</span>
-            <select
+            <SearchableSelect
               value={draft.voiceNotesAutoEnabled ? "true" : "false"}
               onChange={(event) =>
                 setDraft((prev) => ({
@@ -2843,7 +3125,7 @@ export function LiveSettings() {
             >
               <option value="false">Disabled</option>
               <option value="true">Enabled</option>
-            </select>
+            </SearchableSelect>
             <span className="queue-meta">
               Explicit `/vn` directives still send voice notes when you request them.
             </span>
@@ -3083,47 +3365,42 @@ export function LiveSettings() {
           </>
         ) : null}
 
+        {showVoice ? (
+          <article className="panel-card settings-voice-card">
+            <div className="settings-voice-launch">
+              <div>
+                <p className="settings-eyebrow">Local voice</p>
+                <h3>Voice sample</h3>
+                <p className="queue-meta">
+                  Record or replace the voice sample OdogwuHQ uses for local Vox voice notes in the same setup recorder.
+                </p>
+              </div>
+              <Link className="btn btn-primary" href="/setup?connect=voice&returnTo=%2Fsettings%3Fsection%3Dvoice">
+                Open voice setup
+              </Link>
+            </div>
+          </article>
+        ) : null}
+
         {showAutomation ? (
           <>
             <article className="panel-card">
         <h3>Romantic Contacts</h3>
         <div className="stack compact">
           <div className="stack compact">
-            <span className="queue-meta">Romantic contacts (WhatsApp JIDs)</span>
-            <select
-              value=""
-              onChange={(event) => {
-                if (!event.target.value) {
-                  return;
-                }
-                addRomanticPartner(event.target.value);
-              }}
-              disabled={record.pending || contactsLoading}
-              aria-disabled={record.pending || contactsLoading}
-            >
-              <option value="">
-                {contactsLoading ? "Loading WhatsApp contacts..." : "Add from previous WhatsApp contacts"}
-              </option>
-              {knownWhatsAppContacts.map((contact) => (
-                <option key={contact._id} value={contact.jid}>
-                  {contact.title ? `${contact.title} (${contact.jid})` : contact.jid}
-                </option>
-              ))}
-            </select>
-            <textarea
-              rows={6}
-              placeholder={"2348012345678@s.whatsapp.net\n2348098765432@s.whatsapp.net"}
-              value={draft.romanticPartnerJids.join("\n")}
-              onChange={(event) =>
-                setDraft((prev) => ({
-                  ...prev,
-                  romanticPartnerJids: parseContactJids(event.target.value),
-                }))
-              }
+            <RecipientPickerField
+              label="Romantic contacts"
+              helper="Select from previous WhatsApp contacts or paste one contact address."
+              contacts={knownWhatsAppContacts}
+              selectedJids={draft.romanticPartnerJids}
               disabled={record.pending}
-              aria-disabled={record.pending}
+              contactsLoading={contactsLoading}
+              addPlaceholder="Add from previous WhatsApp contacts"
+              inputPlaceholder="Paste a WhatsApp contact address"
+              emptyLabel="No romantic contacts selected."
+              onAdd={addRomanticPartner}
+              onRemove={removeRomanticPartner}
             />
-            <span className="queue-meta">Select from contacts or paste one WhatsApp JID per line.</span>
             {draft.romanticMorningEnabled && draft.romanticPartnerJids.length === 0 ? (
               <p className="queue-meta">
                 Good-morning automation is enabled, but no romantic contacts are configured. Add at least one
@@ -3132,7 +3409,7 @@ export function LiveSettings() {
             ) : null}
             <label className="stack compact">
               <span className="queue-meta">Allow adaptive good-morning drafts</span>
-              <select
+              <SearchableSelect
                 value={draft.romanticMorningEnabled ? "true" : "false"}
                 onChange={(event) =>
                   setDraft((prev) => ({
@@ -3145,7 +3422,7 @@ export function LiveSettings() {
               >
                 <option value="true">Yes</option>
                 <option value="false">No</option>
-              </select>
+              </SearchableSelect>
             </label>
             <label className="stack compact">
               <span className="queue-meta">Morning start hour (24h)</span>
@@ -3243,26 +3520,6 @@ export function LiveSettings() {
                 aria-disabled={record.pending || !draft.romanticMorningEnabled}
               />
             </label>
-            {draft.romanticPartnerJids.length > 0 ? (
-              <div className="stack compact">
-                {draft.romanticPartnerJids.map((jid) => (
-                  <div key={jid} className="queue-item">
-                    <p className="queue-body">{jid}</p>
-                    <div className="queue-actions">
-                      <button
-                        type="button"
-                        className="btn btn-ghost"
-                        onClick={() => removeRomanticPartner(jid)}
-                        disabled={record.pending}
-                        aria-disabled={record.pending}
-                      >
-                        Remove
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : null}
           </div>
         </div>
       </article>
@@ -3272,7 +3529,7 @@ export function LiveSettings() {
         <div className="stack compact">
           <label className="stack compact">
             <span className="queue-meta">Allow proactive check-in drafts</span>
-            <select
+            <SearchableSelect
               value={draft.outreachEnabled ? "true" : "false"}
               onChange={(event) =>
                 setDraft((prev) => ({
@@ -3285,7 +3542,7 @@ export function LiveSettings() {
             >
               <option value="true">Yes</option>
               <option value="false">No</option>
-            </select>
+            </SearchableSelect>
           </label>
 
           <label className="stack compact">
@@ -3326,66 +3583,27 @@ export function LiveSettings() {
             />
           </label>
 
-          <label className="stack compact">
-            <span className="queue-meta">Fixed contacts (one WhatsApp JID per line or comma-separated)</span>
-            <select
-              value=""
-              onChange={(event) => {
-                if (!event.target.value) {
-                  return;
-                }
-                addOutreachContact(event.target.value);
-              }}
-              disabled={record.pending || contactsLoading}
-              aria-disabled={record.pending || contactsLoading}
-            >
-              <option value="">{contactsLoading ? "Loading previous contacts..." : "Add from previous contacts"}</option>
-              {knownContacts.map((contact) => (
-                <option key={contact._id} value={contact.jid}>
-                  {contact.title ? `${contact.title} (${contact.jid})` : contact.jid}
-                </option>
-              ))}
-            </select>
-            <textarea
-              rows={6}
-              placeholder={"2348012345678@s.whatsapp.net\n2348098765432@s.whatsapp.net"}
-              value={draft.outreachContactJids.join("\n")}
-              onChange={(event) =>
-                setDraft((prev) => ({
-                  ...prev,
-                  outreachContactJids: parseContactJids(event.target.value),
-                }))
-              }
+          <div className="stack compact">
+            <RecipientPickerField
+              label="Fixed outreach contacts"
+              helper="Choose previous contacts or paste contact addresses."
+              contacts={knownContacts}
+              selectedJids={draft.outreachContactJids}
               disabled={record.pending}
-              aria-disabled={record.pending}
+              contactsLoading={contactsLoading}
+              addPlaceholder="Add from previous contacts"
+              inputPlaceholder="Paste contact addresses"
+              emptyLabel="No fixed outreach contacts selected."
+              onAdd={addOutreachContact}
+              onRemove={removeOutreachContact}
             />
             {draft.outreachEnabled && draft.outreachContactJids.length === 0 ? (
               <p className="queue-meta">
-                Proactive outreach is enabled, but no fixed contacts are configured. Add at least one JID to activate
+                Proactive outreach is enabled, but no fixed contacts are configured. Add at least one contact to activate
                 scheduled outreach drafts.
               </p>
             ) : null}
-            {draft.outreachContactJids.length > 0 ? (
-              <div className="stack compact">
-                {draft.outreachContactJids.map((jid) => (
-                  <div key={jid} className="queue-item">
-                    <p className="queue-body">{jid}</p>
-                    <div className="queue-actions">
-                      <button
-                        type="button"
-                        className="btn btn-ghost"
-                        onClick={() => removeOutreachContact(jid)}
-                        disabled={record.pending}
-                        aria-disabled={record.pending}
-                      >
-                        Remove
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : null}
-          </label>
+          </div>
 
           <label className="stack compact">
             <span className="queue-meta">Starter template</span>
@@ -3411,7 +3629,7 @@ export function LiveSettings() {
         <div className="stack compact">
           <label className="stack compact">
             <span className="queue-meta">Enable conversation signal tracking</span>
-            <select
+            <SearchableSelect
               value={draft.conversationIntelligenceEnabled ? "true" : "false"}
               onChange={(event) =>
                 setDraft((prev) => ({
@@ -3424,7 +3642,7 @@ export function LiveSettings() {
             >
               <option value="true">Yes</option>
               <option value="false">No</option>
-            </select>
+            </SearchableSelect>
           </label>
 
           <label className="stack compact">
@@ -3486,7 +3704,7 @@ export function LiveSettings() {
 
           <label className="stack compact">
             <span className="queue-meta">Enable anti-dwelling guards</span>
-            <select
+            <SearchableSelect
               value={draft.antiDwellingEnabled ? "true" : "false"}
               onChange={(event) =>
                 setDraft((prev) => ({
@@ -3499,7 +3717,7 @@ export function LiveSettings() {
             >
               <option value="true">Yes</option>
               <option value="false">No</option>
-            </select>
+            </SearchableSelect>
           </label>
 
           <label className="stack compact">
@@ -3565,7 +3783,7 @@ export function LiveSettings() {
 
           <label className="stack compact">
             <span className="queue-meta">Allow pivot replies</span>
-            <select
+            <SearchableSelect
               value={draft.pivotReplyEnabled ? "true" : "false"}
               onChange={(event) =>
                 setDraft((prev) => ({
@@ -3578,12 +3796,12 @@ export function LiveSettings() {
             >
               <option value="true">Yes</option>
               <option value="false">No</option>
-            </select>
+            </SearchableSelect>
           </label>
 
           <label className="stack compact">
             <span className="queue-meta">Allow lead-pivot mode</span>
-            <select
+            <SearchableSelect
               value={draft.topicLeadPivotEnabled ? "true" : "false"}
               onChange={(event) =>
                 setDraft((prev) => ({
@@ -3596,7 +3814,7 @@ export function LiveSettings() {
             >
               <option value="true">Yes</option>
               <option value="false">No</option>
-            </select>
+            </SearchableSelect>
           </label>
 
           <label className="stack compact">
@@ -3664,7 +3882,7 @@ export function LiveSettings() {
         <div className="stack compact">
           <label className="stack compact">
             <span className="queue-meta">Allow automatic status posting</span>
-            <select
+            <SearchableSelect
               value={draft.statusBuilderEnabled ? "true" : "false"}
               onChange={(event) =>
                 setDraft((prev) => ({
@@ -3677,7 +3895,7 @@ export function LiveSettings() {
             >
               <option value="true">Yes</option>
               <option value="false">No</option>
-            </select>
+            </SearchableSelect>
           </label>
 
           <label className="stack compact">
@@ -3764,7 +3982,7 @@ export function LiveSettings() {
 
           <label className="stack compact">
             <span className="queue-meta">Status audience mode</span>
-            <select
+            <SearchableSelect
               value={draft.statusPostAudienceMode}
               onChange={(event) =>
                 setDraft((prev) => ({
@@ -3776,10 +3994,10 @@ export function LiveSettings() {
               aria-disabled={record.pending || !draft.statusBuilderEnabled}
             >
               <option value="whatsapp_privacy">Respect WhatsApp privacy settings</option>
-              <option value="manual_allowlist">Manual allowlist (configured audience JIDs)</option>
-            </select>
+              <option value="manual_allowlist">Manual allowlist (selected contacts)</option>
+            </SearchableSelect>
             <span className="queue-meta">
-              Privacy mode posts to My Status using your WhatsApp privacy setting. Manual allowlist mode sends only to configured JIDs and skips posting when the allowlist is empty.
+              Privacy mode posts to My Status using your WhatsApp privacy setting. Manual allowlist mode sends only to selected contacts and skips posting when the allowlist is empty.
             </span>
           </label>
 
@@ -3807,64 +4025,23 @@ export function LiveSettings() {
             </span>
           </label>
 
-          <label className="stack compact">
-            <span className="queue-meta">
-              {draft.statusPostAudienceMode === "manual_allowlist"
-                ? "Audience JIDs (trend sampling + status allowlist)"
-                : "Audience JIDs for trend sampling (optional)"}
-            </span>
-            <select
-              value=""
-              onChange={(event) => {
-                if (!event.target.value) {
-                  return;
-                }
-                addStatusAudience(event.target.value);
-              }}
-              disabled={record.pending || contactsLoading || !draft.statusBuilderEnabled}
-              aria-disabled={record.pending || contactsLoading || !draft.statusBuilderEnabled}
-            >
-              <option value="">{contactsLoading ? "Loading contacts..." : "Add from previous contacts"}</option>
-              {knownContacts.map((contact) => (
-                <option key={contact._id} value={contact.jid}>
-                  {contact.title ? `${contact.title} (${contact.jid})` : contact.jid}
-                </option>
-              ))}
-            </select>
-            <textarea
-              rows={5}
-              placeholder={"2348012345678@s.whatsapp.net\n2348098765432@s.whatsapp.net"}
-              value={draft.statusBuilderAudienceJids.join("\n")}
-              onChange={(event) =>
-                setDraft((prev) => ({
-                  ...prev,
-                  statusBuilderAudienceJids: parseContactJids(event.target.value),
-                }))
-              }
-              disabled={record.pending || !draft.statusBuilderEnabled}
-              aria-disabled={record.pending || !draft.statusBuilderEnabled}
-            />
-            {draft.statusBuilderAudienceJids.length > 0 ? (
-              <div className="stack compact">
-                {draft.statusBuilderAudienceJids.map((jid) => (
-                  <div key={jid} className="queue-item">
-                    <p className="queue-body">{jid}</p>
-                    <div className="queue-actions">
-                      <button
-                        type="button"
-                        className="btn btn-ghost"
-                        onClick={() => removeStatusAudience(jid)}
-                        disabled={record.pending || !draft.statusBuilderEnabled}
-                        aria-disabled={record.pending || !draft.statusBuilderEnabled}
-                      >
-                        Remove
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : null}
-          </label>
+          <RecipientPickerField
+            label={draft.statusPostAudienceMode === "manual_allowlist" ? "Status audience" : "Trend sampling audience"}
+            helper={
+              draft.statusPostAudienceMode === "manual_allowlist"
+                ? "Used for trend sampling and status allowlist delivery."
+                : "Optional. Delivery still follows your WhatsApp status privacy setting."
+            }
+            contacts={knownContacts}
+            selectedJids={draft.statusBuilderAudienceJids}
+            disabled={record.pending || !draft.statusBuilderEnabled}
+            contactsLoading={contactsLoading}
+            addPlaceholder="Add from previous contacts"
+            inputPlaceholder="Paste contact addresses"
+            emptyLabel="No audience contacts selected."
+            onAdd={addStatusAudience}
+            onRemove={removeStatusAudience}
+          />
         </div>
       </article>
           </>
@@ -3873,66 +4050,112 @@ export function LiveSettings() {
         {showPersonality ? (
           <article className="panel-card">
         <h3>Personality Profiles</h3>
+        <p className="queue-meta">Profiles are reusable voices. Pick one to edit, or make a new one for a different kind of conversation.</p>
         {profilesLoading ? (
           <LoadingBlock label="Loading personality profiles…" rows={4} />
         ) : profiles.length > 0 ? (
-          <div className="stack compact">
-            <div className="personality-config-block">
-              <p className="queue-meta">Profiles are global across all conversations.</p>
-              <label className="setup-input-group">
-                <span className="queue-meta">Profile to Edit</span>
-                <select value={selectedEditorSlug} onChange={(event) => setEditorSlug(event.target.value)}>
-                  {profiles.map((profile) => (
-                    <option key={profile.slug} value={profile.slug}>
-                      {profile.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
+          <div className="personality-settings-flow">
+            <div className="personality-profile-picker" aria-label="Choose a personality profile">
+              <div className="personality-section-head">
+                <div>
+                  <h3>Choose a profile</h3>
+                  <p className="queue-meta">Select the voice you want to inspect or edit.</p>
+                </div>
+              </div>
+              <div className="personality-profile-list">
+                {profiles.map((profile) => {
+                  const selected = profile.slug === selectedEditorSlug;
+                  return (
+                    <button
+                      key={profile.slug}
+                      type="button"
+                      className={`personality-profile-option ${selected ? "personality-profile-option-active" : ""}`}
+                      aria-pressed={selected}
+                      onClick={() => setEditorSlug(profile.slug)}
+                    >
+                      <span>
+                        <strong>{profile.name}</strong>
+                        <small>{profile.description || "No description yet."}</small>
+                      </span>
+                      <em>{profile.isDefault ? "Default" : "Custom"}</em>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
 
-            {selectedEditorProfile ? (
-              <ProfileEditorForm
-                key={`${selectedEditorProfile.slug}:${selectedEditorProfile.updatedAt || 0}`}
-                profile={selectedEditorProfile}
-                pending={profileRecord.pending}
-                error={profileRecord.error}
-                onSave={saveProfile}
-              />
-            ) : null}
+            <div className="personality-editor-pane">
+              {selectedEditorProfile ? (
+                <>
+                  <div className="personality-selected-summary">
+                    <div>
+                      <p className="settings-eyebrow">Selected profile</p>
+                      <h3>{selectedEditorProfile.name}</h3>
+                      <p className="queue-meta">{selectedEditorProfile.description || "Add a short note so this profile is easy to recognize."}</p>
+                    </div>
+                    <dl>
+                      <div>
+                        <dt>Short ID</dt>
+                        <dd>{selectedEditorProfile.slug}</dd>
+                      </div>
+                      <div>
+                        <dt>Strength</dt>
+                        <dd>{Math.round(clamp01(selectedEditorProfile.defaultIntensity) * 100)}%</dd>
+                      </div>
+                    </dl>
+                  </div>
 
-            {selectedEditorProfile && !selectedEditorProfile.isDefault ? (
-              <button
-                type="button"
-                className="btn btn-ghost"
-                onClick={() => removeProfile(selectedEditorProfile.slug)}
-                disabled={profileRecord.pending}
-                aria-disabled={profileRecord.pending}
-              >
-                Delete Profile
-              </button>
-            ) : null}
+                  <ProfileEditorForm
+                    key={`${selectedEditorProfile.slug}:${selectedEditorProfile.updatedAt || 0}`}
+                    profile={selectedEditorProfile}
+                    pending={profileRecord.pending}
+                    error={profileRecord.error}
+                    onSave={saveProfile}
+                  />
 
-            <div className="personality-config-block">
-              <h3>Create Profile</h3>
+                  <div className="personality-secondary-actions">
+                    {selectedEditorProfile.isDefault ? (
+                      <p className="queue-meta">Default profiles stay available so you always have a safe fallback.</p>
+                    ) : (
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        onClick={() => removeProfile(selectedEditorProfile.slug)}
+                        disabled={profileRecord.pending}
+                        aria-disabled={profileRecord.pending}
+                      >
+                        Delete this custom profile
+                      </button>
+                    )}
+                  </div>
+                </>
+              ) : null}
+            </div>
+
+            <details className="personality-config-block personality-create-panel">
+              <summary>
+                <span>Make a new profile</span>
+                <small>Use this for a different voice, audience, or situation.</small>
+              </summary>
               <label className="setup-input-group">
-                <span className="queue-meta">Slug</span>
+                <span className="queue-meta">Short ID</span>
                 <input value={newProfileSlug} onChange={(event) => setNewProfileSlug(event.target.value)} placeholder="family_warm" />
+                <span className="queue-meta">Lowercase words with underscores work best. You will not need this day to day.</span>
               </label>
               <label className="setup-input-group">
                 <span className="queue-meta">Name</span>
                 <input value={newProfileName} onChange={(event) => setNewProfileName(event.target.value)} placeholder="Family Warm" />
               </label>
               <label className="setup-input-group">
-                <span className="queue-meta">Description</span>
+                <span className="queue-meta">When to use it</span>
                 <input value={newProfileDescription} onChange={(event) => setNewProfileDescription(event.target.value)} placeholder="Gentle and caring." />
               </label>
               <label className="setup-input-group">
-                <span className="queue-meta">Prompt</span>
+                <span className="queue-meta">How replies should sound</span>
                 <textarea rows={3} value={newProfilePrompt} onChange={(event) => setNewProfilePrompt(event.target.value)} />
               </label>
               <label className="setup-input-group">
-                <span className="queue-meta">Default Intensity: {Math.round(newProfileIntensity * 100)}%</span>
+                <span className="queue-meta">Style strength: {Math.round(newProfileIntensity * 100)}%</span>
                 <input
                   type="range"
                   min="0"
@@ -3949,12 +4172,15 @@ export function LiveSettings() {
                 disabled={profileRecord.pending || !newProfileSlug.trim() || !newProfileName.trim() || !newProfilePrompt.trim()}
                 aria-disabled={profileRecord.pending || !newProfileSlug.trim() || !newProfileName.trim() || !newProfilePrompt.trim()}
               >
-                Create Profile
+                Create profile
               </button>
-            </div>
+            </details>
 
-            <div className="personality-config-block">
-              <h3>Profile Version History</h3>
+            <details className="personality-config-block personality-history-panel">
+              <summary>
+                <span>Previous saves</span>
+                <small>Restore an older version if a profile starts feeling off.</small>
+              </summary>
               <div className="stack">
                 {profileVersionsLoading ? <LoadingBlock label="Loading profile history…" rows={2} compact /> : null}
                 {(profileVersions || []).map((version) => (
@@ -3977,13 +4203,55 @@ export function LiveSettings() {
                   </div>
                 ))}
                 {profileVersions !== undefined && profileVersions.length === 0 ? (
-                  <p className="empty-line">No history entries yet.</p>
+                  <EmptyState
+                    variant="style"
+                    compact
+                    title="No history entries yet."
+                    description="Profile snapshots will appear here after saves so you can roll back."
+                  />
                 ) : null}
               </div>
-            </div>
+            </details>
           </div>
         ) : (
-          <p className="empty-line">No personality profiles configured yet.</p>
+          <div className="personality-settings-flow">
+            <EmptyState
+              variant="style"
+              title="No personality profiles yet."
+              description="Create one profile to save a clear voice for replies."
+            />
+            <details className="personality-config-block personality-create-panel" open>
+              <summary>
+                <span>Make your first profile</span>
+                <small>Start with a simple name and a few tone notes.</small>
+              </summary>
+              <label className="setup-input-group">
+                <span className="queue-meta">Short ID</span>
+                <input value={newProfileSlug} onChange={(event) => setNewProfileSlug(event.target.value)} placeholder="family_warm" />
+              </label>
+              <label className="setup-input-group">
+                <span className="queue-meta">Name</span>
+                <input value={newProfileName} onChange={(event) => setNewProfileName(event.target.value)} placeholder="Family Warm" />
+              </label>
+              <label className="setup-input-group">
+                <span className="queue-meta">When to use it</span>
+                <input value={newProfileDescription} onChange={(event) => setNewProfileDescription(event.target.value)} placeholder="Gentle and caring." />
+              </label>
+              <label className="setup-input-group">
+                <span className="queue-meta">How replies should sound</span>
+                <textarea rows={3} value={newProfilePrompt} onChange={(event) => setNewProfilePrompt(event.target.value)} />
+              </label>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={createProfile}
+                disabled={profileRecord.pending || !newProfileSlug.trim() || !newProfileName.trim() || !newProfilePrompt.trim()}
+                aria-disabled={profileRecord.pending || !newProfileSlug.trim() || !newProfileName.trim() || !newProfilePrompt.trim()}
+              >
+                Create profile
+              </button>
+            </details>
+          </div>
         )}
       </article>
         ) : null}
@@ -3991,127 +4259,180 @@ export function LiveSettings() {
         {showMedia ? (
           <article className="panel-card">
         <h3>Media Library</h3>
-        <p className="queue-meta">Upload sticker and meme assets for outbound use.</p>
-        <div className="stack compact">
-          <label className="setup-input-group">
-            <span className="queue-meta">Kind</span>
-            <select
-              value={assetKind}
-              onChange={(event) => setAssetKind(event.target.value === "meme" ? "meme" : "sticker")}
-              disabled={mediaRecord.pending}
-              aria-disabled={mediaRecord.pending}
-            >
-              <option value="sticker">Sticker</option>
-              <option value="meme">Meme</option>
-            </select>
-          </label>
-          <label className="setup-input-group">
-            <span className="queue-meta">Label</span>
-            <input
-              type="text"
-              value={assetLabel}
-              onChange={(event) => setAssetLabel(event.target.value)}
-              disabled={mediaRecord.pending}
-              aria-disabled={mediaRecord.pending}
-            />
-          </label>
-          <label className="setup-input-group">
-            <span className="queue-meta">Tags (comma separated)</span>
-            <input
-              type="text"
-              value={assetTags}
-              onChange={(event) => setAssetTags(event.target.value)}
-              disabled={mediaRecord.pending}
-              aria-disabled={mediaRecord.pending}
-            />
-          </label>
-          <label className="setup-input-group">
-            <span className="queue-meta">File</span>
-            <input
-              type="file"
-              accept="image/*,.webp"
-              onChange={(event: ChangeEvent<HTMLInputElement>) => setAssetFile(event.target.files?.[0] || null)}
-              disabled={mediaRecord.pending}
-              aria-disabled={mediaRecord.pending}
-            />
-          </label>
-          <button
-            type="button"
-            className="btn btn-primary"
-            onClick={uploadAsset}
-            disabled={mediaRecord.pending || !assetFile}
-            aria-disabled={mediaRecord.pending || !assetFile}
-          >
-            {mediaRecord.pending ? "Uploading..." : "Upload Asset"}
-          </button>
-          <div className="stack">
-            <div className="topbar-controls">
-              <h3>Suggested Merges</h3>
-              <label className="queue-meta" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                <input
-                  type="checkbox"
-                  checked={autoMergeSuggestionsEnabled}
-                  onChange={(event) => setAutoMergeSuggestionsEnabled(event.target.checked)}
-                  disabled={mediaRecord.pending}
-                  aria-disabled={mediaRecord.pending}
-                />
-                Auto-merge suggestions
-              </label>
-              <button
-                type="button"
-                className="btn btn-ghost"
-                onClick={() => mergeAllSuggestedPairs({ requireConfirm: true })}
-                disabled={mediaRecord.pending || suggestedMerges.length === 0}
-                aria-disabled={mediaRecord.pending || suggestedMerges.length === 0}
-              >
-                Merge All Suggestions
-              </button>
-            </div>
-            <p className="queue-meta">Suggestions are grouped by visual hash similarity (sticker appearance) or exact content hash match.</p>
-            {suggestedMergeGroups.map((group) => (
-              <div key={group.groupKey} className="stack compact">
-                <p className="queue-title">
-                  {group.label} · {group.items.length} pair{group.items.length === 1 ? "" : "s"}
-                </p>
-                {group.items.map((suggestion) => (
-                  <div key={suggestion.key} className="queue-item">
-                    <p className="queue-title">
-                      Merge {suggestion.sourceLabel} into {suggestion.targetLabel} ({suggestion.kind})
-                    </p>
-                    <p className="queue-meta">
-                      Similarity {Math.round(suggestion.score * 100)}%
-                      {suggestion.similaritySource === "visual_hash"
-                        ? suggestion.distanceBits !== undefined
-                          ? ` · visual hash distance ${suggestion.distanceBits} bits`
-                          : " · visual hash"
-                        : " · exact content hash"}
-                    </p>
-                    <div className="queue-actions">
-                      <button
-                        type="button"
-                        className="btn btn-ghost"
-                        onClick={() => mergeSuggestedPair(suggestion.sourceAssetId, suggestion.targetAssetId)}
-                        disabled={mediaRecord.pending}
-                        aria-disabled={mediaRecord.pending}
-                      >
-                        Merge Suggested Pair
-                      </button>
-                    </div>
-                  </div>
-                ))}
+        <p className="queue-meta">Add images that OdogwuHQ can use as stickers or memes. Keep names and tags simple so they are easy to choose later.</p>
+        <div className="media-settings-flow">
+          <aside className="media-upload-panel" aria-label="Add media">
+            <div className="personality-section-head">
+              <div>
+                <h3>Add media</h3>
+                <p className="queue-meta">Upload one sticker or meme at a time.</p>
               </div>
-            ))}
-            {!mediaAssetsLoading && curatedMediaAssets.length > 1 && suggestedMerges.length === 0 ? (
-              <p className="empty-line">No hash-similar merge suggestions yet.</p>
-            ) : null}
-            {autoMergeSuggestionsEnabled && suggestedMerges.length > 0 ? (
-              <p className="queue-meta">Auto-merge is ON. New hash-based suggestion batches merge automatically.</p>
-            ) : null}
-          </div>
-          <div className="media-settings-grid">
-            {mediaAssetsLoading ? <LoadingBlock label="Loading media assets…" rows={3} compact /> : null}
-            {curatedMediaAssets.map((asset) => (
-              <article key={asset._id} className="media-settings-card">
+            </div>
+            <label className="setup-input-group">
+              <span className="queue-meta">Type</span>
+              <SearchableSelect
+                value={assetKind}
+                onChange={(event) => setAssetKind(event.target.value === "meme" ? "meme" : "sticker")}
+                disabled={mediaRecord.pending}
+                aria-disabled={mediaRecord.pending}
+              >
+                <option value="sticker">Sticker</option>
+                <option value="meme">Meme</option>
+              </SearchableSelect>
+            </label>
+            <label className="setup-input-group">
+              <span className="queue-meta">Name</span>
+              <input
+                type="text"
+                value={assetLabel}
+                onChange={(event) => setAssetLabel(event.target.value)}
+                disabled={mediaRecord.pending}
+                aria-disabled={mediaRecord.pending}
+                placeholder={assetKind === "meme" ? "Side-eye reaction" : "Laughing sticker"}
+              />
+            </label>
+            <label className="setup-input-group">
+              <span className="queue-meta">Tags</span>
+              <input
+                type="text"
+                value={assetTags}
+                onChange={(event) => setAssetTags(event.target.value)}
+                disabled={mediaRecord.pending}
+                aria-disabled={mediaRecord.pending}
+                placeholder="funny, greeting, apology"
+              />
+              <span className="queue-meta">Separate tags with commas.</span>
+            </label>
+            <label className="setup-input-group">
+              <span className="queue-meta">Image file</span>
+              <input
+                type="file"
+                accept="image/*,.webp"
+                onChange={(event: ChangeEvent<HTMLInputElement>) => setAssetFile(event.target.files?.[0] || null)}
+                disabled={mediaRecord.pending}
+                aria-disabled={mediaRecord.pending}
+              />
+            </label>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={uploadAsset}
+              disabled={mediaRecord.pending || !assetFile}
+              aria-disabled={mediaRecord.pending || !assetFile}
+            >
+              {mediaRecord.pending ? "Adding..." : "Add to library"}
+            </button>
+          </aside>
+
+          <div className="media-library-pane">
+            <div className="media-library-summary">
+              <div>
+                <p className="settings-eyebrow">Library</p>
+                <h3>Your media</h3>
+                <p className="queue-meta">
+                  {curatedMediaAssets.length === 0
+                    ? "No stickers or memes yet."
+                    : `${enabledMediaCount} of ${curatedMediaAssets.length} available for replies.`}
+                </p>
+              </div>
+              <dl>
+                <div>
+                  <dt>Stickers</dt>
+                  <dd>{stickerCount}</dd>
+                </div>
+                <div>
+                  <dt>Memes</dt>
+                  <dd>{memeCount}</dd>
+                </div>
+              </dl>
+            </div>
+
+            <details className="media-cleanup-panel">
+              <summary>
+                <span>Duplicate cleanup</span>
+                <small>
+                  {suggestedMerges.length > 0
+                    ? `${suggestedMerges.length} possible duplicate${suggestedMerges.length === 1 ? "" : "s"} found.`
+                    : "Possible duplicates will appear here."}
+                </small>
+              </summary>
+              <div className="media-cleanup-actions">
+                <label className="queue-meta media-inline-check">
+                  <input
+                    type="checkbox"
+                    checked={autoMergeSuggestionsEnabled}
+                    onChange={(event) => setAutoMergeSuggestionsEnabled(event.target.checked)}
+                    disabled={mediaRecord.pending}
+                    aria-disabled={mediaRecord.pending}
+                  />
+                  Automatically merge future matches
+                </label>
+                {suggestedMerges.length > 0 ? (
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    onClick={() => mergeAllSuggestedPairs({ requireConfirm: true })}
+                    disabled={mediaRecord.pending}
+                    aria-disabled={mediaRecord.pending}
+                  >
+                    Merge all
+                  </button>
+                ) : null}
+              </div>
+              <p className="queue-meta">Matches are based on similar appearance or exact file content.</p>
+              {suggestedMergeGroups.map((group) => (
+                <div key={group.groupKey} className="stack compact">
+                  <p className="queue-title">
+                    {group.label} · {group.items.length} pair{group.items.length === 1 ? "" : "s"}
+                  </p>
+                  {group.items.map((suggestion) => (
+                    <div key={suggestion.key} className="queue-item">
+                      <p className="queue-title">
+                        Merge {suggestion.sourceLabel} into {suggestion.targetLabel} ({suggestion.kind})
+                      </p>
+                      <p className="queue-meta">
+                        Similarity {Math.round(suggestion.score * 100)}%
+                        {suggestion.similaritySource === "visual_hash"
+                          ? suggestion.distanceBits !== undefined
+                            ? ` · visual distance ${suggestion.distanceBits} bits`
+                            : " · visual match"
+                          : " · exact file match"}
+                      </p>
+                      <div className="queue-actions">
+                        <button
+                          type="button"
+                          className="btn btn-ghost"
+                          onClick={() => mergeSuggestedPair(suggestion.sourceAssetId, suggestion.targetAssetId)}
+                          disabled={mediaRecord.pending}
+                          aria-disabled={mediaRecord.pending}
+                        >
+                          Merge this pair
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ))}
+              {!mediaAssetsLoading && curatedMediaAssets.length > 1 && suggestedMerges.length === 0 ? (
+                <EmptyState
+                  variant="settings"
+                  compact
+                  title="No duplicate suggestions."
+                  description="This library looks clean right now."
+                />
+              ) : null}
+              {autoMergeSuggestionsEnabled && suggestedMerges.length > 0 ? (
+                <p className="queue-meta">Automatic cleanup is on for new matching batches.</p>
+              ) : null}
+            </details>
+
+            <div className="media-settings-grid">
+              {mediaAssetsLoading ? <LoadingBlock label="Loading media assets…" rows={3} compact /> : null}
+              {curatedMediaAssets.map((asset) => (
+                <article
+                  key={asset._id}
+                  className={`media-settings-card ${asset.enabled ? "" : "media-settings-card-disabled"}`}
+                >
                 <div className="media-settings-preview-shell">
                   {asset.fileUrl ? (
                     <a href={asset.fileUrl} target="_blank" rel="noreferrer" className="media-settings-preview-link" aria-label={`Open ${asset.label}`}>
@@ -4122,32 +4443,45 @@ export function LiveSettings() {
                     <p className="queue-meta media-settings-preview-empty">Preview unavailable.</p>
                   )}
                 </div>
-                <p className="queue-title">
-                  {asset.label} ({asset.kind})
-                </p>
-                <p className="queue-meta">
-                  {asset.enabled ? "Enabled" : "Disabled"} · {asset.tags.join(", ") || "No tags"}
-                </p>
-                {asset.contextSummary ? <p className="queue-meta">Context: {asset.contextSummary}</p> : null}
+                <div className="media-settings-card-body">
+                  <div className="media-settings-card-head">
+                    <div>
+                      <p className="queue-title">{asset.label}</p>
+                      <p className="queue-meta">{asset.kind === "sticker" ? "Sticker" : "Meme"}</p>
+                    </div>
+                    <span className={asset.enabled ? "media-status-pill" : "media-status-pill media-status-pill-muted"}>
+                      {asset.enabled ? "On" : "Off"}
+                    </span>
+                  </div>
+                  {asset.tags.length > 0 ? (
+                    <div className="media-tag-row" aria-label={`${asset.label} tags`}>
+                      {asset.tags.slice(0, 6).map((tag) => (
+                        <span key={tag}>{tag}</span>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="queue-meta">No tags yet.</p>
+                  )}
+                  {asset.contextSummary ? <p className="queue-meta">Use when: {asset.contextSummary}</p> : null}
                 {asset.contextUpdatedAt ? (
                   <p className="queue-meta">
-                    Context updated {formatDateTime(asset.contextUpdatedAt)}
+                    Notes updated {formatDateTime(asset.contextUpdatedAt)}
                     {asset.contextConfidence !== undefined ? ` · confidence ${Math.round(asset.contextConfidence * 100)}%` : ""}
                   </p>
                 ) : null}
 
                 {editingAssetId === asset._id ? (
-                  <div className="stack compact">
+                  <div className="media-asset-edit-panel">
                     <label className="setup-input-group">
-                      <span className="queue-meta">Label</span>
+                      <span className="queue-meta">Name</span>
                       <input value={editAssetLabel} onChange={(event) => setEditAssetLabel(event.target.value)} disabled={mediaRecord.pending} />
                     </label>
                     <label className="setup-input-group">
-                      <span className="queue-meta">Tags (comma or newline)</span>
+                      <span className="queue-meta">Tags</span>
                       <textarea rows={2} value={editAssetTags} onChange={(event) => setEditAssetTags(event.target.value)} disabled={mediaRecord.pending} />
                     </label>
                     <label className="setup-input-group">
-                      <span className="queue-meta">Context Summary</span>
+                      <span className="queue-meta">Use when</span>
                       <textarea
                         rows={2}
                         value={editContextSummary}
@@ -4156,7 +4490,7 @@ export function LiveSettings() {
                       />
                     </label>
                     <label className="setup-input-group">
-                      <span className="queue-meta">Context Tags</span>
+                      <span className="queue-meta">Context tags</span>
                       <textarea
                         rows={2}
                         value={editContextTags}
@@ -4165,7 +4499,7 @@ export function LiveSettings() {
                       />
                     </label>
                     <label className="setup-input-group">
-                      <span className="queue-meta">Good Triggers</span>
+                      <span className="queue-meta">Good moments</span>
                       <textarea
                         rows={2}
                         value={editContextTriggers}
@@ -4174,7 +4508,7 @@ export function LiveSettings() {
                       />
                     </label>
                     <label className="setup-input-group">
-                      <span className="queue-meta">Avoid Triggers</span>
+                      <span className="queue-meta">Avoid when</span>
                       <textarea
                         rows={2}
                         value={editContextAvoid}
@@ -4183,7 +4517,7 @@ export function LiveSettings() {
                       />
                     </label>
                     <label className="setup-input-group">
-                      <span className="queue-meta">Context Confidence (0-1)</span>
+                      <span className="queue-meta">Confidence (0-1)</span>
                       <input
                         type="number"
                         min={0}
@@ -4225,7 +4559,7 @@ export function LiveSettings() {
                     disabled={mediaRecord.pending}
                     aria-disabled={mediaRecord.pending}
                   >
-                    {editingAssetId === asset._id ? "Close Edit" : "Edit"}
+                    {editingAssetId === asset._id ? "Close" : "Edit notes"}
                   </button>
                   <button
                     type="button"
@@ -4235,6 +4569,7 @@ export function LiveSettings() {
                         mediaKey,
                         async () => {
                           await toggleAsset({
+                            ...tenantScope,
                             assetId: asset._id as Id<"mediaAssets">,
                             enabled: !asset.enabled,
                           });
@@ -4248,7 +4583,7 @@ export function LiveSettings() {
                     disabled={mediaRecord.pending}
                     aria-disabled={mediaRecord.pending}
                   >
-                    {asset.enabled ? "Disable" : "Enable"}
+                    {asset.enabled ? "Turn off" : "Turn on"}
                   </button>
                   <button
                     type="button"
@@ -4261,6 +4596,7 @@ export function LiveSettings() {
                         mediaKey,
                         async () => {
                           await deleteAsset({
+                            ...tenantScope,
                             assetId: asset._id as Id<"mediaAssets">,
                           });
                           if (editingAssetId === asset._id) {
@@ -4279,14 +4615,36 @@ export function LiveSettings() {
                     Delete
                   </button>
                 </div>
+                </div>
 
               </article>
-            ))}
-            {!mediaAssetsLoading && curatedMediaAssets.length === 0 ? <p className="empty-line">No media assets yet.</p> : null}
+              ))}
+              {!mediaAssetsLoading && curatedMediaAssets.length === 0 ? (
+                <EmptyState
+                  variant="media"
+                  title="No media assets yet."
+                  description="Add a sticker or meme and it will appear here."
+                />
+              ) : null}
+            </div>
           </div>
         </div>
       </article>
         ) : null}
+
+        {showStyle ? (
+          <div className="settings-embedded-section">
+            <LiveStyleLab />
+          </div>
+        ) : null}
+
+        {showRules ? (
+          <div className="settings-embedded-section">
+            <LiveRules />
+          </div>
+        ) : null}
+          </div>
+        </div>
       </div>
     </section>
   );

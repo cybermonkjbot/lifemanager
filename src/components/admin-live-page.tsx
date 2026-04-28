@@ -12,6 +12,8 @@ type AdminLivePageProps = {
   title: string;
   nextPath: string;
   children: ReactNode;
+  eyebrow?: string;
+  description?: string;
   showLogWatcher?: boolean;
   logWatcherDefaultExpanded?: boolean;
 };
@@ -20,6 +22,8 @@ export async function AdminLivePage({
   title,
   nextPath,
   children,
+  eyebrow = "Admin Operations",
+  description,
   showLogWatcher = false,
   logWatcherDefaultExpanded = true,
 }: AdminLivePageProps) {
@@ -33,10 +37,12 @@ export async function AdminLivePage({
         {masqueradeSession ? <AdminMasqueradeBanner session={masqueradeSession} /> : null}
         <header className="admin-console-header">
           <div>
+            <p className="admin-kicker">{eyebrow}</p>
             <h1>{title}</h1>
+            {description ? <p>{description}</p> : null}
           </div>
         </header>
-        {children}
+        <section className="admin-operations-surface">{children}</section>
         {showLogWatcher ? <LogWatcher defaultExpanded={logWatcherDefaultExpanded} /> : null}
       </ConvexAppProvider>
     </AdminConsoleShell>

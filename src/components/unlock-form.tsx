@@ -142,10 +142,9 @@ export function UnlockForm(props: UnlockFormProps) {
       <input type="hidden" name="next" value={props.next} />
       <input type="hidden" name="email" value={normalizedEmail} />
       {props.hosted ? (
-        <label className="instance-lock-field">
-          <span className="queue-meta">Email</span>
-          <input type="email" value={normalizedEmail} readOnly aria-readonly="true" />
-        </label>
+        <div className="instance-lock-account" aria-label={`Account ${normalizedEmail}`}>
+          <strong>{normalizedEmail}</strong>
+        </div>
       ) : null}
       <label className="instance-lock-field">
         <span className="queue-meta">PIN</span>
@@ -173,7 +172,7 @@ export function UnlockForm(props: UnlockFormProps) {
         {props.hosted ? (
           <a
             className={`btn btn-ghost${submitting ? " btn-disabled" : ""}`}
-            href={`/unlock?next=${encodeURIComponent(props.next)}`}
+            href={`/unlock?next=${encodeURIComponent(props.next)}&change_email=1`}
             aria-disabled={submitting}
           >
             Change email

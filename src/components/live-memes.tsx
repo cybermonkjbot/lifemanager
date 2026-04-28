@@ -1,8 +1,11 @@
 "use client";
 
 import { ActionNotices } from "@/components/action-notices";
+import { SearchableSelect } from "@/components/app-ui";
+import { EmptyState } from "@/components/empty-state";
 import { LoadingBlock } from "@/components/loading-state";
 import { SharedMediaPreview } from "@/components/media-preview";
+import { useTenantScopeArgs } from "@/components/tenant-scope-provider";
 import { UIModal } from "@/components/ui-modal";
 import { formatDateTime, trim } from "@/lib/format";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
@@ -10,6 +13,7 @@ import type { MediaKind } from "@/lib/ui/media";
 import { api } from "../../convex/_generated/api";
 import { useQuery } from "convex/react";
 import { FormEvent, useMemo, useState } from "react";
+import Link from "next/link";
 
 type MemeAsset = {
   _id: string;
@@ -66,6 +70,7 @@ async function readApiError(response: Response) {
 }
 
 export function LiveMemes() {
+  const tenantScope = useTenantScopeArgs();
   const { runAction, getRecord, notices, dismissNotice } = useActionStateRegistry();
   const [prompt, setPrompt] = useState("");
   const [label, setLabel] = useState("");
@@ -73,8 +78,8 @@ export function LiveMemes() {
   const [preview, setPreview] = useState<MemePreview | null>(null);
   const [lastGenerated, setLastGenerated] = useState<GeneratedMemeResponse | null>(null);
 
-  const contacts = useQuery(api.threads.listContacts, { limit: 300 }) as KnownContact[] | undefined;
-  const memeAssets = useQuery(api.media.listAssets, { kind: "meme" }) as MemeAsset[] | undefined;
+  const contacts = useQuery(api.threads.listContacts, { ...tenantScope, limit: 300 }) as KnownContact[] | undefined;
+  const memeAssets = useQuery(api.media.listAssets, { ...tenantScope, kind: "meme" }) as MemeAsset[] | undefined;
 
   const contactById = useMemo(() => {
     return new Map((contacts || []).map((item) => [item._id, item]));
@@ -127,7 +132,7 @@ export function LiveMemes() {
   };
 
   return (
-    <section className="panel-grid two-col">
+    <section className="panel-grid two-col memes-workspace">
       <article className="panel-card">
         <ActionNotices notices={notices} onDismiss={dismissNotice} />
         <h3>Manual Meme Generator</h3>
@@ -165,7 +170,7 @@ export function LiveMemes() {
 
           <label className="stack compact">
             <span className="queue-meta">Thread context (optional)</span>
-            <select
+            <SearchableSelect
               value={threadId}
               onChange={(event) => setThreadId(event.target.value)}
               disabled={record.pending || contactsLoading}
@@ -177,7 +182,7 @@ export function LiveMemes() {
                   {(contact.title?.trim() || contact.jid).slice(0, 120)}
                 </option>
               ))}
-            </select>
+            </SearchableSelect>
           </label>
 
           <button type="submit" className="btn btn-primary" disabled={!canGenerate} aria-disabled={!canGenerate}>
@@ -229,7 +234,12 @@ export function LiveMemes() {
             </div>
           </div>
         ) : (
-          <p className="empty-line">Generate a meme to preview the latest output before using it.</p>
+          <EmptyState
+            variant="media"
+            compact
+            title="No generated preview yet."
+            description="Create a meme to preview the latest output before using it."
+          />
         )}
       </article>
 
@@ -238,9 +248,18 @@ export function LiveMemes() {
         <p className="queue-meta">
           Showing {generatedMemes.length} generated meme{generatedMemes.length === 1 ? "" : "s"} from your stored assets.
         </p>
+        <p className="queue-meta">
+          Meme availability, tags, and cleanup live in <Link href="/settings?section=media">Media Settings</Link>.
+        </p>
 
         {loading ? <LoadingBlock label="Loading generated memes..." rows={4} /> : null}
-        {!loading && generatedMemes.length === 0 ? <p className="empty-line">No generated meme assets have been saved yet.</p> : null}
+        {!loading && generatedMemes.length === 0 ? (
+          <EmptyState
+            variant="media"
+            title="No generated meme assets saved yet."
+            description="Generated meme assets will appear here after they are created."
+          />
+        ) : null}
 
         <div className="stack">
           {generatedMemes.map((asset) => {
@@ -269,9 +288,7 @@ export function LiveMemes() {
                   />
                   <div className="media-dashboard-content">
                     <p className="queue-title">{asset.label || "Generated meme"}</p>
-                    <p className="queue-meta">
-                      {formatDateTime(asset.createdAt)} · {asset.enabled ? "Enabled" : "Disabled"}
-                    </p>
+                    <p className="queue-meta">{formatDateTime(asset.createdAt)}</p>
                     <p className="queue-meta">{asset.mimeType || "unknown mime type"}</p>
                     {sourceThread ? <p className="queue-meta">Thread: {(sourceThread.title?.trim() || sourceThread.jid).slice(0, 120)}</p> : null}
                     {asset.tags.length > 0 ? <p className="queue-meta">Tags: {asset.tags.join(", ")}</p> : null}
@@ -314,7 +331,12 @@ export function LiveMemes() {
             </a>
           </div>
         ) : (
-          <p className="empty-line">Meme preview unavailable.</p>
+          <EmptyState
+            variant="media"
+            compact
+            title="Meme preview unavailable."
+            description="The saved asset is present, but its preview URL is missing."
+          />
         )}
       </UIModal>
     </section>

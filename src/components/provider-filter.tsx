@@ -1,5 +1,6 @@
 "use client";
 
+import { useTenantScopeArgs } from "@/components/tenant-scope-provider";
 import { api } from "../../convex/_generated/api";
 import { useQuery } from "convex/react";
 import { useEffect } from "react";
@@ -19,7 +20,8 @@ export function ProviderFilter({
   label = "Provider filter",
   allLabel = "All",
 }: ProviderFilterProps) {
-  const instagramSetup = useQuery(api.system.setupStatus, { provider: "instagram" }) as
+  const tenantScope = useTenantScopeArgs();
+  const instagramSetup = useQuery(api.system.setupStatus, { ...tenantScope, provider: "instagram" }) as
     | {
         status?: string;
         hasAuth?: boolean;

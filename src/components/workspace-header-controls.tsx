@@ -1,5 +1,6 @@
 "use client";
 
+import { SessionExitModal } from "@/components/session-exit-control";
 import { UIModal } from "@/components/ui-modal";
 import { dashboardNavItems, publicDashboardNavItems } from "@/lib/ui/dashboard-nav";
 import Link from "next/link";
@@ -29,6 +30,7 @@ export function WorkspaceHeaderControls({
   const router = useRouter();
   const pathname = usePathname() || "/";
   const [menuOpen, setMenuOpen] = useState(false);
+  const [exitModalOpen, setExitModalOpen] = useState(false);
   const visibleItems = items;
 
   const onBack = () => {
@@ -82,13 +84,19 @@ export function WorkspaceHeaderControls({
               </Link>
             );
           })}
-          <form action="/api/auth/pin/logout" method="post">
-            <button type="submit" className="workspace-modal-link workspace-modal-button">
-              <span>Log out</span>
-            </button>
-          </form>
+          <button
+            type="button"
+            className="workspace-modal-link workspace-modal-button"
+            onClick={() => {
+              setMenuOpen(false);
+              setExitModalOpen(true);
+            }}
+          >
+            <span>Log out</span>
+          </button>
         </div>
       </UIModal>
+      <SessionExitModal open={exitModalOpen} onClose={() => setExitModalOpen(false)} />
     </>
   );
 }

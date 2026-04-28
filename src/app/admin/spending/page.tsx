@@ -22,7 +22,12 @@ export default async function AdminSpendingPage() {
     Number.isFinite(inputRate) && Number.isFinite(outputRate) && (inputRate as number) >= 0 && (outputRate as number) >= 0;
 
   return (
-    <AdminLivePage title="Spending" nextPath="/admin/spending">
+    <AdminLivePage
+      title="Platform Spending"
+      nextPath="/admin/spending"
+      eyebrow="Cost Operations"
+      description="Monitor Azure AI usage, pricing coverage, run cost, and token trends for admin review."
+    >
       <LiveSpending
         initialInputRatePer1MUsd={hasEnvPricing ? (inputRate as number) : undefined}
         initialOutputRatePer1MUsd={hasEnvPricing ? (outputRate as number) : undefined}

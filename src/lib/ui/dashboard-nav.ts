@@ -15,9 +15,9 @@ export const dashboardNavItems: DashboardNavItem[] = [
     primary: true,
   },
   {
-    href: "/queue",
-    label: "Queue",
-    description: "Review drafts, follow-ups, tasks, and safety flags.",
+    href: "/review",
+    label: "Review",
+    description: "Approve replies, confirm follow-ups, clear tasks, and check safety holds.",
     primary: true,
   },
   {
@@ -46,14 +46,8 @@ export const dashboardNavItems: DashboardNavItem[] = [
   },
   {
     href: "/backlog",
-    label: "Backlog",
-    description: "Triage stale or unresolved threads before reconnecting.",
-    primary: true,
-  },
-  {
-    href: "/followups",
-    label: "Follow-ups",
-    description: "Confirm, reschedule, or dismiss conversation reminders.",
+    label: "Catch Up",
+    description: "Pick up stale conversations before they become review items.",
     primary: true,
   },
   {
@@ -63,19 +57,9 @@ export const dashboardNavItems: DashboardNavItem[] = [
     runtimeControlOnly: true,
   },
   {
-    href: "/style-lab",
-    label: "Style Lab",
-    description: "Tune voice matching, persona packs, and rollback history.",
-  },
-  {
-    href: "/rules",
-    label: "Rules",
-    description: "Set ignore lists, boundaries, and send constraints.",
-  },
-  {
     href: "/settings",
     label: "Settings",
-    description: "Adjust runtime defaults and automation thresholds.",
+    description: "Adjust runtime, automation, style, media, and rules.",
   },
 ];
 

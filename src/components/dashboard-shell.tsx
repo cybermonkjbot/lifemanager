@@ -7,18 +7,22 @@ import { LogWatcher } from "@/components/log-watcher";
 import { RuntimeStateOverlay } from "@/components/runtime-state-overlay";
 import { ShellControlsModal } from "@/components/shell-controls-modal";
 import { ShellNavigation } from "@/components/shell-navigation";
+import { SetupPreparationProgress } from "@/components/setup-preparation-progress";
 import { SubscriptionTrialBanner } from "@/components/subscription-trial-banner";
+import { TenantScopeProvider } from "@/components/tenant-scope-provider";
 import { isInstancePinEnabled } from "@/lib/instance-pin";
 import { isElectronEnvironment } from "@/lib/runtime-env";
 import { SetupNotice } from "@/components/setup-notice";
 import { dashboardNavItems } from "@/lib/ui/dashboard-nav";
 import { WorkspaceHeaderControls } from "@/components/workspace-header-controls";
 import { BrandLogo } from "@/components/brand-logo";
+import { SessionExitControl } from "@/components/session-exit-control";
 import { convexRefs } from "@/lib/convex-refs";
 import { createConvexClient } from "@/lib/convex-server";
 import { readLocalInstanceConfig } from "@/lib/instance-config";
 import { getTenantSessionCookieName, verifyTenantSessionToken } from "@/lib/tenant-session";
 import { cookies } from "next/headers";
+import Link from "next/link";
 import { ReactNode } from "react";
 
 type BillingBannerStatus = "trialing" | "active" | "past_due" | "paused" | "canceled" | "self_hosted" | "unknown";
@@ -104,6 +108,7 @@ export async function DashboardShell({
     ? null
     : readAdminMasqueradeToken(cookieStore.get(getAdminMasqueradeCookieName())?.value);
   const hostedTenant = localConfig?.preferences.serviceMode === "hosted";
+  const tenantScopeId = masqueradeSession?.tenantId || (hostedTenant ? localConfig?.account?.tenantId : "") || undefined;
   const canManageRuntime =
     !hostedTenant ||
     tenantSession?.role === "owner" ||
@@ -117,59 +122,67 @@ export async function DashboardShell({
   return (
     <div className="shell-root">
       <ConvexAppProvider convexUrl={convexUrl}>
-        {realtimeEnabled ? <RuntimeStateOverlay /> : null}
-        <div className="shell-main-wrap">
-          {masqueradeSession ? <AdminMasqueradeBanner session={masqueradeSession} /> : null}
-          {!hideShellChrome ? (
-            <>
-              <header className="shell-topbar">
-                <div className="brand-block">
-                  <BrandLogo priority />
-                </div>
-                <div className="shell-topbar-actions">
-                  {pinEnabled ? (
-                    <form action="/api/auth/pin/logout" method="post">
-                      <button type="submit" className="btn btn-ghost">
-                        Log out
-                      </button>
-                    </form>
-                  ) : null}
-                  {canManageRuntime ? <ShellControlsModal realtimeEnabled={realtimeEnabled} fallbackPaused={autonomyPaused} /> : null}
-                  <WorkspaceHeaderControls className="shell-menu-mobile" items={visibleNavItems} showMenu />
-                </div>
-              </header>
-
-              <ShellNavigation items={visibleNavItems} />
-            </>
-          ) : null}
-
-          <main className="shell-main">
-            {!hideViewHeader ? (
+        <TenantScopeProvider tenantId={tenantScopeId}>
+          {realtimeEnabled ? <RuntimeStateOverlay canManageRuntime={canManageRuntime} /> : null}
+          <div className="shell-main-wrap">
+            {masqueradeSession ? <AdminMasqueradeBanner session={masqueradeSession} /> : null}
+            {!hideShellChrome ? (
               <>
-                <header className="view-header">
-                  <div className="view-header-main">
-                    <h1 className="panel-title">{title}</h1>
-                    <p className="panel-subtitle">{subtitle}</p>
+                <header className="shell-topbar">
+                  <div className="brand-block">
+                    <BrandLogo priority />
                   </div>
-                  <WorkspaceHeaderControls items={visibleNavItems} />
+                  <div className="shell-topbar-actions">
+                    {pinEnabled ? (
+                      <SessionExitControl />
+                    ) : null}
+                    <Link href="/code" className="btn btn-ghost btn-icon" aria-label="Open Code Lab" title="Open Code Lab">
+                      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                        <path
+                          fill="currentColor"
+                          d="M4 5.75A1.75 1.75 0 0 1 5.75 4h12.5A1.75 1.75 0 0 1 20 5.75v12.5A1.75 1.75 0 0 1 18.25 20H5.75A1.75 1.75 0 0 1 4 18.25V5.75Zm1.75-.25a.25.25 0 0 0-.25.25v12.5c0 .138.112.25.25.25h12.5a.25.25 0 0 0 .25-.25V5.75a.25.25 0 0 0-.25-.25H5.75Zm2.22 4.03a.75.75 0 0 1 1.06 0l2 2a.75.75 0 0 1 0 1.06l-2 2a.75.75 0 1 1-1.06-1.06L9.44 12l-1.47-1.47a.75.75 0 0 1 0-1.06Zm4.28 4.72a.75.75 0 0 1 .75-.75h3a.75.75 0 0 1 0 1.5h-3a.75.75 0 0 1-.75-.75Z"
+                        />
+                      </svg>
+                      <span className="sr-only">Open Code Lab</span>
+                    </Link>
+                    {canManageRuntime ? <ShellControlsModal realtimeEnabled={realtimeEnabled} fallbackPaused={autonomyPaused} /> : null}
+                    <WorkspaceHeaderControls className="shell-menu-mobile" items={visibleNavItems} showMenu />
+                  </div>
                 </header>
-                <h2 className="sr-only">Page sections</h2>
+
+                <ShellNavigation items={visibleNavItems} />
+                <SetupPreparationProgress variant="compact" />
               </>
             ) : null}
-            <div className="shell-view-scroll">
-              {!realtimeEnabled ? <SetupNotice error={null} /> : null}
-              {billingBanner ? (
-                <SubscriptionTrialBanner
-                  billingStatus={billingBanner.billingStatus}
-                  trialEndsAt={billingBanner.trialEndsAt}
-                  plan={billingBanner.plan}
-                />
+
+            <main className="shell-main">
+              {!hideViewHeader ? (
+                <>
+                  <header className="view-header">
+                    <div className="view-header-main">
+                      <h1 className="panel-title">{title}</h1>
+                      <p className="panel-subtitle">{subtitle}</p>
+                    </div>
+                    <WorkspaceHeaderControls items={visibleNavItems} />
+                  </header>
+                  <h2 className="sr-only">Page sections</h2>
+                </>
               ) : null}
-              {children}
-            </div>
-          </main>
-          {showLogWatcher ? <LogWatcher defaultExpanded={logWatcherDefaultExpanded} /> : null}
-        </div>
+              <div className="shell-view-scroll">
+                {!realtimeEnabled ? <SetupNotice error={null} /> : null}
+                {billingBanner ? (
+                  <SubscriptionTrialBanner
+                    billingStatus={billingBanner.billingStatus}
+                    trialEndsAt={billingBanner.trialEndsAt}
+                    plan={billingBanner.plan}
+                  />
+                ) : null}
+                {children}
+              </div>
+            </main>
+            {showLogWatcher ? <LogWatcher defaultExpanded={logWatcherDefaultExpanded} /> : null}
+          </div>
+        </TenantScopeProvider>
       </ConvexAppProvider>
     </div>
   );
