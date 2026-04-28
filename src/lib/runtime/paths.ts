@@ -5,5 +5,5 @@ export function getRuntimeDataDir() {
 }
 
 export function getRuntimeDataPath(...segments: string[]) {
-  return join(getRuntimeDataDir(), ...segments);
+  return join(/* turbopackIgnore: true */ getRuntimeDataDir(), ...segments);
 }

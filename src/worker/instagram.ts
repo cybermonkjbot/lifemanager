@@ -332,6 +332,22 @@ async function run() {
         }
       : {};
 
+  if (!selfHosted) {
+    if (!tenantId || !connectorTokenHash) {
+      logger.warn("Hosted worker missing tenant connector credentials; exiting before connecting Instagram.");
+      return;
+    }
+    const verifiedConnector = await convex
+      .mutation(convexRefs.tenantAccountsVerifyConnectorToken, {
+        tokenHash: connectorTokenHash,
+      })
+      .catch(() => null);
+    if (!verifiedConnector) {
+      logger.warn("Hosted worker connector is inactive or billing expired; exiting before connecting Instagram.");
+      return;
+    }
+  }
+
   const seenInboundIds = new Set<string>();
   const seenQueue: string[] = [];
   let processingInbox = false;

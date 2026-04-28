@@ -1984,6 +1984,48 @@ async function run() {
           connectorTokenHash,
         }
       : {};
+  const selfControlAdminTenantIds = new Set(
+    [
+      process.env.ODOGWU_SELF_CONTROL_ADMIN_TENANT_IDS,
+      process.env.SLM_SELF_CONTROL_ADMIN_TENANT_IDS,
+      process.env.ODOGWU_ADMIN_TENANT_ID,
+    ]
+      .join(",")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean),
+  );
+  let initialSelfControlAccess:
+    | {
+        allowed: boolean;
+        reason: string;
+      }
+    | null = selfHosted ? { allowed: true, reason: "self_hosted" } : null;
+
+  if (!selfHosted) {
+    if (!tenantId || !connectorTokenHash) {
+      logger.warn("Hosted worker missing tenant connector credentials; exiting before connecting WhatsApp.");
+      return;
+    }
+    const verifiedConnector = await convex
+      .mutation(convexRefs.tenantAccountsVerifyConnectorToken, {
+        tokenHash: connectorTokenHash,
+      })
+      .catch(() => null);
+    if (!verifiedConnector) {
+      logger.warn("Hosted worker connector is inactive or billing expired; exiting before connecting WhatsApp.");
+      return;
+    }
+    initialSelfControlAccess = {
+      allowed: selfControlAdminTenantIds.has(tenantId) || verifiedConnector.canUseSelfControl === true,
+      reason: selfControlAdminTenantIds.has(tenantId)
+        ? "admin_tenant_env"
+        : verifiedConnector.canUseSelfControl === true
+          ? "admin_tenant"
+          : "not_admin_tenant",
+    };
+  }
+
   let isShuttingDown = false;
   let reconnectAttempts = 0;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -2325,6 +2367,8 @@ async function run() {
   const historyFetchStateByThread = new Map<string, { roundsUsed: number; lastFetchedAt: number; blockedUntil: number }>();
   const stickerContextPassInFlightByAsset = new Set<string>();
   const stickerContextSkipUntilByAsset = new Map<string, number>();
+  const avatarContextPassInFlightByAsset = new Set<string>();
+  const avatarContextSkipUntilByAsset = new Map<string, number>();
   const memePrewarmInFlightByThread = new Set<string>();
   const memePrewarmSkipUntilByThread = new Map<string, number>();
   const memeGenerationSkipUntilByThread = new Map<string, number>();
@@ -2336,8 +2380,10 @@ async function run() {
 const HEALTH_CACHE_TTL_MS = 1500;
 const ENABLED_ASSET_CACHE_TTL_MS = 12_000;
 const STICKER_CONTEXT_STALE_AFTER_MS = 30 * 24 * 60 * 60 * 1000;
+const AVATAR_CONTEXT_STALE_AFTER_MS = 90 * 24 * 60 * 60 * 1000;
 const STICKER_CONTEXT_PASS_INTERVAL_MS = 60_000;
 const STICKER_CONTEXT_FAILURE_RETRY_MS = 10 * 60 * 1000;
+const AMBIENT_MEMORY_SUFFICIENCY_FACTS = Math.round(clamp(Number(process.env.SLM_AMBIENT_MEMORY_SUFFICIENCY_FACTS || 10), 4, 30));
 const MEME_PREWARM_COOLDOWN_MS = 25 * 60 * 1000;
 const MEME_GENERATION_FAILURE_RETRY_MS = 10 * 60 * 1000;
 const MEDIA_ASSET_BUFFER_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -3000,6 +3046,27 @@ function resolveTextEmojiAllowlist() {
     };
   };
 
+  const buildAvatarContextFromDescription = (description: string, label?: string, tags?: string[]) => {
+    const merged = [description, label || "", ...(tags || [])].filter(Boolean).join(" ");
+    const words = tokenizeForMatch(merged);
+    const contextTags = uniqueTrimmed([
+      "avatar",
+      "profile-picture",
+      ...words.filter((word) =>
+        /^(portrait|selfie|outfit|style|travel|beach|gym|sport|music|car|work|formal|casual|art|pet|food|nature)$/.test(word),
+      ),
+      ...(tags || []).map((tag) => tag.toLowerCase()),
+    ], 16);
+
+    return {
+      summary: compactLogText(description || "Profile picture visual cue.", 220),
+      contextTags,
+      triggers: uniqueTrimmed(["profile picture", "visual context", ...contextTags], 16),
+      avoid: ["sensitive identity claims", "hard personality claims"],
+      confidence: description ? 0.58 : 0.4,
+    };
+  };
+
   const ensureStickerContextForAsset = async (assetId: string) => {
     if (!assetId || stickerContextPassInFlightByAsset.has(assetId)) {
       return;
@@ -3114,7 +3181,110 @@ function resolveTextEmojiAllowlist() {
   const getEnabledStickerAssets = async () => {
     return await resolveTtlCache(enabledStickerCache, ENABLED_ASSET_CACHE_TTL_MS, async () => {
       return (await convex.query(convexRefs.mediaGetEnabledByKind, { kind: "sticker" }).catch(() => [])) as StickerAssetSnapshot[];
-    });
+      });
+  };
+
+  const hasEnoughContactMemoryForAmbientSkip = async (threadId?: string) => {
+    if (!threadId) {
+      return false;
+    }
+    const output = (await convex
+      .query(convexRefs.chatContactMemoryFactsList, {
+        threadId: threadId as Id<"threads">,
+        limit: AMBIENT_MEMORY_SUFFICIENCY_FACTS,
+      })
+      .catch(() => null)) as ContactFactsSnapshot;
+    return ((output?.facts || []).length || 0) >= AMBIENT_MEMORY_SUFFICIENCY_FACTS;
+  };
+
+  const ensureAvatarContextForAsset = async (assetId: string, threadId?: string) => {
+    if (!assetId || avatarContextPassInFlightByAsset.has(assetId)) {
+      return;
+    }
+    const blockedUntil = avatarContextSkipUntilByAsset.get(assetId) || 0;
+    if (blockedUntil > Date.now()) {
+      return;
+    }
+
+    avatarContextPassInFlightByAsset.add(assetId);
+    try {
+      if (await hasEnoughContactMemoryForAmbientSkip(threadId)) {
+        return;
+      }
+      const asset = (await convex.query(convexRefs.mediaGetAssetDownloadUrl, {
+        assetId,
+      })) as
+        | null
+        | {
+            assetId: string;
+            kind: "image";
+            mimeType: string;
+            label: string;
+            url: string;
+            contextUpdatedAt?: number;
+          };
+      if (!asset || asset.kind !== "image" || !asset.url) {
+        return;
+      }
+      if ((asset.contextUpdatedAt || 0) > Date.now() - AVATAR_CONTEXT_STALE_AFTER_MS) {
+        return;
+      }
+
+      const response = await fetch(asset.url);
+      if (!response.ok) {
+        throw new Error(`Failed to download avatar asset ${assetId}: ${response.status}`);
+      }
+      const avatarBytes = Buffer.from(await response.arrayBuffer());
+      if (avatarBytes.length === 0) {
+        throw new Error(`Avatar asset ${assetId} is empty.`);
+      }
+
+      const runtimeSettings = await getRuntimeSettings();
+      const visual = await describeInboundImageWithFallback({
+        imageBytes: avatarBytes,
+        mimeType: asset.mimeType || "image/jpeg",
+        caption: asset.label,
+        runtime: {
+          temperature: runtimeSettings?.aiTemperature,
+          maxOutputTokens: Math.min(runtimeSettings?.aiMaxOutputTokens ?? 180, 180),
+          maxReplyChars: Math.min(runtimeSettings?.aiMaxReplyChars ?? 280, 280),
+          fallbackMode: runtimeSettings?.aiFallbackMode,
+        },
+      });
+
+      const context = buildAvatarContextFromDescription(visual.description, asset.label, ["avatar", "profile-picture"]);
+      await convex
+        .mutation(convexRefs.mediaUpsertAssetContext, {
+          assetId: asset.assetId as Id<"mediaAssets">,
+          contextSummary: context.summary,
+          contextTags: context.contextTags,
+          contextTriggers: context.triggers,
+          contextAvoid: context.avoid,
+          contextConfidence: context.confidence,
+          contextSource: visual.provider === "azure" ? "vision_ai" : "heuristic",
+        })
+        .catch(() => undefined);
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: "media.avatar.context_passed",
+          detail: compactLogText(`asset=${assetId} source=${visual.provider} summary=${context.summary}`, 280),
+        })
+        .catch(() => undefined);
+      avatarContextSkipUntilByAsset.delete(assetId);
+    } catch (error) {
+      const err = error instanceof Error ? error.message : String(error);
+      avatarContextSkipUntilByAsset.set(assetId, Date.now() + STICKER_CONTEXT_FAILURE_RETRY_MS);
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: "media.avatar.context_pass_error",
+          detail: compactLogText(`asset=${assetId} ${err}`, 280),
+        })
+        .catch(() => undefined);
+    } finally {
+      avatarContextPassInFlightByAsset.delete(assetId);
+    }
   };
 
   const pickBestStickerAsset = async (inboundText: string) => {
@@ -3586,7 +3756,14 @@ function resolveTextEmojiAllowlist() {
   const quietHoursMutedByThread = new Map<string, number>();
   const quietHoursMuteTouchedAtByThread = new Map<string, number>();
   const mediaAssetIdByKey = new Map<string, Id<"mediaAssets">>();
+  const avatarAttemptByThreadKey = new Map<string, number>();
+  const avatarRefreshInFlightByThreadKey = new Set<string>();
   const inboundImageVisionLastSentAtByThread = new Map<string, number>();
+  const AVATAR_REFRESH_INTERVAL_MS = Math.round(clamp(Number(process.env.SLM_AVATAR_REFRESH_INTERVAL_MS || 7 * 24 * 60 * 60 * 1000), 60 * 60 * 1000, 30 * 24 * 60 * 60 * 1000));
+  const AVATAR_RETRY_INTERVAL_MS = Math.round(clamp(Number(process.env.SLM_AVATAR_RETRY_INTERVAL_MS || 24 * 60 * 60 * 1000), 15 * 60 * 1000, 7 * 24 * 60 * 60 * 1000));
+  const AVATAR_IN_MEMORY_ATTEMPT_INTERVAL_MS = Math.round(clamp(Number(process.env.SLM_AVATAR_ATTEMPT_INTERVAL_MS || 6 * 60 * 60 * 1000), 5 * 60 * 1000, 24 * 60 * 60 * 1000));
+  const AVATAR_FETCH_TIMEOUT_MS = Math.round(clamp(Number(process.env.SLM_AVATAR_FETCH_TIMEOUT_MS || 8_000), 2_000, 30_000));
+  const AVATAR_MAX_BYTES = Math.round(clamp(Number(process.env.SLM_AVATAR_MAX_BYTES || 900_000), 64_000, 1_000_000));
   let inboundConcurrency = Math.round(clamp(Number(process.env.SLM_INBOUND_CONCURRENCY || 4), 1, 16));
   let outboxSendConcurrency = Math.round(clamp(Number(process.env.SLM_OUTBOX_CONCURRENCY || 4), 1, 16));
   let adaptiveOutboxClaimLimit = 4;
@@ -4157,6 +4334,207 @@ function resolveTextEmojiAllowlist() {
   };
 
   const mediaCacheKey = (kind: CapturableMediaKind, contentHash: string) => `${kind}:${contentHash}`;
+  const avatarCacheKey = (jid: string, threadKind: "direct" | "group" | "broadcast_or_system") => {
+    return threadKind === "direct" ? normalizeAccountJid(jid) || normalizeJidForLookup(jid) : normalizeJidForLookup(jid);
+  };
+  const shouldSkipAvatarRefresh = (cache: {
+    avatarLastFetchedAt?: number;
+    avatarStatus?: "available" | "missing" | "blocked" | "error";
+  } | null) => {
+    const fetchedAt = cache?.avatarLastFetchedAt || 0;
+    if (!fetchedAt) {
+      return false;
+    }
+    const ageMs = Date.now() - fetchedAt;
+    return ageMs < (cache?.avatarStatus === "available" ? AVATAR_REFRESH_INTERVAL_MS : AVATAR_RETRY_INTERVAL_MS);
+  };
+  const fetchAvatarBytes = async (url: string) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), AVATAR_FETCH_TIMEOUT_MS);
+    try {
+      const response = await fetch(url, {
+        redirect: "follow",
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        throw new Error(`avatar_fetch_${response.status}`);
+      }
+      const mimeType = response.headers.get("content-type")?.split(";")[0]?.trim() || "image/jpeg";
+      if (!mimeType.startsWith("image/")) {
+        throw new Error(`avatar_fetch_non_image_${mimeType}`);
+      }
+      const contentLength = Number(response.headers.get("content-length") || 0);
+      if (contentLength > AVATAR_MAX_BYTES) {
+        throw new Error(`avatar_fetch_too_large_${contentLength}`);
+      }
+      const arrayBuffer = await response.arrayBuffer();
+      if (arrayBuffer.byteLength <= 0) {
+        throw new Error("avatar_fetch_empty");
+      }
+      if (arrayBuffer.byteLength > AVATAR_MAX_BYTES) {
+        throw new Error(`avatar_fetch_too_large_${arrayBuffer.byteLength}`);
+      }
+      return {
+        buffer: Buffer.from(arrayBuffer),
+        mimeType,
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
+  const rememberAvatarStatus = async (args: {
+    threadId?: string;
+    threadJid: string;
+    status: "missing" | "blocked" | "error";
+    fetchedAt: number;
+  }) => {
+    await convex
+      .mutation(convexRefs.threadsUpdateAvatarCache, {
+        ...tenantConnectorArgs(),
+        provider: "whatsapp",
+        threadId: args.threadId as Id<"threads"> | undefined,
+        threadJid: args.threadJid,
+        avatarStatus: args.status,
+        fetchedAt: args.fetchedAt,
+      })
+      .catch(() => undefined);
+  };
+  const maybeRefreshThreadAvatar = (args: {
+    threadJid: string;
+    threadId?: string;
+    threadKind: "direct" | "group" | "broadcast_or_system";
+    reason: "chat" | "contact" | "message";
+    force?: boolean;
+  }) => {
+    if (!args.threadJid || args.threadKind === "broadcast_or_system") {
+      return;
+    }
+    const key = avatarCacheKey(args.threadJid, args.threadKind);
+    if (!key || avatarRefreshInFlightByThreadKey.has(key)) {
+      return;
+    }
+    const lastAttemptAt = avatarAttemptByThreadKey.get(key) || 0;
+    if (!args.force && Date.now() - lastAttemptAt < AVATAR_IN_MEMORY_ATTEMPT_INTERVAL_MS) {
+      return;
+    }
+
+    avatarAttemptByThreadKey.set(key, Date.now());
+    avatarRefreshInFlightByThreadKey.add(key);
+    void (async () => {
+      const fetchedAt = Date.now();
+      try {
+        const cache = (await convex
+          .query(convexRefs.threadsGetAvatarCache, {
+            ...tenantConnectorArgs(),
+            provider: "whatsapp",
+            threadJid: args.threadJid,
+          })
+          .catch(() => null)) as
+          | {
+              threadId?: string;
+              avatarMediaAssetId?: Id<"mediaAssets">;
+              avatarContentHash?: string;
+              avatarLastFetchedAt?: number;
+              avatarStatus?: "available" | "missing" | "blocked" | "error";
+            }
+          | null;
+        if (!args.force && shouldSkipAvatarRefresh(cache)) {
+          return;
+        }
+
+        let pictureUrl: string | undefined;
+        try {
+          pictureUrl = await sock.profilePictureUrl(args.threadJid, "preview", AVATAR_FETCH_TIMEOUT_MS);
+        } catch (error) {
+          const statusCode = getStatusCode(error);
+          await rememberAvatarStatus({
+            threadId: args.threadId || cache?.threadId,
+            threadJid: args.threadJid,
+            status: statusCode === 401 || statusCode === 403 ? "blocked" : statusCode === 404 ? "missing" : "error",
+            fetchedAt,
+          });
+          return;
+        }
+
+        if (!pictureUrl) {
+          await rememberAvatarStatus({
+            threadId: args.threadId || cache?.threadId,
+            threadJid: args.threadJid,
+            status: "missing",
+            fetchedAt,
+          });
+          return;
+        }
+
+        const avatar = await fetchAvatarBytes(pictureUrl);
+        const contentHash = createHash("sha256").update(avatar.buffer).digest("hex");
+        let assetId: Id<"mediaAssets"> | undefined;
+        if (cache?.avatarContentHash === contentHash && cache.avatarMediaAssetId) {
+          assetId = cache.avatarMediaAssetId;
+        } else {
+          const uploadUrl = (await convex.mutation(convexRefs.mediaGenerateUploadUrl, {})) as string;
+          const upload = await fetch(uploadUrl, {
+            method: "POST",
+            headers: {
+              "Content-Type": avatar.mimeType,
+            },
+            body: avatar.buffer,
+          });
+          if (!upload.ok) {
+            throw new Error(`avatar_upload_${upload.status}`);
+          }
+          const uploadPayload = (await upload.json()) as { storageId?: string };
+          if (!uploadPayload.storageId) {
+            throw new Error("avatar_upload_missing_storage_id");
+          }
+          assetId = (await convex.mutation(convexRefs.mediaRegisterAssetIfMissing, {
+            ...tenantConnectorArgs(),
+            kind: "image",
+            label: `WhatsApp avatar ${(args.threadJid || key).slice(0, 32)}`,
+            tags: ["avatar", "profile-picture", "whatsapp", args.threadKind],
+            fileId: uploadPayload.storageId as Id<"_storage">,
+            mimeType: avatar.mimeType,
+            enabled: true,
+            contentHash,
+            source: "captured",
+            threadId: (args.threadId || cache?.threadId) as Id<"threads"> | undefined,
+          })) as Id<"mediaAssets">;
+        }
+
+        await convex.mutation(convexRefs.threadsUpdateAvatarCache, {
+          ...tenantConnectorArgs(),
+          provider: "whatsapp",
+          threadId: (args.threadId || cache?.threadId) as Id<"threads"> | undefined,
+          threadJid: args.threadJid,
+          avatarMediaAssetId: assetId,
+          avatarContentHash: contentHash,
+          avatarStatus: "available",
+          fetchedAt,
+        });
+        if (assetId) {
+          void ensureAvatarContextForAsset(assetId, args.threadId || cache?.threadId);
+        }
+      } catch (error) {
+        const err = error instanceof Error ? error.message : String(error);
+        await rememberAvatarStatus({
+          threadId: args.threadId,
+          threadJid: args.threadJid,
+          status: "error",
+          fetchedAt,
+        });
+        await convex
+          .mutation(convexRefs.systemRecordEvent, {
+            source: "worker",
+            eventType: "whatsapp.avatar.refresh_error",
+            threadId: args.threadId as Id<"threads"> | undefined,
+            detail: compactLogText(`jid=${args.threadJid} reason=${args.reason} err=${err}`, 280),
+          })
+          .catch(() => undefined);
+      } finally {
+        avatarRefreshInFlightByThreadKey.delete(key);
+      }
+    })();
+  };
   const pruneInboundImageVisionByThread = () => {
     const ttl = Math.max(VISION_FILTER_UNCAPTIONED_COOLDOWN_MS * 3, 6 * 60 * 60 * 1000);
     const cutoff = Date.now() - ttl;
@@ -4366,8 +4744,50 @@ function resolveTextEmojiAllowlist() {
       name?: string;
       notify?: string;
       verifiedName?: string;
+      imgUrl?: string | null;
     };
     rememberContactName(row);
+    const contactJids = new Set<string>();
+    for (const candidate of [row.id, row.lid, row.phoneNumber]) {
+      for (const key of jidLookupKeys(candidate)) {
+        contactJids.add(key);
+      }
+    }
+    if (contactJids.size > 0) {
+      void convex
+        .mutation(convexRefs.threadsUpsertContactMetadata, {
+          provider: "whatsapp",
+          jids: [...contactJids],
+          savedName: normalizeDisplayName(row.name),
+          notifyName: normalizeDisplayName(row.notify),
+          verifiedName: normalizeDisplayName(row.verifiedName),
+          phoneNumber: typeof row.phoneNumber === "string" && row.phoneNumber.trim() ? row.phoneNumber.trim() : undefined,
+          lid: typeof row.lid === "string" && row.lid.trim() ? row.lid.trim() : undefined,
+        })
+        .catch(() => undefined);
+    }
+    const avatarForce = row.imgUrl === "changed" || (typeof row.imgUrl === "string" && row.imgUrl.startsWith("http"));
+    const avatarRemoved = row.imgUrl === null;
+    for (const candidate of [row.id, row.lid, row.phoneNumber]) {
+      const jid = normalizeJidForLookup(candidate);
+      if (!jid || (!jid.endsWith("@s.whatsapp.net") && !jid.endsWith("@lid"))) {
+        continue;
+      }
+      if (avatarRemoved) {
+        void rememberAvatarStatus({
+          threadJid: jid,
+          status: "missing",
+          fetchedAt: Date.now(),
+        });
+        continue;
+      }
+      maybeRefreshThreadAvatar({
+        threadJid: jid,
+        threadKind: "direct",
+        reason: "contact",
+        force: avatarForce,
+      });
+    }
   };
 
   const resolveSenderTitle = (args: {
@@ -4439,6 +4859,7 @@ function resolveTextEmojiAllowlist() {
       name?: string;
       conversationName?: string;
       subject?: string;
+      unreadCount?: number;
     };
     const threadJid = row.id || row.jid || "";
     if (!threadJid) {
@@ -4457,18 +4878,28 @@ function resolveTextEmojiAllowlist() {
     }
 
     const threadKind = classifyThreadKindFromJid(threadJid);
-    await convex
+    const threadId = (await convex
       .mutation(convexRefs.threadsUpsertMetadata, {
         provider: "whatsapp",
         threadJid,
         title: threadTitle,
+        baileysChatName: normalizeDisplayName(row.name),
+        baileysConversationName: normalizeDisplayName(row.conversationName),
+        baileysSubject: normalizeDisplayName(row.subject),
+        baileysUnreadCount: Number.isFinite(row.unreadCount) ? row.unreadCount : undefined,
         isGroup: isGroupJid(threadJid),
         threadKind,
         isArchived,
         archivedAt,
         lastMessageAt: extractChatTimestamp(chatLike),
       })
-      .catch(() => undefined);
+      .catch(() => undefined)) as string | undefined;
+    maybeRefreshThreadAvatar({
+      threadJid,
+      threadId,
+      threadKind,
+      reason: "chat",
+    });
   };
 
   const maybeCaptureMediaAsset = async (args: {
@@ -4649,6 +5080,13 @@ function resolveTextEmojiAllowlist() {
   const SELF_CONTROL_IMPLICIT_ROUTING_ENABLED = !["0", "false", "off", "no"].includes(
     (process.env.SLM_SELF_CONTROL_IMPLICIT_ROUTING_ENABLED || "1").trim().toLowerCase(),
   );
+  const SELF_CONTROL_ACCESS_CACHE_MS = (() => {
+    const raw = Number(process.env.SLM_SELF_CONTROL_ACCESS_CACHE_MS || 60_000);
+    if (!Number.isFinite(raw)) {
+      return 60_000;
+    }
+    return Math.max(5_000, Math.min(Math.round(raw), 5 * 60_000));
+  })();
   const CODEX_CLI_PATH = (process.env.CODEX_CLI_PATH || "codex").trim() || "codex";
   const SELF_CONTROL_SMART_ROUTING_ENABLED = !["0", "false", "off", "no"].includes(
     (process.env.SLM_SELF_CONTROL_SMART_ROUTING_ENABLED || "1").trim().toLowerCase(),
@@ -4750,6 +5188,67 @@ function resolveTextEmojiAllowlist() {
       threadJid: threadJid || senderJid || `${selfAccounts[0]}@s.whatsapp.net`,
       replyJids,
     };
+  };
+
+  let selfControlAccessCache:
+    | {
+        allowed: boolean;
+        reason: string;
+        checkedAt: number;
+      }
+    | null = initialSelfControlAccess
+    ? {
+        ...initialSelfControlAccess,
+        checkedAt: Date.now(),
+      }
+    : null;
+
+  const getSelfControlAccess = async () => {
+    if (selfHosted) {
+      return { allowed: true, reason: "self_hosted" };
+    }
+    if (tenantId && selfControlAdminTenantIds.has(tenantId)) {
+      return { allowed: true, reason: "admin_tenant_env" };
+    }
+    const now = Date.now();
+    if (selfControlAccessCache && now - selfControlAccessCache.checkedAt <= SELF_CONTROL_ACCESS_CACHE_MS) {
+      return selfControlAccessCache;
+    }
+    if (!tenantId || !connectorTokenHash) {
+      selfControlAccessCache = { allowed: false, reason: "missing_connector", checkedAt: now };
+      return selfControlAccessCache;
+    }
+
+    try {
+      const access = (await convex.mutation(convexRefs.tenantAccountsGetConnectorSelfControlAccess, {
+        tenantId,
+        connectorTokenHash,
+      })) as { allowed?: boolean; reason?: string } | null;
+      selfControlAccessCache = {
+        allowed: access?.allowed === true,
+        reason: access?.reason || (access?.allowed === true ? "admin_tenant" : "not_admin_tenant"),
+        checkedAt: now,
+      };
+    } catch (error) {
+      selfControlAccessCache = { allowed: false, reason: "access_check_failed", checkedAt: now };
+      logger.warn({ err: error instanceof Error ? error.message : String(error) }, "Self-control access check failed");
+    }
+    return selfControlAccessCache;
+  };
+
+  const resolveAuthorizedSelfControlThread = async (
+    messageKey: SelfControlMessageKey,
+  ): Promise<ResolvedSelfControlThread | null> => {
+    const selfControl = resolveSelfControlThread(messageKey);
+    if (!selfControl) {
+      return null;
+    }
+    const access = await getSelfControlAccess();
+    if (!access.allowed) {
+      logger.warn({ reason: access.reason, tenantId }, "Ignoring self-control WhatsApp message for non-admin tenant");
+      return null;
+    }
+    return selfControl;
   };
 
   const resolveSelfControlCommandTextForHandling = (rawText: string) => {
@@ -5288,7 +5787,7 @@ function resolveTextEmojiAllowlist() {
       return false;
     }
 
-    const selfControl = resolveSelfControlThread(message.key);
+    const selfControl = await resolveAuthorizedSelfControlThread(message.key);
     if (!selfControl) {
       return false;
     }
@@ -6323,7 +6822,7 @@ function resolveTextEmojiAllowlist() {
       return false;
     }
 
-    const selfControl = resolveSelfControlThread(message.key);
+    const selfControl = await resolveAuthorizedSelfControlThread(message.key);
     if (!selfControl) {
       return false;
     }
@@ -6394,7 +6893,7 @@ function resolveTextEmojiAllowlist() {
       return false;
     }
 
-    const selfControl = resolveSelfControlThread(message.key);
+    const selfControl = await resolveAuthorizedSelfControlThread(message.key);
     if (!selfControl) {
       return false;
     }
@@ -6543,7 +7042,7 @@ function resolveTextEmojiAllowlist() {
       return false;
     }
 
-    const selfControl = resolveSelfControlThread(message.key);
+    const selfControl = await resolveAuthorizedSelfControlThread(message.key);
     if (!selfControl) {
       return false;
     }
@@ -6612,7 +7111,7 @@ function resolveTextEmojiAllowlist() {
       return false;
     }
 
-    const selfControl = resolveSelfControlThread(message.key);
+    const selfControl = await resolveAuthorizedSelfControlThread(message.key);
     if (!selfControl) {
       return false;
     }
@@ -6715,6 +7214,12 @@ function resolveTextEmojiAllowlist() {
 
       const runtimeSettings = await getRuntimeSettings();
       const shouldCaptureGroupMedia = runtimeSettings?.captureGroupMediaEnabled ?? false;
+      maybeRefreshThreadAvatar({
+        threadJid,
+        threadId: ownSync.threadId,
+        threadKind: classifyThreadKindFromJid(threadJid),
+        reason: "message",
+      });
       if (mediaKind && ownSync.recordedMessageId && (shouldCaptureGroupMedia || !isGroupJid(rawThreadJid || ""))) {
         await maybeCaptureMediaAsset({
           message: message as Parameters<typeof downloadMediaMessage>[0],
@@ -6802,6 +7307,13 @@ function resolveTextEmojiAllowlist() {
         messageId: string;
         duplicate: boolean;
       };
+
+      maybeRefreshThreadAvatar({
+        threadJid,
+        threadId: ingested.threadId,
+        threadKind,
+        reason: "message",
+      });
 
       if (ingested.duplicate) {
         return;
@@ -7187,6 +7699,13 @@ function resolveTextEmojiAllowlist() {
       };
 
       const shouldCaptureGroupMedia = runtimeSettings?.captureGroupMediaEnabled ?? false;
+      maybeRefreshThreadAvatar({
+        threadJid,
+        threadId: ingest.threadId,
+        threadKind,
+        reason: "message",
+      });
+
       if (ingest.duplicate) {
         logger.info({ threadJid, whatsappMessageId: message.key.id }, "Inbound duplicate ignored");
         return;
@@ -7747,9 +8266,10 @@ function resolveTextEmojiAllowlist() {
               ? `Ack route attempt ${index + 1}/${ackRoute.attempts.length} · ${label} · ${attempt.model} · ${attempt.latencyMs}ms${usageSuffix ? ` · ${usageSuffix}` : ""} · ${attempt.error.slice(0, 220)}`
               : `Ack route attempt ${index + 1}/${ackRoute.attempts.length} · ${label} · ${attempt.model} · ${attempt.latencyMs}ms${usageSuffix ? ` · ${usageSuffix}` : ""}`;
 
-            await convex
-              .mutation(convexRefs.systemRecordProviderRun, {
-                threadId: ingest.threadId,
+	            await convex
+	              .mutation(convexRefs.systemRecordProviderRun, {
+	                ...tenantConnectorArgs(),
+	                threadId: ingest.threadId,
                 provider: attempt.provider,
                 model: attempt.model,
                 latencyMs: attempt.latencyMs,
@@ -8388,9 +8908,10 @@ function resolveTextEmojiAllowlist() {
             ? `Attempt ${index + 1}/${ai.attempts.length} · ${label} · ${attempt.model} · ${attempt.latencyMs}ms${usageSuffix ? ` · ${usageSuffix}` : ""} · ${attempt.error.slice(0, 220)}`
             : `Attempt ${index + 1}/${ai.attempts.length} · ${label} · ${attempt.model} · ${attempt.latencyMs}ms${usageSuffix ? ` · ${usageSuffix}` : ""}`;
 
-          await convex
-            .mutation(convexRefs.systemRecordProviderRun, {
-              threadId: ingest.threadId,
+	          await convex
+	            .mutation(convexRefs.systemRecordProviderRun, {
+	              ...tenantConnectorArgs(),
+	              threadId: ingest.threadId,
               provider: attempt.provider,
               model: attempt.model,
               latencyMs: attempt.latencyMs,
@@ -9419,9 +9940,10 @@ function resolveTextEmojiAllowlist() {
         ? `Outreach attempt ${index + 1}/${ai.attempts.length} · ${label} · ${attempt.model} · ${attempt.latencyMs}ms${usageSuffix ? ` · ${usageSuffix}` : ""} · ${attempt.error.slice(0, 220)}`
         : `Outreach attempt ${index + 1}/${ai.attempts.length} · ${label} · ${attempt.model} · ${attempt.latencyMs}ms${usageSuffix ? ` · ${usageSuffix}` : ""}`;
 
-      await convex
-        .mutation(convexRefs.systemRecordProviderRun, {
-          threadId: item.threadId,
+	      await convex
+	        .mutation(convexRefs.systemRecordProviderRun, {
+	          ...tenantConnectorArgs(),
+	          threadId: item.threadId,
           provider: attempt.provider,
           model: attempt.model,
           latencyMs: attempt.latencyMs,
@@ -9925,9 +10447,10 @@ function resolveTextEmojiAllowlist() {
         ? `Status attempt ${index + 1}/${ai.attempts.length} · ${label} · ${attempt.model} · ${attempt.latencyMs}ms${usageSuffix ? ` · ${usageSuffix}` : ""} · ${attempt.error.slice(0, 220)}`
         : `Status attempt ${index + 1}/${ai.attempts.length} · ${label} · ${attempt.model} · ${attempt.latencyMs}ms${usageSuffix ? ` · ${usageSuffix}` : ""}`;
 
-      await convex
-        .mutation(convexRefs.systemRecordProviderRun, {
-          threadId: item.threadId,
+	      await convex
+	        .mutation(convexRefs.systemRecordProviderRun, {
+	          ...tenantConnectorArgs(),
+	          threadId: item.threadId,
           provider: attempt.provider,
           model: attempt.model,
           latencyMs: attempt.latencyMs,

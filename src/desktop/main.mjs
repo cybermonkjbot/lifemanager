@@ -1,7 +1,7 @@
 import { app, BrowserWindow, Menu, shell } from "electron";
 import { spawn } from "node:child_process";
 import { createDecipheriv, createHash, randomBytes } from "node:crypto";
-import { mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { request } from "node:http";
 import { dirname, join, resolve } from "node:path";
@@ -18,21 +18,29 @@ const children = new Set();
 
 let mainWindow = null;
 
+function quoteWindowsArg(value) {
+  const arg = String(value);
+  if (arg.length > 0 && !/[\s"]/u.test(arg)) {
+    return arg;
+  }
+  return `"${arg.replace(/"/g, '\\"')}"`;
+}
+
 function getCommand(command, args) {
   if (process.platform === "win32") {
     return {
       command: "cmd.exe",
-      args: ["/d", "/s", "/c", [command, ...args].join(" ")],
+      args: ["/d", "/s", "/c", [command, ...args].map(quoteWindowsArg).join(" ")],
     };
   }
 
   return { command, args };
 }
 
-function spawnManaged(label, command, args, env = {}) {
+function spawnManaged(label, command, args, env = {}, options = {}) {
   const resolved = getCommand(command, args);
   const child = spawn(resolved.command, resolved.args, {
-    cwd: projectRoot,
+    cwd: options.cwd || projectRoot,
     env: {
       ...process.env,
       ODOGWU_DESKTOP: "1",
@@ -117,6 +125,18 @@ async function waitForHttp(url, timeoutMs = 45_000) {
 
 function getBunBin() {
   return process.env.BUN_BIN || "bun";
+}
+
+function getPackagedNodeBin() {
+  if (process.platform === "darwin" && app.isPackaged) {
+    const helperName = `${app.getName()} Helper`;
+    const helperPath = join(dirname(process.execPath), "..", "Frameworks", `${helperName}.app`, "Contents", "MacOS", helperName);
+    if (existsSync(helperPath)) {
+      return helperPath;
+    }
+  }
+
+  return process.env.ODOGWU_DESKTOP_NODE_BIN || process.execPath;
 }
 
 function ensureDir(path) {
@@ -237,10 +257,15 @@ function readDesktopServiceEnv(dataDir) {
 
 function getDesktopProcessEnv(extra = {}) {
   const dataDir = getDesktopDataDir();
+  const whatsappConnectorEntry = join(projectRoot, "dist", "connector", "index.mjs");
+  const instagramConnectorEntry = join(projectRoot, "dist", "connector", "instagram.mjs");
   return {
     ODOGWU_DESKTOP: "1",
     NEXT_PUBLIC_ODOGWU_DESKTOP: "1",
     ODOGWU_DESKTOP_RUNTIME_SECRET: desktopRuntimeSecret,
+    ODOGWU_DESKTOP_NODE_BIN: getPackagedNodeBin(),
+    ODOGWU_CONNECTOR_WHATSAPP_ENTRY: whatsappConnectorEntry,
+    ODOGWU_CONNECTOR_INSTAGRAM_ENTRY: instagramConnectorEntry,
     SLM_DATA_DIR: dataDir,
     SLM_WORKER_ID: process.env.SLM_WORKER_ID || "desktop-whatsapp",
     WHATSAPP_AUTH_PATH: ensureDir(process.env.WHATSAPP_AUTH_PATH || join(dataDir, "whatsapp-auth")),
@@ -252,17 +277,41 @@ function getDesktopProcessEnv(extra = {}) {
 }
 
 async function startLocalAppRuntime(port) {
-  const bunBin = getBunBin();
-  const nextMode = isDev ? "dev" : "start";
   const appUrl = `http://127.0.0.1:${port}`;
-  spawnManaged(
-    "local app runtime",
-    bunBin,
-    ["x", "next", nextMode, "-H", "127.0.0.1", "-p", String(port)],
-    getDesktopProcessEnv({
-      PORT: String(port),
-    }),
-  );
+  const runtimeEnv = getDesktopProcessEnv({
+    PORT: String(port),
+    HOSTNAME: "127.0.0.1",
+    ODOGWU_DESKTOP_APP_URL: appUrl,
+  });
+
+  let child;
+  if (isDev) {
+    child = spawnManaged(
+      "local app runtime",
+      getBunBin(),
+      ["x", "next", "dev", "-H", "127.0.0.1", "-p", String(port)],
+      runtimeEnv,
+    );
+  } else {
+    const standaloneServerPath = join(projectRoot, ".next", "standalone", "server.js");
+    if (!existsSync(standaloneServerPath)) {
+      throw new Error(`Missing packaged Next standalone server at ${standaloneServerPath}.`);
+    }
+    child = spawnManaged(
+      "local app runtime",
+      getPackagedNodeBin(),
+      [standaloneServerPath],
+      {
+        ...runtimeEnv,
+        ELECTRON_RUN_AS_NODE: "1",
+      },
+      { cwd: join(projectRoot, ".next", "standalone") },
+    );
+  }
+
+  if (child.pid) {
+    writeFileSync(join(getDesktopDataDir(), "app.pid"), `${child.pid}\n`, "utf8");
+  }
 
   const ready = await waitForHttp(appUrl);
   if (!ready) {
@@ -277,15 +326,24 @@ function startWhatsappWorker(appUrl) {
     return null;
   }
 
-  return spawnManaged(
-    "WhatsApp connector",
-    getBunBin(),
-    ["run", "worker"],
-    getDesktopProcessEnv({
-      ODOGWU_DESKTOP_APP_URL: appUrl,
-      SLM_APP_START_CMD: "",
-    }),
-  );
+  const env = getDesktopProcessEnv({
+    ODOGWU_DESKTOP_APP_URL: appUrl,
+    SLM_APP_START_CMD: "",
+  });
+
+  if (!isDev && existsSync(env.ODOGWU_CONNECTOR_WHATSAPP_ENTRY)) {
+    return spawnManaged(
+      "WhatsApp connector",
+      getPackagedNodeBin(),
+      [env.ODOGWU_CONNECTOR_WHATSAPP_ENTRY],
+      {
+        ...env,
+        ELECTRON_RUN_AS_NODE: "1",
+      },
+    );
+  }
+
+  return spawnManaged("WhatsApp connector", getBunBin(), ["run", "worker"], env);
 }
 
 function createMenu(appUrl) {
