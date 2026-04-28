@@ -36,6 +36,7 @@ type SetupState = {
   listenerLastSeenAt?: number;
   updatedAt: number;
   hasAuth: boolean;
+  hasConnectedBefore?: boolean;
 };
 
 type SetupWizardProps = {
@@ -43,20 +44,108 @@ type SetupWizardProps = {
   embedded?: boolean;
   initialScreen?: SetupWizardScreen;
   setupSecret?: string;
+  showNotices?: boolean;
   onWhatsAppConnectedChange?: (connected: boolean) => void;
 };
 
 type SetupWizardScreen = "options" | "whatsapp" | "pairing" | "instagram" | "voice";
 
-type VoiceSetupState = {
+export type VoiceSetupState = {
   status: VoiceSetupStatus;
   message: string;
   modelId: string;
   hasSample: boolean;
+  hasPendingSample?: boolean;
   samplePromptText?: string;
   installLog?: string;
   updatedAt: number;
 };
+
+const DEFAULT_VOICE_SAMPLE_PROMPT =
+  "Hey, this is my voice sample for OdogwuHQ. I want this to sound natural, warm, and clear. Today I am speaking at my normal pace, with the kind of tone I would use when sending a thoughtful voice note to someone I care about. Sometimes I pause a little before important words, and sometimes I smile while I talk. If you are listening back to this, try to keep my rhythm, my energy, and the way I explain things simple and human.";
+const VOICE_WAVEFORM_BARS = 48;
+const MAX_VOICE_RECORDING_MS = 5 * 60 * 1000;
+const IDLE_WAVEFORM = Array.from({ length: VOICE_WAVEFORM_BARS }, (_, index) => 0.14 + ((index * 7) % 9) / 100);
+
+function formatVoiceDuration(ms: number) {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function buildWaveformFromSamples(samples: Float32Array) {
+  if (samples.length === 0) {
+    return IDLE_WAVEFORM;
+  }
+  const blockSize = Math.max(1, Math.floor(samples.length / VOICE_WAVEFORM_BARS));
+  return Array.from({ length: VOICE_WAVEFORM_BARS }, (_, index) => {
+    const start = index * blockSize;
+    const end = Math.min(samples.length, start + blockSize);
+    let peak = 0;
+    for (let cursor = start; cursor < end; cursor += 1) {
+      peak = Math.max(peak, Math.abs(samples[cursor] || 0));
+    }
+    return Math.max(0.12, Math.min(1, peak * 1.8));
+  });
+}
+
+function WaveformBars({
+  values,
+  progress = 0,
+  label,
+  onSeek,
+}: {
+  values: number[];
+  progress?: number;
+  label: string;
+  onSeek?: (ratio: number) => void;
+}) {
+  return (
+    <div
+      className={`voice-waveform ${onSeek ? "voice-waveform-seekable" : ""}`}
+      aria-label={label}
+      role={onSeek ? "slider" : "img"}
+      aria-valuemin={onSeek ? 0 : undefined}
+      aria-valuemax={onSeek ? 100 : undefined}
+      aria-valuenow={onSeek ? Math.round(progress * 100) : undefined}
+      tabIndex={onSeek ? 0 : undefined}
+      onClick={
+        onSeek
+          ? (event) => {
+              const bounds = event.currentTarget.getBoundingClientRect();
+              onSeek(Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width)));
+            }
+          : undefined
+      }
+      onKeyDown={
+        onSeek
+          ? (event) => {
+              if (event.key === "ArrowLeft") {
+                event.preventDefault();
+                onSeek(Math.max(0, progress - 0.05));
+              }
+              if (event.key === "ArrowRight") {
+                event.preventDefault();
+                onSeek(Math.min(1, progress + 0.05));
+              }
+            }
+          : undefined
+      }
+    >
+      {values.map((value, index) => {
+        const active = index / Math.max(1, values.length - 1) <= progress;
+        return (
+          <span
+            key={index}
+            className={active ? "voice-waveform-bar-active" : ""}
+            style={{ height: `${Math.round(Math.max(0.12, Math.min(1, value)) * 100)}%` }}
+          />
+        );
+      })}
+    </div>
+  );
+}
 
 const setupWizardScreens: Record<
   SetupWizardScreen,
@@ -264,6 +353,7 @@ function SetupWizardContent({
   initialScreen = "options",
   embedded = false,
   setupSecret,
+  showNotices = true,
   onWhatsAppConnectedChange,
 }: {
   liveState: SetupState | null | undefined;
@@ -272,6 +362,7 @@ function SetupWizardContent({
   initialScreen?: SetupWizardScreen;
   embedded?: boolean;
   setupSecret?: string;
+  showNotices?: boolean;
   onWhatsAppConnectedChange?: (connected: boolean) => void;
 }) {
   const [localState, setLocalState] = useState<SetupState | null>(null);
@@ -612,7 +703,7 @@ function SetupWizardContent({
 
           <section id="setup-panel-whatsapp" className="setup-flow-panel" hidden={activeScreen !== "whatsapp"}>
             <div className="setup-wizard-card">
-              <ActionNotices notices={notices} onDismiss={dismissNotice} />
+              {showNotices ? <ActionNotices notices={notices} onDismiss={dismissNotice} /> : null}
               {!embedded ? <h3>Connect WhatsApp</h3> : null}
 
               {!embedded ? (
@@ -809,13 +900,19 @@ function SetupWizardContent({
           </section>
 
           <section id="setup-panel-instagram" className="setup-flow-panel" hidden={activeScreen !== "instagram"}>
-            <InstagramSetupPanel liveState={instagramLiveState} realtimeEnabled={realtimeEnabled} setupSecret={setupSecret} />
+            <InstagramSetupPanel
+              liveState={instagramLiveState}
+              realtimeEnabled={realtimeEnabled}
+              setupSecret={setupSecret}
+              showNotices={showNotices}
+            />
           </section>
 
           <section id="setup-panel-voice" className="setup-flow-panel" hidden={activeScreen !== "voice"}>
             <VoiceSetupPanel
               setupSecret={setupSecret}
               initialState={voiceState}
+              showNotices={showNotices}
               onStateChange={(next) => setVoiceState(next)}
             />
           </section>
@@ -825,24 +922,53 @@ function SetupWizardContent({
   );
 }
 
-function VoiceSetupPanel({
+export function VoiceSetupPanel({
   setupSecret,
   initialState,
+  showNotices = true,
+  title = "Voice sample",
+  description = "Record a short sample OdogwuHQ can use later for local Vox voice notes.",
+  privacyCopy = "Your recording stays on this computer and is only used for local voice generation.",
+  showToolControls = true,
+  showAdvancedControls = true,
+  surface = "card",
+  className = "",
+  onSampleSaved,
   onStateChange,
 }: {
   setupSecret?: string;
   initialState?: VoiceSetupState | null;
+  showNotices?: boolean;
+  title?: string;
+  description?: string;
+  privacyCopy?: string;
+  showToolControls?: boolean;
+  showAdvancedControls?: boolean;
+  surface?: "card" | "plain";
+  className?: string;
+  onSampleSaved?: (next: VoiceSetupState) => void;
   onStateChange?: (next: VoiceSetupState) => void;
 }) {
   const [state, setState] = useState<VoiceSetupState | null>(initialState || null);
   const [modelId, setModelId] = useState(initialState?.modelId || "openbmb/VoxCPM-0.5B");
-  const [promptText, setPromptText] = useState(initialState?.samplePromptText || "");
+  const [promptText, setPromptText] = useState(initialState?.samplePromptText || DEFAULT_VOICE_SAMPLE_PROMPT);
   const [recordedBlob, setRecordedBlob] = useState<Blob | null>(null);
   const [isRecording, setIsRecording] = useState(false);
   const [recordingError, setRecordingError] = useState<string | null>(null);
+  const [recordingMs, setRecordingMs] = useState(0);
+  const [liveWaveform, setLiveWaveform] = useState(IDLE_WAVEFORM);
+  const [previewWaveform, setPreviewWaveform] = useState(IDLE_WAVEFORM);
+  const [previewDurationMs, setPreviewDurationMs] = useState(0);
+  const [previewProgress, setPreviewProgress] = useState(0);
+  const [isPreviewPlaying, setIsPreviewPlaying] = useState(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const animationFrameRef = useRef<number | null>(null);
+  const maxRecordingTimerRef = useRef<number | null>(null);
+  const recordingStartedAtRef = useRef(0);
+  const previewAudioRef = useRef<HTMLAudioElement | null>(null);
 
   const { runAction, isPending, anyPending, notices, dismissNotice } = useActionStateRegistry();
 
@@ -880,6 +1006,22 @@ function VoiceSetupPanel({
     stream.getTracks().forEach((track) => track.stop());
   }, []);
 
+  const stopAudioAnalyzer = useCallback(() => {
+    if (animationFrameRef.current !== null) {
+      window.cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
+    }
+    if (maxRecordingTimerRef.current !== null) {
+      window.clearTimeout(maxRecordingTimerRef.current);
+      maxRecordingTimerRef.current = null;
+    }
+    const audioContext = audioContextRef.current;
+    audioContextRef.current = null;
+    if (audioContext && audioContext.state !== "closed") {
+      void audioContext.close().catch(() => undefined);
+    }
+  }, []);
+
   useEffect(() => {
     return () => {
       try {
@@ -888,9 +1030,44 @@ function VoiceSetupPanel({
         // no-op
       }
       recorderRef.current = null;
+      stopAudioAnalyzer();
       stopMediaStream();
     };
-  }, [stopMediaStream]);
+  }, [stopAudioAnalyzer, stopMediaStream]);
+
+  useEffect(() => {
+    if (!recordedBlob) {
+      return;
+    }
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        const AudioContextCtor = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+        if (!AudioContextCtor) {
+          return;
+        }
+        const arrayBuffer = await recordedBlob.arrayBuffer();
+        const audioContext = new AudioContextCtor();
+        const decoded = await audioContext.decodeAudioData(arrayBuffer.slice(0));
+        if (cancelled) {
+          await audioContext.close().catch(() => undefined);
+          return;
+        }
+        setPreviewDurationMs(decoded.duration * 1000);
+        setPreviewWaveform(buildWaveformFromSamples(decoded.getChannelData(0)));
+        await audioContext.close().catch(() => undefined);
+      } catch {
+        if (!cancelled) {
+          setPreviewWaveform(IDLE_WAVEFORM);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [recordedBlob]);
 
   const applyState = useCallback(
     (next: VoiceSetupState) => {
@@ -959,6 +1136,9 @@ function VoiceSetupPanel({
 
   const startRecording = async () => {
     setRecordingError(null);
+    setPreviewProgress(0);
+    setIsPreviewPlaying(false);
+    previewAudioRef.current?.pause();
 
     if (!navigator.mediaDevices?.getUserMedia) {
       setRecordingError("Browser does not support microphone capture in this context.");
@@ -974,6 +1154,42 @@ function VoiceSetupPanel({
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
       chunksRef.current = [];
+      const AudioContextCtor = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (AudioContextCtor) {
+        const audioContext = new AudioContextCtor();
+        const source = audioContext.createMediaStreamSource(stream);
+        const analyser = audioContext.createAnalyser();
+        analyser.fftSize = 256;
+        source.connect(analyser);
+        audioContextRef.current = audioContext;
+        const data = new Uint8Array(analyser.frequencyBinCount);
+        recordingStartedAtRef.current = Date.now();
+        const updateLiveWaveform = () => {
+          analyser.getByteTimeDomainData(data);
+          const blockSize = Math.max(1, Math.floor(data.length / VOICE_WAVEFORM_BARS));
+          const values = Array.from({ length: VOICE_WAVEFORM_BARS }, (_, index) => {
+            const start = index * blockSize;
+            const end = Math.min(data.length, start + blockSize);
+            let sum = 0;
+            for (let cursor = start; cursor < end; cursor += 1) {
+              sum += Math.abs((data[cursor] || 128) - 128) / 128;
+            }
+            return Math.max(0.12, Math.min(1, (sum / Math.max(1, end - start)) * 3.2));
+          });
+          setLiveWaveform(values);
+          setRecordingMs(Math.min(MAX_VOICE_RECORDING_MS, Date.now() - recordingStartedAtRef.current));
+          animationFrameRef.current = window.requestAnimationFrame(updateLiveWaveform);
+        };
+        updateLiveWaveform();
+      } else {
+        recordingStartedAtRef.current = Date.now();
+        const updateTimer = () => {
+          setRecordingMs(Math.min(MAX_VOICE_RECORDING_MS, Date.now() - recordingStartedAtRef.current));
+          setLiveWaveform((current) => current.map((value, index) => 0.14 + Math.abs(Math.sin(Date.now() / 240 + index)) * value));
+          animationFrameRef.current = window.requestAnimationFrame(updateTimer);
+        };
+        updateTimer();
+      }
       const preferredMimeTypes = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
       const selectedMimeType = preferredMimeTypes.find((value) => MediaRecorder.isTypeSupported(value));
       const recorder = selectedMimeType ? new MediaRecorder(stream, { mimeType: selectedMimeType }) : new MediaRecorder(stream);
@@ -993,15 +1209,27 @@ function VoiceSetupPanel({
           setRecordedBlob(nextBlob);
         }
         setIsRecording(false);
+        setRecordingMs(Math.min(MAX_VOICE_RECORDING_MS, Date.now() - recordingStartedAtRef.current));
+        stopAudioAnalyzer();
         recorderRef.current = null;
         stopMediaStream();
       };
 
       recorder.start(250);
+      maxRecordingTimerRef.current = window.setTimeout(() => {
+        const activeRecorder = recorderRef.current;
+        if (activeRecorder && activeRecorder.state !== "inactive") {
+          activeRecorder.stop();
+          setRecordingError("Recording stopped at the 5 minute limit.");
+        }
+      }, MAX_VOICE_RECORDING_MS);
+      setRecordedBlob(null);
+      setPreviewWaveform(IDLE_WAVEFORM);
       setIsRecording(true);
     } catch {
       setRecordingError("Could not access microphone. Allow permissions and retry.");
       setIsRecording(false);
+      stopAudioAnalyzer();
       stopMediaStream();
     }
   };
@@ -1014,6 +1242,28 @@ function VoiceSetupPanel({
     if (recorder.state !== "inactive") {
       recorder.stop();
     }
+  };
+
+  const togglePreviewPlayback = () => {
+    const audio = previewAudioRef.current;
+    if (!audio) {
+      return;
+    }
+    if (audio.paused) {
+      void audio.play().catch(() => undefined);
+      return;
+    }
+    audio.pause();
+  };
+
+  const seekPreview = (ratio: number) => {
+    const audio = previewAudioRef.current;
+    if (!audio || !Number.isFinite(audio.duration) || audio.duration <= 0) {
+      setPreviewProgress(ratio);
+      return;
+    }
+    audio.currentTime = ratio * audio.duration;
+    setPreviewProgress(ratio);
   };
 
   const uploadSample = () => {
@@ -1043,6 +1293,7 @@ function VoiceSetupPanel({
         });
         const next = await readVoiceSetupResponse(response);
         applyState(next);
+        onSampleSaved?.(next);
       },
       {
         pendingLabel: "Saving sample...",
@@ -1095,60 +1346,88 @@ function VoiceSetupPanel({
   const pendingReset = isPending("setup:voice:reset");
   const pendingRefresh = isPending("setup:voice:refresh");
   const statusText = voiceStatusLabel(state?.status);
-  const canStartRecording = !anyPending && !isRecording;
+  const canUseRecordButton = !anyPending;
   const canStopRecording = isRecording;
   const canSaveSample = !anyPending && !isRecording && Boolean(recordedBlob) && Boolean(promptText.trim());
   const canInstall = !anyPending && !isRecording && Boolean(modelId.trim());
+  const displayedDurationMs = isRecording ? recordingMs : previewDurationMs || recordingMs;
+  const rootClassName = [
+    surface === "card" ? "setup-wizard-card" : "voice-setup-panel",
+    className,
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   return (
-    <div className="setup-wizard-card" aria-busy={anyPending}>
-      <ActionNotices notices={notices} onDismiss={dismissNotice} />
-      <h3>Voice sample</h3>
+    <div className={rootClassName} aria-busy={anyPending}>
+      {showNotices ? <ActionNotices notices={notices} onDismiss={dismissNotice} /> : null}
+      <div className="voice-setup-heading">
+        <p className="setup-onboarding-kicker">Local voice</p>
+        <h3>{title}</h3>
+        <p>{description}</p>
+      </div>
 
       <div className="setup-status-row">
         <span className={`status-pill ${voiceStatusToneClass(state?.status)}`}>{statusText}</span>
-        {state?.status === "error" ? <span className="queue-meta">{state.message}</span> : null}
+        <span className="queue-meta">
+          {state?.hasSample ? "Sample saved locally." : state?.hasPendingSample ? "Sample saved. Preparation will finish it." : privacyCopy}
+        </span>
       </div>
 
+      <div className="voice-sample-script" aria-label="Suggested recording script">
+        <span>Sample script</span>
+        <p>{promptText}</p>
+      </div>
+      <p className="voice-recording-guidance">
+        Longer samples help OdogwuHQ capture your voice more accurately. You can record up to 5 minutes.
+      </p>
+
       <label className="setup-input-group">
-        <span className="queue-meta">Sample transcript</span>
+        <span className="queue-meta">Exact words in the recording</span>
         <textarea
           value={promptText}
           onChange={(event) => setPromptText(event.target.value)}
           rows={3}
-          placeholder="Type the exact words in your recording."
+          placeholder={DEFAULT_VOICE_SAMPLE_PROMPT}
           disabled={anyPending}
           aria-disabled={anyPending}
         />
       </label>
 
-      <div className="wizard-actions">
+      <div className={`voice-recorder-console ${isRecording ? "voice-recorder-console-active" : ""}`}>
         <button
-          className="btn btn-primary"
+          className="voice-record-button"
           type="button"
-          onClick={installVoiceModule}
-          disabled={!canInstall}
-          aria-disabled={!canInstall}
+          onClick={isRecording ? stopRecording : startRecording}
+          disabled={!canUseRecordButton}
+          aria-disabled={!canUseRecordButton}
+          aria-label={isRecording ? "Stop recording" : recordedBlob ? "Record again" : "Record voice sample"}
         >
-          {pendingInstall ? "Installing..." : "Install tools"}
+          <span aria-hidden="true" />
         </button>
-        <button
-          className="btn btn-ghost"
-          type="button"
-          onClick={startRecording}
-          disabled={!canStartRecording}
-          aria-disabled={!canStartRecording}
-        >
-          {isRecording ? "Recording..." : "Record sample"}
-        </button>
-        {isRecording ? (
+        <div className="voice-recorder-surface">
+          <div className="voice-recorder-meta">
+            <strong>{isRecording ? "Recording" : recordedBlob ? "Sample captured" : "Ready to record"}</strong>
+            <span>{isRecording ? `${formatVoiceDuration(displayedDurationMs)} / 5:00` : formatVoiceDuration(displayedDurationMs)}</span>
+          </div>
+          <WaveformBars values={isRecording ? liveWaveform : recordedBlob ? previewWaveform : IDLE_WAVEFORM} progress={isRecording ? 1 : 0} label="Live voice waveform" />
+        </div>
+      </div>
+
+      <div className="wizard-actions voice-recorder-actions">
+        {showToolControls ? (
           <button
-            className="btn btn-ghost"
+            className="btn btn-primary"
             type="button"
-            onClick={stopRecording}
-            disabled={!canStopRecording}
-            aria-disabled={!canStopRecording}
+            onClick={installVoiceModule}
+            disabled={!canInstall}
+            aria-disabled={!canInstall}
           >
+            {pendingInstall ? "Installing..." : "Install tools"}
+          </button>
+        ) : null}
+        {isRecording ? (
+          <button className="btn btn-ghost" type="button" onClick={stopRecording} disabled={!canStopRecording} aria-disabled={!canStopRecording}>
             Stop
           </button>
         ) : null}
@@ -1157,16 +1436,48 @@ function VoiceSetupPanel({
       {recordingError ? <p className="setup-revoked-notice">{recordingError}</p> : null}
 
       {previewUrl ? (
-        <div className="queue-item">
-          <p className="queue-title">Recorded sample preview</p>
-          <audio controls src={previewUrl} />
+        <div className="voice-preview-player">
+          <audio
+            ref={previewAudioRef}
+            src={previewUrl}
+            preload="metadata"
+            onPlay={() => setIsPreviewPlaying(true)}
+            onPause={() => setIsPreviewPlaying(false)}
+            onEnded={() => {
+              setIsPreviewPlaying(false);
+              setPreviewProgress(0);
+            }}
+            onTimeUpdate={(event) => {
+              const audio = event.currentTarget;
+              if (Number.isFinite(audio.duration) && audio.duration > 0) {
+                setPreviewProgress(audio.currentTime / audio.duration);
+              }
+            }}
+            onLoadedMetadata={(event) => {
+              if (Number.isFinite(event.currentTarget.duration)) {
+                setPreviewDurationMs(event.currentTarget.duration * 1000);
+              }
+            }}
+          />
+          <button className="voice-play-button" type="button" onClick={togglePreviewPlayback} aria-label={isPreviewPlaying ? "Pause preview" : "Play preview"}>
+            <span aria-hidden="true">{isPreviewPlaying ? "Pause" : "Play"}</span>
+          </button>
+          <div className="voice-preview-main">
+            <div className="voice-recorder-meta">
+              <strong>Preview</strong>
+              <span>{formatVoiceDuration(previewProgress * (previewDurationMs || 0))} / {formatVoiceDuration(previewDurationMs)}</span>
+            </div>
+            <WaveformBars values={previewWaveform} progress={previewProgress} label="Voice preview waveform" onSeek={seekPreview} />
+          </div>
         </div>
       ) : null}
 
       {state?.hasSample ? (
-        <p className="queue-meta">Sample saved.</p>
+        <p className="queue-meta">Sample saved. You can replace it anytime from Settings.</p>
+      ) : state?.hasPendingSample ? (
+        <p className="queue-meta">Sample saved locally. Preparation will process it when audio tools are ready.</p>
       ) : (
-        <p className="queue-meta">No sample yet.</p>
+        <p className="queue-meta">No sample yet. You can skip this and add it later.</p>
       )}
 
       <div className="wizard-actions">
@@ -1181,42 +1492,44 @@ function VoiceSetupPanel({
         </button>
       </div>
 
-      <details className="setup-advanced">
-        <summary>More actions</summary>
-        <label className="setup-input-group">
-          <span className="queue-meta">Voice model</span>
-          <input
-            type="text"
-            value={modelId}
-            onChange={(event) => setModelId(event.target.value)}
-            placeholder="openbmb/VoxCPM-0.5B"
-            disabled={anyPending || isRecording}
-            aria-disabled={anyPending || isRecording}
-          />
-        </label>
-        <div className="wizard-actions">
-          <button
-            className="btn btn-ghost"
-            type="button"
-            onClick={() => refresh(false)}
-            disabled={pendingRefresh || anyPending}
-            aria-disabled={pendingRefresh || anyPending}
-          >
-            {pendingRefresh ? "Refreshing..." : "Refresh"}
-          </button>
-          <button
-            className="btn btn-ghost"
-            type="button"
-            onClick={resetVoiceModule}
-            disabled={pendingReset || anyPending}
-            aria-disabled={pendingReset || anyPending}
-          >
-            {pendingReset ? "Resetting..." : "Reset"}
-          </button>
-        </div>
-      </details>
+      {showAdvancedControls ? (
+        <details className="setup-advanced">
+          <summary>More actions</summary>
+          <label className="setup-input-group">
+            <span className="queue-meta">Voice model</span>
+            <input
+              type="text"
+              value={modelId}
+              onChange={(event) => setModelId(event.target.value)}
+              placeholder="openbmb/VoxCPM-0.5B"
+              disabled={anyPending || isRecording}
+              aria-disabled={anyPending || isRecording}
+            />
+          </label>
+          <div className="wizard-actions">
+            <button
+              className="btn btn-ghost"
+              type="button"
+              onClick={() => refresh(false)}
+              disabled={pendingRefresh || anyPending}
+              aria-disabled={pendingRefresh || anyPending}
+            >
+              {pendingRefresh ? "Refreshing..." : "Refresh"}
+            </button>
+            <button
+              className="btn btn-ghost"
+              type="button"
+              onClick={resetVoiceModule}
+              disabled={pendingReset || anyPending}
+              aria-disabled={pendingReset || anyPending}
+            >
+              {pendingReset ? "Resetting..." : "Reset"}
+            </button>
+          </div>
+        </details>
+      ) : null}
 
-      {state?.installLog ? (
+      {showAdvancedControls && state?.installLog ? (
         <details className="setup-advanced">
           <summary>Installation log</summary>
           <pre className="queue-meta">{state.installLog}</pre>
@@ -1230,10 +1543,12 @@ function InstagramSetupPanel({
   liveState,
   realtimeEnabled,
   setupSecret,
+  showNotices = true,
 }: {
   liveState: SetupState | null | undefined;
   realtimeEnabled: boolean;
   setupSecret?: string;
+  showNotices?: boolean;
 }) {
   const [localState, setLocalState] = useState<SetupState | null>(null);
   const [username, setUsername] = useState("");
@@ -1438,7 +1753,7 @@ function InstagramSetupPanel({
 
   return (
     <div className="setup-wizard-card" aria-busy={anyPending}>
-      <ActionNotices notices={notices} onDismiss={dismissNotice} />
+      {showNotices ? <ActionNotices notices={notices} onDismiss={dismissNotice} /> : null}
       <h3>Connect Instagram <em className="setup-unstable-tag">Currently unstable</em></h3>
       <p className="queue-meta">Instagram support is experimental and may require retries.</p>
 
@@ -1578,11 +1893,13 @@ function SetupWizardRealtimeWrapper({
   embedded,
   initialScreen,
   setupSecret,
+  showNotices,
   onWhatsAppConnectedChange,
 }: {
   embedded?: boolean;
   initialScreen?: SetupWizardScreen;
   setupSecret?: string;
+  showNotices?: boolean;
   onWhatsAppConnectedChange?: (connected: boolean) => void;
 }) {
   const liveState = useQuery(api.system.setupStatus, { provider: "whatsapp" }) as SetupState | null | undefined;
@@ -1595,6 +1912,7 @@ function SetupWizardRealtimeWrapper({
       embedded={embedded}
       initialScreen={initialScreen}
       setupSecret={setupSecret}
+      showNotices={showNotices}
       onWhatsAppConnectedChange={onWhatsAppConnectedChange}
     />
   );
@@ -1605,6 +1923,7 @@ export function SetupWizard({
   embedded = false,
   initialScreen = "options",
   setupSecret,
+  showNotices = true,
   onWhatsAppConnectedChange,
 }: SetupWizardProps) {
   if (!realtimeEnabled) {
@@ -1616,6 +1935,7 @@ export function SetupWizard({
         embedded={embedded}
         initialScreen={initialScreen}
         setupSecret={setupSecret}
+        showNotices={showNotices}
         onWhatsAppConnectedChange={onWhatsAppConnectedChange}
       />
     );
@@ -1626,6 +1946,7 @@ export function SetupWizard({
       embedded={embedded}
       initialScreen={initialScreen}
       setupSecret={setupSecret}
+      showNotices={showNotices}
       onWhatsAppConnectedChange={onWhatsAppConnectedChange}
     />
   );

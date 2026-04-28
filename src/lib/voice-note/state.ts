@@ -1,4 +1,5 @@
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { platform } from "node:os";
 import { join } from "node:path";
 import { getRuntimeDataPath } from "../runtime/paths";
 
@@ -13,6 +14,9 @@ export type VoiceModuleState = {
   sampleWavPath?: string;
   samplePromptText?: string;
   sampleMimeType?: string;
+  pendingSamplePath?: string;
+  pendingSamplePromptText?: string;
+  pendingSampleMimeType?: string;
   installLogPath?: string;
   installingPid?: number;
   lastError?: string;
@@ -20,6 +24,7 @@ export type VoiceModuleState = {
 
 export type VoiceModuleStateSnapshot = VoiceModuleState & {
   hasSample: boolean;
+  hasPendingSample: boolean;
 };
 
 const DEFAULT_MODEL_ID = "openbmb/VoxCPM-0.5B";
@@ -36,11 +41,19 @@ export function getVoiceNoteSamplePath() {
   return join(getVoiceNoteDataDir(), "prompt_sample.wav");
 }
 
+export function getVoiceNotePendingSamplePath(extension = ".audio") {
+  const safeExtension = extension.startsWith(".") && /^[a-z0-9.]+$/i.test(extension) ? extension : ".audio";
+  return join(getVoiceNoteDataDir(), `prompt_sample_original${safeExtension}`);
+}
+
 export function getVoiceNoteVenvDir() {
   return join(getVoiceNoteDataDir(), "venv");
 }
 
 export function getVoiceNotePythonBinPath() {
+  if (platform() === "win32") {
+    return join(getVoiceNoteVenvDir(), "Scripts", "python.exe");
+  }
   return join(getVoiceNoteVenvDir(), "bin", "python");
 }
 
@@ -102,6 +115,9 @@ function normalizeState(raw: Partial<VoiceModuleState> | null | undefined): Voic
     sampleWavPath: raw.sampleWavPath,
     samplePromptText: raw.samplePromptText,
     sampleMimeType: raw.sampleMimeType,
+    pendingSamplePath: raw.pendingSamplePath,
+    pendingSamplePromptText: raw.pendingSamplePromptText,
+    pendingSampleMimeType: raw.pendingSampleMimeType,
     installLogPath: raw.installLogPath || fallback.installLogPath,
     installingPid: Number.isFinite(raw.installingPid) ? Number(raw.installingPid) : undefined,
     lastError: raw.lastError,
@@ -142,9 +158,11 @@ export async function updateVoiceModuleState(patch: Partial<VoiceModuleState>) {
 export async function readVoiceModuleStateSnapshot(): Promise<VoiceModuleStateSnapshot> {
   const state = await readVoiceModuleState();
   const hasSample = await fileExists(state.sampleWavPath);
+  const hasPendingSample = await fileExists(state.pendingSamplePath);
   return {
     ...state,
     hasSample,
+    hasPendingSample,
   };
 }
 

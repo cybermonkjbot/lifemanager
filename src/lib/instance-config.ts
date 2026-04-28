@@ -3,8 +3,10 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import {
   DEFAULT_INSTANCE_ACCOUNT_PROFILE,
+  DEFAULT_INSTANCE_LEGAL_ACCEPTANCE,
   DEFAULT_INSTANCE_SETUP_PREFERENCES,
   type InstanceAccountProfile,
+  type InstanceLegalAcceptance,
   type InstancePinSource,
   type InstanceSelfHostedConfig,
   type InstanceSetupPreferences,
@@ -32,6 +34,7 @@ export type LocalInstanceConfig = {
   createdAt: number;
   updatedAt: number;
   pin: LocalPinRecord | null;
+  legalAcceptance?: InstanceLegalAcceptance;
   preferences: InstanceSetupPreferences;
   account?: InstanceAccountProfile;
   setupAiSettingsToolConsumedAt?: number | null;
@@ -63,6 +66,16 @@ function normalizeConfigText(value: unknown, maxChars = 800) {
 
 function normalizeEmail(value: unknown) {
   return normalizeConfigText(value, 320).toLowerCase();
+}
+
+function sanitizeLegalAcceptance(value: Partial<InstanceLegalAcceptance> | null | undefined): InstanceLegalAcceptance {
+  const acceptedAt = Number(value?.acceptedAt);
+  return {
+    accepted: value?.accepted === true,
+    acceptedAt: Number.isFinite(acceptedAt) ? acceptedAt : null,
+    privacyPolicyVersion: normalizeConfigText(value?.privacyPolicyVersion, 80),
+    termsVersion: normalizeConfigText(value?.termsVersion, 80),
+  };
 }
 
 function deriveLocalSecretKey(secret: string) {
@@ -107,8 +120,14 @@ function normalizeSoulPrivacyLevel(value: unknown, fallback: InstanceSoulPrivacy
 }
 
 function sanitizeSelfHostedConfig(value: Partial<InstanceSelfHostedConfig> | null | undefined): InstanceSelfHostedConfig {
+  const convexBackendProvisionedAt = Number(value?.convexBackendProvisionedAt);
   return {
     convexUrl: normalizeConfigText(value?.convexUrl),
+    convexDeployKey: normalizeConfigText(value?.convexDeployKey, 2000),
+    convexBackendProvisionedAt:
+      Number.isFinite(convexBackendProvisionedAt) && convexBackendProvisionedAt > 0
+        ? convexBackendProvisionedAt
+        : null,
     appBaseUrl: normalizeConfigText(value?.appBaseUrl),
     aiBaseUrl: normalizeConfigText(value?.aiBaseUrl),
     aiApiKey: normalizeConfigText(value?.aiApiKey, 2000),
@@ -241,6 +260,7 @@ export async function readLocalInstanceConfig(): Promise<LocalInstanceConfig | n
               updatedAt: Number.isFinite(Number(parsed.pin.updatedAt)) ? Number(parsed.pin.updatedAt) : Date.now(),
             }
           : null,
+      legalAcceptance: sanitizeLegalAcceptance(parsed.legalAcceptance),
       preferences: sanitizeInstanceSetupPreferences(parsed.preferences),
       account: sanitizeInstanceAccountProfile(parsed.account),
       setupAiSettingsToolConsumedAt: Number.isFinite(setupAiSettingsToolConsumedAt) ? setupAiSettingsToolConsumedAt : null,
@@ -374,6 +394,7 @@ export async function resolveInstanceSetupState(): Promise<InstanceSetupState> {
     setupCompleted,
     pinEnabled: pinSource !== "none",
     pinSource,
+    legalAcceptance: sanitizeLegalAcceptance(config?.legalAcceptance || DEFAULT_INSTANCE_LEGAL_ACCEPTANCE),
     preferences: config?.preferences || DEFAULT_INSTANCE_SETUP_PREFERENCES,
     account: redactInstanceAccountProfileForClient(sanitizeInstanceAccountProfile(config?.account)),
     setupAiSettingsToolAvailable: !setupCompleted && !setupAiSettingsToolConsumedAt,

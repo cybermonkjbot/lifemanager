@@ -20,6 +20,7 @@ import {
   resolveInstancePinSource,
 } from "@/lib/instance-pin";
 import { DEFAULT_INSTANCE_SETUP_PREFERENCES, type InstanceSetupPreferences } from "@/lib/instance-setup-types";
+import { LEGAL_POLICY_VERSIONS } from "@/lib/legal-policies";
 import { requireRuntimeControlApiAccess } from "@/lib/instance-guard";
 import {
   buildSetupBootstrapCookie,
@@ -47,6 +48,7 @@ type SetupInstancePayload = {
   setupCompleted?: unknown;
   beginFullSetup?: unknown;
   issueSession?: unknown;
+  legalAccepted?: unknown;
 };
 
 function getErrorMessage(error: unknown) {
@@ -83,8 +85,8 @@ function isPlaceholderValue(value: string) {
 function validateSelfHostedSetup(preferences: InstanceSetupPreferences) {
   const { selfHosted } = preferences;
   const convexUrl = parseHttpUrl(selfHosted.convexUrl);
-  if (!convexUrl || !selfHosted.convexUrl.includes(".convex.cloud")) {
-    return "Enter your real Convex deployment URL, for example https://your-deployment.convex.cloud.";
+  if (!convexUrl) {
+    return "Enter your real Convex deployment URL.";
   }
   if (isPlaceholderValue(selfHosted.convexUrl)) {
     return "Replace the placeholder Convex URL with your real self-hosted Convex deployment.";
@@ -101,6 +103,19 @@ function validateSelfHostedSetup(preferences: InstanceSetupPreferences) {
     return "Enter a real AI API key. Placeholder keys like test-key cannot finish setup.";
   }
   return "";
+}
+
+function stripSelfHostedDeployCredentials(preferences: InstanceSetupPreferences): InstanceSetupPreferences {
+  if (preferences.serviceMode !== "self_hosted") {
+    return preferences;
+  }
+  return {
+    ...preferences,
+    selfHosted: {
+      ...preferences.selfHosted,
+      convexDeployKey: "",
+    },
+  };
 }
 
 function hashConnectorToken(token: string) {
@@ -184,6 +199,7 @@ export async function POST(request: NextRequest) {
     const wantsCompletion = payload.setupCompleted === true;
     const beginsFullSetup = payload.beginFullSetup === true;
     const shouldIssueSession = payload.issueSession === true;
+    const wantsLegalAcceptance = payload.legalAccepted === true;
 
     if (pinSource === "env" && requestedPin && !(await matchesInstancePin(requestedPin))) {
       return NextResponse.json({ error: "This instance PIN is managed by environment configuration." }, { status: 400 });
@@ -203,6 +219,24 @@ export async function POST(request: NextRequest) {
 
     if (wantsCompletion && pinSource !== "env" && !pinRecord) {
       return NextResponse.json({ error: "Set an instance PIN before finishing setup." }, { status: 400 });
+    }
+
+    const legalAcceptance = wantsLegalAcceptance
+      ? {
+          accepted: true,
+          acceptedAt: now,
+          privacyPolicyVersion: LEGAL_POLICY_VERSIONS.privacyPolicy,
+          termsVersion: LEGAL_POLICY_VERSIONS.terms,
+        }
+      : current?.legalAcceptance;
+
+    const legalAcceptanceIsCurrent =
+      legalAcceptance?.accepted === true &&
+      legalAcceptance.privacyPolicyVersion === LEGAL_POLICY_VERSIONS.privacyPolicy &&
+      legalAcceptance.termsVersion === LEGAL_POLICY_VERSIONS.terms;
+
+    if (wantsCompletion && !legalAcceptanceIsCurrent) {
+      return NextResponse.json({ error: "Accept the Privacy Policy and Terms before finishing setup." }, { status: 400 });
     }
 
     if (wantsCompletion && nextPreferences.serviceMode === "hosted" && !isValidEmail(nextAccount.email)) {
@@ -290,13 +324,20 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const persistedPreferences = stripSelfHostedDeployCredentials(nextPreferences);
     const nextConfig = {
       version: 1 as const,
-      setupCompleted: beginsFullSetup ? false : wantsCompletion ? true : current?.setupCompleted === true,
+      setupCompleted:
+        beginsFullSetup
+          ? false
+          : wantsCompletion && nextPreferences.serviceMode !== "self_hosted"
+            ? true
+            : current?.setupCompleted === true,
       createdAt: current?.createdAt ?? now,
       updatedAt: now,
       pin: pinRecord,
-      preferences: nextPreferences,
+      legalAcceptance,
+      preferences: persistedPreferences,
       account: nextAccount,
       setupAiSettingsToolConsumedAt: beginsFullSetup ? null : current?.setupAiSettingsToolConsumedAt ?? null,
     };
@@ -316,6 +357,32 @@ export async function POST(request: NextRequest) {
       preferencesSynced = false;
     }
 
+    let responseConfig = nextConfig;
+    if (nextPreferences.serviceMode === "self_hosted" && preferencesSynced) {
+      responseConfig = {
+        ...nextConfig,
+        setupCompleted: beginsFullSetup ? false : wantsCompletion ? true : nextConfig.setupCompleted,
+        preferences: {
+          ...nextPreferences,
+          selfHosted: {
+            ...persistedPreferences.selfHosted,
+            convexBackendProvisionedAt: nextPreferences.selfHosted.convexBackendProvisionedAt || now,
+          },
+        },
+      };
+      await writeLocalInstanceConfig(responseConfig);
+    }
+
+    if (wantsCompletion && nextPreferences.serviceMode === "self_hosted" && !preferencesSynced) {
+      return NextResponse.json(
+        {
+          error:
+            "Self-hosted Convex backend is not ready yet. Run the backend setup step so the app can deploy and verify its Convex functions.",
+        },
+        { status: 502 },
+      );
+    }
+
     const pinWillBeEnabled = pinSource === "env" || Boolean(pinRecord);
     const canIssueSession = Boolean(
       shouldIssueSession &&
@@ -326,7 +393,7 @@ export async function POST(request: NextRequest) {
       state: await resolveInstanceSetupState(),
       preferencesSynced,
       issuedSession: canIssueSession,
-      redirectPath: nextConfig.setupCompleted ? (canIssueSession ? "/" : pinWillBeEnabled ? "/unlock" : "/") : "/setup",
+      redirectPath: responseConfig.setupCompleted ? (canIssueSession ? "/" : pinWillBeEnabled ? "/unlock" : "/") : "/setup",
     };
     const response = NextResponse.json(body);
 
@@ -339,7 +406,7 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    if (nextConfig.setupCompleted) {
+    if (responseConfig.setupCompleted) {
       response.cookies.set(getSetupBootstrapCookieName(), "", clearSetupBootstrapCookieOptions());
     } else if (setupBootstrapConfigured() && (isLocalBootstrap || hasValidSetupSecret)) {
       response.cookies.set(getSetupBootstrapCookieName(), buildSetupBootstrapCookie(), getSetupBootstrapCookieOptions());

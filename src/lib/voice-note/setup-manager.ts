@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import {
   ensureVoiceModuleDataDir,
   getVoiceNoteInstallLogPath,
+  getVoiceNotePendingSamplePath,
   getVoiceNotePythonBinPath,
   getVoiceNoteSamplePath,
   getVoiceNoteVenvDir,
@@ -104,6 +105,120 @@ class VoiceNoteSetupManager {
     }
   }
 
+  private async commandSucceeds(command: string, args: string[], timeoutMs: number) {
+    try {
+      await this.runInstallCommand(command, args, timeoutMs);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async getMissingVoicePackages(pythonBinPath: string, timeoutMs: number) {
+    const modulePackages = [
+      ["voxcpm", "voxcpm"],
+      ["soundfile", "soundfile"],
+    ] as const;
+    const script = [
+      "import importlib.util",
+      `packages = ${JSON.stringify(modulePackages)}`,
+      "missing = [package for package, module in packages if importlib.util.find_spec(module) is None]",
+      "print(','.join(missing))",
+      "raise SystemExit(1 if missing else 0)",
+    ].join("; ");
+    await this.appendInstallLog(`$ ${pythonBinPath} -c <check voice packages>`);
+    try {
+      const result = await execFileAsync(pythonBinPath, ["-c", script], {
+        timeout: timeoutMs,
+        maxBuffer: 256 * 1024,
+      });
+      const stdout = (result.stdout || "").trim();
+      if (stdout) {
+        await this.appendInstallLog(stdout);
+      }
+      return stdout ? stdout.split(",").filter(Boolean) : [];
+    } catch (error) {
+      const output =
+        typeof error === "object" && error && "stdout" in error
+          ? String((error as { stdout?: unknown }).stdout || "").trim()
+          : "";
+      const missing = output ? output.split(",").filter(Boolean) : modulePackages.map(([packageName]) => packageName);
+      await this.appendInstallLog(`Missing voice packages: ${missing.join(", ")}`);
+      return missing;
+    }
+  }
+
+  private async markReady(args: { modelId: string; pythonBinPath: string; reusedExisting: boolean }) {
+    await this.preparePendingSample();
+    const snapshot = await readVoiceModuleStateSnapshot();
+    const hasSample = snapshot.hasSample;
+
+    await updateVoiceModuleState({
+      status: "ready",
+      modelId: args.modelId,
+      pythonBinPath: args.pythonBinPath,
+      message: hasSample
+        ? args.reusedExisting
+          ? "Voice note module is ready. Existing packages were reused."
+          : "Voice note module is ready. Sample already present; cloning can run now."
+        : args.reusedExisting
+          ? "Voice note packages are already available. Record a voice sample to enable cloning."
+          : "Voice note module installed. Record a voice sample to enable cloning.",
+      lastError: undefined,
+    });
+    return await this.getState();
+  }
+
+  private async preparePendingSample() {
+    const current = await readVoiceModuleState();
+    if (!current.pendingSamplePath || !(await fileExists(current.pendingSamplePath))) {
+      return;
+    }
+
+    const ffmpegPath = resolveFfmpegPath();
+    const sampleTimeoutMs = parsePositiveInt(process.env.SLM_VOICE_SAMPLE_TIMEOUT_MS, DEFAULT_SAMPLE_TIMEOUT_MS);
+    try {
+      await execFileAsync(
+        ffmpegPath,
+        [
+          "-y",
+          "-hide_banner",
+          "-loglevel",
+          "error",
+          "-i",
+          current.pendingSamplePath,
+          "-ac",
+          "1",
+          "-ar",
+          "16000",
+          "-c:a",
+          "pcm_s16le",
+          getVoiceNoteSamplePath(),
+        ],
+        {
+          timeout: sampleTimeoutMs,
+          maxBuffer: 8 * 1024 * 1024,
+        },
+      );
+      await updateVoiceModuleState({
+        sampleWavPath: getVoiceNoteSamplePath(),
+        samplePromptText: current.pendingSamplePromptText || current.samplePromptText,
+        sampleMimeType: "audio/wav",
+        pendingSamplePath: undefined,
+        pendingSamplePromptText: undefined,
+        pendingSampleMimeType: undefined,
+        message: "Voice sample prepared. Voice note cloning can use it now.",
+        lastError: undefined,
+      });
+      await rm(current.pendingSamplePath, { force: true }).catch(() => undefined);
+    } catch (error) {
+      await updateVoiceModuleState({
+        message: "Voice sample is saved locally. Install audio tools to finish preparing it.",
+        lastError: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   async getState() {
     return await readVoiceModuleStateSnapshot();
   }
@@ -131,25 +246,34 @@ class VoiceNoteSetupManager {
         lastError: undefined,
       });
 
-      await this.runInstallCommand(basePythonBin, ["--version"], Math.min(25_000, installTimeoutMs));
-      await this.runInstallCommand(basePythonBin, ["-m", "venv", venvDir], installTimeoutMs);
-      await this.runInstallCommand(pythonBinPath, ["-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"], installTimeoutMs);
-      await this.runInstallCommand(pythonBinPath, ["-m", "pip", "install", "--upgrade", "voxcpm", "soundfile"], installTimeoutMs);
-      await this.runInstallCommand(pythonBinPath, ["-m", "pip", "show", "voxcpm"], Math.min(60_000, installTimeoutMs));
+      const probeTimeoutMs = Math.min(60_000, installTimeoutMs);
+      const existingVenvReady =
+        (await fileExists(pythonBinPath)) && (await this.commandSucceeds(pythonBinPath, ["--version"], probeTimeoutMs));
+      if (existingVenvReady) {
+        const missingPackages = await this.getMissingVoicePackages(pythonBinPath, probeTimeoutMs);
+        if (missingPackages.length === 0) {
+          return await this.markReady({ modelId, pythonBinPath, reusedExisting: true });
+        }
+      }
 
-      const snapshot = await readVoiceModuleStateSnapshot();
-      const hasSample = snapshot.hasSample;
+      if (!existingVenvReady) {
+        await this.runInstallCommand(basePythonBin, ["--version"], Math.min(25_000, installTimeoutMs));
+        const baseMissingPackages = await this.getMissingVoicePackages(basePythonBin, probeTimeoutMs);
+        if (baseMissingPackages.length === 0) {
+          return await this.markReady({ modelId, pythonBinPath: basePythonBin, reusedExisting: true });
+        }
+        await this.runInstallCommand(basePythonBin, ["-m", "venv", venvDir], installTimeoutMs);
+      }
 
-      await updateVoiceModuleState({
-        status: "ready",
-        modelId,
-        pythonBinPath,
-        message: hasSample
-          ? "Voice note module is ready. Sample already present; cloning can run now."
-          : "Voice note module installed. Record a voice sample to enable cloning.",
-        lastError: undefined,
-      });
-      return await this.getState();
+      await this.runInstallCommand(pythonBinPath, ["--version"], probeTimeoutMs);
+      const missingPackages = await this.getMissingVoicePackages(pythonBinPath, probeTimeoutMs);
+      if (missingPackages.length > 0) {
+        await this.runInstallCommand(pythonBinPath, ["-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"], installTimeoutMs);
+        await this.runInstallCommand(pythonBinPath, ["-m", "pip", "install", ...missingPackages], installTimeoutMs);
+      }
+      await this.runInstallCommand(pythonBinPath, ["-c", "import voxcpm, soundfile"], probeTimeoutMs);
+
+      return await this.markReady({ modelId, pythonBinPath, reusedExisting: missingPackages.length === 0 });
     } catch (error) {
       const err = error instanceof Error ? error.message : String(error);
       await this.appendInstallLog(`ERROR: ${err}`);
@@ -179,7 +303,8 @@ class VoiceNoteSetupManager {
     const ffmpegPath = resolveFfmpegPath();
     const sampleTimeoutMs = parsePositiveInt(process.env.SLM_VOICE_SAMPLE_TIMEOUT_MS, DEFAULT_SAMPLE_TIMEOUT_MS);
     const tempDir = await mkdtemp(join(tmpdir(), "slm-voice-sample-"));
-    const inputPath = join(tempDir, `sample${extensionFromMimeType(args.mimeType)}`);
+    const inputExtension = extensionFromMimeType(args.mimeType);
+    const inputPath = join(tempDir, `sample${inputExtension}`);
     const outputPath = getVoiceNoteSamplePath();
 
     try {
@@ -215,6 +340,9 @@ class VoiceNoteSetupManager {
         sampleWavPath: outputPath,
         samplePromptText: promptText,
         sampleMimeType: "audio/wav",
+        pendingSamplePath: undefined,
+        pendingSamplePromptText: undefined,
+        pendingSampleMimeType: undefined,
         message:
           previous.status === "ready"
             ? "Voice sample saved. Voice note cloning is ready."
@@ -223,12 +351,17 @@ class VoiceNoteSetupManager {
       });
 
       return await this.getState();
-    } catch (error) {
-      const err = error instanceof Error ? error.message : String(error);
+    } catch {
+      const previous = await readVoiceModuleState();
+      const pendingPath = getVoiceNotePendingSamplePath(inputExtension);
+      await writeFile(pendingPath, args.audioBytes);
       await updateVoiceModuleState({
-        status: "error",
-        message: "Could not process the recorded audio sample. Verify ffmpeg and retry.",
-        lastError: err,
+        status: previous.status,
+        pendingSamplePath: pendingPath,
+        pendingSamplePromptText: promptText,
+        pendingSampleMimeType: args.mimeType || "audio/webm",
+        message: "Voice sample saved locally. Preparation will finish it when audio tools are ready.",
+        lastError: undefined,
       });
       return await this.getState();
     } finally {
@@ -239,9 +372,13 @@ class VoiceNoteSetupManager {
   async reset() {
     const current = await readVoiceModuleState();
     const samplePath = current.sampleWavPath || getVoiceNoteSamplePath();
+    const pendingSamplePath = current.pendingSamplePath;
     const venvDir = getVoiceNoteVenvDir();
 
     await rm(samplePath, { force: true }).catch(() => undefined);
+    if (pendingSamplePath) {
+      await rm(pendingSamplePath, { force: true }).catch(() => undefined);
+    }
     await rm(venvDir, { recursive: true, force: true }).catch(() => undefined);
     await rm(getVoiceNoteInstallLogPath(), { force: true }).catch(() => undefined);
 
@@ -255,6 +392,9 @@ class VoiceNoteSetupManager {
       sampleWavPath: undefined,
       samplePromptText: undefined,
       sampleMimeType: undefined,
+      pendingSamplePath: undefined,
+      pendingSamplePromptText: undefined,
+      pendingSampleMimeType: undefined,
       pythonBinPath: undefined,
       lastError: sampleStillExists ? "Failed to remove sample file." : undefined,
     });

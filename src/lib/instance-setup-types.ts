@@ -5,8 +5,17 @@ export type InstanceMimicryPreset = "light" | "balanced" | "close";
 export type InstanceSoulPrivacyLevel = "setup_only" | "ai_usable" | "never_mention";
 export type InstanceServiceMode = "hosted" | "self_hosted";
 
+export type InstanceLegalAcceptance = {
+  accepted: boolean;
+  acceptedAt: number | null;
+  privacyPolicyVersion: string;
+  termsVersion: string;
+};
+
 export type InstanceSelfHostedConfig = {
   convexUrl: string;
+  convexDeployKey: string;
+  convexBackendProvisionedAt: number | null;
   appBaseUrl: string;
   aiBaseUrl: string;
   aiApiKey: string;
@@ -66,11 +75,19 @@ export type InstanceSetupState = {
   setupCompleted: boolean;
   pinEnabled: boolean;
   pinSource: InstancePinSource;
+  legalAcceptance: InstanceLegalAcceptance;
   preferences: InstanceSetupPreferences;
   account: InstanceAccountProfile;
   setupAiSettingsToolAvailable: boolean;
   setupAiSettingsToolConsumedAt: number | null;
   updatedAt: number | null;
+};
+
+export const DEFAULT_INSTANCE_LEGAL_ACCEPTANCE: InstanceLegalAcceptance = {
+  accepted: false,
+  acceptedAt: null,
+  privacyPolicyVersion: "",
+  termsVersion: "",
 };
 
 export const DEFAULT_INSTANCE_ACCOUNT_PROFILE: InstanceAccountProfile = {
@@ -92,6 +109,8 @@ export const DEFAULT_INSTANCE_SETUP_PREFERENCES: InstanceSetupPreferences = {
   serviceMode: "hosted",
   selfHosted: {
     convexUrl: "",
+    convexDeployKey: "",
+    convexBackendProvisionedAt: null,
     appBaseUrl: "",
     aiBaseUrl: "",
     aiApiKey: "",

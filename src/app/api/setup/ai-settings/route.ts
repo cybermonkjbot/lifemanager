@@ -89,6 +89,7 @@ export async function POST(request: NextRequest) {
       createdAt: current?.createdAt ?? now,
       updatedAt: now,
       pin: current?.pin || null,
+      legalAcceptance: current?.legalAcceptance,
       preferences: nextPreferences,
       account: current?.account,
       setupAiSettingsToolConsumedAt: now,

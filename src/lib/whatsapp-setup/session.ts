@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { ConvexHttpClient } from "convex/browser";
 import { convexRefs } from "../convex-refs";
+import { getWorkerCommand } from "../runtime/worker-command";
 import { ensureWorkerStopped, getWorkerRuntimeStatus } from "../runtime/worker-lock";
 
 type SetupStatus = "idle" | "starting" | "qr_ready" | "code_ready" | "syncing" | "connected" | "error";
@@ -114,10 +115,10 @@ class WhatsAppSetupManager {
       });
 
       try {
-        const bunBin = process.env.BUN_BIN || "bun";
-        const child = spawn(bunBin, ["run", "worker"], {
+        const workerCommand = getWorkerCommand("whatsapp");
+        const child = spawn(workerCommand.command, workerCommand.args, {
           cwd: ".",
-          env: process.env,
+          env: workerCommand.env,
           detached: true,
           stdio: "ignore",
         });
@@ -126,7 +127,7 @@ class WhatsAppSetupManager {
         this.setState({
           status: "connected",
           mode: this.setupMode,
-          message: "WhatsApp connected, but auto-start failed. Run `bun run worker` manually.",
+          message: "WhatsApp connected, but auto-start failed. Start the worker manually from the desktop app.",
         });
         return;
       }

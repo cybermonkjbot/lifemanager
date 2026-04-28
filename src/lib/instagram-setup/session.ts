@@ -12,6 +12,7 @@ import {
   IgResponseError,
 } from "instagram-private-api";
 import { convexRefs } from "../convex-refs";
+import { getWorkerCommand } from "../runtime/worker-command";
 import { ensureWorkerStopped, getWorkerRuntimeStatus } from "../runtime/worker-lock";
 
 type InstagramSetupStatus = "idle" | "starting" | "authenticating" | "challenge_required" | "connected" | "error";
@@ -76,12 +77,12 @@ class InstagramSetupManager {
   private get authDir() {
     const configured = (process.env.INSTAGRAM_AUTH_PATH || "").trim();
     if (!configured) {
-      return join(process.cwd(), ".ig_auth");
+      return join(/* turbopackIgnore: true */ process.cwd(), ".ig_auth");
     }
     if (configured.startsWith("/")) {
       return configured;
     }
-    return join(process.cwd(), configured);
+    return join(/* turbopackIgnore: true */ process.cwd(), configured);
   }
 
   private get sessionPath() {
@@ -377,10 +378,10 @@ class InstagramSetupManager {
       });
 
       try {
-        const bunBin = process.env.BUN_BIN || "bun";
-        const child = spawn(bunBin, ["run", "worker:instagram"], {
+        const workerCommand = getWorkerCommand("instagram");
+        const child = spawn(workerCommand.command, workerCommand.args, {
           cwd: ".",
-          env: process.env,
+          env: workerCommand.env,
           detached: true,
           stdio: "ignore",
         });
@@ -389,7 +390,7 @@ class InstagramSetupManager {
         this.setState({
           status: "connected",
           mode: "password",
-          message: "Instagram connected, but auto-start failed. Run `bun run worker:instagram` manually.",
+          message: "Instagram connected, but auto-start failed. Start the worker manually from the desktop app.",
         });
         return;
       }
