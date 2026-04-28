@@ -16,7 +16,27 @@ function diagnostic(message: string, line: number, column = 1): CodeDiagnostic {
 }
 
 function stripComment(line: string) {
-  return line.replace(/(^|\s)#.*$/, "");
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (char === "#" && !inString && (index === 0 || /\s/.test(line[index - 1] || ""))) {
+      return line.slice(0, index);
+    }
+  }
+  return line;
 }
 
 function parseLiteral(raw: string): LiteralValue | null {
