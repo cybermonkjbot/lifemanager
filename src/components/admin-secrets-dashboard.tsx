@@ -35,6 +35,95 @@ type AdminSecretsDashboardProps = {
   masqueradeSession?: AdminMasqueradeSession | null;
 };
 
+type AdminSecretUpdateModalProps = {
+  selectedSecret: SecretStatus | null;
+  draftValue: string;
+  pendingKey: string;
+  onChange: (key: string, value: string) => void;
+  onClose: () => void;
+  onSave: (key: string) => void;
+};
+
+function AdminSecretUpdateModal({
+  selectedSecret,
+  draftValue,
+  pendingKey,
+  onChange,
+  onClose,
+  onSave,
+}: AdminSecretUpdateModalProps) {
+  return (
+    <UIModal
+      open={Boolean(selectedSecret)}
+      onClose={onClose}
+      title={selectedSecret ? `Update ${selectedSecret.label}` : "Update Secret"}
+    >
+      {selectedSecret ? (
+        <div className="admin-modal-form">
+          <label>
+            <span>{selectedSecret.secret ? "Secret value" : "Config value"}</span>
+            <input
+              type={selectedSecret.secret ? "password" : "text"}
+              value={draftValue}
+              placeholder={selectedSecret.secret ? "New secret value" : "New config value"}
+              onChange={(event) => onChange(selectedSecret.key, event.target.value)}
+              autoComplete="off"
+            />
+          </label>
+          <div className="admin-modal-actions">
+            <button className="btn btn-ghost" type="button" onClick={onClose}>
+              Cancel
+            </button>
+            <button
+              className="btn btn-primary"
+              type="button"
+              disabled={!draftValue.trim() || pendingKey === selectedSecret.key}
+              onClick={() => onSave(selectedSecret.key)}
+            >
+              {pendingKey === selectedSecret.key ? "Saving..." : "Save value"}
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </UIModal>
+  );
+}
+
+type AdminSecretClearModalProps = {
+  clearingSecret: SecretStatus | null;
+  pendingKey: string;
+  onClose: () => void;
+  onClear: (key: string) => void;
+};
+
+function AdminSecretClearModal({ clearingSecret, pendingKey, onClose, onClear }: AdminSecretClearModalProps) {
+  return (
+    <UIModal
+      open={Boolean(clearingSecret)}
+      onClose={onClose}
+      title={clearingSecret ? `Clear ${clearingSecret.label}` : "Clear Secret"}
+      description="This removes the stored value until a new one is saved."
+    >
+      <p className="ui-modal-confirmation-copy">
+        Clear this value from the admin runtime configuration?
+      </p>
+      <div className="admin-modal-actions">
+        <button className="btn btn-ghost" type="button" onClick={onClose}>
+          Cancel
+        </button>
+        <button
+          className="btn btn-danger-ghost"
+          type="button"
+          disabled={!clearingSecret || pendingKey === clearingSecret.key}
+          onClick={() => clearingSecret ? onClear(clearingSecret.key) : undefined}
+        >
+          {clearingSecret && pendingKey === clearingSecret.key ? "Clearing..." : "Clear value"}
+        </button>
+      </div>
+    </UIModal>
+  );
+}
+
 export function AdminSecretsDashboard({ masqueradeSession }: AdminSecretsDashboardProps) {
   const [secrets, setSecrets] = useState<SecretStatus[]>([]);
   const [draftValues, setDraftValues] = useState<Record<string, string>>({});
@@ -137,7 +226,9 @@ export function AdminSecretsDashboard({ masqueradeSession }: AdminSecretsDashboa
         {masqueradeSession ? <AdminMasqueradeBanner session={masqueradeSession} /> : null}
         <header className="admin-console-header">
           <div>
-            <h1>Secrets</h1>
+            <p className="admin-kicker">Runtime Configuration</p>
+            <h1>Managed Secrets</h1>
+            <p>Review provider credentials, Convex stored values, environment fallbacks, and update status.</p>
           </div>
           <button className="btn btn-primary admin-primary-action" type="button" disabled={loading} onClick={() => void loadSecrets()}>
             {loading ? "Refreshing..." : "Refresh secrets"}
@@ -193,59 +284,21 @@ export function AdminSecretsDashboard({ masqueradeSession }: AdminSecretsDashboa
           </div>
         </div>
 
-      <UIModal
-        open={Boolean(selectedSecret)}
+      <AdminSecretUpdateModal
+        selectedSecret={selectedSecret}
+        draftValue={selectedSecret ? draftValues[selectedSecret.key] || "" : ""}
+        pendingKey={pendingKey}
+        onChange={(key, value) => setDraftValues((current) => ({ ...current, [key]: value }))}
         onClose={() => setSecretEditKey("")}
-        title={selectedSecret ? `Update ${selectedSecret.label}` : "Update Secret"}
-      >
-        {selectedSecret ? (
-          <div className="admin-modal-form">
-            <label>
-              <span>{selectedSecret.secret ? "Secret value" : "Config value"}</span>
-              <input
-                type={selectedSecret.secret ? "password" : "text"}
-                value={draftValues[selectedSecret.key] || ""}
-                placeholder={selectedSecret.secret ? "New secret value" : "New config value"}
-                onChange={(event) => setDraftValues((current) => ({ ...current, [selectedSecret.key]: event.target.value }))}
-                autoComplete="off"
-              />
-            </label>
-            <div className="admin-modal-actions">
-              <button className="btn btn-ghost" type="button" onClick={() => setSecretEditKey("")}>
-                Cancel
-              </button>
-              <button
-                className="btn btn-primary"
-                type="button"
-                disabled={!draftValues[selectedSecret.key]?.trim() || pendingKey === selectedSecret.key}
-                onClick={() => void saveSecret(selectedSecret.key)}
-              >
-                {pendingKey === selectedSecret.key ? "Saving..." : "Save value"}
-              </button>
-            </div>
-          </div>
-        ) : null}
-      </UIModal>
+        onSave={(key) => void saveSecret(key)}
+      />
 
-      <UIModal
-        open={Boolean(clearingSecret)}
+      <AdminSecretClearModal
+        clearingSecret={clearingSecret}
+        pendingKey={pendingKey}
         onClose={() => setClearSecretKey("")}
-        title={clearingSecret ? `Clear ${clearingSecret.label}` : "Clear Secret"}
-      >
-        <div className="admin-modal-actions">
-          <button className="btn btn-ghost" type="button" onClick={() => setClearSecretKey("")}>
-            Cancel
-          </button>
-          <button
-            className="btn btn-primary"
-            type="button"
-            disabled={!clearingSecret || pendingKey === clearingSecret.key}
-            onClick={() => clearingSecret ? void clearSecret(clearingSecret.key) : undefined}
-          >
-            {clearingSecret && pendingKey === clearingSecret.key ? "Clearing..." : "Clear value"}
-          </button>
-        </div>
-      </UIModal>
+        onClear={(key) => void clearSecret(key)}
+      />
 
     </AdminConsoleShell>
   );

@@ -16,6 +16,33 @@ function isActive(pathname: string, href: string) {
   return pathname === href || pathname.startsWith(`${href}/`);
 }
 
+function AdminNavLink({
+  item,
+  active,
+}: {
+  item: {
+    href: string;
+    label: string;
+    eyebrow?: string;
+    description?: string;
+  };
+  active: boolean;
+}) {
+  return (
+    <Link
+      key={item.href}
+      className={active ? "admin-nav-active" : undefined}
+      href={item.href}
+      aria-current={active ? "page" : undefined}
+    >
+      <span className="admin-nav-label-row">
+        <strong>{item.label}</strong>
+      </span>
+      {item.description ? <span className="admin-nav-description">{item.description}</span> : null}
+    </Link>
+  );
+}
+
 export function AdminConsoleShell({ children }: AdminConsoleShellProps) {
   const pathname = usePathname() || "/admin";
 
@@ -35,32 +62,14 @@ export function AdminConsoleShell({ children }: AdminConsoleShellProps) {
           <nav className="admin-nav-stack" aria-label="Admin sections">
             {adminPrimaryNavItems.map((item) => {
               const active = isActive(pathname, item.href);
-              return (
-                <Link
-                  key={item.href}
-                  className={active ? "admin-nav-active" : undefined}
-                  href={item.href}
-                  aria-current={active ? "page" : undefined}
-                >
-                  {item.label}
-                </Link>
-              );
+              return <AdminNavLink key={item.href} item={item} active={active} />;
             })}
           </nav>
           <nav className="admin-nav-stack admin-nav-secondary" aria-label="Admin operations">
             <span>Operations</span>
             {adminOperationsNavItems.map((item) => {
               const active = isActive(pathname, item.href);
-              return (
-                <Link
-                  key={item.href}
-                  className={active ? "admin-nav-active" : undefined}
-                  href={item.href}
-                  aria-current={active ? "page" : undefined}
-                >
-                  {item.label}
-                </Link>
-              );
+              return <AdminNavLink key={item.href} item={item} active={active} />;
             })}
           </nav>
         </div>

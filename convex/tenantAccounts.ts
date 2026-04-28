@@ -38,6 +38,29 @@ function tenantAccessStatus(
   return isTenantBillingActive(tenant, now) ? "active" as const : "billing_required" as const;
 }
 
+async function isTenantAccountPlatformAdmin(ctx: MutationCtx, tenantId: Id<"tenantAccounts">) {
+  const tenant = await ctx.db.get(tenantId);
+  if (!tenant) {
+    return false;
+  }
+
+  const adminUser = await ctx.db
+    .query("adminUsers")
+    .withIndex("by_emailNormalized", (q) => q.eq("emailNormalized", tenant.emailNormalized))
+    .unique();
+  if (adminUser) {
+    return true;
+  }
+
+  const configuredAdminUsers = await ctx.db.query("adminUsers").take(1);
+  if (configuredAdminUsers.length > 0) {
+    return false;
+  }
+
+  const tenants = await ctx.db.query("tenantAccounts").take(2);
+  return tenants.length === 1 && tenants[0]?._id === tenantId;
+}
+
 export const registerFromDesktop = mutation({
   args: {
     email: v.string(),
@@ -267,6 +290,43 @@ export const verifyConnectorToken = mutation({
       deviceId: token.deviceId,
       scopes: token.scopes,
       billingStatus: tenant.billingStatus,
+      canUseSelfControl: await isTenantAccountPlatformAdmin(ctx, tenant._id),
+    };
+  },
+});
+
+export const getConnectorSelfControlAccess = mutation({
+  args: {
+    tenantId: v.id("tenantAccounts"),
+    connectorTokenHash: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    const token = await ctx.db
+      .query("tenantConnectorTokens")
+      .withIndex("by_tokenHash", (q) => q.eq("tokenHash", args.connectorTokenHash))
+      .unique();
+    if (!token || token.status !== "active" || (token.expiresAt && token.expiresAt <= now)) {
+      return { allowed: false, reason: "invalid_connector" };
+    }
+    if (token.tenantId !== args.tenantId) {
+      return { allowed: false, reason: "tenant_mismatch" };
+    }
+
+    const tenant = await ctx.db.get(token.tenantId);
+    if (!tenant || !isTenantBillingActive(tenant, now)) {
+      return { allowed: false, reason: "inactive_tenant" };
+    }
+
+    await ctx.db.patch(token._id, {
+      lastUsedAt: now,
+      updatedAt: now,
+    });
+
+    const allowed = await isTenantAccountPlatformAdmin(ctx, tenant._id);
+    return {
+      allowed,
+      reason: allowed ? "admin_tenant" : "not_admin_tenant",
     };
   },
 });
@@ -723,7 +783,14 @@ type BackfillTable =
   | "mediaAssets"
   | "followUps"
   | "todoCandidates"
-  | "todos";
+  | "todos"
+  | "appConfig"
+  | "styleProfiles"
+  | "styleProfileHistory"
+  | "personalityProfiles"
+  | "personalityProfileVersions"
+  | "threadPersonalitySettings"
+  | "ignoreRules";
 
 async function patchTenantBatch(ctx: MutationCtx, table: BackfillTable, tenantId: Id<"tenantAccounts">, limit: number) {
   if (table === "threads") {
@@ -856,9 +923,79 @@ async function patchTenantBatch(ctx: MutationCtx, table: BackfillTable, tenantId
     }
     return { table, patched: rows.length, hasMore: rows.length === limit };
   }
+  if (table === "todos") {
+    const rows = await ctx.db
+      .query("todos")
+      .withIndex("by_tenantId_and_status", (q) => q.eq("tenantId", undefined))
+      .take(limit);
+    for (const row of rows) {
+      await ctx.db.patch(row._id, { tenantId });
+    }
+    return { table, patched: rows.length, hasMore: rows.length === limit };
+  }
+  if (table === "appConfig") {
+    const rows = await ctx.db
+      .query("appConfig")
+      .withIndex("by_tenantId_and_key", (q) => q.eq("tenantId", undefined))
+      .take(limit);
+    for (const row of rows) {
+      await ctx.db.patch(row._id, { tenantId });
+    }
+    return { table, patched: rows.length, hasMore: rows.length === limit };
+  }
+  if (table === "styleProfiles") {
+    const rows = await ctx.db
+      .query("styleProfiles")
+      .withIndex("by_tenantId_and_scope", (q) => q.eq("tenantId", undefined))
+      .take(limit);
+    for (const row of rows) {
+      await ctx.db.patch(row._id, { tenantId });
+    }
+    return { table, patched: rows.length, hasMore: rows.length === limit };
+  }
+  if (table === "styleProfileHistory") {
+    const rows = await ctx.db
+      .query("styleProfileHistory")
+      .withIndex("by_tenantId_and_scope_and_createdAt", (q) => q.eq("tenantId", undefined))
+      .take(limit);
+    for (const row of rows) {
+      await ctx.db.patch(row._id, { tenantId });
+    }
+    return { table, patched: rows.length, hasMore: rows.length === limit };
+  }
+  if (table === "personalityProfiles") {
+    const rows = await ctx.db
+      .query("personalityProfiles")
+      .withIndex("by_tenantId_and_slug", (q) => q.eq("tenantId", undefined))
+      .take(limit);
+    for (const row of rows) {
+      await ctx.db.patch(row._id, { tenantId });
+    }
+    return { table, patched: rows.length, hasMore: rows.length === limit };
+  }
+  if (table === "personalityProfileVersions") {
+    const rows = await ctx.db
+      .query("personalityProfileVersions")
+      .withIndex("by_tenantId_and_profileSlug_and_createdAt", (q) => q.eq("tenantId", undefined))
+      .take(limit);
+    for (const row of rows) {
+      await ctx.db.patch(row._id, { tenantId });
+    }
+    return { table, patched: rows.length, hasMore: rows.length === limit };
+  }
+  if (table === "threadPersonalitySettings") {
+    const rows = await ctx.db
+      .query("threadPersonalitySettings")
+      .withIndex("by_tenantId_and_thread", (q) => q.eq("tenantId", undefined))
+      .take(limit);
+    for (const row of rows) {
+      await ctx.db.patch(row._id, { tenantId });
+    }
+    return { table, patched: rows.length, hasMore: rows.length === limit };
+  }
   const rows = await ctx.db
-    .query("todos")
-    .withIndex("by_tenantId_and_status", (q) => q.eq("tenantId", undefined))
+    .query("ignoreRules")
+    .withIndex("by_tenantId_and_type", (q) => q.eq("tenantId", undefined))
     .take(limit);
   for (const row of rows) {
     await ctx.db.patch(row._id, { tenantId });
@@ -964,6 +1101,13 @@ export const adminSeedOwnerAndBackfill = mutation({
       "followUps",
       "todoCandidates",
       "todos",
+      "appConfig",
+      "styleProfiles",
+      "styleProfileHistory",
+      "personalityProfiles",
+      "personalityProfileVersions",
+      "threadPersonalitySettings",
+      "ignoreRules",
     ];
     const backfill = [];
     for (const table of tables) {

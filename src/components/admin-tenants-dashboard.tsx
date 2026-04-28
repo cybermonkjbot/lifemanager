@@ -1,7 +1,8 @@
 "use client";
 
+import { SearchableSelect } from "@/components/app-ui";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { AdminMasqueradeBanner } from "@/components/admin-masquerade-banner";
 import { AdminConsoleShell } from "@/components/admin-console-shell";
 import { UIModal } from "@/components/ui-modal";
@@ -176,22 +177,519 @@ function emptyUserDraft() {
   };
 }
 
-function emptyBootstrapDraft() {
-  return {
-    email: "",
-    displayName: "",
-    pin: "",
-    batchSize: 100,
-  };
-}
+type SubscriptionDraft = {
+  plan: string;
+  billingStatus: string;
+  trialEndsAt: string;
+  subscriptionExpiresAt: string;
+  subscriptionPauseReason: string;
+};
+
+type UserDraft = ReturnType<typeof emptyUserDraft>;
 
 type AdminTenantsDashboardProps = {
   masqueradeSession?: AdminMasqueradeSession | null;
 };
 
+type AdminTenantDetailModalProps = {
+  open: boolean;
+  tenantDetail: TenantDetail | null;
+  detailNotice: string;
+  detailLoading: boolean;
+  pendingUserId: string;
+  onClose: () => void;
+  onEditBilling: () => void;
+  onCreateUser: () => void;
+  onRefresh: (tenantId: string) => void;
+  onEditUser: (user: TenantUserRow) => void;
+  onRemoveUser: (userId: string) => void;
+};
+
+function AdminTenantDetailModal({
+  open,
+  tenantDetail,
+  detailNotice,
+  detailLoading,
+  pendingUserId,
+  onClose,
+  onEditBilling,
+  onCreateUser,
+  onRefresh,
+  onEditUser,
+  onRemoveUser,
+}: AdminTenantDetailModalProps) {
+  return (
+    <UIModal
+      open={open && Boolean(tenantDetail)}
+      onClose={onClose}
+      title={tenantDetail?.tenant.email || "Tenant"}
+      size="wide"
+    >
+      <div className="admin-access-head">
+        {tenantDetail ? (
+          <div className="admin-panel-action-row">
+            <button className="btn btn-secondary" type="button" onClick={onEditBilling}>
+              Edit billing
+            </button>
+            <button className="btn btn-primary admin-primary-action" type="button" onClick={onCreateUser}>
+              Add user
+            </button>
+            <button className="btn btn-ghost" type="button" disabled={detailLoading} onClick={() => onRefresh(tenantDetail.tenant._id)}>
+              Refresh
+            </button>
+          </div>
+        ) : null}
+      </div>
+
+      {detailNotice ? <p className="admin-notice admin-management-notice" role="status">{detailNotice}</p> : null}
+
+      {tenantDetail ? (
+        <div className="admin-management-grid">
+          <div className="admin-management-form">
+            <div className="admin-management-title">
+              <strong>Subscription</strong>
+              <span>{tenantDetail.tenant.serviceMode.replace("_", " ")}</span>
+            </div>
+            <dl className="admin-detail-list">
+              <div>
+                <dt>Plan</dt>
+                <dd>{tenantDetail.tenant.plan.replace("_", " ")}</dd>
+              </div>
+              <div>
+                <dt>Billing</dt>
+                <dd>{tenantDetail.tenant.billingStatus.replace("_", " ")}</dd>
+              </div>
+              <div>
+                <dt>Trial ends</dt>
+                <dd>{formatDate(tenantDetail.tenant.trialEndsAt)}</dd>
+              </div>
+              <div>
+                <dt>Subscription expires</dt>
+                <dd>{tenantDetail.tenant.subscriptionExpiresAt ? formatDate(tenantDetail.tenant.subscriptionExpiresAt) : "Not set"}</dd>
+              </div>
+            </dl>
+            {tenantDetail.tenant.subscriptionProvider || tenantDetail.tenant.flutterwaveSubscriptionId ? (
+              <div className="admin-management-title">
+                <strong>{tenantDetail.tenant.subscriptionProvider || "manual"}</strong>
+                <span>{tenantDetail.tenant.flutterwaveSubscriptionId || "No Flutterwave subscription ID"}</span>
+              </div>
+            ) : null}
+          </div>
+
+          <div className="admin-management-form">
+            <div className="admin-management-title">
+              <strong>Tenant users</strong>
+              <span>{tenantDetail.users.length} configured</span>
+            </div>
+            <div className="admin-data-list admin-tenant-user-list">
+              {tenantDetail.users.map((user) => (
+                <article className="admin-data-row admin-tenant-user-row" key={user._id}>
+                  <div>
+                    <strong>{user.email}</strong>
+                    <span>{user.displayName || "No name"}</span>
+                  </div>
+                  <div>
+                    <strong>{user.role}{user.isSuperAdmin ? " / super admin" : ""}</strong>
+                    <span>{user.pinConfigured ? "PIN configured" : "PIN missing"}</span>
+                  </div>
+                  <div>
+                    <strong>{user.pinUpdatedAt ? formatDate(user.pinUpdatedAt) : "No PIN update"}</strong>
+                    <span>Updated {formatDate(user.updatedAt)}</span>
+                  </div>
+                  <div className="admin-tenant-user-actions">
+                    <button className="btn btn-secondary" type="button" onClick={() => onEditUser(user)}>
+                      Edit
+                    </button>
+                    <button
+                      className="btn btn-ghost"
+                      type="button"
+                      disabled={pendingUserId === user._id}
+                      onClick={() => onRemoveUser(user._id)}
+                    >
+                      {pendingUserId === user._id ? "Removing..." : "Remove"}
+                    </button>
+                  </div>
+                </article>
+              ))}
+              {tenantDetail.users.length === 0 ? <p className="admin-empty-state">No tenant users have been configured yet.</p> : null}
+            </div>
+          </div>
+
+          <div className="admin-management-form">
+            <div className="admin-management-title">
+              <strong>Connected accounts</strong>
+              <span>{tenantDetail.connectedAccounts.length} linked</span>
+            </div>
+            <div className="admin-data-list admin-tenant-user-list">
+              {tenantDetail.connectedAccounts.map((account) => (
+                <article className="admin-data-row admin-tenant-runtime-row" key={account._id}>
+                  <div>
+                    <strong>{account.provider}</strong>
+                    <span>{account.displayName || account.accountLabel || account.username || account.phoneNumberMasked || account.providerAccountId}</span>
+                  </div>
+                  <div>
+                    <strong>{account.authState}</strong>
+                    <span>Device {account.deviceId}</span>
+                  </div>
+                  <div>
+                    <strong>{formatOptionalDate(account.lastSeenAt)}</strong>
+                    <span>Updated {formatDate(account.updatedAt)}</span>
+                  </div>
+                </article>
+              ))}
+              {tenantDetail.connectedAccounts.length === 0 ? <p className="admin-empty-state">No WhatsApp or Instagram accounts linked yet.</p> : null}
+            </div>
+          </div>
+
+          <div className="admin-management-form">
+            <div className="admin-management-title">
+              <strong>Devices and tokens</strong>
+              <span>{tenantDetail.devices.length} devices / {tenantDetail.connectorTokens.length} tokens</span>
+            </div>
+            <div className="admin-data-list admin-tenant-user-list">
+              {tenantDetail.devices.map((device) => (
+                <article className="admin-data-row admin-tenant-runtime-row" key={device._id}>
+                  <div>
+                    <strong>{device.label || device.deviceId}</strong>
+                    <span>{device.deviceId}</span>
+                  </div>
+                  <div>
+                    <strong>Last seen {formatDate(device.lastSeenAt)}</strong>
+                    <span>Updated {formatDate(device.updatedAt)}</span>
+                  </div>
+                  <div>
+                    <strong>{tenantDetail.connectorTokens.filter((token) => token.deviceId === device.deviceId).length} tokens</strong>
+                    <span>
+                      {tenantDetail.connectorTokens
+                        .filter((token) => token.deviceId === device.deviceId)
+                        .map((token) => `${token.status} ${token.tokenPreview}`)
+                        .join(", ") || "No connector token"}
+                    </span>
+                  </div>
+                </article>
+              ))}
+              {tenantDetail.devices.length === 0 ? <p className="admin-empty-state">No registered devices yet.</p> : null}
+            </div>
+          </div>
+
+          <div className="admin-management-form">
+            <div className="admin-management-title">
+              <strong>Subscriptions</strong>
+              <span>{tenantDetail.subscriptions.length} records</span>
+            </div>
+            <div className="admin-data-list admin-tenant-user-list">
+              {tenantDetail.subscriptions.map((subscription) => (
+                <article className="admin-data-row admin-tenant-runtime-row" key={subscription._id}>
+                  <div>
+                    <strong>{subscription.provider} / {subscription.status}</strong>
+                    <span>{subscription.plan.replace("_", " ")}</span>
+                  </div>
+                  <div>
+                    <strong>{formatAmount(subscription.amount, subscription.currency)}</strong>
+                    <span>{subscription.txRef || subscription.providerSubscriptionId || "No provider reference"}</span>
+                  </div>
+                  <div>
+                    <strong>Period ends {formatOptionalDate(subscription.currentPeriodEndsAt)}</strong>
+                    <span>Last payment {formatOptionalDate(subscription.lastPaymentAt)}</span>
+                    {subscription.paymentLink ? <a href={subscription.paymentLink} target="_blank" rel="noreferrer">Payment link</a> : null}
+                  </div>
+                </article>
+              ))}
+              {tenantDetail.subscriptions.length === 0 ? <p className="admin-empty-state">No subscription records yet.</p> : null}
+            </div>
+          </div>
+
+          <div className="admin-management-form admin-tenant-events-panel">
+            <div className="admin-management-title">
+              <strong>Billing events</strong>
+              <span>{tenantDetail.subscriptionEvents.length} recent</span>
+            </div>
+            <div className="admin-data-list admin-tenant-user-list">
+              {tenantDetail.subscriptionEvents.map((event) => (
+                <article className="admin-data-row admin-tenant-event-row" key={event._id}>
+                  <div>
+                    <strong>{event.eventType}</strong>
+                    <span>{event.provider}{event.status ? ` / ${event.status}` : ""}</span>
+                  </div>
+                  <div>
+                    <strong>{formatDate(event.createdAt)}</strong>
+                    <span>{event.txRef || event.transactionId || event.providerEventId || "No provider reference"}</span>
+                  </div>
+                  <div>
+                    <span>{event.detail}</span>
+                  </div>
+                </article>
+              ))}
+              {tenantDetail.subscriptionEvents.length === 0 ? <p className="admin-empty-state">No billing events recorded yet.</p> : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </UIModal>
+  );
+}
+
+type AdminSubscriptionModalProps = {
+  open: boolean;
+  tenantDetail: TenantDetail | null;
+  draft: SubscriptionDraft;
+  loading: boolean;
+  onClose: () => void;
+  onDraftChange: (draft: SubscriptionDraft) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+};
+
+function AdminSubscriptionModal({
+  open,
+  tenantDetail,
+  draft,
+  loading,
+  onClose,
+  onDraftChange,
+  onSubmit,
+}: AdminSubscriptionModalProps) {
+  return (
+    <UIModal open={open && Boolean(tenantDetail)} onClose={onClose} title="Edit Subscription" size="wide">
+      {tenantDetail ? (
+        <form className="admin-modal-form admin-modal-grid-form" onSubmit={onSubmit}>
+          <label>
+            <span>Plan</span>
+            <SearchableSelect value={draft.plan} onChange={(event) => onDraftChange({ ...draft, plan: event.target.value })}>
+              {PLAN_OPTIONS.map((plan) => (
+                <option key={plan} value={plan}>{plan.replace("_", " ")}</option>
+              ))}
+            </SearchableSelect>
+          </label>
+          <label>
+            <span>Billing status</span>
+            <SearchableSelect value={draft.billingStatus} onChange={(event) => onDraftChange({ ...draft, billingStatus: event.target.value })}>
+              {BILLING_STATUS_OPTIONS.map((status) => (
+                <option key={status} value={status}>{status.replace("_", " ")}</option>
+              ))}
+            </SearchableSelect>
+          </label>
+          <label>
+            <span>Trial ends</span>
+            <input
+              type="datetime-local"
+              value={draft.trialEndsAt}
+              onChange={(event) => onDraftChange({ ...draft, trialEndsAt: event.target.value })}
+            />
+          </label>
+          <label>
+            <span>Subscription expires</span>
+            <input
+              type="datetime-local"
+              value={draft.subscriptionExpiresAt}
+              onChange={(event) => onDraftChange({ ...draft, subscriptionExpiresAt: event.target.value })}
+            />
+          </label>
+          <label className="admin-modal-full">
+            <span>Pause reason</span>
+            <input
+              value={draft.subscriptionPauseReason}
+              onChange={(event) => onDraftChange({ ...draft, subscriptionPauseReason: event.target.value })}
+              placeholder="Optional"
+            />
+          </label>
+          <div className="admin-modal-actions admin-modal-full">
+            <button className="btn btn-ghost" type="button" onClick={onClose}>
+              Cancel
+            </button>
+            <button className="btn btn-primary" type="submit" disabled={loading}>
+              {loading ? "Saving..." : "Save subscription"}
+            </button>
+          </div>
+        </form>
+      ) : null}
+    </UIModal>
+  );
+}
+
+type AdminTenantUserModalProps = {
+  open: boolean;
+  tenantDetail: TenantDetail | null;
+  draft: UserDraft;
+  pendingUserId: string;
+  onClose: () => void;
+  onDraftChange: (draft: UserDraft) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+};
+
+function AdminTenantUserModal({
+  open,
+  tenantDetail,
+  draft,
+  pendingUserId,
+  onClose,
+  onDraftChange,
+  onSubmit,
+}: AdminTenantUserModalProps) {
+  return (
+    <UIModal
+      open={open && Boolean(tenantDetail)}
+      onClose={onClose}
+      title={draft.email ? "Edit Tenant User" : "Add Tenant User"}
+    >
+      <form className="admin-modal-form" onSubmit={onSubmit}>
+        <label>
+          <span>Email</span>
+          <input
+            type="email"
+            value={draft.email}
+            onChange={(event) => onDraftChange({ ...draft, email: event.target.value })}
+            placeholder="user@example.com"
+          />
+        </label>
+        <label>
+          <span>Name</span>
+          <input
+            value={draft.displayName}
+            onChange={(event) => onDraftChange({ ...draft, displayName: event.target.value })}
+            placeholder="Optional"
+          />
+        </label>
+        <label>
+          <span>Role</span>
+          <SearchableSelect
+            value={draft.role}
+            onChange={(event) => onDraftChange({ ...draft, role: event.target.value as TenantUserRow["role"] })}
+          >
+            {TENANT_ROLE_OPTIONS.map((role) => (
+              <option key={role} value={role}>{role}</option>
+            ))}
+          </SearchableSelect>
+        </label>
+        <label>
+          <span>PIN</span>
+          <input
+            type="password"
+            value={draft.pin}
+            onChange={(event) => onDraftChange({ ...draft, pin: event.target.value })}
+            placeholder="Set or reset PIN"
+          />
+        </label>
+        <label className="admin-checkbox-line">
+          <input
+            type="checkbox"
+            checked={draft.isSuperAdmin}
+            onChange={(event) => onDraftChange({ ...draft, isSuperAdmin: event.target.checked })}
+          />
+          <span>Tenant super admin</span>
+        </label>
+        <div className="admin-modal-actions">
+          <button className="btn btn-ghost" type="button" onClick={onClose}>
+            Cancel
+          </button>
+          <button className="btn btn-primary" type="submit" disabled={pendingUserId === "save"}>
+            {pendingUserId === "save" ? "Saving..." : "Save user"}
+          </button>
+        </div>
+      </form>
+    </UIModal>
+  );
+}
+
+type AdminRemoveTenantUserModalProps = {
+  removingUser: TenantUserRow | null;
+  pendingUserId: string;
+  onClose: () => void;
+  onRemove: (user: TenantUserRow) => void;
+};
+
+function AdminRemoveTenantUserModal({ removingUser, pendingUserId, onClose, onRemove }: AdminRemoveTenantUserModalProps) {
+  return (
+    <UIModal
+      open={Boolean(removingUser)}
+      onClose={onClose}
+      title="Remove Tenant User"
+      description={removingUser ? `Remove ${removingUser.email} from this tenant.` : undefined}
+    >
+      <p className="ui-modal-confirmation-copy">
+        This user will lose access to the tenant workspace immediately.
+      </p>
+      <div className="admin-modal-actions">
+        <button className="btn btn-ghost" type="button" onClick={onClose}>
+          Cancel
+        </button>
+        <button
+          className="btn btn-danger-ghost"
+          type="button"
+          disabled={!removingUser || pendingUserId === removingUser._id}
+          onClick={() => removingUser ? onRemove(removingUser) : undefined}
+        >
+          {removingUser && pendingUserId === removingUser._id ? "Removing..." : "Remove user"}
+        </button>
+      </div>
+    </UIModal>
+  );
+}
+
+type AdminStartMasqueradeModalProps = {
+  masqueradeTenant: TenantRow | null;
+  pendingTenantId: string;
+  onClose: () => void;
+  onStart: (tenant: TenantRow) => void;
+};
+
+function AdminStartMasqueradeModal({ masqueradeTenant, pendingTenantId, onClose, onStart }: AdminStartMasqueradeModalProps) {
+  return (
+    <UIModal
+      open={Boolean(masqueradeTenant)}
+      onClose={onClose}
+      title="Start Masquerade"
+      description={masqueradeTenant ? `Switch admin context into ${masqueradeTenant.email}.` : undefined}
+    >
+      <p className="ui-modal-confirmation-copy">
+        Use this only for support or verification work. Your admin session can be stopped from the banner.
+      </p>
+      <div className="admin-modal-actions">
+        <button className="btn btn-ghost" type="button" onClick={onClose}>
+          Cancel
+        </button>
+        <button
+          className="btn btn-primary"
+          type="button"
+          disabled={!masqueradeTenant || pendingTenantId === masqueradeTenant._id}
+          onClick={() => masqueradeTenant ? onStart(masqueradeTenant) : undefined}
+        >
+          {masqueradeTenant && pendingTenantId === masqueradeTenant._id ? "Starting..." : "Start masquerade"}
+        </button>
+      </div>
+    </UIModal>
+  );
+}
+
+type AdminStopMasqueradeModalProps = {
+  open: boolean;
+  pendingTenantId: string;
+  onClose: () => void;
+  onStop: () => void;
+};
+
+function AdminStopMasqueradeModal({ open, pendingTenantId, onClose, onStop }: AdminStopMasqueradeModalProps) {
+  return (
+    <UIModal open={open} onClose={onClose} title="Stop Masquerade" description="Return to your super admin context.">
+      <p className="ui-modal-confirmation-copy">
+        Current tenant-specific access will end and the dashboard will refresh.
+      </p>
+      <div className="admin-modal-actions">
+        <button className="btn btn-ghost" type="button" onClick={onClose}>
+          Cancel
+        </button>
+        <button className="btn btn-primary" type="button" disabled={pendingTenantId === "stop"} onClick={onStop}>
+          {pendingTenantId === "stop" ? "Stopping..." : "Stop masquerade"}
+        </button>
+      </div>
+    </UIModal>
+  );
+}
+
 export function AdminTenantsDashboard({ masqueradeSession }: AdminTenantsDashboardProps) {
   const router = useRouter();
   const [tenants, setTenants] = useState<TenantRow[]>([]);
+  const [tenantSearch, setTenantSearch] = useState("");
+  const [billingFilter, setBillingFilter] = useState("all");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [masquerade, setMasquerade] = useState<MasqueradeState>(null);
@@ -214,9 +712,6 @@ export function AdminTenantsDashboard({ masqueradeSession }: AdminTenantsDashboa
   const [subscriptionModalOpen, setSubscriptionModalOpen] = useState(false);
   const [userModalOpen, setUserModalOpen] = useState(false);
   const [tenantDetailModalOpen, setTenantDetailModalOpen] = useState(false);
-  const [bootstrapModalOpen, setBootstrapModalOpen] = useState(false);
-  const [bootstrapDraft, setBootstrapDraft] = useState(emptyBootstrapDraft);
-  const [bootstrapLoading, setBootstrapLoading] = useState(false);
   const [removeUserId, setRemoveUserId] = useState("");
   const [masqueradeTenantId, setMasqueradeTenantId] = useState("");
   const [stopMasqueradeOpen, setStopMasqueradeOpen] = useState(false);
@@ -224,6 +719,30 @@ export function AdminTenantsDashboard({ masqueradeSession }: AdminTenantsDashboa
 
   const removingUser = tenantDetail?.users.find((user) => user._id === removeUserId) || null;
   const masqueradeTenant = tenants.find((tenant) => tenant._id === masqueradeTenantId) || null;
+  const tenantStats = useMemo(() => {
+    const activeStatuses = new Set(["active", "trialing"]);
+    return {
+      total: tenants.length,
+      active: tenants.filter((tenant) => activeStatuses.has(tenant.billingStatus)).length,
+      needsAttention: tenants.filter((tenant) => ["past_due", "paused"].includes(tenant.billingStatus) || !tenant.pinConfigured).length,
+      hosted: tenants.filter((tenant) => tenant.serviceMode === "hosted").length,
+    };
+  }, [tenants]);
+  const visibleTenants = useMemo(() => {
+    const query = tenantSearch.trim().toLowerCase();
+    return tenants.filter((tenant) => {
+      const matchesStatus = billingFilter === "all" || tenant.billingStatus === billingFilter;
+      const matchesQuery = !query || [
+        tenant.email,
+        tenant.displayName,
+        tenant.plan,
+        tenant.serviceMode,
+        tenant.billingStatus,
+        tenant.flutterwaveSubscriptionId,
+      ].some((value) => value?.toLowerCase().includes(query));
+      return matchesStatus && matchesQuery;
+    });
+  }, [billingFilter, tenantSearch, tenants]);
 
   const applyTenantDetail = useCallback((detail: TenantDetail) => {
     setTenantDetail(detail);
@@ -478,65 +997,29 @@ export function AdminTenantsDashboard({ masqueradeSession }: AdminTenantsDashboa
     }
   };
 
-  const bootstrapTenant = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    setBootstrapLoading(true);
-    setError("");
-    setNotice("");
-    try {
-      const response = await fetch("/api/admin/tenant-bootstrap", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(bootstrapDraft),
-      });
-      const body = (await response.json()) as {
-        result?: {
-          tenantId: string;
-          email: string;
-          hasMore?: boolean;
-          backfill?: Array<{ table: string; patched: number; hasMore: boolean }>;
-        };
-        error?: string;
-      };
-      if (!response.ok || !body.result) {
-        throw new Error(body.error || "Failed to bootstrap tenant.");
-      }
-      setBootstrapModalOpen(false);
-      setBootstrapDraft(emptyBootstrapDraft());
-      const patched = body.result.backfill?.reduce((sum, row) => sum + row.patched, 0) || 0;
-      setNotice(
-        body.result.hasMore
-          ? `Bootstrapped ${body.result.email}. Backfilled ${patched} records; run again to continue.`
-          : `Bootstrapped ${body.result.email}. Backfilled ${patched} records.`,
-      );
-      await loadTenants({ quiet: true });
-      await loadTenantDetail(body.result.tenantId, { quiet: true });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to bootstrap tenant.");
-    } finally {
-      setBootstrapLoading(false);
-    }
-  };
-
   return (
     <AdminConsoleShell>
         {masqueradeSession ? <AdminMasqueradeBanner session={masqueradeSession} /> : null}
         <header className="admin-console-header">
           <div>
-            <h1>Tenants</h1>
+            <p className="admin-kicker">Account Operations</p>
+            <h1>Tenant Accounts</h1>
+            <p>Manage tenant access, subscriptions, connector devices, masquerade sessions, and billing events.</p>
           </div>
-          <div className="admin-page-actions">
-            <button className="btn btn-ghost" type="button" onClick={() => setBootstrapModalOpen(true)}>
-              Bootstrap tenant
-            </button>
-            <button className="btn btn-primary admin-primary-action" type="button" disabled={loading} onClick={() => void loadTenants()}>
-              {loading ? "Refreshing..." : tenants.length > 0 ? "Refresh tenants" : "Load tenants"}
-            </button>
-          </div>
+          <button className="btn btn-primary admin-primary-action" type="button" disabled={loading} onClick={() => void loadTenants()}>
+            {loading ? "Refreshing..." : tenants.length > 0 ? "Refresh tenants" : "Load tenants"}
+          </button>
         </header>
 
         {error ? <p className="admin-alert" role="alert">{error}</p> : null}
         {notice ? <p className="admin-notice" role="status">{notice}</p> : null}
+
+        <div className="admin-stat-grid admin-tenant-stat-grid" aria-label="Tenant account stats">
+          <div><span>Total Tenants</span><strong>{tenantStats.total}</strong></div>
+          <div><span>Active / Trial</span><strong>{tenantStats.active}</strong></div>
+          <div><span>Needs Attention</span><strong>{tenantStats.needsAttention}</strong></div>
+          <div><span>Hosted</span><strong>{tenantStats.hosted}</strong></div>
+        </div>
 
         <div className="admin-masquerade-strip">
           <div>
@@ -549,6 +1032,31 @@ export function AdminTenantsDashboard({ masqueradeSession }: AdminTenantsDashboa
         </div>
 
         <div className="admin-data-panel">
+          <div className="admin-table-toolbar">
+            <div>
+              <span>Tenant Directory</span>
+              <strong>{visibleTenants.length} shown</strong>
+            </div>
+            <div className="admin-filter-controls">
+              <label>
+                <span>Search</span>
+                <input
+                  value={tenantSearch}
+                  onChange={(event) => setTenantSearch(event.target.value)}
+                  placeholder="Email, name, plan, reference"
+                />
+              </label>
+              <label>
+                <span>Billing</span>
+                <SearchableSelect value={billingFilter} onChange={(event) => setBillingFilter(event.target.value)}>
+                  <option value="all">All statuses</option>
+                  {BILLING_STATUS_OPTIONS.map((status) => (
+                    <option key={status} value={status}>{status.replace("_", " ")}</option>
+                  ))}
+                </SearchableSelect>
+              </label>
+            </div>
+          </div>
           <div className="admin-data-head">
             <span>Account</span>
             <span>Mode</span>
@@ -556,7 +1064,7 @@ export function AdminTenantsDashboard({ masqueradeSession }: AdminTenantsDashboa
             <span>Security</span>
           </div>
           <div className="admin-data-list">
-            {tenants.map((tenant) => (
+            {visibleTenants.map((tenant) => (
               <article className="admin-data-row" key={tenant._id}>
                 <div>
                   <strong>{tenant.email}</strong>
@@ -575,480 +1083,86 @@ export function AdminTenantsDashboard({ masqueradeSession }: AdminTenantsDashboa
                 <div>
                   <strong>{tenant.pinConfigured ? "PIN configured" : "PIN missing"}</strong>
                   <span>{tenant.pinUpdatedAt ? formatDate(tenant.pinUpdatedAt) : "No recent update"}</span>
-                  <button
-                    className="btn btn-secondary"
-                    type="button"
-                    disabled={detailLoading && selectedTenantId === tenant._id}
-                    onClick={() => void openTenantManagement(tenant._id)}
-                  >
-                    {detailLoading && selectedTenantId === tenant._id ? "Opening..." : "Open"}
-                  </button>
-                  <button
-                    className="btn btn-ghost"
-                    type="button"
-                    disabled={!canMasqueradeTenants || pendingTenantId === tenant._id}
-                    onClick={() => setMasqueradeTenantId(tenant._id)}
-                  >
-                    {pendingTenantId === tenant._id ? "Starting..." : "Masquerade"}
-                  </button>
+                  <div className="admin-row-actions">
+                    <button
+                      className="btn btn-secondary"
+                      type="button"
+                      disabled={detailLoading && selectedTenantId === tenant._id}
+                      onClick={() => void openTenantManagement(tenant._id)}
+                    >
+                      {detailLoading && selectedTenantId === tenant._id ? "Opening..." : "Open"}
+                    </button>
+                    <button
+                      className="btn btn-ghost"
+                      type="button"
+                      disabled={!canMasqueradeTenants || pendingTenantId === tenant._id}
+                      onClick={() => setMasqueradeTenantId(tenant._id)}
+                    >
+                      {pendingTenantId === tenant._id ? "Starting..." : "Masquerade"}
+                    </button>
+                  </div>
                 </div>
               </article>
             ))}
             {tenants.length === 0 ? <p className="admin-empty-state">{loading ? "Loading tenants..." : "No tenant accounts found."}</p> : null}
+            {tenants.length > 0 && visibleTenants.length === 0 ? <p className="admin-empty-state">No tenants match the current filters.</p> : null}
           </div>
         </div>
 
-        <UIModal
-          open={tenantDetailModalOpen && Boolean(tenantDetail)}
+        <AdminTenantDetailModal
+          open={tenantDetailModalOpen}
+          tenantDetail={tenantDetail}
+          detailNotice={detailNotice}
+          detailLoading={detailLoading}
+          pendingUserId={pendingUserId}
           onClose={() => setTenantDetailModalOpen(false)}
-          title={tenantDetail?.tenant.email || "Tenant"}
-          size="wide"
-        >
-          <div className="admin-access-head">
-            {tenantDetail ? (
-              <div className="admin-panel-action-row">
-                <button className="btn btn-secondary" type="button" onClick={() => setSubscriptionModalOpen(true)}>
-                  Edit billing
-                </button>
-                <button className="btn btn-primary admin-primary-action" type="button" onClick={createTenantUser}>
-                  Add user
-                </button>
-                <button className="btn btn-ghost" type="button" disabled={detailLoading} onClick={() => void loadTenantDetail(tenantDetail.tenant._id)}>
-                  Refresh
-                </button>
-              </div>
-            ) : null}
-          </div>
+          onEditBilling={() => setSubscriptionModalOpen(true)}
+          onCreateUser={createTenantUser}
+          onRefresh={(tenantId) => void loadTenantDetail(tenantId)}
+          onEditUser={editTenantUser}
+          onRemoveUser={setRemoveUserId}
+        />
 
-          {detailNotice ? <p className="admin-notice admin-management-notice" role="status">{detailNotice}</p> : null}
-
-          {tenantDetail ? (
-            <div className="admin-management-grid">
-              <div className="admin-management-form">
-                <div className="admin-management-title">
-                  <strong>Subscription</strong>
-                  <span>{tenantDetail.tenant.serviceMode.replace("_", " ")}</span>
-                </div>
-                <dl className="admin-detail-list">
-                  <div>
-                    <dt>Plan</dt>
-                    <dd>{tenantDetail.tenant.plan.replace("_", " ")}</dd>
-                  </div>
-                  <div>
-                    <dt>Billing</dt>
-                    <dd>{tenantDetail.tenant.billingStatus.replace("_", " ")}</dd>
-                  </div>
-                  <div>
-                    <dt>Trial ends</dt>
-                    <dd>{formatDate(tenantDetail.tenant.trialEndsAt)}</dd>
-                  </div>
-                  <div>
-                    <dt>Subscription expires</dt>
-                    <dd>{tenantDetail.tenant.subscriptionExpiresAt ? formatDate(tenantDetail.tenant.subscriptionExpiresAt) : "Not set"}</dd>
-                  </div>
-                </dl>
-                {tenantDetail.tenant.subscriptionProvider || tenantDetail.tenant.flutterwaveSubscriptionId ? (
-                  <div className="admin-management-title">
-                    <strong>{tenantDetail.tenant.subscriptionProvider || "manual"}</strong>
-                    <span>{tenantDetail.tenant.flutterwaveSubscriptionId || "No Flutterwave subscription ID"}</span>
-                  </div>
-                ) : null}
-              </div>
-
-              <div className="admin-management-form">
-                <div className="admin-management-title">
-                  <strong>Tenant users</strong>
-                  <span>{tenantDetail.users.length} configured</span>
-                </div>
-                <div className="admin-data-list admin-tenant-user-list">
-                  {tenantDetail.users.map((user) => (
-                    <article className="admin-data-row admin-tenant-user-row" key={user._id}>
-                      <div>
-                        <strong>{user.email}</strong>
-                        <span>{user.displayName || "No name"}</span>
-                      </div>
-                      <div>
-                        <strong>{user.role}{user.isSuperAdmin ? " / super admin" : ""}</strong>
-                        <span>{user.pinConfigured ? "PIN configured" : "PIN missing"}</span>
-                      </div>
-                      <div>
-                        <strong>{user.pinUpdatedAt ? formatDate(user.pinUpdatedAt) : "No PIN update"}</strong>
-                        <span>Updated {formatDate(user.updatedAt)}</span>
-                      </div>
-                      <div className="admin-tenant-user-actions">
-                        <button className="btn btn-secondary" type="button" onClick={() => editTenantUser(user)}>
-                          Edit
-                        </button>
-                        <button
-                          className="btn btn-ghost"
-                          type="button"
-                          disabled={pendingUserId === user._id}
-                          onClick={() => setRemoveUserId(user._id)}
-                        >
-                          {pendingUserId === user._id ? "Removing..." : "Remove"}
-                        </button>
-                      </div>
-                    </article>
-                  ))}
-                  {tenantDetail.users.length === 0 ? <p className="admin-empty-state">No tenant users have been configured yet.</p> : null}
-                </div>
-              </div>
-
-              <div className="admin-management-form">
-                <div className="admin-management-title">
-                  <strong>Connected accounts</strong>
-                  <span>{tenantDetail.connectedAccounts.length} linked</span>
-                </div>
-                <div className="admin-data-list admin-tenant-user-list">
-                  {tenantDetail.connectedAccounts.map((account) => (
-                    <article className="admin-data-row admin-tenant-runtime-row" key={account._id}>
-                      <div>
-                        <strong>{account.provider}</strong>
-                        <span>{account.displayName || account.accountLabel || account.username || account.phoneNumberMasked || account.providerAccountId}</span>
-                      </div>
-                      <div>
-                        <strong>{account.authState}</strong>
-                        <span>Device {account.deviceId}</span>
-                      </div>
-                      <div>
-                        <strong>{formatOptionalDate(account.lastSeenAt)}</strong>
-                        <span>Updated {formatDate(account.updatedAt)}</span>
-                      </div>
-                    </article>
-                  ))}
-                  {tenantDetail.connectedAccounts.length === 0 ? <p className="admin-empty-state">No WhatsApp or Instagram accounts linked yet.</p> : null}
-                </div>
-              </div>
-
-              <div className="admin-management-form">
-                <div className="admin-management-title">
-                  <strong>Devices and tokens</strong>
-                  <span>{tenantDetail.devices.length} devices / {tenantDetail.connectorTokens.length} tokens</span>
-                </div>
-                <div className="admin-data-list admin-tenant-user-list">
-                  {tenantDetail.devices.map((device) => (
-                    <article className="admin-data-row admin-tenant-runtime-row" key={device._id}>
-                      <div>
-                        <strong>{device.label || device.deviceId}</strong>
-                        <span>{device.deviceId}</span>
-                      </div>
-                      <div>
-                        <strong>Last seen {formatDate(device.lastSeenAt)}</strong>
-                        <span>Updated {formatDate(device.updatedAt)}</span>
-                      </div>
-                      <div>
-                        <strong>{tenantDetail.connectorTokens.filter((token) => token.deviceId === device.deviceId).length} tokens</strong>
-                        <span>
-                          {tenantDetail.connectorTokens
-                            .filter((token) => token.deviceId === device.deviceId)
-                            .map((token) => `${token.status} ${token.tokenPreview}`)
-                            .join(", ") || "No connector token"}
-                        </span>
-                      </div>
-                    </article>
-                  ))}
-                  {tenantDetail.devices.length === 0 ? <p className="admin-empty-state">No registered devices yet.</p> : null}
-                </div>
-              </div>
-
-              <div className="admin-management-form">
-                <div className="admin-management-title">
-                  <strong>Subscriptions</strong>
-                  <span>{tenantDetail.subscriptions.length} records</span>
-                </div>
-                <div className="admin-data-list admin-tenant-user-list">
-                  {tenantDetail.subscriptions.map((subscription) => (
-                    <article className="admin-data-row admin-tenant-runtime-row" key={subscription._id}>
-                      <div>
-                        <strong>{subscription.provider} / {subscription.status}</strong>
-                        <span>{subscription.plan.replace("_", " ")}</span>
-                      </div>
-                      <div>
-                        <strong>{formatAmount(subscription.amount, subscription.currency)}</strong>
-                        <span>{subscription.txRef || subscription.providerSubscriptionId || "No provider reference"}</span>
-                      </div>
-                      <div>
-                        <strong>Period ends {formatOptionalDate(subscription.currentPeriodEndsAt)}</strong>
-                        <span>Last payment {formatOptionalDate(subscription.lastPaymentAt)}</span>
-                        {subscription.paymentLink ? <a href={subscription.paymentLink} target="_blank" rel="noreferrer">Payment link</a> : null}
-                      </div>
-                    </article>
-                  ))}
-                  {tenantDetail.subscriptions.length === 0 ? <p className="admin-empty-state">No subscription records yet.</p> : null}
-                </div>
-              </div>
-
-              <div className="admin-management-form admin-tenant-events-panel">
-                <div className="admin-management-title">
-                  <strong>Billing events</strong>
-                  <span>{tenantDetail.subscriptionEvents.length} recent</span>
-                </div>
-                <div className="admin-data-list admin-tenant-user-list">
-                  {tenantDetail.subscriptionEvents.map((event) => (
-                    <article className="admin-data-row admin-tenant-event-row" key={event._id}>
-                      <div>
-                        <strong>{event.eventType}</strong>
-                        <span>{event.provider}{event.status ? ` / ${event.status}` : ""}</span>
-                      </div>
-                      <div>
-                        <strong>{formatDate(event.createdAt)}</strong>
-                        <span>{event.txRef || event.transactionId || event.providerEventId || "No provider reference"}</span>
-                      </div>
-                      <div>
-                        <span>{event.detail}</span>
-                      </div>
-                    </article>
-                  ))}
-                  {tenantDetail.subscriptionEvents.length === 0 ? <p className="admin-empty-state">No billing events recorded yet.</p> : null}
-                </div>
-              </div>
-            </div>
-          ) : null}
-        </UIModal>
-
-      <UIModal
-        open={bootstrapModalOpen}
-        onClose={() => setBootstrapModalOpen(false)}
-        title="Bootstrap Tenant"
-      >
-        <form className="admin-modal-form" onSubmit={(event) => void bootstrapTenant(event)}>
-          <label>
-            <span>Owner email</span>
-            <input
-              type="email"
-              value={bootstrapDraft.email}
-              onChange={(event) => setBootstrapDraft((draft) => ({ ...draft, email: event.target.value }))}
-              placeholder="owner@example.com"
-              autoComplete="off"
-            />
-          </label>
-          <label>
-            <span>Display name</span>
-            <input
-              type="text"
-              value={bootstrapDraft.displayName}
-              onChange={(event) => setBootstrapDraft((draft) => ({ ...draft, displayName: event.target.value }))}
-              placeholder="Workspace owner"
-              autoComplete="off"
-            />
-          </label>
-          <label>
-            <span>Owner PIN</span>
-            <input
-              type="password"
-              value={bootstrapDraft.pin}
-              onChange={(event) => setBootstrapDraft((draft) => ({ ...draft, pin: event.target.value }))}
-              placeholder="Set owner PIN"
-              autoComplete="new-password"
-            />
-          </label>
-          <label>
-            <span>Backfill batch size</span>
-            <input
-              type="number"
-              min="1"
-              max="250"
-              value={bootstrapDraft.batchSize}
-              onChange={(event) => setBootstrapDraft((draft) => ({ ...draft, batchSize: Number(event.target.value) }))}
-            />
-          </label>
-          <div className="admin-modal-actions">
-            <button className="btn btn-ghost" type="button" onClick={() => setBootstrapModalOpen(false)}>
-              Cancel
-            </button>
-            <button
-              className="btn btn-primary"
-              type="submit"
-              disabled={!bootstrapDraft.email.trim() || bootstrapDraft.pin.trim().length < 4 || bootstrapLoading}
-            >
-              {bootstrapLoading ? "Bootstrapping..." : "Bootstrap tenant"}
-            </button>
-          </div>
-        </form>
-      </UIModal>
-
-      <UIModal
-        open={subscriptionModalOpen && Boolean(tenantDetail)}
+      <AdminSubscriptionModal
+        open={subscriptionModalOpen}
+        tenantDetail={tenantDetail}
+        draft={subscriptionDraft}
+        loading={detailLoading}
         onClose={() => setSubscriptionModalOpen(false)}
-        title="Edit Subscription"
-        size="wide"
-      >
-        {tenantDetail ? (
-          <form className="admin-modal-form admin-modal-grid-form" onSubmit={(event) => void saveSubscription(event)}>
-            <label>
-              <span>Plan</span>
-              <select
-                value={subscriptionDraft.plan}
-                onChange={(event) => setSubscriptionDraft((draft) => ({ ...draft, plan: event.target.value }))}
-              >
-                {PLAN_OPTIONS.map((plan) => (
-                  <option key={plan} value={plan}>{plan.replace("_", " ")}</option>
-                ))}
-              </select>
-            </label>
-            <label>
-              <span>Billing status</span>
-              <select
-                value={subscriptionDraft.billingStatus}
-                onChange={(event) => setSubscriptionDraft((draft) => ({ ...draft, billingStatus: event.target.value }))}
-              >
-                {BILLING_STATUS_OPTIONS.map((status) => (
-                  <option key={status} value={status}>{status.replace("_", " ")}</option>
-                ))}
-              </select>
-            </label>
-            <label>
-              <span>Trial ends</span>
-              <input
-                type="datetime-local"
-                value={subscriptionDraft.trialEndsAt}
-                onChange={(event) => setSubscriptionDraft((draft) => ({ ...draft, trialEndsAt: event.target.value }))}
-              />
-            </label>
-            <label>
-              <span>Subscription expires</span>
-              <input
-                type="datetime-local"
-                value={subscriptionDraft.subscriptionExpiresAt}
-                onChange={(event) => setSubscriptionDraft((draft) => ({ ...draft, subscriptionExpiresAt: event.target.value }))}
-              />
-            </label>
-            <label className="admin-modal-full">
-              <span>Pause reason</span>
-              <input
-                value={subscriptionDraft.subscriptionPauseReason}
-                onChange={(event) => setSubscriptionDraft((draft) => ({ ...draft, subscriptionPauseReason: event.target.value }))}
-                placeholder="Optional"
-              />
-            </label>
-            <div className="admin-modal-actions admin-modal-full">
-              <button className="btn btn-ghost" type="button" onClick={() => setSubscriptionModalOpen(false)}>
-                Cancel
-              </button>
-              <button className="btn btn-primary" type="submit" disabled={detailLoading}>
-                {detailLoading ? "Saving..." : "Save subscription"}
-              </button>
-            </div>
-          </form>
-        ) : null}
-      </UIModal>
+        onDraftChange={setSubscriptionDraft}
+        onSubmit={(event) => void saveSubscription(event)}
+      />
 
-      <UIModal
-        open={userModalOpen && Boolean(tenantDetail)}
+      <AdminTenantUserModal
+        open={userModalOpen}
+        tenantDetail={tenantDetail}
+        draft={userDraft}
+        pendingUserId={pendingUserId}
         onClose={() => setUserModalOpen(false)}
-        title={userDraft.email ? "Edit Tenant User" : "Add Tenant User"}
-      >
-        <form className="admin-modal-form" onSubmit={(event) => void saveTenantUser(event)}>
-          <label>
-            <span>Email</span>
-            <input
-              type="email"
-              value={userDraft.email}
-              onChange={(event) => setUserDraft((draft) => ({ ...draft, email: event.target.value }))}
-              placeholder="user@example.com"
-            />
-          </label>
-          <label>
-            <span>Name</span>
-            <input
-              value={userDraft.displayName}
-              onChange={(event) => setUserDraft((draft) => ({ ...draft, displayName: event.target.value }))}
-              placeholder="Optional"
-            />
-          </label>
-          <label>
-            <span>Role</span>
-            <select
-              value={userDraft.role}
-              onChange={(event) => setUserDraft((draft) => ({ ...draft, role: event.target.value as TenantUserRow["role"] }))}
-            >
-              {TENANT_ROLE_OPTIONS.map((role) => (
-                <option key={role} value={role}>{role}</option>
-              ))}
-            </select>
-          </label>
-          <label>
-            <span>PIN</span>
-            <input
-              type="password"
-              value={userDraft.pin}
-              onChange={(event) => setUserDraft((draft) => ({ ...draft, pin: event.target.value }))}
-              placeholder="Set or reset PIN"
-            />
-          </label>
-          <label className="admin-checkbox-line">
-            <input
-              type="checkbox"
-              checked={userDraft.isSuperAdmin}
-              onChange={(event) => setUserDraft((draft) => ({ ...draft, isSuperAdmin: event.target.checked }))}
-            />
-            <span>Tenant super admin</span>
-          </label>
-          <div className="admin-modal-actions">
-            <button className="btn btn-ghost" type="button" onClick={() => setUserModalOpen(false)}>
-              Cancel
-            </button>
-            <button className="btn btn-primary" type="submit" disabled={pendingUserId === "save"}>
-              {pendingUserId === "save" ? "Saving..." : "Save user"}
-            </button>
-          </div>
-        </form>
-      </UIModal>
+        onDraftChange={setUserDraft}
+        onSubmit={(event) => void saveTenantUser(event)}
+      />
 
-      <UIModal
-        open={Boolean(removingUser)}
+      <AdminRemoveTenantUserModal
+        removingUser={removingUser}
+        pendingUserId={pendingUserId}
         onClose={() => setRemoveUserId("")}
-        title="Remove Tenant User"
-      >
-        <div className="admin-modal-actions">
-          <button className="btn btn-ghost" type="button" onClick={() => setRemoveUserId("")}>
-            Cancel
-          </button>
-          <button
-            className="btn btn-primary"
-            type="button"
-            disabled={!removingUser || pendingUserId === removingUser._id}
-            onClick={() => removingUser ? void removeTenantUser(removingUser) : undefined}
-          >
-            {removingUser && pendingUserId === removingUser._id ? "Removing..." : "Remove user"}
-          </button>
-        </div>
-      </UIModal>
+        onRemove={(user) => void removeTenantUser(user)}
+      />
 
-      <UIModal
-        open={Boolean(masqueradeTenant)}
+      <AdminStartMasqueradeModal
+        masqueradeTenant={masqueradeTenant}
+        pendingTenantId={pendingTenantId}
         onClose={() => setMasqueradeTenantId("")}
-        title="Start Masquerade"
-      >
-        <div className="admin-modal-actions">
-          <button className="btn btn-ghost" type="button" onClick={() => setMasqueradeTenantId("")}>
-            Cancel
-          </button>
-          <button
-            className="btn btn-primary"
-            type="button"
-            disabled={!masqueradeTenant || pendingTenantId === masqueradeTenant._id}
-            onClick={() => masqueradeTenant ? void startMasquerade(masqueradeTenant) : undefined}
-          >
-            {masqueradeTenant && pendingTenantId === masqueradeTenant._id ? "Starting..." : "Start masquerade"}
-          </button>
-        </div>
-      </UIModal>
+        onStart={(tenant) => void startMasquerade(tenant)}
+      />
 
-      <UIModal
+      <AdminStopMasqueradeModal
         open={stopMasqueradeOpen}
+        pendingTenantId={pendingTenantId}
         onClose={() => setStopMasqueradeOpen(false)}
-        title="Stop Masquerade"
-      >
-        <div className="admin-modal-actions">
-          <button className="btn btn-ghost" type="button" onClick={() => setStopMasqueradeOpen(false)}>
-            Cancel
-          </button>
-          <button className="btn btn-primary" type="button" disabled={pendingTenantId === "stop"} onClick={() => void stopMasquerade()}>
-            {pendingTenantId === "stop" ? "Stopping..." : "Stop masquerade"}
-          </button>
-        </div>
-      </UIModal>
+        onStop={() => void stopMasquerade()}
+      />
     </AdminConsoleShell>
   );
 }

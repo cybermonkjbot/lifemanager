@@ -65,10 +65,7 @@ export async function resolveTenantForQuery(
   args: TenantScopedArgs,
 ): Promise<Id<"tenantAccounts"> | undefined> {
   if (!args.connectorTokenHash) {
-    if (args.tenantId) {
-      throw new Error("Connector token is required for tenant-scoped reads.");
-    }
-    return undefined;
+    return args.tenantId;
   }
 
   const now = Date.now();

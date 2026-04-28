@@ -15,6 +15,7 @@ export const convexRefs = {
   settingsGet: makeFunctionReference<"query">("settings:get"),
   settingsSaveOnboardingPreset: makeFunctionReference<"mutation">("settings:saveOnboardingPreset"),
   systemHealth: makeFunctionReference<"query">("system:health"),
+  systemAdminOverviewMetrics: makeFunctionReference<"query">("system:adminOverviewMetrics"),
   systemSetupStatus: makeFunctionReference<"query">("system:setupStatus"),
   contextConversationHistorySearch: makeFunctionReference<"query">("contextTools:conversationHistorySearch"),
   contextGetMessageEmbeddings: makeFunctionReference<"query">("contextTools:getMessageEmbeddings"),
@@ -52,6 +53,9 @@ export const convexRefs = {
   todosCreateAgendaRange: makeFunctionReference<"mutation">("todos:createAgendaRange"),
   rulesUpsertIgnoreRule: makeFunctionReference<"mutation">("rules:upsertIgnoreRule"),
   threadsUpsertMetadata: makeFunctionReference<"mutation">("threads:upsertMetadata"),
+  threadsUpsertContactMetadata: makeFunctionReference<"mutation">("threads:upsertContactMetadata"),
+  threadsGetAvatarCache: makeFunctionReference<"query">("threads:getAvatarCache"),
+  threadsUpdateAvatarCache: makeFunctionReference<"mutation">("threads:updateAvatarCache"),
   threadsSetNightPause: makeFunctionReference<"mutation">("threads:setNightPause"),
   threadsListContacts: makeFunctionReference<"query">("threads:listContacts"),
   outreachRunManual: makeFunctionReference<"mutation">("outreach:runManual"),
@@ -96,6 +100,9 @@ export const convexRefs = {
   tenantAccountsRegisterFromDesktop: makeFunctionReference<"mutation">("tenantAccounts:registerFromDesktop"),
   tenantAccountsIssueConnectorToken: makeFunctionReference<"mutation">("tenantAccounts:issueConnectorToken"),
   tenantAccountsVerifyConnectorToken: makeFunctionReference<"mutation">("tenantAccounts:verifyConnectorToken"),
+  tenantAccountsGetConnectorSelfControlAccess: makeFunctionReference<"mutation">(
+    "tenantAccounts:getConnectorSelfControlAccess",
+  ),
   tenantAccountsGetLoginPinSalt: makeFunctionReference<"query">("tenantAccounts:getLoginPinSalt"),
   tenantAccountsVerifyTenantLogin: makeFunctionReference<"mutation">("tenantAccounts:verifyTenantLogin"),
   tenantAccountsAdminList: makeFunctionReference<"query">("tenantAccounts:adminList"),
@@ -111,6 +118,12 @@ export const convexRefs = {
   billingAdminAttachCheckoutLink: makeFunctionReference<"mutation">("billing:adminAttachCheckoutLink"),
   billingAdminRecordFlutterwaveEvent: makeFunctionReference<"mutation">("billing:adminRecordFlutterwaveEvent"),
   billingGetTenantBillingSummary: makeFunctionReference<"query">("billing:getTenantBillingSummary"),
+  adminPlatformSubscriptionConfig: makeFunctionReference<"query">("adminPlatform:subscriptionConfig"),
+  adminPlatformSaveSubscriptionConfig: makeFunctionReference<"mutation">("adminPlatform:saveSubscriptionConfig"),
+  adminPlatformPlatformConfig: makeFunctionReference<"query">("adminPlatform:platformConfig"),
+  adminPlatformSavePlatformConfig: makeFunctionReference<"mutation">("adminPlatform:savePlatformConfig"),
+  adminPlatformBillingOps: makeFunctionReference<"query">("adminPlatform:billingOps"),
+  adminPlatformAuditFeed: makeFunctionReference<"query">("adminPlatform:auditFeed"),
   connectedAccountsUpsertFromConnector: makeFunctionReference<"mutation">("connectedAccounts:upsertFromConnector"),
   connectedAccountsMarkDisconnectedFromConnector: makeFunctionReference<"mutation">(
     "connectedAccounts:markDisconnectedFromConnector",
@@ -155,6 +168,9 @@ export const convexRefs = {
   chatExternalWebSearch: makeFunctionReference<"action">("chatTools:externalWebSearch"),
   chatPersonalConnectorsSearch: makeFunctionReference<"action">("chatTools:personalConnectorsSearch"),
   chatToolRouterPlan: makeFunctionReference<"action">("chatTools:toolRouterPlan"),
+  codeGetPublishedWebhookProject: makeFunctionReference<"query">("code:getPublishedWebhookProject"),
+  codeListActiveBehaviorExtensions: makeFunctionReference<"query">("code:listActiveBehaviorExtensions"),
+  codeRecordProjectRun: makeFunctionReference<"mutation">("code:recordProjectRun"),
 };
 
 export type ConvexRefs = typeof convexRefs;

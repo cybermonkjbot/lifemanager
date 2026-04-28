@@ -1,3 +1,4 @@
+import type { Id } from "../_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./types";
 import { DEFAULT_AUTONOMY_PAUSED, DEFAULT_IGNORE_GROUPS } from "./constants";
 import { type QualityGateMode } from "./personaPacks";
@@ -356,8 +357,13 @@ function parseAiDeterministicModes(value: string | undefined, fallback: AiDeterm
   return deduped;
 }
 
-export async function getConfig(ctx: QueryCtx | MutationCtx): Promise<AppConfig> {
-  const rows = await ctx.db.query("appConfig").take(120);
+export async function getConfig(ctx: QueryCtx | MutationCtx, tenantId?: Id<"tenantAccounts">): Promise<AppConfig> {
+  const rows = tenantId
+    ? await ctx.db
+        .query("appConfig")
+        .withIndex("by_tenantId_and_key", (q) => q.eq("tenantId", tenantId))
+        .take(120)
+    : await ctx.db.query("appConfig").take(120);
   const map = new Map(rows.map((row) => [row.key, row.value]));
 
   return {
@@ -695,11 +701,17 @@ export async function getConfig(ctx: QueryCtx | MutationCtx): Promise<AppConfig>
   };
 }
 
-export async function setConfigValue(ctx: MutationCtx, key: string, value: string) {
-  const existing = await ctx.db
-    .query("appConfig")
-    .withIndex("by_key", (q) => q.eq("key", key))
-    .first();
+export async function setConfigValue(ctx: MutationCtx, key: string, value: string, tenantId?: Id<"tenantAccounts">) {
+  const existing = tenantId
+    ? (await ctx.db
+        .query("appConfig")
+        .withIndex("by_tenantId_and_key", (q) => q.eq("tenantId", tenantId))
+        .take(120)
+      ).find((row) => row.key === key)
+    : await ctx.db
+        .query("appConfig")
+        .withIndex("by_key", (q) => q.eq("key", key))
+        .first();
 
   const updatedAt = Date.now();
   if (existing) {
@@ -708,6 +720,7 @@ export async function setConfigValue(ctx: MutationCtx, key: string, value: strin
   }
 
   return await ctx.db.insert("appConfig", {
+    tenantId,
     key,
     value,
     updatedAt,

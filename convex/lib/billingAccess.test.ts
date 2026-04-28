@@ -25,3 +25,18 @@ test("billing access blocks active subscriptions after their explicit expiry", (
 test("billing access keeps manual active tenants valid when no expiry is set", () => {
   assert.equal(isTenantBillingActive({ billingStatus: "active", trialEndsAt: 0 }, now), true);
 });
+
+test("billing access never pauses self-hosted tenants", () => {
+  assert.equal(
+    isTenantBillingActive(
+      {
+        serviceMode: "self_hosted",
+        billingStatus: "canceled",
+        trialEndsAt: now - 1,
+        subscriptionExpiresAt: now - 1,
+      },
+      now,
+    ),
+    true,
+  );
+});

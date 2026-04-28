@@ -1,5 +1,6 @@
 import { ConvexHttpClient } from "convex/browser";
 import { convexRefs } from "./convex-refs";
+import { readLocalInstanceConfig } from "./instance-config";
 
 export function getConvexUrl(overrideUrl?: string) {
   return overrideUrl || process.env.CONVEX_URL || process.env.NEXT_PUBLIC_CONVEX_URL || "";
@@ -13,44 +14,50 @@ export function createConvexClient(overrideUrl?: string) {
   return new ConvexHttpClient(url);
 }
 
+async function getTenantScopeArgs() {
+  const config = await readLocalInstanceConfig();
+  const tenantId = config?.preferences.serviceMode === "hosted" ? config.account?.tenantId || "" : "";
+  return tenantId ? { tenantId } : {};
+}
+
 export async function queryQueue() {
   const client = createConvexClient();
-  return await client.query(convexRefs.queueList, {});
+  return await client.query(convexRefs.queueList, await getTenantScopeArgs());
 }
 
 export async function queryThreads() {
   const client = createConvexClient();
-  return await client.query(convexRefs.threadsList, { limit: 50 });
+  return await client.query(convexRefs.threadsList, { ...(await getTenantScopeArgs()), limit: 50 });
 }
 
 export async function queryThread(threadId: string) {
   const client = createConvexClient();
-  return await client.query(convexRefs.threadGet, { threadId });
+  return await client.query(convexRefs.threadGet, { ...(await getTenantScopeArgs()), threadId });
 }
 
 export async function queryFollowups() {
   const client = createConvexClient();
-  return await client.query(convexRefs.followupsList, { limit: 80 });
+  return await client.query(convexRefs.followupsList, { ...(await getTenantScopeArgs()), limit: 80 });
 }
 
 export async function queryTodos() {
   const client = createConvexClient();
-  return await client.query(convexRefs.todosList, {});
+  return await client.query(convexRefs.todosList, await getTenantScopeArgs());
 }
 
 export async function queryRules() {
   const client = createConvexClient();
-  return await client.query(convexRefs.rulesList, {});
+  return await client.query(convexRefs.rulesList, await getTenantScopeArgs());
 }
 
 export async function queryStyleProfile() {
   const client = createConvexClient();
-  return await client.query(convexRefs.styleGetProfile, {});
+  return await client.query(convexRefs.styleGetProfile, await getTenantScopeArgs());
 }
 
 export async function querySystemHealth() {
   const client = createConvexClient();
-  return await client.query(convexRefs.systemHealth, {});
+  return await client.query(convexRefs.systemHealth, await getTenantScopeArgs());
 }
 
 export async function approveDraft(draftId: string, options?: { sendImmediately?: boolean }) {
@@ -81,10 +88,12 @@ type IgnoreTargetType = "contact" | "group" | "keyword";
 export async function upsertIgnoreTarget(targetValue: string, enabled: boolean, targetType?: IgnoreTargetType) {
   const client = createConvexClient();
   const payload: {
+    tenantId?: string;
     targetValue: string;
     enabled: boolean;
     targetType?: IgnoreTargetType;
   } = {
+    ...(await getTenantScopeArgs()),
     targetValue,
     enabled,
   };
@@ -100,15 +109,15 @@ export async function upsertIgnoreContact(targetValue: string, enabled: boolean)
 
 export async function pauseAutonomy() {
   const client = createConvexClient();
-  return await client.mutation(convexRefs.systemPauseAutonomy, {});
+  return await client.mutation(convexRefs.systemPauseAutonomy, await getTenantScopeArgs());
 }
 
 export async function resumeAutonomy() {
   const client = createConvexClient();
-  return await client.mutation(convexRefs.systemResumeAutonomy, {});
+  return await client.mutation(convexRefs.systemResumeAutonomy, await getTenantScopeArgs());
 }
 
 export async function setMimicry(mimicryLevel: number) {
   const client = createConvexClient();
-  return await client.mutation(convexRefs.styleSetMimicry, { mimicryLevel });
+  return await client.mutation(convexRefs.styleSetMimicry, { ...(await getTenantScopeArgs()), mimicryLevel });
 }

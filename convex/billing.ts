@@ -3,7 +3,7 @@ import { v } from "convex/values";
 import { internalAction, internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import type { MutationCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
-import { isTenantBillingActive } from "./lib/billingAccess";
+import { isTenantBillingActive, listHostedTenantBillingScopes } from "./lib/billingAccess";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MONTH_MS = 30 * DAY_MS;
@@ -11,6 +11,13 @@ const WEEK_MS = 7 * DAY_MS;
 
 const sendSubscriptionEmailRef = makeFunctionReference<"action">("billingActions:sendSubscriptionEmail");
 const sendTenantReportRef = makeFunctionReference<"action">("billingActions:sendTenantReport");
+
+export const listHostedTenantBillingScopesForActions = internalQuery({
+  args: {},
+  handler: async (ctx) => {
+    return await listHostedTenantBillingScopes(ctx);
+  },
+});
 
 const planValidator = v.union(v.literal("personal_connector"), v.literal("business_whatsapp"), v.literal("self_hosted"));
 function readAdminSecret() {
