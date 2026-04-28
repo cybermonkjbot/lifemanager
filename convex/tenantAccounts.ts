@@ -3,6 +3,7 @@ import { mutation, query } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
 import { isTenantBillingActive, tenantBillingInactiveReason } from "./lib/billingAccess";
+import { consumeRateLimit } from "./lib/rateLimit";
 
 const TRIAL_DAYS = 7;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -29,6 +30,24 @@ function requireValidEmail(email: string) {
     throw new Error("Valid email is required.");
   }
   return normalized;
+}
+
+function rateKey(scope: string, ...parts: string[]) {
+  return `${scope}:${parts.map((part) => part.trim().toLowerCase().slice(0, 160)).join(":")}`;
+}
+
+async function assertAllowed(ctx: MutationCtx, args: {
+  key: string;
+  scope: string;
+  limit: number;
+  windowMs: number;
+  penaltyMs?: number;
+}) {
+  const decision = await consumeRateLimit(ctx, args);
+  if (!decision.allowed) {
+    const retryAfterSeconds = Math.max(1, Math.ceil(decision.retryAfterMs / 1000));
+    throw new Error(`Too many requests. Try again in ${retryAfterSeconds} seconds.`);
+  }
 }
 
 function tenantAccessStatus(
@@ -73,6 +92,13 @@ export const registerFromDesktop = mutation({
   },
   handler: async (ctx, args) => {
     const emailNormalized = requireValidEmail(args.email);
+    await assertAllowed(ctx, {
+      key: rateKey("tenant.register", emailNormalized, args.deviceId),
+      scope: "tenant.register",
+      limit: 5,
+      windowMs: 60 * 60 * 1000,
+      penaltyMs: 10 * 60 * 1000,
+    });
     const now = Date.now();
     const existing = await ctx.db
       .query("tenantAccounts")
@@ -192,6 +218,13 @@ export const issueConnectorToken = mutation({
   },
   handler: async (ctx, args) => {
     const emailNormalized = requireValidEmail(args.email);
+    await assertAllowed(ctx, {
+      key: rateKey("tenant.connector_token", emailNormalized, args.deviceId),
+      scope: "tenant.connector_token",
+      limit: 8,
+      windowMs: 60 * 60 * 1000,
+      penaltyMs: 10 * 60 * 1000,
+    });
     const tenant = await ctx.db
       .query("tenantAccounts")
       .withIndex("by_emailNormalized", (q) => q.eq("emailNormalized", emailNormalized))
@@ -331,12 +364,39 @@ export const getConnectorSelfControlAccess = mutation({
   },
 });
 
-export const getLoginPinSalt = query({
+export const getLoginPinSalt = mutation({
   args: {
     email: v.string(),
+    deviceId: v.optional(v.string()),
+    expectedTenantId: v.optional(v.id("tenantAccounts")),
   },
   handler: async (ctx, args) => {
     const emailNormalized = requireValidEmail(args.email);
+    await assertAllowed(ctx, {
+      key: rateKey("tenant.login_salt", emailNormalized, args.deviceId || ""),
+      scope: "tenant.login_salt",
+      limit: 30,
+      windowMs: 10 * 60 * 1000,
+      penaltyMs: 10 * 60 * 1000,
+    });
+    if (args.expectedTenantId) {
+      const tenant = await ctx.db.get(args.expectedTenantId);
+      if (!tenant) {
+        return { pinSalt: FAKE_LOGIN_PIN_SALT };
+      }
+      const users = await ctx.db
+        .query("tenantUsers")
+        .withIndex("by_tenantId_and_emailNormalized", (q) => q.eq("tenantId", tenant._id).eq("emailNormalized", emailNormalized))
+        .take(5);
+      const user = users.find((candidate) => candidate.pinSalt) || users[0];
+      if (!user && tenant.emailNormalized !== emailNormalized) {
+        return { pinSalt: FAKE_LOGIN_PIN_SALT };
+      }
+      return {
+        pinSalt: user?.pinSalt || tenant.pinSalt || FAKE_LOGIN_PIN_SALT,
+      };
+    }
+
     const users = await ctx.db
       .query("tenantUsers")
       .withIndex("by_emailNormalized", (q) => q.eq("emailNormalized", emailNormalized))
@@ -368,7 +428,71 @@ export const verifyTenantLogin = mutation({
   },
   handler: async (ctx, args) => {
     const emailNormalized = requireValidEmail(args.email);
+    await assertAllowed(ctx, {
+      key: rateKey("tenant.login_verify", emailNormalized, args.deviceId || ""),
+      scope: "tenant.login_verify",
+      limit: 8,
+      windowMs: 10 * 60 * 1000,
+      penaltyMs: 15 * 60 * 1000,
+    });
     const now = Date.now();
+    if (args.expectedTenantId) {
+      const tenant = await ctx.db.get(args.expectedTenantId);
+      if (!tenant) {
+        return null;
+      }
+      const users = await ctx.db
+        .query("tenantUsers")
+        .withIndex("by_tenantId_and_emailNormalized", (q) => q.eq("tenantId", tenant._id).eq("emailNormalized", emailNormalized))
+        .take(5);
+      const matchingUser = users.find((candidate) => candidate.pinHash === args.pinHash);
+      const user = matchingUser || users[0];
+      if (!user && tenant.emailNormalized !== emailNormalized) {
+        return null;
+      }
+
+      const tenantPinMatched = tenant.pinHash === args.pinHash;
+      if (!matchingUser && !tenantPinMatched) {
+        return null;
+      }
+
+      const deviceId = args.deviceId?.trim();
+      if (deviceId) {
+        const existingDevice = await ctx.db
+          .query("tenantDevices")
+          .withIndex("by_tenantId_and_deviceId", (q) => q.eq("tenantId", tenant._id).eq("deviceId", deviceId))
+          .unique();
+        if (existingDevice) {
+          await ctx.db.patch(existingDevice._id, {
+            lastSeenAt: now,
+            updatedAt: now,
+          });
+        } else {
+          await ctx.db.insert("tenantDevices", {
+            tenantId: tenant._id,
+            deviceId,
+            label: "Desktop app",
+            lastSeenAt: now,
+            createdAt: now,
+            updatedAt: now,
+          });
+        }
+      }
+
+      return {
+        tenantId: tenant._id,
+        ...(user?._id ? { userId: user._id } : {}),
+        email: user?.email || tenant.email,
+        displayName: user?.displayName || tenant.displayName || "",
+        role: user?.role || "owner",
+        isSuperAdmin: user?.isSuperAdmin || false,
+        billingStatus: tenant.billingStatus,
+        accessStatus: tenantAccessStatus(tenant, now),
+        trialStartedAt: tenant.trialStartedAt,
+        trialEndsAt: tenant.trialEndsAt,
+      };
+    }
+
     const tenantUsers = await ctx.db
       .query("tenantUsers")
       .withIndex("by_emailNormalized", (q) => q.eq("emailNormalized", emailNormalized))

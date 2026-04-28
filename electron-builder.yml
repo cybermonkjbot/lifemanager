@@ -1,6 +1,11 @@
 appId: com.odogwuhq.desktop
 productName: Odogwu HQ
 copyright: Copyright © 2026 Marvengrey technologies Nig LTD
+publish:
+  provider: github
+  owner: cybermonkjbot
+  repo: lifemanager
+  releaseType: release
 directories:
   output: dist/desktop
 files:

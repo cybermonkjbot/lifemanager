@@ -36,6 +36,21 @@ export default defineSchema({
     updatedBy: v.string(),
   }).index("by_key", ["key"]),
 
+  apiRateLimits: defineTable({
+    key: v.string(),
+    scope: v.string(),
+    windowStart: v.number(),
+    windowMs: v.number(),
+    limit: v.number(),
+    count: v.number(),
+    blockedUntil: v.optional(v.number()),
+    expiresAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_key", ["key"])
+    .index("by_scope_and_updatedAt", ["scope", "updatedAt"])
+    .index("by_expiresAt", ["expiresAt"]),
+
   adminUsers: defineTable({
     emailNormalized: v.string(),
     email: v.string(),
@@ -629,6 +644,60 @@ export default defineSchema({
     .index("by_path_and_learnedAt", ["path", "learnedAt"])
     .index("by_path_and_createdAt", ["path", "createdAt"])
     .index("by_createdAt", ["createdAt"]),
+
+  conversationQualityRuns: defineTable({
+    windowStartAt: v.number(),
+    windowEndAt: v.number(),
+    status: v.union(v.literal("running"), v.literal("success"), v.literal("warning"), v.literal("error")),
+    model: v.optional(v.string()),
+    selectedThreadCount: v.number(),
+    analyzedThreadCount: v.number(),
+    findingCount: v.number(),
+    errorMessage: v.optional(v.string()),
+    startedAt: v.number(),
+    finishedAt: v.optional(v.number()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_createdAt", ["createdAt"])
+    .index("by_status_and_createdAt", ["status", "createdAt"]),
+
+  conversationQualityFindings: defineTable({
+    runId: v.id("conversationQualityRuns"),
+    dedupeKey: v.string(),
+    category: v.string(),
+    severity: v.union(v.literal("low"), v.literal("medium"), v.literal("high")),
+    title: v.string(),
+    problemStatement: v.string(),
+    evidenceSummary: v.string(),
+    evidence: v.array(
+      v.object({
+        threadId: v.optional(v.id("threads")),
+        threadTitle: v.optional(v.string()),
+        messageId: v.optional(v.id("messages")),
+        messageAt: v.optional(v.number()),
+        excerpt: v.string(),
+      }),
+    ),
+    suggestedFixPrompt: v.string(),
+    status: v.union(
+      v.literal("open"),
+      v.literal("running"),
+      v.literal("applied"),
+      v.literal("dismissed"),
+      v.literal("failed"),
+    ),
+    launchedSelfImproveRunId: v.optional(v.string()),
+    launchedAt: v.optional(v.number()),
+    finishedAt: v.optional(v.number()),
+    runError: v.optional(v.string()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_createdAt", ["createdAt"])
+    .index("by_status_and_createdAt", ["status", "createdAt"])
+    .index("by_runId_and_createdAt", ["runId", "createdAt"])
+    .index("by_dedupeKey_and_createdAt", ["dedupeKey", "createdAt"]),
 
   aiBackfillJobs: defineTable({
     jobKey: v.string(),

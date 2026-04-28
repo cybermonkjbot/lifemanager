@@ -18,22 +18,31 @@ This repository is proprietary and is not published as an npm package by default
 - Confirm README and `docs/reference/*` reflect current behavior.
 - Confirm `.env.example` is still complete and sanitized.
 
-4. Tag the release
-- `git tag vX.Y.Z`
-- `git push origin vX.Y.Z`
+4. Promote to the release branch
+- Keep `main` as the playground branch.
+- Bump `package.json` to the release version.
+- Merge or cherry-pick the ready commit onto `release`.
+- `git push origin release`
 
 5. Publish GitHub Release
-- Create a new release from the tag.
-- Use changelog notes as release notes.
-- Call out breaking changes and migration notes.
+- The `Desktop Release` workflow runs on every push to `release`.
+- It runs lint, tests, and build, then creates `desktop-vX.Y.Z` from `package.json`.
+- It uploads the macOS and Windows desktop artifacts, including updater metadata, to GitHub Releases.
+- If `desktop-vX.Y.Z` already exists, bump `package.json` before pushing `release` again.
+
+6. Verify desktop updates
+- Install the previous desktop version.
+- Publish the new release from `release`.
+- Launch the previous desktop version and confirm it downloads the GitHub Release update.
 
 ## Patch Releases
 
 For urgent fixes:
-- branch from `main`
+- branch from `release` when patching a shipped version, or from `main` when promoting a new ready fix
 - implement minimal fix + tests/docs
 - update changelog
-- tag `vX.Y.(Z+1)`
+- bump `package.json` to `X.Y.(Z+1)`
+- push the fix to `release`
 
 ## Security Releases
 

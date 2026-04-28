@@ -16,6 +16,7 @@ import {
   resolveGatewayRuntimeModel,
   resolveGatewayThreadId,
 } from "@/lib/openai-gateway";
+import { consumeRequestRateLimit, rateLimitHeaders } from "@/lib/rate-limit";
 import { generateReplyWithFallback } from "@/worker/ai";
 import { NextResponse } from "next/server";
 
@@ -173,6 +174,12 @@ function openAiErrorResponse(
   });
 }
 
+function gatewayRateLimitIdentity(request: Request) {
+  const authorization = request.headers.get("authorization") || "";
+  const apiKey = request.headers.get("x-api-key") || "";
+  return authorization || apiKey || "missing-key";
+}
+
 export async function OPTIONS() {
   return new Response(null, {
     status: 204,
@@ -199,6 +206,23 @@ export async function POST(request: Request) {
       "authentication_error",
       "invalid_api_key",
       { "WWW-Authenticate": 'Bearer realm="slm-api-gateway"' },
+    );
+  }
+
+  const rateLimit = await consumeRequestRateLimit(request, {
+    scope: "api.gateway.chat",
+    identity: gatewayRateLimitIdentity(request),
+    limit: 30,
+    windowMs: 60 * 1000,
+    penaltyMs: 60 * 1000,
+  });
+  if (!rateLimit.allowed) {
+    return openAiErrorResponse(
+      429,
+      "Rate limit exceeded. Try again shortly.",
+      "api_error",
+      "rate_limit_exceeded",
+      rateLimitHeaders(rateLimit),
     );
   }
 

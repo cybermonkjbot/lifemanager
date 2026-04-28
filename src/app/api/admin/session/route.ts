@@ -8,6 +8,7 @@ import {
   verifyAdminRequest,
 } from "@/lib/admin-auth";
 import { verifyAdminCredentials } from "@/lib/admin-users";
+import { consumeRequestRateLimit, rateLimitHeaders } from "@/lib/rate-limit";
 import { isElectronEnvironment } from "@/lib/runtime-env";
 import { requestHasSameOrigin } from "@/lib/secure-cookies";
 
@@ -27,6 +28,20 @@ export async function POST(request: NextRequest) {
   const email = String(formData.get("email") || "");
   const pin = String(formData.get("pin") || "");
   const nextPath = normalizeAdminNextPath(String(formData.get("next") || ""));
+  const decision = await consumeRequestRateLimit(request, {
+    scope: "auth.admin",
+    identity: email,
+    limit: 6,
+    windowMs: 10 * 60 * 1000,
+    penaltyMs: 15 * 60 * 1000,
+  });
+  if (!decision.allowed) {
+    const headers = rateLimitHeaders(decision);
+    return NextResponse.redirect(
+      new URL(`/admin/unlock?next=${encodeURIComponent(nextPath)}&error=rate_limited`, request.url),
+      { status: 303, headers },
+    );
+  }
   const admin = await verifyAdminCredentials(email, pin);
   if (!admin) {
     return NextResponse.redirect(new URL(`/admin/unlock?next=${encodeURIComponent(nextPath)}&error=1`, request.url), 303);

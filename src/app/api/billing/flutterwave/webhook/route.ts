@@ -3,9 +3,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { convexRefs } from "@/lib/convex-refs";
 import { createConvexClient } from "@/lib/convex-server";
 import { resolveManagedSecretValue } from "@/lib/managed-secrets-server";
+import { rateLimitJsonResponse } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+const MAX_WEBHOOK_BODY_BYTES = 256 * 1024;
 
 type FlutterwaveWebhook = {
   event?: string;
@@ -71,11 +73,28 @@ function paymentPlanId(value: unknown) {
 
 export async function POST(request: NextRequest) {
   try {
+    const limited = await rateLimitJsonResponse(request, {
+      scope: "billing.flutterwave_webhook",
+      identity: "flutterwave",
+      limit: 120,
+      windowMs: 60 * 1000,
+      penaltyMs: 60 * 1000,
+    });
+    if (limited) {
+      return limited;
+    }
+    const contentLength = Number(request.headers.get("content-length") || 0);
+    if (Number.isFinite(contentLength) && contentLength > MAX_WEBHOOK_BODY_BYTES) {
+      return NextResponse.json({ error: "Webhook body is too large." }, { status: 413 });
+    }
     const expectedHash = await resolveManagedSecretValue("flutterwave.webhookHash");
     if (!expectedHash) {
       return NextResponse.json({ error: "Flutterwave webhook hash is not configured." }, { status: 500 });
     }
     const rawBody = await request.text();
+    if (Buffer.byteLength(rawBody, "utf8") > MAX_WEBHOOK_BODY_BYTES) {
+      return NextResponse.json({ error: "Webhook body is too large." }, { status: 413 });
+    }
     if (!hasValidFlutterwaveSignature(rawBody, expectedHash, request)) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
     }

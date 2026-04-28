@@ -15,6 +15,7 @@ import {
   requestHasValidSetupBootstrapSecret,
   setupBootstrapConfigured,
 } from "@/lib/setup-bootstrap-auth";
+import { rateLimitJsonResponse } from "@/lib/rate-limit";
 import { generateSetupPreferencesWithAiTool } from "@/worker/ai";
 
 export const runtime = "nodejs";
@@ -32,6 +33,17 @@ function getErrorMessage(error: unknown) {
 }
 
 export async function POST(request: NextRequest) {
+  const limited = await rateLimitJsonResponse(request, {
+    scope: "setup.ai_settings",
+    identity: request.headers.get("x-setup-secret") || request.headers.get("authorization") || "setup",
+    limit: 3,
+    windowMs: 24 * 60 * 60 * 1000,
+    penaltyMs: 60 * 60 * 1000,
+  });
+  if (limited) {
+    return limited;
+  }
+
   let payload: SetupAiSettingsPayload;
 
   try {

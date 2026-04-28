@@ -1,6 +1,8 @@
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { createConvexClient } from "@/lib/convex-server";
 import { convexRefs } from "@/lib/convex-refs";
 import { resolveManagedSecretValue } from "@/lib/managed-secrets-server";
+import { rateLimitJsonResponse } from "@/lib/rate-limit";
 import type { CodeProjectBundle, ProjectSdkCall } from "@/code-runtime";
 
 export const runtime = "nodejs";
@@ -14,16 +16,42 @@ type RunStep = {
   errorMessage?: string;
 };
 
-async function readPayload(request: Request) {
+const MAX_WEBHOOK_BODY_BYTES = 256 * 1024;
+
+function safeEqual(left: string, right: string) {
+  const a = Buffer.from(left);
+  const b = Buffer.from(right);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+async function resolveWebhookSecret() {
+  return (await resolveManagedSecretValue("code.webhookSecret").catch(() => "")) || process.env.SLM_CODE_WEBHOOK_SECRET || "";
+}
+
+function hasValidWebhookSecret(rawBody: string, request: Request, secret: string) {
+  const bearer = request.headers.get("authorization") || "";
+  const directSecret = request.headers.get("x-webhook-secret") || "";
+  if (bearer.toLowerCase().startsWith("bearer ") && safeEqual(bearer.slice("bearer ".length).trim(), secret)) {
+    return true;
+  }
+  if (directSecret && safeEqual(directSecret, secret)) {
+    return true;
+  }
+
+  const signature = request.headers.get("x-odogwu-signature") || "";
+  const expected = createHmac("sha256", secret).update(rawBody).digest("hex");
+  return safeEqual(signature.replace(/^sha256=/i, ""), expected);
+}
+
+async function readPayload(request: Request, rawBody: string) {
   const contentType = request.headers.get("content-type") || "";
   if (contentType.includes("application/json")) {
-    return await request.json().catch(() => ({}));
+    return JSON.parse(rawBody);
   }
-  const text = await request.text();
   try {
-    return JSON.parse(text);
+    return JSON.parse(rawBody);
   } catch {
-    return { text };
+    return { text: rawBody };
   }
 }
 
@@ -93,7 +121,36 @@ function plannedStep(call: ProjectSdkCall): RunStep {
 
 export async function POST(request: Request, { params }: { params: Promise<{ projectSlug: string; handlerName: string }> }) {
   const { projectSlug, handlerName } = await params;
-  const payload = await readPayload(request);
+  const limited = await rateLimitJsonResponse(request, {
+    scope: "code.webhook",
+    identity: `${projectSlug}:${handlerName}`,
+    limit: 60,
+    windowMs: 60 * 1000,
+    penaltyMs: 60 * 1000,
+  });
+  if (limited) {
+    return limited;
+  }
+
+  const contentLength = Number(request.headers.get("content-length") || 0);
+  if (Number.isFinite(contentLength) && contentLength > MAX_WEBHOOK_BODY_BYTES) {
+    return Response.json({ ok: false, error: "Webhook body is too large." }, { status: 413 });
+  }
+
+  const secret = await resolveWebhookSecret();
+  if (!secret) {
+    return Response.json({ ok: false, error: "Code webhook secret is not configured." }, { status: 503 });
+  }
+
+  const rawBody = await request.text();
+  if (Buffer.byteLength(rawBody, "utf8") > MAX_WEBHOOK_BODY_BYTES) {
+    return Response.json({ ok: false, error: "Webhook body is too large." }, { status: 413 });
+  }
+  if (!hasValidWebhookSecret(rawBody, request, secret)) {
+    return Response.json({ ok: false, error: "Unauthorized." }, { status: 401 });
+  }
+
+  const payload = await readPayload(request, rawBody).catch(() => ({}));
   const convex = createConvexClient();
   const published = (await convex.query(convexRefs.codeGetPublishedWebhookProject, {
     projectSlug,

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, shell } from "electron";
+import { app, BrowserWindow, ipcMain, Menu, shell } from "electron";
 import { spawn } from "node:child_process";
 import { createDecipheriv, createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, "..", "..");
 const appIconPath = join(projectRoot, "public", "icons", "icon.png");
+const preloadPath = join(__dirname, "preload.cjs");
 const isDev = process.env.ODOGWU_DESKTOP_DEV === "1" || !app.isPackaged;
 const desktopRuntimeCookieName = "odogwu_desktop_runtime";
 const desktopRuntimeHeaderName = "x-odogwu-desktop-runtime";
@@ -17,6 +18,22 @@ const desktopRuntimeSecret = process.env.ODOGWU_DESKTOP_RUNTIME_SECRET || random
 const children = new Set();
 
 let mainWindow = null;
+let updateCheckInFlight = false;
+let autoUpdater = null;
+let installingUpdate = false;
+let updateState = {
+  status: "idle",
+  version: "",
+  error: "",
+};
+
+function publishUpdateState(nextState) {
+  updateState = {
+    ...updateState,
+    ...nextState,
+  };
+  mainWindow?.webContents.send("desktop-update-state", updateState);
+}
 
 function quoteWindowsArg(value) {
   const arg = String(value);
@@ -417,6 +434,7 @@ async function createWindow(appUrl) {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      preload: preloadPath,
       sandbox: true,
     },
   });
@@ -469,6 +487,79 @@ async function createWindow(appUrl) {
   await mainWindow.loadURL(appUrl);
 }
 
+async function setupAutoUpdates() {
+  if (isDev || process.env.ODOGWU_DESKTOP_AUTO_UPDATE === "0") {
+    return;
+  }
+
+  const updaterModule = await import("electron-updater");
+  autoUpdater = updaterModule.default?.autoUpdater || updaterModule.autoUpdater;
+  if (!autoUpdater) {
+    console.warn("[desktop] auto updater is unavailable.");
+    return;
+  }
+
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.on("checking-for-update", () => {
+    publishUpdateState({ status: "checking", error: "" });
+  });
+  autoUpdater.on("update-available", (info) => {
+    publishUpdateState({ status: "downloading", version: info?.version || "", error: "" });
+  });
+  autoUpdater.on("update-not-available", () => {
+    publishUpdateState({ status: "idle", error: "" });
+  });
+  autoUpdater.on("error", (error) => {
+    publishUpdateState({ status: "error", error: error?.message || "Update check failed." });
+    console.error("[desktop] update check failed:", error);
+  });
+  autoUpdater.on("update-downloaded", (info) => {
+    publishUpdateState({ status: "ready", version: info?.version || updateState.version || "", error: "" });
+    console.log("[desktop] update downloaded; it will install when the app quits.");
+  });
+
+  const checkForUpdates = async () => {
+    if (updateCheckInFlight) {
+      return;
+    }
+    updateCheckInFlight = true;
+    try {
+      await autoUpdater.checkForUpdatesAndNotify();
+    } finally {
+      updateCheckInFlight = false;
+    }
+  };
+
+  setTimeout(() => {
+    void checkForUpdates();
+  }, 10_000);
+  setInterval(() => {
+    void checkForUpdates();
+  }, 4 * 60 * 60 * 1000);
+}
+
+ipcMain.handle("desktop-update-get-state", () => updateState);
+
+ipcMain.handle("desktop-update-restart", async () => {
+  if (!autoUpdater || updateState.status !== "ready") {
+    return { ok: false, error: "No downloaded update is ready to install." };
+  }
+
+  try {
+    installingUpdate = true;
+    publishUpdateState({ status: "restarting", error: "" });
+    await stopChildren();
+    autoUpdater.quitAndInstall(false, true);
+    return { ok: true };
+  } catch (error) {
+    installingUpdate = false;
+    const message = error instanceof Error ? error.message : "Could not restart for the update.";
+    publishUpdateState({ status: "ready", error: message });
+    return { ok: false, error: message };
+  }
+});
+
 async function stopChildren() {
   const active = [...children];
   for (const child of active) {
@@ -499,6 +590,7 @@ app.whenReady()
     startWhatsappWorker(appUrl);
     createMenu(appUrl);
     await createWindow(appUrl);
+    await setupAutoUpdates();
   })
   .catch((error) => {
     console.error("[desktop] failed to launch:", error);
@@ -512,6 +604,9 @@ app.on("activate", () => {
 });
 
 app.on("before-quit", async (event) => {
+  if (installingUpdate) {
+    return;
+  }
   if (children.size === 0) {
     return;
   }

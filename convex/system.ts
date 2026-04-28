@@ -37,10 +37,13 @@ async function getProviderConnectionHistory(
 ) {
   const history: {
     hasConnectedBefore: boolean;
+    hasActiveConnection: boolean;
     lastConnectedAt?: number;
     lastDisconnectedAt?: number;
+    lastConnectionSeenAt?: number;
   } = {
     hasConnectedBefore: false,
+    hasActiveConnection: false,
   };
 
   if (tenantId) {
@@ -52,6 +55,10 @@ async function getProviderConnectionHistory(
     for (const account of accounts) {
       if (account.connectedAt !== undefined || account.authState === "connected") {
         history.hasConnectedBefore = true;
+      }
+      if (account.authState === "connected") {
+        history.hasActiveConnection = true;
+        history.lastConnectionSeenAt = Math.max(history.lastConnectionSeenAt ?? 0, account.lastSeenAt ?? account.updatedAt);
       }
       if (account.connectedAt !== undefined) {
         history.lastConnectedAt = Math.max(history.lastConnectedAt ?? 0, account.connectedAt);
@@ -1047,6 +1054,18 @@ export const setupStatus = query({
     }
 
     if (record) {
+      if (connectionHistory.hasActiveConnection && (record.listenerActive !== true || record.hasAuth !== true)) {
+        return {
+          ...record,
+          status: "connected" as const,
+          message: provider === "instagram" ? "Instagram connected." : "WhatsApp connected.",
+          hasAuth: true,
+          listenerActive: true,
+          listenerLastSeenAt: connectionHistory.lastConnectionSeenAt ?? record.listenerLastSeenAt,
+          updatedAt: Math.max(record.updatedAt, connectionHistory.lastConnectionSeenAt ?? 0),
+          ...connectionHistory,
+        };
+      }
       return {
         ...record,
         ...connectionHistory,
@@ -1057,11 +1076,21 @@ export const setupStatus = query({
       const syntheticRecord = {
         key: provider,
         provider,
-        status: "idle" as const,
+        status: connectionHistory.hasActiveConnection ? ("connected" as const) : ("idle" as const),
         mode: provider === "instagram" ? ("password" as const) : ("qr" as const),
-        message: "Setup not started.",
-        hasAuth: false,
-        updatedAt: connectionHistory.lastDisconnectedAt || connectionHistory.lastConnectedAt || Date.now(),
+        message: connectionHistory.hasActiveConnection
+          ? provider === "instagram"
+            ? "Instagram connected."
+            : "WhatsApp connected."
+          : "Setup not started.",
+        hasAuth: connectionHistory.hasActiveConnection,
+        listenerActive: connectionHistory.hasActiveConnection ? true : undefined,
+        listenerLastSeenAt: connectionHistory.lastConnectionSeenAt,
+        updatedAt:
+          connectionHistory.lastConnectionSeenAt ||
+          connectionHistory.lastDisconnectedAt ||
+          connectionHistory.lastConnectedAt ||
+          Date.now(),
         ...connectionHistory,
       };
       return tenantId ? { ...syntheticRecord, tenantId } : syntheticRecord;

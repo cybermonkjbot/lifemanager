@@ -169,9 +169,9 @@ function ControlsRealtime({ fallbackPaused }: { fallbackPaused?: boolean }) {
         const response = await fetch("/api/setup/whatsapp/restart-worker", {
           method: "POST",
         });
-        const payload = (await response.json()) as { status?: string; message?: string };
+        const payload = (await response.json()) as { status?: string; message?: string; error?: string };
         if (!response.ok || payload.status === "error") {
-          throw new Error(payload.message || "Failed to restart worker.");
+          throw new Error(payload.message || payload.error || "Failed to restart worker.");
         }
       },
       {

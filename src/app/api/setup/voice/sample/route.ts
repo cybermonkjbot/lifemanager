@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireRuntimeControlApiAccess } from "@/lib/instance-guard";
 import { readLocalInstanceConfig } from "@/lib/instance-config";
 import { isLoopbackHostname, requestHasValidSetupBootstrapSecret } from "@/lib/setup-bootstrap-auth";
+import { rateLimitJsonResponse } from "@/lib/rate-limit";
 import { getVoiceNoteSetupManager } from "@/lib/voice-note/setup-manager";
 
 export const runtime = "nodejs";
@@ -18,6 +19,17 @@ async function requireVoiceSetupAccess(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
+  const limited = await rateLimitJsonResponse(request, {
+    scope: "setup.voice_sample",
+    identity: request.headers.get("x-setup-secret") || request.headers.get("authorization") || "setup",
+    limit: 6,
+    windowMs: 60 * 60 * 1000,
+    penaltyMs: 30 * 60 * 1000,
+  });
+  if (limited) {
+    return limited;
+  }
+
   const unauthorized = await requireVoiceSetupAccess(request);
   if (unauthorized) {
     return unauthorized;

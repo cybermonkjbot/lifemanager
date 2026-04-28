@@ -4,6 +4,7 @@ import { createConvexClient } from "@/lib/convex-server";
 import { readLocalInstanceConfig } from "@/lib/instance-config";
 import { requireInstanceApiAccess } from "@/lib/instance-guard";
 import { resolveManagedSecretValue } from "@/lib/managed-secrets-server";
+import { rateLimitJsonResponse } from "@/lib/rate-limit";
 import { getTenantSessionCookieName, verifyTenantSessionToken } from "@/lib/tenant-session";
 
 export const runtime = "nodejs";
@@ -63,6 +64,16 @@ export async function POST(request: NextRequest) {
   const unauthorized = await requireInstanceApiAccess(request, "json");
   if (unauthorized) {
     return unauthorized;
+  }
+  const limited = await rateLimitJsonResponse(request, {
+    scope: "billing.checkout",
+    identity: request.cookies.get(getTenantSessionCookieName())?.value || "",
+    limit: 5,
+    windowMs: 60 * 60 * 1000,
+    penaltyMs: 30 * 60 * 1000,
+  });
+  if (limited) {
+    return limited;
   }
 
   try {

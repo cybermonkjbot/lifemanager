@@ -3,6 +3,7 @@
 import { ActionNotices } from "@/components/action-notices";
 import { LoadingIndicator } from "@/components/loading-state";
 import { useTenantScopeArgs } from "@/components/tenant-scope-provider";
+import { UIModal } from "@/components/ui-modal";
 import {
   compileCodeProject,
   runCodeProjectTests,
@@ -21,6 +22,13 @@ import type { Id } from "../../convex/_generated/dataModel";
 import { useAction, useMutation, useQuery } from "convex/react";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
+
+type FileDialogMode = "create" | "rename" | "duplicate";
+type FileDialogState = {
+  mode: FileDialogMode;
+  path: string;
+  sourcePath?: string;
+} | null;
 
 const starterProjectFiles: CodeProjectFile[] = [
   {
@@ -329,6 +337,38 @@ function stableFilesJson(files: CodeProjectFile[]) {
   return JSON.stringify([...files].sort((a, b) => a.path.localeCompare(b.path)));
 }
 
+function validateOdogwuPath(path: string, files: CodeProjectFile[], currentPath?: string) {
+  const trimmed = path.trim().replace(/^\/+/, "");
+  if (!trimmed) return "Path is required.";
+  if (trimmed.includes("..")) return "Parent directory segments are not allowed.";
+  if (!/^[A-Za-z0-9_./-]+$/.test(trimmed)) return "Use letters, numbers, dashes, underscores, slashes, and dots.";
+  if (!trimmed.endsWith(".odo")) return "ODOGWU source files must end in .odo.";
+  if (files.some((file) => file.path === trimmed && file.path !== currentPath)) return "A file already exists at that path.";
+  return "";
+}
+
+function defaultFileTemplate(path: string) {
+  const name = path
+    .split("/")
+    .pop()
+    ?.replace(/\.odo$/, "")
+    .replace(/[^A-Za-z0-9_]/g, "_") || "helper";
+  return `# ${path}
+export function ${name}(payload)
+do
+  messages.preview(text: "Ready")
+end`;
+}
+
+function duplicatePath(path: string, files: CodeProjectFile[]) {
+  const basePath = path.endsWith(".odo") ? path.slice(0, -4) : path;
+  for (let index = 1; index < 100; index += 1) {
+    const nextPath = `${basePath}.copy${index === 1 ? "" : index}.odo`;
+    if (!files.some((file) => file.path === nextPath)) return nextPath;
+  }
+  return `${basePath}.copy.odo`;
+}
+
 type GeneratedCanvasPreview = {
   hash: string;
   title: string;
@@ -587,6 +627,10 @@ export function CodeLab() {
   const [lastSavedFilesJson, setLastSavedFilesJson] = useState("");
   const [description, setDescription] = useState("");
   const [localTestJson, setLocalTestJson] = useState("");
+  const [terminalOpen, setTerminalOpen] = useState(false);
+  const [terminalOutput, setTerminalOutput] = useState("");
+  const [fileDialog, setFileDialog] = useState<FileDialogState>(null);
+  const [fileDialogError, setFileDialogError] = useState("");
   const [canvasPreview, setCanvasPreview] = useState<GeneratedCanvasPreview | null>(null);
   const detail = useQuery(
     api.code.getProject,
@@ -619,13 +663,24 @@ export function CodeLab() {
   const localTestResult = useMemo(() => runCodeProjectTests(files), [files]);
   const activeDiagnostics = compileResult.diagnostics.filter((item) => item.filePath === activeFile.path);
   const latestSuite = detail?.testSuites?.[0];
-  const latestSuiteResult = safeJson<{ trace?: Array<{ nodeId: string; status: string; summary: string }> }>(latestSuite?.resultJson, {});
   const hasErrors = compileResult.diagnostics.some((item) => item.severity === "error");
   const canPublish = Boolean(selectedProjectId && !hasErrors && latestSuite?.passed);
   const hasUnsavedChanges = stableFilesJson(files) !== lastSavedFilesJson;
+  const savedFileContentByPath = useMemo(() => {
+    const savedFiles = safeJson<CodeProjectFile[]>(lastSavedFilesJson, []);
+    return new Map(savedFiles.map((file) => [file.path, file.content]));
+  }, [lastSavedFilesJson]);
   const activeProjectName = selectedProjectId ? detail?.project?.name || "Loading project" : "Unsaved extension";
   const activeStatus = selectedProjectId ? detail?.project?.status || "draft" : "draft";
   const webhookBase = detail?.project?.webhookSlug ? `/api/code/webhooks/${detail.project.webhookSlug}` : "/api/code/webhooks/{projectSlug}";
+  const activeFileDirty = savedFileContentByPath.get(activeFile.path) !== activeFile.content;
+
+  const writeTerminal = (label: string, value?: unknown) => {
+    const timestamp = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date());
+    const body = value === undefined ? "" : typeof value === "string" ? value : JSON.stringify(value, null, 2);
+    setTerminalOpen(true);
+    setTerminalOutput((current) => `${current ? `${current}\n\n` : ""}[${timestamp}] ${label}${body ? `\n${body}` : ""}`);
+  };
 
   const replaceActiveFile = (content: string) => {
     setFiles((current) => current.map((file) => (file.path === activeFile.path ? { ...file, content } : file)));
@@ -658,6 +713,7 @@ export function CodeLab() {
         }
         await saveProjectFiles({ ...tenantScope, projectId, files, description: description.trim() || undefined });
         setLastSavedFilesJson(stableFilesJson(files));
+        writeTerminal("save", `${files.length} file(s) synced to Convex.`);
       },
       { pendingLabel: "Syncing files...", successMessage: "Project files saved to Convex." },
     );
@@ -669,6 +725,7 @@ export function CodeLab() {
       async () => {
         const result = await runProjectTestsRemote({ ...tenantScope, projectId: selectedProjectId || undefined, files });
         setLocalTestJson(JSON.stringify(result, null, 2));
+        writeTerminal("test", result);
       },
       { pendingLabel: "Running project tests...", successMessage: "Project tests completed." },
     );
@@ -680,6 +737,7 @@ export function CodeLab() {
       "code-project:publish",
       async () => {
         await publishProject({ ...tenantScope, projectId: selectedProjectId });
+        writeTerminal("publish", "Published bundle activated for webhooks and worker hooks.");
       },
       { pendingLabel: "Publishing project bundle...", successMessage: "Project published. Webhooks and worker hooks are active." },
     );
@@ -697,10 +755,13 @@ export function CodeLab() {
         }
         await saveProjectFiles({ ...tenantScope, projectId, files, description: description.trim() || undefined });
         setLastSavedFilesJson(stableFilesJson(files));
+        writeTerminal("save", `${files.length} file(s) synced to Convex.`);
         const tests = await runProjectTestsRemote({ ...tenantScope, projectId, files });
         setLocalTestJson(JSON.stringify(tests, null, 2));
+        writeTerminal("test", tests);
         if (!tests.passed) throw new Error("Tests failed. Fix inline diagnostics before publishing.");
         await publishProject({ ...tenantScope, projectId });
+        writeTerminal("publish", "Done coding flow completed.");
       },
       {
         pendingLabel: "Saving, compiling, testing, publishing...",
@@ -711,23 +772,62 @@ export function CodeLab() {
 
   const onFormat = () => replaceActiveFile(formatOdogwuSource(activeFile.content));
 
-  const onCreateFile = () => {
-    const path = window.prompt("New ODOGWU file path", "helpers.odo")?.trim();
-    if (!path || files.some((file) => file.path === path)) return;
-    setFiles((current) => [...current, { path, content: `export function helper(payload)\ndo\n  messages.preview(text: "Ready")\nend`, language: "odogwu" }]);
-    setActivePath(path);
+  const openFileDialog = (mode: FileDialogMode) => {
+    if (mode === "rename" && activeFile.path === "main.odo") return;
+    const nextPath =
+      mode === "create" ? "workflows/new-file.odo" : mode === "duplicate" ? duplicatePath(activeFile.path, files) : activeFile.path;
+    setFileDialog({ mode, path: nextPath, sourcePath: activeFile.path });
+    setFileDialogError("");
   };
 
-  const onRenameFile = () => {
+  const closeFileDialog = () => {
+    setFileDialog(null);
+    setFileDialogError("");
+  };
+
+  const onSubmitFileDialog = () => {
+    if (!fileDialog) return;
+    const nextPath = fileDialog.path.trim().replace(/^\/+/, "");
+    const pathError = validateOdogwuPath(
+      nextPath,
+      files,
+      fileDialog.mode === "rename" ? fileDialog.sourcePath : undefined,
+    );
+    if (pathError) {
+      setFileDialogError(pathError);
+      return;
+    }
+
+    if (fileDialog.mode === "create") {
+      setFiles((current) => [...current, { path: nextPath, content: defaultFileTemplate(nextPath), language: "odogwu" }]);
+      setActivePath(nextPath);
+      closeFileDialog();
+      return;
+    }
+
+    const sourcePath = fileDialog.sourcePath || activeFile.path;
+    const sourceFile = files.find((file) => file.path === sourcePath);
+    if (!sourceFile) {
+      setFileDialogError("Source file is no longer available.");
+      return;
+    }
+
+    if (fileDialog.mode === "duplicate") {
+      setFiles((current) => [...current, { ...sourceFile, path: nextPath }]);
+      setActivePath(nextPath);
+      closeFileDialog();
+      return;
+    }
+
     if (activeFile.path === "main.odo") return;
-    const path = window.prompt("Rename file", activeFile.path)?.trim();
-    if (!path || files.some((file) => file.path === path)) return;
-    setFiles((current) => current.map((file) => (file.path === activeFile.path ? { ...file, path } : file)));
-    setActivePath(path);
+    setFiles((current) => current.map((file) => (file.path === sourcePath ? { ...file, path: nextPath } : file)));
+    setActivePath(nextPath);
+    closeFileDialog();
   };
 
   const onDeleteFile = () => {
     if (activeFile.path === "main.odo" || files.length <= 1) return;
+    if (!window.confirm(`Delete ${activeFile.path}?`)) return;
     setFiles((current) => current.filter((file) => file.path !== activeFile.path));
     setActivePath("main.odo");
   };
@@ -796,7 +896,11 @@ export function CodeLab() {
           <button className="btn btn-ghost" type="button" onClick={() => router.push("/code/docs")}>
             Docs
           </button>
-          <button className="btn btn-ghost" type="button" onClick={() => setFiles(starterProjectFiles)}>
+          <button className="btn btn-ghost" type="button" onClick={() => {
+            setFiles(starterProjectFiles);
+            setActivePath("main.odo");
+            writeTerminal("starter", "Starter project loaded into the workspace.");
+          }}>
             Starter
           </button>
           <button className="btn btn-ghost" type="button" onClick={onFormat}>
@@ -847,8 +951,9 @@ export function CodeLab() {
 
           <div className="code-lab-sidebar-section">Files</div>
           <div className="code-file-actions">
-            <button type="button" onClick={onCreateFile}>New</button>
-            <button type="button" onClick={onRenameFile} disabled={activeFile.path === "main.odo"}>Rename</button>
+            <button type="button" onClick={() => openFileDialog("create")}>New</button>
+            <button type="button" onClick={() => openFileDialog("rename")} disabled={activeFile.path === "main.odo"}>Rename</button>
+            <button type="button" onClick={() => openFileDialog("duplicate")}>Copy</button>
             <button type="button" onClick={onDeleteFile} disabled={activeFile.path === "main.odo"}>Delete</button>
           </div>
           {[...files].sort((a, b) => (a.path === "main.odo" ? -1 : b.path === "main.odo" ? 1 : a.path.localeCompare(b.path))).map((file) => (
@@ -859,7 +964,9 @@ export function CodeLab() {
               onClick={() => setActivePath(file.path)}
             >
               <strong>{file.path}</strong>
-              <span>{file.path === "main.odo" ? "entry" : "module"} {hasUnsavedChanges ? "· unsaved" : ""}</span>
+              <span>
+                {file.path === "main.odo" ? "entry" : "module"} · {savedFileContentByPath.get(file.path) === file.content ? "saved" : "modified"}
+              </span>
             </button>
           ))}
         </aside>
@@ -868,14 +975,19 @@ export function CodeLab() {
           <div className="code-lab-menu-bar" role="toolbar" aria-label="Code editor menu">
             <div className="code-lab-menu-group">
               <span>File</span>
-              <button type="button" onClick={onCreateFile}>New</button>
+              <button type="button" onClick={() => openFileDialog("create")}>New</button>
               <button type="button" onClick={onSave} disabled={saveRecord.pending}>{saveRecord.pending ? "Saving" : "Save"}</button>
-              <button type="button" onClick={onRenameFile} disabled={activeFile.path === "main.odo"}>Rename</button>
+              <button type="button" onClick={() => openFileDialog("rename")} disabled={activeFile.path === "main.odo"}>Rename</button>
+              <button type="button" onClick={() => openFileDialog("duplicate")}>Duplicate</button>
             </div>
             <div className="code-lab-menu-group">
               <span>Edit</span>
               <button type="button" onClick={onFormat}>Format</button>
-              <button type="button" onClick={() => setFiles(starterProjectFiles)}>Starter</button>
+              <button type="button" onClick={() => {
+                setFiles(starterProjectFiles);
+                setActivePath("main.odo");
+                writeTerminal("starter", "Starter project loaded into the workspace.");
+              }}>Starter</button>
               <button type="button" onClick={onGenerateCanvas}>Canvas</button>
               <button type="button" onClick={() => router.push("/code/docs")}>Docs</button>
             </div>
@@ -887,13 +999,20 @@ export function CodeLab() {
             </div>
             <div className="code-lab-menu-group code-lab-menu-group-terminal">
               <span>Terminal</span>
-              <button type="button" onClick={() => setLocalTestJson(JSON.stringify(localTestResult, null, 2))}>Preview output</button>
-              <button type="button" onClick={() => setLocalTestJson("")} disabled={!localTestJson}>Clear</button>
+              <button type="button" onClick={() => {
+                setLocalTestJson(JSON.stringify(localTestResult, null, 2));
+                writeTerminal("preview", localTestResult);
+              }}>Preview</button>
+              <button type="button" onClick={() => setTerminalOpen((open) => !open)}>{terminalOpen ? "Hide" : "Show"}</button>
+              <button type="button" onClick={() => {
+                setLocalTestJson("");
+                setTerminalOutput("");
+              }} disabled={!localTestJson && !terminalOutput}>Clear</button>
             </div>
           </div>
           <div className="code-lab-editor-tabbar">
             <span>{activeFile.path}</span>
-            <em>{hasUnsavedChanges ? "unsaved" : "synced"} · {hasErrors ? `${compileResult.diagnostics.length} diagnostics` : "compiled bundle ready"}</em>
+            <em>{activeFileDirty ? "modified" : "synced"} · {hasErrors ? `${compileResult.diagnostics.length} diagnostics` : "compiled bundle ready"}</em>
           </div>
           <CodeEditor
             value={activeFile.content}
@@ -905,6 +1024,18 @@ export function CodeLab() {
             onPublish={onPublish}
             onFormat={onFormat}
           />
+          {terminalOpen ? (
+            <div className="code-terminal-panel" aria-label="Code Lab terminal">
+              <header>
+                <strong>Terminal</strong>
+                <div>
+                  <button type="button" onClick={() => setTerminalOutput("")} disabled={!terminalOutput}>Clear</button>
+                  <button type="button" onClick={() => setTerminalOpen(false)}>Close</button>
+                </div>
+              </header>
+              <pre>{terminalOutput || "No output."}</pre>
+            </div>
+          ) : null}
         </main>
 
         <aside className="code-lab-inspector">
@@ -1012,13 +1143,6 @@ export function CodeLab() {
             </div>
           </section>
 
-          {latestSuite || localTestJson ? (
-            <section>
-              <h3>Output</h3>
-              {latestSuiteResult.trace?.length ? <pre className="tool-json-output">{latestSuiteResult.trace.map((item) => `${item.status} ${item.summary}`).join("\n")}</pre> : null}
-              {localTestJson ? <pre className="tool-json-output">{localTestJson}</pre> : null}
-            </section>
-          ) : null}
         </aside>
       </div>
 
@@ -1031,7 +1155,50 @@ export function CodeLab() {
         <span>{compileResult.manifest.sdkCalls.length} SDK calls</span>
         <span>{hasUnsavedChanges ? "modified" : "saved"}</span>
         <span>{localTestResult.passed ? "tests ok" : "tests failing"}</span>
+        <span>{terminalOpen ? "terminal open" : "terminal hidden"}</span>
       </footer>
+
+      <UIModal
+        open={Boolean(fileDialog)}
+        onClose={closeFileDialog}
+        title={
+          fileDialog?.mode === "create"
+            ? "New File"
+            : fileDialog?.mode === "duplicate"
+              ? "Duplicate File"
+              : "Rename File"
+        }
+      >
+        <form
+          className="code-file-dialog"
+          onSubmit={(event) => {
+            event.preventDefault();
+            onSubmitFileDialog();
+          }}
+        >
+          <label>
+            <span>Path</span>
+            <input
+              autoFocus
+              value={fileDialog?.path || ""}
+              onChange={(event) => {
+                setFileDialog((current) => (current ? { ...current, path: event.target.value } : current));
+                setFileDialogError("");
+              }}
+              placeholder="workflows/reply-router.odo"
+            />
+          </label>
+          {fileDialogError ? <p className="code-file-dialog-error">{fileDialogError}</p> : null}
+          <div className="code-file-dialog-actions">
+            <button className="btn btn-ghost" type="button" onClick={closeFileDialog}>
+              Cancel
+            </button>
+            <button className="btn btn-primary" type="submit">
+              {fileDialog?.mode === "create" ? "Create" : fileDialog?.mode === "duplicate" ? "Duplicate" : "Rename"}
+            </button>
+          </div>
+        </form>
+      </UIModal>
     </section>
   );
 }

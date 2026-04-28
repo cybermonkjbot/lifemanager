@@ -17,6 +17,7 @@ export const convexRefs = {
   systemHealth: makeFunctionReference<"query">("system:health"),
   systemAdminOverviewMetrics: makeFunctionReference<"query">("system:adminOverviewMetrics"),
   systemSetupStatus: makeFunctionReference<"query">("system:setupStatus"),
+  rateLimitsCheck: makeFunctionReference<"mutation">("rateLimits:check"),
   contextConversationHistorySearch: makeFunctionReference<"query">("contextTools:conversationHistorySearch"),
   contextGetMessageEmbeddings: makeFunctionReference<"query">("contextTools:getMessageEmbeddings"),
   contextWindowDetection: makeFunctionReference<"query">("contextTools:contextWindowDetection"),
@@ -33,6 +34,8 @@ export const convexRefs = {
   chatReplyStyleGuardrailCheck: makeFunctionReference<"query">("chatTools:replyStyleGuardrailCheck"),
   aiFeedbackGetThreadAdaptiveHints: makeFunctionReference<"query">("aiFeedback:getThreadAdaptiveHints"),
   aiFeedbackGetActiveTuningProfile: makeFunctionReference<"query">("aiFeedback:getActiveTuningProfile"),
+  conversationQualityListForAdmin: makeFunctionReference<"query">("conversationQuality:listForAdmin"),
+  conversationQualityRunManual: makeFunctionReference<"action">("conversationQualityActions:runManual"),
 
   inboundIngest: makeFunctionReference<"mutation">("inbound:ingest"),
   inboundAttachMediaAsset: makeFunctionReference<"mutation">("inbound:attachMediaAsset"),
@@ -86,6 +89,11 @@ export const convexRefs = {
   chatExtractContactMemoryFacts: makeFunctionReference<"mutation">("chatTools:extractContactMemoryFacts"),
   aiFeedbackRecordSignal: makeFunctionReference<"mutation">("aiFeedback:recordSignal"),
   aiFeedbackRecordCandidateEvals: makeFunctionReference<"mutation">("aiFeedback:recordCandidateEvals"),
+  conversationQualityDismissFinding: makeFunctionReference<"mutation">("conversationQuality:dismissFinding"),
+  conversationQualityPrepareFindingRun: makeFunctionReference<"mutation">("conversationQuality:prepareFindingRun"),
+  conversationQualityMarkFindingRunFinished: makeFunctionReference<"mutation">(
+    "conversationQuality:markFindingRunFinished",
+  ),
 
   adminSecretsList: makeFunctionReference<"query">("adminSecrets:list"),
   adminSecretsGetEncrypted: makeFunctionReference<"query">("adminSecrets:getEncrypted"),
@@ -103,7 +111,7 @@ export const convexRefs = {
   tenantAccountsGetConnectorSelfControlAccess: makeFunctionReference<"mutation">(
     "tenantAccounts:getConnectorSelfControlAccess",
   ),
-  tenantAccountsGetLoginPinSalt: makeFunctionReference<"query">("tenantAccounts:getLoginPinSalt"),
+  tenantAccountsGetLoginPinSalt: makeFunctionReference<"mutation">("tenantAccounts:getLoginPinSalt"),
   tenantAccountsVerifyTenantLogin: makeFunctionReference<"mutation">("tenantAccounts:verifyTenantLogin"),
   tenantAccountsAdminList: makeFunctionReference<"query">("tenantAccounts:adminList"),
   tenantAccountsAdminGet: makeFunctionReference<"query">("tenantAccounts:adminGet"),

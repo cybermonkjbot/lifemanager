@@ -1,0 +1,105 @@
+name: Desktop Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [release]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    name: Release Checks
+    runs-on: ubuntu-latest
+    env:
+      NEXT_PUBLIC_CONVEX_URL: https://example.convex.cloud
+      CONVEX_URL: https://example.convex.cloud
+      AZURE_AI_ENDPOINT: https://example.openai.azure.com/openai/v1
+      AZURE_AI_API_KEY: test-key
+      AZURE_AI_MODEL: gpt-5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun run lint
+      - run: bun test
+      - run: bun run build
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: checks
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            os: macos-latest
+            script: desktop:dist:mac
+            artifact: odogwuhq-macos
+          - name: Windows
+            os: windows-latest
+            script: desktop:dist:win
+            artifact: odogwuhq-windows
+    env:
+      NEXT_PUBLIC_CONVEX_URL: https://example.convex.cloud
+      CONVEX_URL: https://example.convex.cloud
+      AZURE_AI_ENDPOINT: https://example.openai.azure.com/openai/v1
+      AZURE_AI_API_KEY: test-key
+      AZURE_AI_MODEL: gpt-5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun run ${{ matrix.script }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/desktop/**
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          merge-multiple: true
+      - name: Create desktop release
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          tag="desktop-v${version}"
+          mapfile -t files < <(find release-artifacts -type f | sort)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error title=No release artifacts::No files were downloaded from the desktop build jobs."
+            exit 1
+          fi
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "::error title=Release tag already exists::${tag} already exists. Bump package.json version before pushing release again."
+            exit 1
+          fi
+
+          git tag "${tag}" "${GITHUB_SHA}"
+          git push origin "${tag}"
+          gh release create "${tag}" "${files[@]}" \
+            --target "${GITHUB_SHA}" \
+            --title "Odogwu HQ ${version}" \
+            --generate-notes \
+            --latest

@@ -7,6 +7,7 @@ import { createConvexClient } from "@/lib/convex-server";
 import { convexRefs } from "@/lib/convex-refs";
 import { requireInstanceApiAccess } from "@/lib/instance-guard";
 import { getManagedAiRuntimeOverrides } from "@/lib/managed-secrets-server";
+import { rateLimitJsonResponse } from "@/lib/rate-limit";
 import { generateReplyWithFallback } from "@/worker/ai";
 import { NextResponse } from "next/server";
 
@@ -93,6 +94,16 @@ export async function POST(request: Request) {
   const unauthorized = await requireInstanceApiAccess(request);
   if (unauthorized) {
     return unauthorized;
+  }
+  const limited = await rateLimitJsonResponse(request, {
+    scope: "ai.test",
+    identity: request.headers.get("cookie") || "",
+    limit: 20,
+    windowMs: 60 * 60 * 1000,
+    penaltyMs: 10 * 60 * 1000,
+  });
+  if (limited) {
+    return limited;
   }
 
   let payload: { message?: unknown; threadId?: unknown; purpose?: unknown };

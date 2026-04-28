@@ -60,6 +60,7 @@ export const dashboardNavItems: DashboardNavItem[] = [
     href: "/settings",
     label: "Settings",
     description: "Adjust runtime, automation, style, media, and rules.",
+    primary: true,
   },
 ];
 

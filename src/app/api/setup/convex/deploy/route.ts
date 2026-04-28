@@ -18,6 +18,7 @@ import {
   requestHasValidSetupBootstrapSecret,
   setupBootstrapConfigured,
 } from "@/lib/setup-bootstrap-auth";
+import { rateLimitJsonResponse } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -151,6 +152,17 @@ function convexBinaryPath() {
 }
 
 export async function POST(request: NextRequest) {
+  const limited = await rateLimitJsonResponse(request, {
+    scope: "setup.convex_deploy",
+    identity: request.headers.get("x-setup-secret") || request.headers.get("authorization") || "setup",
+    limit: 3,
+    windowMs: 60 * 60 * 1000,
+    penaltyMs: 30 * 60 * 1000,
+  });
+  if (limited) {
+    return limited;
+  }
+
   let payload: DeployPayload;
 
   try {

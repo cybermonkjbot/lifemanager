@@ -31,6 +31,7 @@ import {
   requestHasValidSetupBootstrapSecret,
   setupBootstrapConfigured,
 } from "@/lib/setup-bootstrap-auth";
+import { rateLimitJsonResponse } from "@/lib/rate-limit";
 import {
   buildTenantSessionToken,
   getTenantSessionCookieName,
@@ -142,6 +143,17 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
+  const limited = await rateLimitJsonResponse(request, {
+    scope: "setup.instance",
+    identity: request.headers.get("x-setup-secret") || request.headers.get("authorization") || "setup",
+    limit: 10,
+    windowMs: 60 * 1000,
+    penaltyMs: 5 * 60 * 1000,
+  });
+  if (limited) {
+    return limited;
+  }
+
   let payload: SetupInstancePayload;
 
   try {

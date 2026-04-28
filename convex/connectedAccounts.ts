@@ -102,7 +102,7 @@ export const upsertFromConnector = mutation({
       username: cleanOptionalText(args.username),
       authState: args.authState,
       connectedAt,
-      ...(disconnectedAt ? { disconnectedAt } : {}),
+      disconnectedAt,
       lastSeenAt,
       updatedAt: now,
     };

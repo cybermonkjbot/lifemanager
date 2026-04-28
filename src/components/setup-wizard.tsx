@@ -218,6 +218,13 @@ function voiceStatusLabel(status?: VoiceSetupStatus) {
   return "Not Installed";
 }
 
+function voiceSetupDetailLabel(status?: VoiceSetupStatus) {
+  if (status === "ready") return "Voice tools are available";
+  if (status === "installing") return "Voice tools are being prepared";
+  if (status === "error") return "Voice tools need attention";
+  return "Voice tools can be installed later";
+}
+
 function simplifySetupMessage(message?: string) {
   if (!message) {
     return "Loading status...";
@@ -1351,6 +1358,23 @@ export function VoiceSetupPanel({
   const canSaveSample = !anyPending && !isRecording && Boolean(recordedBlob) && Boolean(promptText.trim());
   const canInstall = !anyPending && !isRecording && Boolean(modelId.trim());
   const displayedDurationMs = isRecording ? recordingMs : previewDurationMs || recordingMs;
+  const hasUnsavedRecording = Boolean(recordedBlob);
+  const sampleStateLabel = state?.hasSample
+    ? "Saved locally"
+    : state?.hasPendingSample
+      ? "Waiting for tools"
+      : hasUnsavedRecording
+        ? "Ready to save"
+        : "Not recorded";
+  const sampleStateCopy = state?.hasSample
+    ? "You can replace this sample from Settings."
+    : state?.hasPendingSample
+      ? "Preparation will finish processing when voice tools are ready."
+      : hasUnsavedRecording
+        ? "Review it, then save the sample before continuing."
+        : "You can skip this step and add a sample later.";
+  const recorderStateLabel = isRecording ? "Recording now" : hasUnsavedRecording ? "Recording captured" : "Ready";
+  const recorderActionLabel = isRecording ? "Stop" : hasUnsavedRecording ? "Record again" : "Record";
   const rootClassName = [
     surface === "card" ? "setup-wizard-card" : "voice-setup-panel",
     className,
@@ -1367,27 +1391,36 @@ export function VoiceSetupPanel({
         <p>{description}</p>
       </div>
 
-      <div className="setup-status-row">
-        <span className={`status-pill ${voiceStatusToneClass(state?.status)}`}>{statusText}</span>
-        <span className="queue-meta">
-          {state?.hasSample ? "Sample saved locally." : state?.hasPendingSample ? "Sample saved. Preparation will finish it." : privacyCopy}
+      <div className="voice-state-strip" aria-label="Voice setup state">
+        <div>
+          <span>Tools</span>
+          <strong>{statusText}</strong>
+          <small>{voiceSetupDetailLabel(state?.status)}</small>
+        </div>
+        <div>
+          <span>Recorder</span>
+          <strong>{recorderStateLabel}</strong>
+          <small>{isRecording ? `${formatVoiceDuration(displayedDurationMs)} of 5:00` : "Up to 5 minutes"}</small>
+        </div>
+        <div>
+          <span>Sample</span>
+          <strong>{sampleStateLabel}</strong>
+          <small>{sampleStateCopy}</small>
+        </div>
+      </div>
+
+      <label className="voice-script-panel">
+        <span className="voice-script-head">
+          <span>
+            <span>Sample script</span>
+            <strong>Read this aloud, or edit it first</strong>
+          </span>
+          <small>{promptText.trim().split(/\s+/).filter(Boolean).length} words</small>
         </span>
-      </div>
-
-      <div className="voice-sample-script" aria-label="Suggested recording script">
-        <span>Sample script</span>
-        <p>{promptText}</p>
-      </div>
-      <p className="voice-recording-guidance">
-        Longer samples help OdogwuHQ capture your voice more accurately. You can record up to 5 minutes.
-      </p>
-
-      <label className="setup-input-group">
-        <span className="queue-meta">Exact words in the recording</span>
         <textarea
           value={promptText}
           onChange={(event) => setPromptText(event.target.value)}
-          rows={3}
+          rows={5}
           placeholder={DEFAULT_VOICE_SAMPLE_PROMPT}
           disabled={anyPending}
           aria-disabled={anyPending}
@@ -1395,29 +1428,70 @@ export function VoiceSetupPanel({
       </label>
 
       <div className={`voice-recorder-console ${isRecording ? "voice-recorder-console-active" : ""}`}>
-        <button
-          className="voice-record-button"
-          type="button"
-          onClick={isRecording ? stopRecording : startRecording}
-          disabled={!canUseRecordButton}
-          aria-disabled={!canUseRecordButton}
-          aria-label={isRecording ? "Stop recording" : recordedBlob ? "Record again" : "Record voice sample"}
-        >
-          <span aria-hidden="true" />
-        </button>
-        <div className="voice-recorder-surface">
-          <div className="voice-recorder-meta">
-            <strong>{isRecording ? "Recording" : recordedBlob ? "Sample captured" : "Ready to record"}</strong>
-            <span>{isRecording ? `${formatVoiceDuration(displayedDurationMs)} / 5:00` : formatVoiceDuration(displayedDurationMs)}</span>
+        <div className="voice-recorder-main">
+          <button
+            className="voice-record-button"
+            type="button"
+            onClick={isRecording ? stopRecording : startRecording}
+            disabled={!canUseRecordButton}
+            aria-disabled={!canUseRecordButton}
+            aria-label={isRecording ? "Stop recording" : recordedBlob ? "Record again" : "Record voice sample"}
+          >
+            <span aria-hidden="true" />
+          </button>
+          <div className="voice-recorder-surface">
+            <div className="voice-recorder-meta">
+              <strong>{isRecording ? "Recording" : recordedBlob ? "Sample captured" : "Ready to record"}</strong>
+              <span>{isRecording ? `${formatVoiceDuration(displayedDurationMs)} / 5:00` : formatVoiceDuration(displayedDurationMs)}</span>
+            </div>
+            <WaveformBars values={isRecording ? liveWaveform : recordedBlob ? previewWaveform : IDLE_WAVEFORM} progress={isRecording ? 1 : 0} label="Live voice waveform" />
           </div>
-          <WaveformBars values={isRecording ? liveWaveform : recordedBlob ? previewWaveform : IDLE_WAVEFORM} progress={isRecording ? 1 : 0} label="Live voice waveform" />
         </div>
+
+        {previewUrl ? (
+          <div className="voice-preview-player">
+            <audio
+              ref={previewAudioRef}
+              src={previewUrl}
+              preload="metadata"
+              onPlay={() => setIsPreviewPlaying(true)}
+              onPause={() => setIsPreviewPlaying(false)}
+              onEnded={() => {
+                setIsPreviewPlaying(false);
+                setPreviewProgress(0);
+              }}
+              onTimeUpdate={(event) => {
+                const audio = event.currentTarget;
+                if (Number.isFinite(audio.duration) && audio.duration > 0) {
+                  setPreviewProgress(audio.currentTime / audio.duration);
+                }
+              }}
+              onLoadedMetadata={(event) => {
+                if (Number.isFinite(event.currentTarget.duration)) {
+                  setPreviewDurationMs(event.currentTarget.duration * 1000);
+                }
+              }}
+            />
+            <button className="voice-play-button" type="button" onClick={togglePreviewPlayback} aria-label={isPreviewPlaying ? "Pause preview" : "Play preview"}>
+              <span aria-hidden="true">{isPreviewPlaying ? "Pause" : "Play"}</span>
+            </button>
+            <div className="voice-preview-main">
+              <div className="voice-recorder-meta">
+                <strong>Preview</strong>
+                <span>{formatVoiceDuration(previewProgress * (previewDurationMs || 0))} / {formatVoiceDuration(previewDurationMs)}</span>
+              </div>
+              <WaveformBars values={previewWaveform} progress={previewProgress} label="Voice preview waveform" onSeek={seekPreview} />
+            </div>
+          </div>
+        ) : null}
       </div>
+
+      {recordingError ? <p className="setup-revoked-notice">{recordingError}</p> : null}
 
       <div className="wizard-actions voice-recorder-actions">
         {showToolControls ? (
           <button
-            className="btn btn-primary"
+            className="btn btn-ghost"
             type="button"
             onClick={installVoiceModule}
             disabled={!canInstall}
@@ -1428,67 +1502,22 @@ export function VoiceSetupPanel({
         ) : null}
         {isRecording ? (
           <button className="btn btn-ghost" type="button" onClick={stopRecording} disabled={!canStopRecording} aria-disabled={!canStopRecording}>
-            Stop
+            Stop recording
           </button>
         ) : null}
-      </div>
-
-      {recordingError ? <p className="setup-revoked-notice">{recordingError}</p> : null}
-
-      {previewUrl ? (
-        <div className="voice-preview-player">
-          <audio
-            ref={previewAudioRef}
-            src={previewUrl}
-            preload="metadata"
-            onPlay={() => setIsPreviewPlaying(true)}
-            onPause={() => setIsPreviewPlaying(false)}
-            onEnded={() => {
-              setIsPreviewPlaying(false);
-              setPreviewProgress(0);
-            }}
-            onTimeUpdate={(event) => {
-              const audio = event.currentTarget;
-              if (Number.isFinite(audio.duration) && audio.duration > 0) {
-                setPreviewProgress(audio.currentTime / audio.duration);
-              }
-            }}
-            onLoadedMetadata={(event) => {
-              if (Number.isFinite(event.currentTarget.duration)) {
-                setPreviewDurationMs(event.currentTarget.duration * 1000);
-              }
-            }}
-          />
-          <button className="voice-play-button" type="button" onClick={togglePreviewPlayback} aria-label={isPreviewPlaying ? "Pause preview" : "Play preview"}>
-            <span aria-hidden="true">{isPreviewPlaying ? "Pause" : "Play"}</span>
+        {!isRecording ? (
+          <button className="btn btn-ghost" type="button" onClick={startRecording} disabled={!canUseRecordButton} aria-disabled={!canUseRecordButton}>
+            {recorderActionLabel}
           </button>
-          <div className="voice-preview-main">
-            <div className="voice-recorder-meta">
-              <strong>Preview</strong>
-              <span>{formatVoiceDuration(previewProgress * (previewDurationMs || 0))} / {formatVoiceDuration(previewDurationMs)}</span>
-            </div>
-            <WaveformBars values={previewWaveform} progress={previewProgress} label="Voice preview waveform" onSeek={seekPreview} />
-          </div>
-        </div>
-      ) : null}
-
-      {state?.hasSample ? (
-        <p className="queue-meta">Sample saved. You can replace it anytime from Settings.</p>
-      ) : state?.hasPendingSample ? (
-        <p className="queue-meta">Sample saved locally. Preparation will process it when audio tools are ready.</p>
-      ) : (
-        <p className="queue-meta">No sample yet. You can skip this and add it later.</p>
-      )}
-
-      <div className="wizard-actions">
+        ) : null}
         <button
-          className="btn btn-ghost"
+          className="btn btn-primary"
           type="button"
           onClick={uploadSample}
           disabled={!canSaveSample}
           aria-disabled={!canSaveSample}
         >
-          {pendingUploadSample ? "Saving..." : "Save sample"}
+          {pendingUploadSample ? "Saving..." : "Save voice sample"}
         </button>
       </div>
 

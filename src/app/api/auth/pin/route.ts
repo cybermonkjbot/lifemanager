@@ -23,6 +23,7 @@ import {
   getTenantSessionCookieOptions,
 } from "@/lib/tenant-session";
 import { requestHasSameOrigin } from "@/lib/secure-cookies";
+import { consumeRequestRateLimit, rateLimitHeaders } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 
@@ -51,6 +52,9 @@ function loginErrorMessage(code: string) {
   if (code === "invalid_origin") {
     return "This unlock request was blocked. Refresh the app and try again.";
   }
+  if (code === "rate_limited") {
+    return "Too many unlock attempts. Try again shortly.";
+  }
   return "That email and PIN do not match an account.";
 }
 
@@ -73,6 +77,39 @@ function loginErrorResponse(request: NextRequest, next: string, code: string, st
     unlockUrl.searchParams.set("email", email);
   }
   return NextResponse.redirect(unlockUrl, 303);
+}
+
+async function loginRateLimitResponse(request: NextRequest, next: string, email: string, scope: string) {
+  const decision = await consumeRequestRateLimit(request, {
+    scope,
+    identity: email || "local-pin",
+    limit: 8,
+    windowMs: 10 * 60 * 1000,
+    penaltyMs: 15 * 60 * 1000,
+  });
+  if (decision.allowed) {
+    return null;
+  }
+
+  const headers = rateLimitHeaders(decision);
+  if (wantsJsonResponse(request)) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "rate_limited",
+        message: loginErrorMessage("rate_limited"),
+      },
+      { status: 429, headers },
+    );
+  }
+
+  const unlockUrl = new URL("/unlock", request.url);
+  unlockUrl.searchParams.set("error", "rate_limited");
+  unlockUrl.searchParams.set("next", next);
+  if (email) {
+    unlockUrl.searchParams.set("email", email);
+  }
+  return NextResponse.redirect(unlockUrl, { status: 303, headers });
 }
 
 type VerifiedTenantLogin = {
@@ -112,8 +149,10 @@ async function verifyHostedTenantLogin(args: {
   expectedTenantId?: string;
 }) {
   const client = createConvexClient();
-  const salt = (await client.query(convexRefs.tenantAccountsGetLoginPinSalt, {
+  const salt = (await client.mutation(convexRefs.tenantAccountsGetLoginPinSalt, {
     email: args.email,
+    deviceId: args.deviceId,
+    expectedTenantId: args.expectedTenantId,
   })) as { pinSalt: string | null } | null;
   if (!salt?.pinSalt) {
     return null;
@@ -160,6 +199,10 @@ export async function POST(request: NextRequest) {
     }
 
     const deviceId = config?.account?.deviceId || randomUUID();
+    const limited = await loginRateLimitResponse(request, next, email, "auth.pin.hosted");
+    if (limited) {
+      return limited;
+    }
     const verified = await verifyHostedTenantLogin({
       email,
       pin,
@@ -198,8 +241,14 @@ export async function POST(request: NextRequest) {
       isSuperAdmin: verified.isSuperAdmin,
     };
 
-  } else if (!(await matchesInstancePin(pin))) {
-    return loginErrorResponse(request, next, "invalid_login", 401, email);
+  } else {
+    const limited = await loginRateLimitResponse(request, next, email, "auth.pin.local");
+    if (limited) {
+      return limited;
+    }
+    if (!(await matchesInstancePin(pin))) {
+      return loginErrorResponse(request, next, "invalid_login", 401, email);
+    }
   }
 
   const response = wantsJsonResponse(request)

@@ -2,9 +2,6 @@ name: Desktop Build
 
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - "desktop-v*"
 
 permissions:
   contents: read
