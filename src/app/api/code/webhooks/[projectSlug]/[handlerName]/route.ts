@@ -111,6 +111,8 @@ function plannedStep(call: ProjectSdkCall): RunStep {
     outputSummary:
       call.module === "messages"
         ? "Message operation recorded for account-scoped worker handling."
+        : call.module === "platform"
+          ? "Cross-platform operation recorded for account-scoped worker handling."
         : call.module === "account"
           ? "Account behavior mutation recorded for worker handling."
           : call.module === "worker"

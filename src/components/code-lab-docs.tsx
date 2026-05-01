@@ -11,6 +11,7 @@ const sdkModules = [
   ["webhook", "Verify inbound secrets and reply to webhook requests."],
   ["orchestrator", "Ask account-scoped AI or run approved tools."],
   ["messages", "Send, draft, or preview messages."],
+  ["platform", "Bridge events, replies, reactions, and routing across connected platforms."],
   ["account", "Patch account behavior and settings."],
   ["worker", "Extend the local worker through approved hooks."],
   ["heuristics", "Add tenant-scoped pattern rules."],
@@ -48,7 +49,9 @@ export function CodeLabDocs() {
           <a href="#comments">Comments</a>
           <a href="#exports">Exports</a>
           <a href="#sdk">SDK</a>
+          <a href="#events">Events</a>
           <a href="#webhooks">Webhooks</a>
+          <a href="#cross-platform">Cross Platform</a>
           <a href="#behavior">Tenant Behavior</a>
           <a href="#publish">Done Coding</a>
           <a href="#safety">Safety</a>
@@ -71,6 +74,7 @@ use http
 use ai
 use followups
 use messages
+use platform
 use orchestrator
 use account
 use worker
@@ -111,12 +115,42 @@ end`}</pre>
             <h2>Approved ODOGWU HQ modules</h2>
             <div className="code-docs-sdk-grid">
               {sdkModules.map(([name, detail]) => (
-                <div key={name}>
+                <div key={name} id={name === "messages" ? "sdk-messages" : undefined}>
                   <code>{name}</code>
                   <p>{detail}</p>
                 </div>
               ))}
             </div>
+          </section>
+
+          <section id="events">
+            <span>Events</span>
+            <h2>Runtime triggers</h2>
+            <p>Rules and webhooks subscribe with `on {"{event.name}"} as {"{alias}"}`. The alias becomes the event object used inside guards and action blocks.</p>
+            <div className="code-docs-definition-list">
+              <div id="events-message-received">
+                <code>message.received</code>
+                <p>Fires when ODOGWU receives a message from a connected account adapter. Use it for inbox triage, cross-platform reactions, draft generation, routing, follow-ups, worker handoffs, and review-first automations.</p>
+              </div>
+              <div id="events-platform-message-received">
+                <code>{"{platform}"}.message.received</code>
+                <p>Fires for a specific source adapter such as WhatsApp, Instagram, iMessage, or Telegram. Use the platform-scoped event when a rule should only react to one channel before relaying, mirroring, or broadcasting into other connected platforms.</p>
+              </div>
+              <div id="events-webhook-received">
+                <code>webhook.received</code>
+                <p>Fires inside an exported webhook handler when an external service posts to that handler. Use it for payment callbacks, form submissions, lead capture, external system updates, and audited HTTP replies.</p>
+              </div>
+            </div>
+            <pre>{`export rule DirectMessageTriage
+on message.received as msg
+when msg.thread.kind == "direct"
+do
+  account.behavior.set("review_first")
+  messages.preview(
+    to: msg.contact,
+    text: "I saw this and will reply properly shortly."
+  )
+end`}</pre>
           </section>
 
           <section id="webhooks">
@@ -139,6 +173,21 @@ do
     text: "Payment received. I will confirm a time and send prep notes shortly."
   )
   orchestrator.run_tool("update_customer_timeline")
+end`}</pre>
+          </section>
+
+          <section id="cross-platform">
+            <span>Cross Platform</span>
+            <h2>Route any platform to any platform</h2>
+            <p>`platform.*` actions target connected adapters, so events from WhatsApp, Instagram, iMessage, or Telegram can draft, react, mirror, relay, broadcast, or route work into any other connected platform.</p>
+            <pre>{`export rule AnyPlatformFanout
+on message.received as msg
+do
+  platform.broadcast(
+    targets: "all",
+    text: "Mirror this event everywhere connected."
+  )
+  platform.relay(targets: "all")
 end`}</pre>
           </section>
 

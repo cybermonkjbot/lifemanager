@@ -77,3 +77,27 @@ expect followups.created_count == 1`);
   assert.equal(result.plan, null);
   assert.ok(result.diagnostics.some((item) => item.message.includes("use followups")));
 });
+
+test("compileCodeProgram supports cross-platform message and reaction actions", () => {
+  const result = runCodeTests(`program CrossPlatformBridge version "1.0"
+use platform
+
+on message.received as msg
+do
+  platform.broadcast(targets: "all", text: "Mirror this event everywhere connected.")
+  platform.relay(targets: "all")
+end
+
+test "any platform event can trigger all platform work"
+given message.received {
+  provider: "telegram",
+  contact: "+15551234567"
+}
+expect platform.actions_count == 2
+expect platform.sends_count == 1
+expect platform.routes_count == 2
+expect platform.last_target == "all"`);
+
+  assert.equal(result.passed, true, JSON.stringify(result, null, 2));
+  assert.equal(result.plan?.handlers[0]?.operations[0]?.module, "platform");
+});

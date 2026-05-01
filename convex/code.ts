@@ -69,103 +69,16 @@ async function getOwnedProject(ctx: QueryCtx | MutationCtx, projectId: Id<"codeP
 }
 
 function defaultProjectFiles(name: string) {
+  const projectName = name.replace(/[^A-Za-z0-9_]/g, "") || "ODOGWUExtension";
   return [
     {
       path: "main.odo",
-      content: `# Lead Desk keeps paid consults, inbound leads, and personal replies sane.
-project ${name.replace(/[^A-Za-z0-9_]/g, "") || "LeadDesk"} version "1.0"
+      content: `project ${projectName} version "1.0"
 
-import "./messages.odo"
-import "./webhooks/paystack.odo"
-import "./behavior/language.odo"
-
-use webhook
-use http
-use ai
-use followups
-use messages
-use orchestrator
-use account
-use worker
-use heuristics
-use lexicon
-use prompts
-
-# Direct messages stay review-first, but the worker can still classify urgency.
-export rule DirectMessageTriage
-on message.received as msg
-when msg.thread.kind == "direct"
-do
-  account.behavior.set("review_first")
-  ai.set_confidence_floor(0.78)
-  worker.extend("relationship-priority-router")
-end`,
-      language: "odogwu" as const,
-    },
-    {
-      path: "messages.odo",
-      content: `# Shared reply helpers for leads and payment events.
-export function draftPaidConsultReply(payload)
-do
-  messages.draft(
-    to: payload.phone,
-    text: "Payment received. I will confirm a time and send the prep notes shortly."
-  )
-end`,
-      language: "odogwu" as const,
-    },
-    {
-      path: "webhooks/paystack.odo",
-      content: `# Paystack posts here after a consultation checkout succeeds.
-export webhook paidConsultation
-on webhook.received as hook
-do
-  webhook.verify_secret("paystackWebhookSecret")
-  http.post(secret: "ops.paymentWebhookUrl")
-  followups.create(
-    title: "Schedule paid consultation",
-    thread: hook.payload.thread,
-    due: time.tomorrow_at("09:00")
-  )
-  messages.preview(
-    to: hook.payload.phone,
-    text: "Payment received. I will confirm a time and send prep notes shortly."
-  )
-  orchestrator.run_tool("update_customer_timeline")
-end`,
-      language: "odogwu" as const,
-    },
-    {
-      path: "behavior/language.odo",
-      content: `# Tenant-specific behavior overlays used by prompt and worker systems.
-export heuristic PaidConsultIntent
-pattern "paid for consultation"
-pattern "sent payment"
-target "todo_candidate"
-instruction "Treat successful consultation payments as scheduling commitments."
-priority 86
-end
-
-export lexicon ClientLanguage
-term "deck" "pitch deck or proposal document" "sales,client"
-term "call slot" "available meeting time" "scheduling"
-phrase "no wahala" "no problem; keep the tone relaxed"
-end
-
-export prompt ConsultationReplyStyle
-target "intent:paid_consult"
-append "Be concise, confirm payment, state the next scheduling step, and avoid overexplaining."
-priority 88
-end`,
+`,
       language: "odogwu" as const,
     },
   ];
-}
-
-function projectNameFromFiles(files: Array<{ path: string; content: string }>) {
-  const main = files.find((file) => file.path === "main.odo")?.content || files[0]?.content || "";
-  const match = main.match(/^\s*project\s+([A-Za-z_][\w]*)/m) || main.match(/^\s*program\s+([A-Za-z_][\w]*)/m);
-  return match?.[1] || "ODOGWU Extension";
 }
 
 export const listPrograms = query({
@@ -283,6 +196,36 @@ export const createProject = mutation({
   },
 });
 
+export const renameProject = mutation({
+  args: {
+    ...tenantScopeArgs,
+    projectId: v.id("codeProjects"),
+    name: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForOptionalMutation(ctx, args);
+    const project = await getOwnedProject(ctx, args.projectId, tenantId);
+    const now = Date.now();
+    const name = args.name.trim();
+    if (!name) throw new Error("Project name is required.");
+    if (name.length > 80) throw new Error("Project name must be 80 characters or fewer.");
+    if (name === project.name) return { projectId: project._id, name: project.name };
+    await ctx.db.patch(project._id, {
+      name,
+      slug: slugify(name),
+      updatedAt: now,
+    });
+    await ctx.db.insert("systemEvents", {
+      tenantId,
+      source: "dashboard",
+      eventType: "code.project.renamed",
+      detail: `${project.name} renamed to ${name}.`,
+      createdAt: now,
+    });
+    return { projectId: project._id, name };
+  },
+});
+
 export const saveProjectFiles = mutation({
   args: {
     ...tenantScopeArgs,
@@ -300,7 +243,7 @@ export const saveProjectFiles = mutation({
     }));
     const bundle = compileCodeProject(files);
     const now = Date.now();
-    const name = projectNameFromFiles(files);
+    const name = project.name;
 
     for (const file of files) {
       const existing = await ctx.db
@@ -347,8 +290,6 @@ export const saveProjectFiles = mutation({
     });
 
     await ctx.db.patch(project._id, {
-      name,
-      slug: slugify(name),
       description: args.description?.trim() || project.description,
       updatedAt: now,
     });

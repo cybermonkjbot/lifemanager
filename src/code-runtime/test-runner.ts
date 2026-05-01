@@ -27,6 +27,14 @@ type ExecutionState = {
   outreach: {
     run_count: number;
   };
+  platform: {
+    actions_count: number;
+    sends_count: number;
+    reactions_count: number;
+    routes_count: number;
+    last_target: string;
+    last_operation: string;
+  };
 };
 
 function diagnostic(message: string, line: number): CodeDiagnostic {
@@ -116,6 +124,18 @@ function executeOperation(operation: CompiledCodeOperation, state: ExecutionStat
   if (operation.module === "runtime" && operation.operation === "pause") state.runtime.paused = true;
   if (operation.module === "runtime" && operation.operation === "resume") state.runtime.paused = false;
   if (operation.module === "outreach" && operation.operation === "run") state.outreach.run_count += 1;
+  if (operation.module === "platform") {
+    state.platform.actions_count += 1;
+    state.platform.last_operation = operation.operation;
+    if (typeof args.via === "string") state.platform.last_target = args.via;
+    if (typeof args.to === "string" && !state.platform.last_target) state.platform.last_target = args.to;
+    if (typeof args.targets === "string" && !state.platform.last_target) state.platform.last_target = args.targets;
+    if (operation.operation === "send" || operation.operation === "draft" || operation.operation === "broadcast") state.platform.sends_count += 1;
+    if (operation.operation === "react") state.platform.reactions_count += 1;
+    if (operation.operation === "mirror" || operation.operation === "route" || operation.operation === "relay" || operation.operation === "broadcast") {
+      state.platform.routes_count += 1;
+    }
+  }
 }
 
 function initialState(): ExecutionState {
@@ -125,6 +145,7 @@ function initialState(): ExecutionState {
     memory: { remembered_count: 0 },
     runtime: { paused: false },
     outreach: { run_count: 0 },
+    platform: { actions_count: 0, sends_count: 0, reactions_count: 0, routes_count: 0, last_target: "", last_operation: "" },
   };
 }
 

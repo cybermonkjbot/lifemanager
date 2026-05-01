@@ -1,6 +1,9 @@
 import { CODE_SDK_REGISTRY } from "./sdk";
 import type { CodeDiagnostic, CodeDiagnosticSeverity } from "./types";
 
+export type PlatformProvider = "whatsapp" | "instagram" | "imessage" | "telegram";
+export type PlatformProviderSelector = PlatformProvider | "all";
+
 export type CodeProjectFile = {
   path: string;
   content: string;
@@ -25,8 +28,43 @@ export type ProjectSdkCall = {
   filePath?: string;
   line: number;
   column: number;
+  args: ProjectSdkArg[];
   literalUrl?: string;
   secretUrlKey?: string;
+};
+
+export type ProjectSdkArgKind = "string" | "number" | "boolean" | "ref" | "call" | "unknown";
+
+export type ProjectSdkArg = {
+  key: string;
+  raw: string;
+  kind: ProjectSdkArgKind;
+  value?: string | number | boolean;
+};
+
+export type ProjectEventBinding = {
+  event: string;
+  alias: string;
+  provider?: PlatformProviderSelector;
+  filePath: string;
+  line: number;
+  column: number;
+};
+
+export type ProjectPlatformAction = ProjectSdkCall & {
+  sourceProvider: PlatformProviderSelector;
+  targetProvider?: PlatformProviderSelector;
+  targetProviders: PlatformProviderSelector[];
+  crossPlatform: boolean;
+};
+
+export type ProjectPlatformRoute = {
+  sourceProvider: PlatformProvider;
+  targetProvider: PlatformProvider;
+  operation: string;
+  call: string;
+  filePath?: string;
+  line: number;
 };
 
 export type CodeCanvasNode = {
@@ -44,6 +82,7 @@ export type CodeCanvasNode = {
     | "sdk"
     | "http"
     | "message"
+    | "platform"
     | "account"
     | "worker";
   filePath: string;
@@ -88,10 +127,14 @@ export type CodeProjectBundle = {
     heuristicPatterns: CodeBehaviorExtension[];
     lexiconEntries: CodeBehaviorExtension[];
     promptDerivations: CodeBehaviorExtension[];
+    eventBindings: ProjectEventBinding[];
     sdkCalls: ProjectSdkCall[];
     workerHooks: ProjectSdkCall[];
     outboundHttp: ProjectSdkCall[];
     messageSends: ProjectSdkCall[];
+    platformActions: ProjectPlatformAction[];
+    crossPlatformActions: ProjectPlatformAction[];
+    platformRoutes: ProjectPlatformRoute[];
     accountMutations: ProjectSdkCall[];
   };
   canvas: {
@@ -109,9 +152,15 @@ export type CodeProjectTestResult = {
 
 const importPattern = /^\s*import\s+"([^"]+)"/gm;
 const exportPattern = /^\s*export\s+(rule|webhook|function|heuristic|lexicon|prompt)\s+([A-Za-z_][\w]*)(?:\(([^)]*)\))?/gm;
+const eventPattern = /^\s*on\s+([a-z][\w]*(?:\.[a-z][\w]*)*)\s+as\s+([a-z][\w]*)/gm;
 const sdkCallPattern = /\b([A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)+)\s*\(/g;
 const literalUrlPattern = /\bhttp\.(?:fetch|get|post|request)\s*\(\s*"([^"]+)"/;
 const secretUrlPattern = /\bhttp\.(?:fetch|get|post|request)\s*\(\s*(?:url:\s*)?secret\("([^"]+)"\)|\bhttp\.(?:fetch|get|post|request)\s*\(\s*secret:\s*"([^"]+)"/;
+const providerArgPattern = /\b(?:via|provider|platform|to_platform|target_platform|to|targets)\s*:\s*"([^"]+)"/gi;
+const providerConditionPattern = /\b(?:msg|event|hook)\.(?:provider|platform)\s*==\s*"([^"]+)"/i;
+
+const PLATFORM_PROVIDERS: PlatformProvider[] = ["whatsapp", "instagram", "imessage", "telegram"];
+const PLATFORM_PROVIDER_SELECTORS = new Set<PlatformProviderSelector>([...PLATFORM_PROVIDERS, "all"]);
 
 const PROJECT_SDK_MODULES = new Set([
   ...Object.keys(CODE_SDK_REGISTRY),
@@ -119,6 +168,7 @@ const PROJECT_SDK_MODULES = new Set([
   "webhook",
   "orchestrator",
   "messages",
+  "platform",
   "account",
   "worker",
   "heuristics",
@@ -156,6 +206,7 @@ function lineColumnForIndex(source: string, index: number) {
 function canvasKind(call: ProjectSdkCall): CodeCanvasNode["kind"] {
   if (call.module === "http") return "http";
   if (call.module === "messages") return "message";
+  if (call.module === "platform") return "platform";
   if (call.module === "account") return "account";
   if (call.module === "worker") return "worker";
   return "sdk";
@@ -176,6 +227,160 @@ function exportBlockBody(source: string, exportIndex: number) {
 
 function quotedValues(line: string) {
   return Array.from(line.matchAll(/"([^"]+)"/g)).map((match) => match[1]);
+}
+
+function splitTopLevelArgs(argsText: string) {
+  const args: string[] = [];
+  let start = 0;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < argsText.length; index += 1) {
+    const char = argsText[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (char === "(" || char === "{" || char === "[") depth += 1;
+    if (char === ")" || char === "}" || char === "]") depth = Math.max(0, depth - 1);
+    if (char === "," && depth === 0) {
+      args.push(argsText.slice(start, index).trim());
+      start = index + 1;
+    }
+  }
+  const tail = argsText.slice(start).trim();
+  if (tail) args.push(tail);
+  return args.filter(Boolean);
+}
+
+function extractCallArgsText(callText: string) {
+  const openIndex = callText.indexOf("(");
+  if (openIndex === -1) return "";
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = openIndex; index < callText.length; index += 1) {
+    const char = callText[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (char === "(") depth += 1;
+    if (char === ")") {
+      depth -= 1;
+      if (depth === 0) return callText.slice(openIndex + 1, index);
+    }
+  }
+  return callText.slice(openIndex + 1);
+}
+
+function parseProjectArgValue(raw: string): Omit<ProjectSdkArg, "key"> {
+  const value = raw.trim().replace(/,$/, "");
+  const quoted = value.match(/^"([\s\S]*)"$/);
+  if (quoted) return { raw: value, kind: "string", value: quoted[1] || "" };
+  if (value === "true" || value === "false") return { raw: value, kind: "boolean", value: value === "true" };
+  if (/^-?\d+(?:\.\d+)?$/.test(value)) return { raw: value, kind: "number", value: Number(value) };
+  if (/^[a-z][\w]*(?:\.[a-z][\w]*)*\([\s\S]*\)$/i.test(value)) return { raw: value, kind: "call" };
+  if (/^[a-z][\w]*(?:\.[a-z][\w]*)*$/i.test(value)) return { raw: value, kind: "ref" };
+  return { raw: value, kind: "unknown" };
+}
+
+function parseProjectSdkArgs(callText: string): ProjectSdkArg[] {
+  return splitTopLevelArgs(extractCallArgsText(callText)).map((segment) => {
+    const named = segment.match(/^([a-z][\w]*)\s*:\s*([\s\S]+)$/i);
+    if (named) {
+      return { key: named[1] || "", ...parseProjectArgValue(named[2] || "") };
+    }
+    return { key: "value", ...parseProjectArgValue(segment) };
+  });
+}
+
+function hasProjectArg(call: ProjectSdkCall, argName: string, requiredArgCount: number) {
+  if (call.args.some((arg) => arg.key === argName)) return true;
+  if (requiredArgCount === 1 && call.args.some((arg) => arg.key === "value")) return true;
+  if (call.module === "http" && argName === "url") return Boolean(call.literalUrl || call.secretUrlKey || call.args.some((arg) => arg.key === "url" || arg.key === "secret" || arg.key === "value"));
+  return false;
+}
+
+function argForName(call: ProjectSdkCall, argName: string) {
+  return call.args.find((arg) => arg.key === argName) || (call.args.length === 1 ? call.args[0] : undefined);
+}
+
+function validateProjectSdkCall(call: ProjectSdkCall, filePath: string, diagnostics: ProjectDiagnostic[]) {
+  const moduleSpec = CODE_SDK_REGISTRY[call.module];
+  const operationSpec = moduleSpec?.operations[call.operation];
+  if (!moduleSpec) {
+    diagnostics.push(diagnostic(filePath, call.line, call.column, "error", `Unknown SDK module "${call.module}".`));
+    return;
+  }
+  if (!operationSpec) {
+    diagnostics.push(diagnostic(filePath, call.line, call.column, "error", `Unknown SDK operation "${call.call}".`));
+    return;
+  }
+
+  const requiredArgs = operationSpec.requiredArgs || [];
+  for (const requiredArg of requiredArgs) {
+    if (!hasProjectArg(call, requiredArg, requiredArgs.length)) {
+      diagnostics.push(diagnostic(filePath, call.line, call.column, "error", `Missing required argument "${requiredArg}" for ${call.call}.`));
+    }
+  }
+
+  if (call.module === "http" && call.literalUrl && !/^https?:\/\//i.test(call.literalUrl)) {
+    diagnostics.push(diagnostic(filePath, call.line, call.column, "error", `${call.call} URL must start with http:// or https://.`));
+  }
+
+  if (call.module === "platform") {
+    const providerArgNames = new Set(["via", "provider", "platform", "to_platform", "target_platform", "targets"]);
+    for (const arg of call.args.filter((item) => providerArgNames.has(item.key))) {
+      if (arg.kind !== "string" || typeof arg.value !== "string") {
+        diagnostics.push(diagnostic(filePath, call.line, call.column, "error", `${call.call} argument "${arg.key}" must be a string platform selector.`));
+        continue;
+      }
+      const values = arg.value.split(",").map((item) => item.trim()).filter(Boolean);
+      const invalid = values.filter((value) => !normalizeProvider(value));
+      if (invalid.length > 0) {
+        diagnostics.push(diagnostic(filePath, call.line, call.column, "error", `${call.call} has unknown platform selector "${invalid[0]}". Use whatsapp, instagram, imessage, telegram, or all.`));
+      }
+    }
+    const viaArg = call.args.find((arg) => arg.key === "via");
+    if (viaArg?.value === "all") {
+      diagnostics.push(diagnostic(filePath, call.line, call.column, "error", `${call.call} argument "via" must name one concrete target platform, not all.`));
+    }
+  }
+
+  const numericValueOperations = new Set(["ai.set_confidence_floor", "heuristics.score"]);
+  if (numericValueOperations.has(call.call)) {
+    const valueArg = argForName(call, "value");
+    if (valueArg && valueArg.kind !== "number") {
+      diagnostics.push(diagnostic(filePath, call.line, call.column, "error", `${call.call} argument "value" must be a number.`));
+    }
+  }
+
+  const stringLiteralOperations = new Set(["webhook.verify_secret"]);
+  if (stringLiteralOperations.has(call.call)) {
+    const valueArg = argForName(call, "secretKey");
+    if (valueArg && valueArg.kind !== "string") {
+      diagnostics.push(diagnostic(filePath, call.line, call.column, "error", `${call.call} secret must be a string literal.`));
+    }
+  }
 }
 
 function parseBehaviorExtension(kind: CodeBehaviorExtension["kind"], name: string, filePath: string, line: number, body: string): CodeBehaviorExtension {
@@ -208,6 +413,74 @@ function parseBehaviorExtension(kind: CodeBehaviorExtension["kind"], name: strin
   }
 
   return { kind, name, filePath, line, patterns, terms, promptAdds, targets, priority };
+}
+
+function normalizeProvider(value: string | undefined): PlatformProviderSelector | undefined {
+  const normalized = value?.trim().toLowerCase();
+  return normalized && PLATFORM_PROVIDER_SELECTORS.has(normalized as PlatformProviderSelector) ? (normalized as PlatformProviderSelector) : undefined;
+}
+
+function providerFromEvent(event: string): PlatformProviderSelector | undefined {
+  const prefix = event.split(".")[0];
+  return normalizeProvider(prefix);
+}
+
+function providersFromLine(lineText: string): PlatformProviderSelector[] {
+  const providers: PlatformProviderSelector[] = [];
+  providerArgPattern.lastIndex = 0;
+  for (let match = providerArgPattern.exec(lineText); match; match = providerArgPattern.exec(lineText)) {
+    const values = (match[1] || "").split(",").map((item) => item.trim());
+    for (const value of values) {
+      const provider = normalizeProvider(value);
+      if (provider && !providers.includes(provider)) providers.push(provider);
+    }
+  }
+  return providers;
+}
+
+function providerFromNearbyCondition(lines: string[], lineIndex: number): PlatformProviderSelector | undefined {
+  for (let index = lineIndex; index >= Math.max(0, lineIndex - 8); index -= 1) {
+    const provider = normalizeProvider(lines[index]?.match(providerConditionPattern)?.[1]);
+    if (provider) return provider;
+  }
+  return undefined;
+}
+
+function expandProviders(provider: PlatformProviderSelector): PlatformProvider[] {
+  return provider === "all" ? PLATFORM_PROVIDERS : [provider];
+}
+
+function expandPlatformRoutes(action: ProjectPlatformAction): ProjectPlatformRoute[] {
+  const sourceProviders = expandProviders(action.sourceProvider);
+  const targetProviders = (action.targetProviders.length ? action.targetProviders : [action.targetProvider]).filter(
+    (provider): provider is PlatformProviderSelector => Boolean(provider),
+  );
+  return sourceProviders.flatMap((sourceProvider) =>
+    targetProviders
+      .flatMap((targetProvider) => expandProviders(targetProvider))
+      .filter((targetProvider) => targetProvider !== sourceProvider)
+      .map((targetProvider) => ({
+        sourceProvider,
+        targetProvider,
+        operation: action.operation,
+        call: action.call,
+        filePath: action.filePath,
+        line: action.line,
+      })),
+  );
+}
+
+function callSnippet(lines: string[], lineIndex: number) {
+  const parts: string[] = [];
+  let depth = 0;
+  for (let index = lineIndex; index < Math.min(lines.length, lineIndex + 12); index += 1) {
+    const text = lines[index] || "";
+    parts.push(text);
+    depth += (text.match(/\(/g) || []).length;
+    depth -= (text.match(/\)/g) || []).length;
+    if (parts.length > 1 && depth <= 0) break;
+  }
+  return parts.join("\n");
 }
 
 export function getCodeProjectHash(files: CodeProjectFile[]) {
@@ -246,6 +519,7 @@ export function compileCodeProject(files: CodeProjectFile[], entryPath = "main.o
     const fileDiagnostics: ProjectDiagnostic[] = [];
     const fileNodeId = `file:${file.path}`;
     nodes.push({ id: fileNodeId, label: file.path, kind: "file", filePath: file.path, line: 1 });
+    const contentLines = file.content.split("\n");
 
     importPattern.lastIndex = 0;
     for (let match = importPattern.exec(file.content); match; match = importPattern.exec(file.content)) {
@@ -260,6 +534,16 @@ export function compileCodeProject(files: CodeProjectFile[], entryPath = "main.o
       } else {
         edges.push({ id: `edge:${importNodeId}:file:${resolved}`, from: importNodeId, to: `file:${resolved}`, label: "opens" });
       }
+    }
+
+    eventPattern.lastIndex = 0;
+    for (let match = eventPattern.exec(file.content); match; match = eventPattern.exec(file.content)) {
+      const { line, column } = lineColumnForIndex(file.content, match.index);
+      const event = match[1] || "";
+      const provider = providerFromEvent(event);
+      const eventNodeId = `event:${file.path}:${line}:${column}:${event}`;
+      nodes.push({ id: eventNodeId, label: provider ? `${provider} ${event}` : event, kind: "sdk", filePath: file.path, line });
+      edges.push({ id: `edge:${fileNodeId}:${eventNodeId}`, from: fileNodeId, to: eventNodeId, label: "listens" });
     }
 
     exportPattern.lastIndex = 0;
@@ -293,7 +577,8 @@ export function compileCodeProject(files: CodeProjectFile[], entryPath = "main.o
       const operation = parts.slice(1).join(".");
       if (!PROJECT_SDK_MODULES.has(sdkModule)) continue;
       const { line, column } = lineColumnForIndex(file.content, match.index);
-      const lineText = file.content.split("\n")[line - 1] || "";
+      const lineText = contentLines[line - 1] || "";
+      const callText = callSnippet(contentLines, line - 1);
       const urlMatch = lineText.match(literalUrlPattern);
       const secretUrlMatch = lineText.match(secretUrlPattern);
       const sdkCall: ProjectSdkCall = {
@@ -302,6 +587,7 @@ export function compileCodeProject(files: CodeProjectFile[], entryPath = "main.o
         operation,
         line,
         column,
+        args: parseProjectSdkArgs(callText),
         literalUrl: urlMatch?.[1],
         secretUrlKey: secretUrlMatch?.[1] || secretUrlMatch?.[2],
       };
@@ -309,9 +595,7 @@ export function compileCodeProject(files: CodeProjectFile[], entryPath = "main.o
       const callNodeId = `sdk:${file.path}:${line}:${column}:${sdkCall.call}`;
       nodes.push({ id: callNodeId, label: sdkCall.call, kind: canvasKind(sdkCall), filePath: file.path, line });
       edges.push({ id: `edge:${fileNodeId}:${callNodeId}`, from: fileNodeId, to: callNodeId, label: "uses" });
-      if (sdkModule === "http" && !["fetch", "get", "post", "request"].includes(operation)) {
-        fileDiagnostics.push(diagnostic(file.path, line, column, "error", `Unknown http operation "${operation}".`));
-      }
+      validateProjectSdkCall(sdkCall, file.path, fileDiagnostics);
     }
 
     fileResults.push({ path: file.path, imports, exports, sdkCalls, diagnostics: fileDiagnostics });
@@ -336,6 +620,23 @@ export function compileCodeProject(files: CodeProjectFile[], entryPath = "main.o
 
   const allExports = fileResults.flatMap((file) => file.exports.map((item) => ({ ...item, filePath: file.path })));
   const allCalls = fileResults.flatMap((file) => file.sdkCalls.map((item) => ({ ...item, filePath: file.path })));
+  const allEventBindings = normalized.flatMap((file) => {
+    const bindings: ProjectEventBinding[] = [];
+    eventPattern.lastIndex = 0;
+    for (let match = eventPattern.exec(file.content); match; match = eventPattern.exec(file.content)) {
+      const { line, column } = lineColumnForIndex(file.content, match.index);
+      const event = match[1] || "";
+      bindings.push({
+        event,
+        alias: match[2] || "event",
+        provider: providerFromEvent(event),
+        filePath: file.path,
+        line,
+        column,
+      });
+    }
+    return bindings;
+  });
   const webhooks = allExports
     .filter((item) => item.kind === "webhook")
     .map((item) => ({
@@ -347,6 +648,33 @@ export function compileCodeProject(files: CodeProjectFile[], entryPath = "main.o
   const heuristicPatterns = behaviorExtensions.filter((item) => item.kind === "heuristic");
   const lexiconEntries = behaviorExtensions.filter((item) => item.kind === "lexicon");
   const promptDerivations = behaviorExtensions.filter((item) => item.kind === "prompt");
+  const platformActions = allCalls
+    .filter((item) => item.module === "platform")
+    .map((item): ProjectPlatformAction => {
+      const sourceFile = normalized.find((file) => file.path === item.filePath);
+      const sourceLines = sourceFile?.content.split("\n") || [];
+      const lineText = callSnippet(sourceLines, item.line - 1);
+      const sourceEventProvider = allEventBindings
+        .filter((binding) => binding.filePath === item.filePath && binding.line <= item.line)
+        .sort((a, b) => b.line - a.line)[0]?.provider;
+      const sourceProvider = sourceFile ? providerFromNearbyCondition(sourceLines, item.line - 1) || sourceEventProvider : sourceEventProvider;
+      const targetProviders = providersFromLine(lineText);
+      const targetProvider = targetProviders[0];
+      return {
+        ...item,
+        sourceProvider: sourceProvider || "all",
+        targetProvider,
+        targetProviders,
+        crossPlatform: expandPlatformRoutes({
+          ...item,
+          sourceProvider: sourceProvider || "all",
+          targetProvider,
+          targetProviders,
+          crossPlatform: false,
+        }).length > 0,
+      };
+    });
+  const platformRoutes = platformActions.flatMap((action) => expandPlatformRoutes(action));
 
   return {
     entryPath: entry,
@@ -364,10 +692,14 @@ export function compileCodeProject(files: CodeProjectFile[], entryPath = "main.o
       heuristicPatterns,
       lexiconEntries,
       promptDerivations,
+      eventBindings: allEventBindings,
       sdkCalls: allCalls,
       workerHooks: allCalls.filter((item) => item.module === "worker"),
       outboundHttp: allCalls.filter((item) => item.module === "http"),
       messageSends: allCalls.filter((item) => item.module === "messages"),
+      platformActions,
+      crossPlatformActions: platformActions.filter((item) => item.crossPlatform),
+      platformRoutes,
       accountMutations: allCalls.filter((item) => item.module === "account"),
     },
     canvas: { nodes, edges },

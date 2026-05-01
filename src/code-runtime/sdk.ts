@@ -118,6 +118,51 @@ export const CODE_SDK_REGISTRY: Record<string, CodeSdkModule> = {
       preview: { description: "Render a send preview without queueing it.", danger: "read" },
     },
   },
+  platform: {
+    description: "Bridge events, replies, reactions, and routing across connected platforms.",
+    operations: {
+      send: {
+        description: "Queue a message through a specific connected platform adapter.",
+        danger: "send",
+        requiredArgs: ["via", "to", "text"],
+      },
+      draft: {
+        description: "Create a reviewable draft for a specific connected platform.",
+        danger: "write",
+        requiredArgs: ["via", "to", "text"],
+      },
+      preview: {
+        description: "Preview a cross-platform message without queueing it.",
+        danger: "read",
+        requiredArgs: ["via"],
+      },
+      react: {
+        description: "Queue or preview a reaction through a target platform adapter.",
+        danger: "send",
+        requiredArgs: ["via", "to", "emoji"],
+      },
+      mirror: {
+        description: "Mirror the current event into another platform workflow.",
+        danger: "runtime",
+        requiredArgs: ["to"],
+      },
+      route: {
+        description: "Route the current event into a named cross-platform workflow.",
+        danger: "runtime",
+        requiredArgs: ["to"],
+      },
+      broadcast: {
+        description: "Fan out the current event or message to multiple connected platform adapters.",
+        danger: "send",
+        requiredArgs: ["targets", "text"],
+      },
+      relay: {
+        description: "Relay the current event from its source platform to one or more target platforms.",
+        danger: "runtime",
+        requiredArgs: ["targets"],
+      },
+    },
+  },
   account: {
     description: "Patch account settings and behavior through audited account adapters.",
     operations: {

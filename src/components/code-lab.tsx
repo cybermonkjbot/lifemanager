@@ -5,6 +5,7 @@ import { LoadingIndicator } from "@/components/loading-state";
 import { useTenantScopeArgs } from "@/components/tenant-scope-provider";
 import { UIModal } from "@/components/ui-modal";
 import {
+  CODE_SDK_REGISTRY,
   compileCodeProject,
   runCodeProjectTests,
   type CodeProjectBundle,
@@ -15,12 +16,13 @@ import { useActionStateRegistry } from "@/lib/ui/action-state";
 import { autocompletion, CompletionContext } from "@codemirror/autocomplete";
 import { defaultHighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { linter } from "@codemirror/lint";
-import { EditorState, RangeSetBuilder } from "@codemirror/state";
-import { Decoration, type DecorationSet, EditorView, hoverTooltip, keymap, lineNumbers, ViewPlugin, type ViewUpdate } from "@codemirror/view";
+import { EditorState, RangeSetBuilder, StateEffect, StateField } from "@codemirror/state";
+import { Decoration, type DecorationSet, EditorView, hoverTooltip, keymap, lineNumbers, ViewPlugin, type ViewUpdate, WidgetType } from "@codemirror/view";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { useAction, useMutation, useQuery } from "convex/react";
 import { useRouter } from "next/navigation";
+import type { ButtonHTMLAttributes, MutableRefObject, ReactNode } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 type FileDialogMode = "create" | "rename" | "duplicate";
@@ -29,6 +31,220 @@ type FileDialogState = {
   path: string;
   sourcePath?: string;
 } | null;
+
+type CodeIconName =
+  | "arrowLeft"
+  | "bookOpen"
+  | "check"
+  | "copy"
+  | "diagram"
+  | "eye"
+  | "eyeOff"
+  | "filePlus"
+  | "format"
+  | "play"
+  | "rename"
+  | "save"
+  | "spark"
+  | "terminal"
+  | "trash"
+  | "upload"
+  | "wand"
+  | "x";
+
+function CodeIcon({ name }: { name: CodeIconName }) {
+  const common = {
+    "aria-hidden": true,
+    fill: "none",
+    focusable: false,
+    stroke: "currentColor",
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+    strokeWidth: 1.8,
+    viewBox: "0 0 24 24",
+  };
+
+  switch (name) {
+    case "arrowLeft":
+      return (
+        <svg {...common}>
+          <path d="M19 12H5" />
+          <path d="m12 19-7-7 7-7" />
+        </svg>
+      );
+    case "bookOpen":
+      return (
+        <svg {...common}>
+          <path d="M12 6.5A5.5 5.5 0 0 0 6.5 4H4v15h2.5A5.5 5.5 0 0 1 12 21" />
+          <path d="M12 6.5A5.5 5.5 0 0 1 17.5 4H20v15h-2.5A5.5 5.5 0 0 0 12 21" />
+          <path d="M12 6.5V21" />
+        </svg>
+      );
+    case "check":
+      return (
+        <svg {...common}>
+          <path d="m5 13 4 4L19 7" />
+        </svg>
+      );
+    case "copy":
+      return (
+        <svg {...common}>
+          <rect x="8" y="8" width="11" height="11" rx="2" />
+          <path d="M5 16H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+        </svg>
+      );
+    case "diagram":
+      return (
+        <svg {...common}>
+          <rect x="4" y="4" width="6" height="5" rx="1.4" />
+          <rect x="14" y="15" width="6" height="5" rx="1.4" />
+          <path d="M10 6.5h3a3 3 0 0 1 3 3V15" />
+          <path d="M7 9v3a3 3 0 0 0 3 3h4" />
+        </svg>
+      );
+    case "eye":
+      return (
+        <svg {...common}>
+          <path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z" />
+          <circle cx="12" cy="12" r="2.5" />
+        </svg>
+      );
+    case "eyeOff":
+      return (
+        <svg {...common}>
+          <path d="m3 3 18 18" />
+          <path d="M10.6 10.6a2.5 2.5 0 0 0 2.8 2.8" />
+          <path d="M7.1 7.6C4.2 9.2 2.5 12 2.5 12s3.5 6 9.5 6c1.5 0 2.8-.4 4-1" />
+          <path d="M20.2 15.2c.8-.8 1.3-1.6 1.3-1.6S18 6 12 6c-.8 0-1.6.1-2.3.3" />
+        </svg>
+      );
+    case "filePlus":
+      return (
+        <svg {...common}>
+          <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z" />
+          <path d="M14 3v5h5" />
+          <path d="M12 11v6" />
+          <path d="M9 14h6" />
+        </svg>
+      );
+    case "format":
+      return (
+        <svg {...common}>
+          <path d="M4 6h16" />
+          <path d="M4 12h10" />
+          <path d="M4 18h7" />
+          <path d="m16 16 2 2 3-4" />
+        </svg>
+      );
+    case "play":
+      return (
+        <svg {...common}>
+          <path d="M7 5v14l12-7Z" />
+        </svg>
+      );
+    case "rename":
+      return (
+        <svg {...common}>
+          <path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17Z" />
+          <path d="m14 8 3 3" />
+        </svg>
+      );
+    case "save":
+      return (
+        <svg {...common}>
+          <path d="M5 4h12l2 2v14H5Z" />
+          <path d="M8 4v6h8V4" />
+          <path d="M8 20v-6h8v6" />
+        </svg>
+      );
+    case "spark":
+      return (
+        <svg {...common}>
+          <path d="M12 3 10.4 8.4 5 10l5.4 1.6L12 17l1.6-5.4L19 10l-5.4-1.6Z" />
+          <path d="M5 16.5 4.3 19 2 19.7 4.3 20.4 5 23l.7-2.6L8 19.7 5.7 19Z" />
+        </svg>
+      );
+    case "terminal":
+      return (
+        <svg {...common}>
+          <path d="m4 7 5 5-5 5" />
+          <path d="M11 17h9" />
+        </svg>
+      );
+    case "trash":
+      return (
+        <svg {...common}>
+          <path d="M4 7h16" />
+          <path d="M10 11v6" />
+          <path d="M14 11v6" />
+          <path d="M6 7l1 14h10l1-14" />
+          <path d="M9 7V4h6v3" />
+        </svg>
+      );
+    case "upload":
+      return (
+        <svg {...common}>
+          <path d="M12 16V4" />
+          <path d="m7 9 5-5 5 5" />
+          <path d="M5 20h14" />
+        </svg>
+      );
+    case "wand":
+      return (
+        <svg {...common}>
+          <path d="m4 20 12-12" />
+          <path d="m14 6 4 4" />
+          <path d="M6 4v3" />
+          <path d="M4.5 5.5h3" />
+          <path d="M19 14v3" />
+          <path d="M17.5 15.5h3" />
+        </svg>
+      );
+    case "x":
+      return (
+        <svg {...common}>
+          <path d="M18 6 6 18" />
+          <path d="m6 6 12 12" />
+        </svg>
+      );
+  }
+}
+
+type CodeIconButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
+  icon: CodeIconName;
+  label: string;
+  children?: ReactNode;
+};
+
+function CodeIconButton({ icon, label, children, className, title, ...buttonProps }: CodeIconButtonProps) {
+  const resolvedClassName = ["code-icon-button", children ? "code-icon-button-with-label" : "", className]
+    .filter(Boolean)
+    .join(" ");
+
+  return (
+    <button
+      {...buttonProps}
+      aria-label={buttonProps["aria-label"] || label}
+      className={resolvedClassName}
+      title={title || label}
+      type={buttonProps.type || "button"}
+    >
+      <CodeIcon name={icon} />
+      {children ? <span>{children}</span> : <span className="sr-only">{label}</span>}
+    </button>
+  );
+}
+
+function cleanProjectFiles(name = "ODOGWU Extension"): CodeProjectFile[] {
+  const projectName = name.replace(/[^A-Za-z0-9_]/g, "") || "ODOGWUExtension";
+  return [
+    {
+      path: "main.odo",
+      language: "odogwu",
+      content: `project ${projectName} version "1.0"\n\n`,
+    },
+  ];
+}
 
 const starterProjectFiles: CodeProjectFile[] = [
   {
@@ -39,6 +255,7 @@ project LeadDesk version "1.0"
 
 import "./messages.odo"
 import "./webhooks/paystack.odo"
+import "./automations/cross-platform.odo"
 import "./behavior/language.odo"
 
 use webhook
@@ -46,6 +263,7 @@ use http
 use ai
 use followups
 use messages
+use platform
 use orchestrator
 use account
 use worker
@@ -94,6 +312,20 @@ do
     text: "Payment received. I will confirm a time and send prep notes shortly."
   )
   orchestrator.run_tool("update_customer_timeline")
+end`,
+  },
+  {
+    path: "automations/cross-platform.odo",
+    language: "odogwu",
+    content: `# Cross-platform reactions and routing stay reviewable by default.
+export rule AnyPlatformFanout
+on message.received as msg
+do
+  platform.broadcast(
+    targets: "all",
+    text: "Mirror this event everywhere connected."
+  )
+  platform.relay(targets: "all")
 end`,
   },
   {
@@ -146,6 +378,10 @@ const hoverDocs: Record<string, string> = {
   expect: "Asserts sandbox state after actions run.",
   "webhook.received": "Event fired when an external platform posts to this handler.",
   "message.received": "Event fired when ODOGWU receives a connected account message.",
+  "whatsapp.message.received": "Event fired when a connected WhatsApp account receives a message.",
+  "instagram.message.received": "Event fired when a connected Instagram account receives a message.",
+  "imessage.message.received": "Event fired when a connected iMessage account receives a message.",
+  "telegram.message.received": "Event fired when a connected Telegram account receives a message.",
   chat: "SDK module for inspecting message and thread context.",
   ai: "SDK module for shaping AI behavior.",
   followups: "SDK module for conversation reminders.",
@@ -157,6 +393,7 @@ const hoverDocs: Record<string, string> = {
   http: "SDK module for audited outbound API calls.",
   orchestrator: "SDK module for account-scoped AI orchestration and tools.",
   messages: "SDK module for send, draft, and preview message operations.",
+  platform: "SDK module for cross-platform sends, drafts, reactions, mirrors, and routing.",
   account: "SDK module for account behavior and settings changes.",
   worker: "SDK module for local worker extension hooks.",
   heuristics: "SDK module for tenant-owned heuristic patterns and scores.",
@@ -172,6 +409,14 @@ const hoverDocs: Record<string, string> = {
   "messages.send": "Queue a message send when this project is allowed to do so.",
   "messages.draft": "Create a reviewable message draft.",
   "messages.preview": "Render a send preview without queueing.",
+  "platform.send": "Queue a message through a specific connected platform.",
+  "platform.draft": "Create a reviewable draft for a specific connected platform.",
+  "platform.preview": "Preview a cross-platform message without queueing.",
+  "platform.react": "React through a target platform adapter.",
+  "platform.mirror": "Mirror the current event into another platform workflow.",
+  "platform.route": "Route the current event into a cross-platform workflow.",
+  "platform.broadcast": "Fan out the current event or message to multiple connected platforms.",
+  "platform.relay": "Relay the current event from its source platform to one or more target platforms.",
   "account.settings.patch": "Patch selected account settings through an audited adapter.",
   "account.behavior.set": "Set account behavior flags for the owner account.",
   "account.behavior_set": "Set account behavior flags for the owner account.",
@@ -189,6 +434,88 @@ const hoverDocs: Record<string, string> = {
   "prompts.prepend": "Prepend a high-priority bounded instruction.",
   "prompts.derive": "Create a prompt derivation hook from heuristics or lexicon terms.",
   "prompts.set_context": "Add a bounded context label for prompt construction.",
+};
+
+const hoverDocLinks: Record<string, string> = {
+  project: "/code/docs#language",
+  program: "/code/docs#language",
+  import: "/code/docs#language",
+  export: "/code/docs#exports",
+  rule: "/code/docs#exports",
+  webhook: "/code/docs#webhooks",
+  function: "/code/docs#exports",
+  heuristic: "/code/docs#behavior",
+  lexicon: "/code/docs#behavior",
+  prompt: "/code/docs#behavior",
+  version: "/code/docs#language",
+  use: "/code/docs#sdk",
+  on: "/code/docs#events",
+  when: "/code/docs#language",
+  and: "/code/docs#language",
+  between: "/code/docs#language",
+  do: "/code/docs#language",
+  end: "/code/docs#language",
+  test: "/code/docs#publish",
+  given: "/code/docs#publish",
+  expect: "/code/docs#publish",
+  "message.received": "/code/docs#events-message-received",
+  "webhook.received": "/code/docs#events-webhook-received",
+  chat: "/code/docs#sdk",
+  ai: "/code/docs#sdk",
+  followups: "/code/docs#sdk",
+  memory: "/code/docs#sdk",
+  settings: "/code/docs#sdk",
+  outreach: "/code/docs#sdk",
+  runtime: "/code/docs#sdk",
+  time: "/code/docs#sdk",
+  http: "/code/docs#sdk",
+  orchestrator: "/code/docs#sdk",
+  messages: "/code/docs#sdk-messages",
+  platform: "/code/docs#cross-platform",
+  account: "/code/docs#sdk",
+  worker: "/code/docs#sdk",
+  heuristics: "/code/docs#behavior",
+  prompts: "/code/docs#behavior",
+  "whatsapp.message.received": "/code/docs#events-platform-message-received",
+  "instagram.message.received": "/code/docs#events-platform-message-received",
+  "imessage.message.received": "/code/docs#events-platform-message-received",
+  "telegram.message.received": "/code/docs#events-platform-message-received",
+  "http.post": "/code/docs#safety",
+  "http.get": "/code/docs#safety",
+  "http.fetch": "/code/docs#safety",
+  "http.request": "/code/docs#safety",
+  "webhook.reply": "/code/docs#webhooks",
+  "webhook.verify_secret": "/code/docs#webhooks",
+  "orchestrator.ask": "/code/docs#sdk",
+  "orchestrator.run_tool": "/code/docs#sdk",
+  "messages.send": "/code/docs#sdk-messages",
+  "messages.draft": "/code/docs#sdk-messages",
+  "messages.preview": "/code/docs#sdk-messages",
+  "platform.send": "/code/docs#cross-platform",
+  "platform.draft": "/code/docs#cross-platform",
+  "platform.preview": "/code/docs#cross-platform",
+  "platform.react": "/code/docs#cross-platform",
+  "platform.mirror": "/code/docs#cross-platform",
+  "platform.route": "/code/docs#cross-platform",
+  "platform.broadcast": "/code/docs#cross-platform",
+  "platform.relay": "/code/docs#cross-platform",
+  "account.settings.patch": "/code/docs#sdk",
+  "account.behavior.set": "/code/docs#sdk",
+  "account.behavior_set": "/code/docs#sdk",
+  "worker.extend": "/code/docs#sdk",
+  "worker.schedule": "/code/docs#sdk",
+  "worker.run_local": "/code/docs#safety",
+  "heuristics.pattern": "/code/docs#behavior",
+  "heuristics.score": "/code/docs#behavior",
+  "heuristics.mark_intent": "/code/docs#behavior",
+  "heuristics.block": "/code/docs#behavior",
+  "lexicon.term": "/code/docs#behavior",
+  "lexicon.phrase": "/code/docs#behavior",
+  "lexicon.alias": "/code/docs#behavior",
+  "prompts.append": "/code/docs#behavior",
+  "prompts.prepend": "/code/docs#behavior",
+  "prompts.derive": "/code/docs#behavior",
+  "prompts.set_context": "/code/docs#behavior",
 };
 
 const keywordSet = new Set([
@@ -215,7 +542,14 @@ const keywordSet = new Set([
   "expect",
   "as",
 ]);
-const eventSet = new Set(["message.received", "webhook.received"]);
+const eventSet = new Set([
+  "message.received",
+  "webhook.received",
+  "whatsapp.message.received",
+  "instagram.message.received",
+  "imessage.message.received",
+  "telegram.message.received",
+]);
 const sdkModuleSet = new Set([
   "chat",
   "ai",
@@ -229,6 +563,7 @@ const sdkModuleSet = new Set([
   "webhook",
   "orchestrator",
   "messages",
+  "platform",
   "account",
   "worker",
   "heuristics",
@@ -237,6 +572,22 @@ const sdkModuleSet = new Set([
 ]);
 const sdkCallSet = new Set(Object.keys(hoverDocs).filter((key) => key.includes(".")));
 const tokenPattern = /#[^\n]*|"(?:[^"\\]|\\.)*"|\b\d+(?:\.\d+)?\b|==|[A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)*/g;
+
+function sdkTypeDoc(token: string) {
+  const [moduleName, ...operationParts] = token.split(".");
+  const operationName = operationParts.join(".");
+  const operation = CODE_SDK_REGISTRY[moduleName]?.operations[operationName];
+  if (!operation) return "";
+  const args = operation.requiredArgs?.length ? `Args: ${operation.requiredArgs.join(", ")}` : "Args: none";
+  return `${args}. Effect: ${operation.danger}.`;
+}
+
+function moduleTypeDoc(token: string) {
+  const moduleSpec = CODE_SDK_REGISTRY[token];
+  if (!moduleSpec) return "";
+  const operations = Object.keys(moduleSpec.operations);
+  return operations.length ? `Operations: ${operations.slice(0, 10).join(", ")}.` : "No direct operations.";
+}
 
 function tokenClass(token: string) {
   if (token.startsWith("#")) return "cm-odogwu-comment";
@@ -247,7 +598,7 @@ function tokenClass(token: string) {
   if (eventSet.has(token)) return "cm-odogwu-event";
   if (sdkCallSet.has(token)) return "cm-odogwu-call";
   if (sdkModuleSet.has(token)) return "cm-odogwu-module";
-  if (/^(msg|hook|payload|thread|text|kind|at|title|due|value|phone|sourceHash)$/.test(token)) return "cm-odogwu-property";
+  if (/^(msg|hook|payload|thread|text|kind|at|title|due|value|phone|sourceHash|provider|platform|via|to|emoji|contact|targets)$/.test(token)) return "cm-odogwu-property";
   return "";
 }
 
@@ -289,7 +640,9 @@ function odogwuHoverTooltip(view: EditorView, pos: number) {
   const end = pos + (endMatch?.[0].length || 0);
   const token = view.state.doc.sliceString(start, end);
   const doc = hoverDocs[token];
-  if (!doc) return null;
+  const typeDoc = sdkTypeDoc(token) || moduleTypeDoc(token);
+  const docLink = hoverDocLinks[token];
+  if (!doc && !typeDoc) return null;
   return {
     pos: start,
     end,
@@ -300,8 +653,21 @@ function odogwuHoverTooltip(view: EditorView, pos: number) {
       const title = document.createElement("strong");
       title.textContent = token;
       const body = document.createElement("p");
-      body.textContent = doc;
+      body.textContent = doc || "ODOGWU symbol.";
       dom.append(title, body);
+      if (typeDoc) {
+        const type = document.createElement("p");
+        type.className = "code-hover-type";
+        type.textContent = typeDoc;
+        dom.append(type);
+      }
+      if (docLink) {
+        const link = document.createElement("a");
+        link.href = docLink;
+        link.textContent = "Open docs";
+        link.className = "code-hover-doc-link";
+        dom.append(link);
+      }
       return { dom };
     },
   };
@@ -374,27 +740,26 @@ type GeneratedCanvasPreview = {
   title: string;
   summary: string[];
   mermaid: string;
+  generatedByAi: boolean;
   lanes: Array<{
     title: string;
     items: Array<{ label: string; detail: string; filePath?: string }>;
   }>;
 };
 
-function mermaidId(value: string) {
-  return value.replace(/[^A-Za-z0-9_]/g, "_").replace(/^(\d)/, "_$1").slice(0, 48) || "node";
-}
-
-function mermaidLabel(value: string) {
-  return value.replace(/["[\]{}]/g, "").slice(0, 80);
-}
-
 function buildCanvasPreview(args: {
   files: CodeProjectFile[];
   bundle: CodeProjectBundle;
   projectName: string;
   webhookBase: string;
+  aiCanvas: {
+    title?: string;
+    summary?: string[];
+    mermaid: string;
+    generatedByAi?: boolean;
+  };
 }): GeneratedCanvasPreview {
-  const { files, bundle, projectName, webhookBase } = args;
+  const { files, bundle, webhookBase, aiCanvas } = args;
   const fileItems = files.map((file) => ({
     label: file.path,
     detail: `${file.content.split("\n").length} lines`,
@@ -428,6 +793,11 @@ function buildCanvasPreview(args: {
       detail: `${call.filePath}:${call.line}`,
       filePath: call.filePath,
     })),
+    ...bundle.manifest.platformActions.map((call) => ({
+      label: call.call,
+      detail: `${call.crossPlatform ? "cross-platform" : "platform"} ${call.targetProvider || ""}`.trim() || `${call.filePath}:${call.line}`,
+      filePath: call.filePath,
+    })),
     ...bundle.manifest.accountMutations.map((call) => ({
       label: call.call,
       detail: `${call.filePath}:${call.line}`,
@@ -447,38 +817,16 @@ function buildCanvasPreview(args: {
   ];
   const summary = [
     `${files.length} files compile into ${bundle.manifest.handlers.length} handler(s).`,
-    `${bundle.manifest.webhooks.length} webhook endpoint(s), ${bundle.manifest.outboundHttp.length} outbound API call(s), ${bundle.manifest.messageSends.length} message operation(s).`,
+    `${bundle.manifest.webhooks.length} webhook endpoint(s), ${bundle.manifest.outboundHttp.length} outbound API call(s), ${bundle.manifest.messageSends.length} message operation(s), ${bundle.manifest.crossPlatformActions.length} cross-platform action(s).`,
     `${bundle.manifest.behaviorExtensions.length} tenant behavior overlay(s) can influence heuristics, lexicons, and prompt derivation after publish.`,
   ];
 
-  const mermaidLines = ["flowchart LR", `  project["${mermaidLabel(projectName)}"]`];
-  for (const file of files) {
-    mermaidLines.push(`  ${mermaidId(`file_${file.path}`)}["${mermaidLabel(file.path)}"]`);
-    mermaidLines.push(`  project --> ${mermaidId(`file_${file.path}`)}`);
-  }
-  for (const handler of bundle.manifest.handlers) {
-    mermaidLines.push(`  ${mermaidId(`handler_${handler.name}`)}["${mermaidLabel(`${handler.kind} ${handler.name}`)}"]`);
-    mermaidLines.push(`  ${mermaidId(`file_${handler.filePath}`)} --> ${mermaidId(`handler_${handler.name}`)}`);
-  }
-  for (const webhook of bundle.manifest.webhooks) {
-    mermaidLines.push(`  ${mermaidId(`webhook_${webhook.name}`)}["${mermaidLabel(`POST /${webhook.name}`)}"]`);
-    mermaidLines.push(`  ${mermaidId(`handler_${webhook.name}`)} --> ${mermaidId(`webhook_${webhook.name}`)}`);
-  }
-  for (const extension of bundle.manifest.behaviorExtensions) {
-    mermaidLines.push(`  ${mermaidId(`behavior_${extension.name}`)}["${mermaidLabel(`${extension.kind} ${extension.name}`)}"]`);
-    mermaidLines.push(`  ${mermaidId(`file_${extension.filePath}`)} --> ${mermaidId(`behavior_${extension.name}`)}`);
-  }
-  for (const call of runtimeItems.slice(0, 16)) {
-    const id = mermaidId(`effect_${call.label}_${call.detail}`);
-    mermaidLines.push(`  ${id}["${mermaidLabel(call.label)}"]`);
-    if (call.filePath) mermaidLines.push(`  ${mermaidId(`file_${call.filePath}`)} --> ${id}`);
-  }
-
   return {
     hash: stableFilesJson(files),
-    title: `${projectName} canvas`,
-    summary,
-    mermaid: mermaidLines.join("\n"),
+    title: aiCanvas.title || "AI canvas",
+    summary: aiCanvas.summary?.length ? aiCanvas.summary : summary,
+    mermaid: aiCanvas.mermaid,
+    generatedByAi: Boolean(aiCanvas.generatedByAi),
     lanes,
   };
 }
@@ -501,18 +849,108 @@ function codeCompletions(filePathsRef: { current: string[] }) {
   };
 }
 
+type InlineAiSuggestion = { text: string; from: number } | null;
+
+const setInlineAiSuggestionEffect = StateEffect.define<InlineAiSuggestion>();
+
+class InlineAiSuggestionWidget extends WidgetType {
+  constructor(
+    readonly suggestion: string,
+    readonly onAccept: () => void,
+    readonly onDismiss: () => void,
+  ) {
+    super();
+  }
+
+  toDOM() {
+    const wrap = document.createElement("span");
+    wrap.className = "code-ai-inline-suggestion";
+    const text = document.createElement("span");
+    text.textContent = this.suggestion.replace(/\n/g, " ");
+    const accept = document.createElement("button");
+    accept.type = "button";
+    accept.textContent = "Tab";
+    accept.title = "Accept AI suggestion";
+    accept.addEventListener("mousedown", (event) => {
+      event.preventDefault();
+      this.onAccept();
+    });
+    const dismiss = document.createElement("button");
+    dismiss.type = "button";
+    dismiss.textContent = "Esc";
+    dismiss.title = "Dismiss AI suggestion";
+    dismiss.addEventListener("mousedown", (event) => {
+      event.preventDefault();
+      this.onDismiss();
+    });
+    wrap.append(text, accept, dismiss);
+    return wrap;
+  }
+
+  ignoreEvent() {
+    return false;
+  }
+}
+
+function inlineAiSuggestionExtension(args: {
+  acceptRef: MutableRefObject<() => boolean>;
+  dismissRef: MutableRefObject<() => boolean>;
+}) {
+  return StateField.define<InlineAiSuggestion>({
+    create: () => null,
+    update(value, transaction) {
+      for (const effect of transaction.effects) {
+        if (effect.is(setInlineAiSuggestionEffect)) return effect.value;
+      }
+      if (transaction.docChanged) return null;
+      return value;
+    },
+    provide: (field) =>
+      EditorView.decorations.from(field, (suggestion) => {
+        if (!suggestion?.text) return Decoration.none;
+        return Decoration.set([
+          Decoration.widget({
+            widget: new InlineAiSuggestionWidget(
+              suggestion.text,
+              () => args.acceptRef.current(),
+              () => args.dismissRef.current(),
+            ),
+            side: 1,
+          }).range(suggestion.from),
+        ]);
+      }),
+  });
+}
+
 type CodeEditorProps = {
   value: string;
   diagnostics: ProjectDiagnostic[];
   filePaths: string[];
+  aiSuggestion: string | null;
   onChange: (next: string) => void;
   onSave: () => void;
   onRunTests: () => void;
   onPublish: () => void;
   onFormat: () => void;
+  onCursorChange: (offset: number) => void;
+  onAcceptAiSuggestion: () => boolean;
+  onDismissAiSuggestion: () => boolean;
 };
 
-function CodeEditor({ value, diagnostics, filePaths, onChange, onSave, onRunTests, onPublish, onFormat }: CodeEditorProps) {
+function CodeEditor({
+  value,
+  diagnostics,
+  filePaths,
+  aiSuggestion,
+  onChange,
+  onSave,
+  onRunTests,
+  onPublish,
+  onFormat,
+  onCursorChange,
+  onAcceptAiSuggestion,
+  onDismissAiSuggestion,
+}: CodeEditorProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
   const onChangeRef = useRef(onChange);
@@ -520,6 +958,9 @@ function CodeEditor({ value, diagnostics, filePaths, onChange, onSave, onRunTest
   const onRunTestsRef = useRef(onRunTests);
   const onPublishRef = useRef(onPublish);
   const onFormatRef = useRef(onFormat);
+  const onCursorChangeRef = useRef(onCursorChange);
+  const acceptAiSuggestionRef = useRef(onAcceptAiSuggestion);
+  const dismissAiSuggestionRef = useRef(onDismissAiSuggestion);
   const diagnosticsRef = useRef(diagnostics);
   const filePathsRef = useRef(filePaths);
   const initialValueRef = useRef(value);
@@ -530,9 +971,12 @@ function CodeEditor({ value, diagnostics, filePaths, onChange, onSave, onRunTest
     onRunTestsRef.current = onRunTests;
     onPublishRef.current = onPublish;
     onFormatRef.current = onFormat;
+    onCursorChangeRef.current = onCursorChange;
+    acceptAiSuggestionRef.current = onAcceptAiSuggestion;
+    dismissAiSuggestionRef.current = onDismissAiSuggestion;
     diagnosticsRef.current = diagnostics;
     filePathsRef.current = filePaths;
-  }, [diagnostics, filePaths, onChange, onFormat, onPublish, onRunTests, onSave]);
+  }, [diagnostics, filePaths, onAcceptAiSuggestion, onChange, onCursorChange, onDismissAiSuggestion, onFormat, onPublish, onRunTests, onSave]);
 
   useEffect(() => {
     if (!hostRef.current) return;
@@ -547,10 +991,16 @@ function CodeEditor({ value, diagnostics, filePaths, onChange, onSave, onRunTest
             { key: "Mod-Enter", preventDefault: true, run: () => (onRunTestsRef.current(), true) },
             { key: "Shift-Mod-Enter", preventDefault: true, run: () => (onPublishRef.current(), true) },
             { key: "Shift-Alt-f", preventDefault: true, run: () => (onFormatRef.current(), true) },
+            { key: "Tab", run: () => acceptAiSuggestionRef.current() },
+            { key: "Escape", run: () => dismissAiSuggestionRef.current() },
           ]),
           syntaxHighlighting(defaultHighlightStyle),
           odogwuSyntaxHighlighter,
           hoverTooltip(odogwuHoverTooltip),
+          inlineAiSuggestionExtension({
+            acceptRef: acceptAiSuggestionRef,
+            dismissRef: dismissAiSuggestionRef,
+          }),
           autocompletion({ override: [codeCompletions(filePathsRef)] }),
           linter((editorView) =>
             diagnosticsRef.current.map((item) => {
@@ -566,6 +1016,7 @@ function CodeEditor({ value, diagnostics, filePaths, onChange, onSave, onRunTest
           EditorView.lineWrapping,
           EditorView.updateListener.of((update) => {
             if (update.docChanged) onChangeRef.current(update.state.doc.toString());
+            if (update.selectionSet || update.docChanged) onCursorChangeRef.current(update.state.selection.main.head);
           }),
         ],
       }),
@@ -582,6 +1033,16 @@ function CodeEditor({ value, diagnostics, filePaths, onChange, onSave, onRunTest
     if (!view || view.state.doc.toString() === value) return;
     view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: value } });
   }, [value]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({
+      effects: setInlineAiSuggestionEffect.of(
+        aiSuggestion ? { text: aiSuggestion, from: view.state.selection.main.head } : null,
+      ),
+    });
+  }, [aiSuggestion]);
 
   return <div className="code-editor" ref={hostRef} />;
 }
@@ -614,6 +1075,7 @@ export function CodeLab() {
   const tenantScope = useTenantScopeArgs();
   const projects = useQuery(api.code.listProjects, { ...tenantScope, limit: 80 }) as CodeProjectRow[] | undefined;
   const createProject = useMutation(api.code.createProject);
+  const renameProject = useMutation(api.code.renameProject);
   const saveProjectFiles = useMutation(api.code.saveProjectFiles);
   const publishProject = useMutation(api.code.publishProject);
   const setProjectEnabled = useMutation(api.code.setProjectEnabled);
@@ -622,8 +1084,10 @@ export function CodeLab() {
 
   const [selectedProjectId, setSelectedProjectId] = useState<Id<"codeProjects"> | null>(null);
   const [loadedProjectId, setLoadedProjectId] = useState<Id<"codeProjects"> | null>(null);
-  const [files, setFiles] = useState<CodeProjectFile[]>(starterProjectFiles);
+  const [files, setFiles] = useState<CodeProjectFile[]>(() => cleanProjectFiles());
   const [activePath, setActivePath] = useState("main.odo");
+  const [editingProjectId, setEditingProjectId] = useState<Id<"codeProjects"> | null>(null);
+  const [editingProjectName, setEditingProjectName] = useState("");
   const [lastSavedFilesJson, setLastSavedFilesJson] = useState("");
   const [description, setDescription] = useState("");
   const [localTestJson, setLocalTestJson] = useState("");
@@ -632,10 +1096,18 @@ export function CodeLab() {
   const [fileDialog, setFileDialog] = useState<FileDialogState>(null);
   const [fileDialogError, setFileDialogError] = useState("");
   const [canvasPreview, setCanvasPreview] = useState<GeneratedCanvasPreview | null>(null);
+  const [cursorOffset, setCursorOffset] = useState(0);
+  const [aiSuggestion, setAiSuggestion] = useState<string | null>(null);
   const detail = useQuery(
     api.code.getProject,
     selectedProjectId ? { ...tenantScope, projectId: selectedProjectId, runLimit: 20 } : "skip",
   ) as CodeProjectDetail | undefined;
+
+  const selectActivePath = (path: string) => {
+    setActivePath(path);
+    setCursorOffset(0);
+    setAiSuggestion(null);
+  };
 
   useEffect(() => {
     if (!detail || loadedProjectId === detail.project._id) return;
@@ -647,8 +1119,10 @@ export function CodeLab() {
     let cancelled = false;
     queueMicrotask(() => {
       if (cancelled) return;
-      setFiles(nextFiles.length ? nextFiles : starterProjectFiles);
+      setFiles(nextFiles.length ? nextFiles : cleanProjectFiles(detail.project.name));
       setActivePath(nextFiles.some((file) => file.path === "main.odo") ? "main.odo" : nextFiles[0]?.path || "main.odo");
+      setCursorOffset(0);
+      setAiSuggestion(null);
       setDescription(loadedDescription);
       setLastSavedFilesJson(stableFilesJson(nextFiles));
       setLoadedProjectId(loadedId);
@@ -684,6 +1158,40 @@ export function CodeLab() {
 
   const replaceActiveFile = (content: string) => {
     setFiles((current) => current.map((file) => (file.path === activeFile.path ? { ...file, content } : file)));
+    setAiSuggestion(null);
+  };
+
+  const insertAtCursor = (snippet: string) => {
+    const offset = Math.max(0, Math.min(activeFile.content.length, cursorOffset));
+    replaceActiveFile(`${activeFile.content.slice(0, offset)}${snippet}${activeFile.content.slice(offset)}`);
+    setCursorOffset(offset + snippet.length);
+  };
+
+  const startProjectRename = (project: CodeProjectRow) => {
+    setEditingProjectId(project._id);
+    setEditingProjectName(project.name);
+  };
+
+  const cancelProjectRename = () => {
+    setEditingProjectId(null);
+    setEditingProjectName("");
+  };
+
+  const commitProjectRename = (project: CodeProjectRow) => {
+    const nextName = editingProjectName.trim();
+    if (!nextName || nextName === project.name) {
+      cancelProjectRename();
+      return;
+    }
+    void runAction(
+      "code-project:rename",
+      async () => {
+        await renameProject({ ...tenantScope, projectId: project._id, name: nextName });
+        if (project._id === selectedProjectId) writeTerminal("rename", `Project renamed to ${nextName}.`);
+      },
+      { pendingLabel: "Renaming project...", successMessage: "Project renamed." },
+    );
+    cancelProjectRename();
   };
 
   const onCreateProject = () => {
@@ -694,7 +1202,7 @@ export function CodeLab() {
         setSelectedProjectId(result.projectId);
         setLoadedProjectId(null);
         setFiles(result.files);
-        setActivePath("main.odo");
+        selectActivePath("main.odo");
         setLastSavedFilesJson(stableFilesJson(result.files));
       },
       { pendingLabel: "Creating project...", successMessage: "Project workspace created." },
@@ -800,7 +1308,7 @@ export function CodeLab() {
 
     if (fileDialog.mode === "create") {
       setFiles((current) => [...current, { path: nextPath, content: defaultFileTemplate(nextPath), language: "odogwu" }]);
-      setActivePath(nextPath);
+      selectActivePath(nextPath);
       closeFileDialog();
       return;
     }
@@ -814,14 +1322,14 @@ export function CodeLab() {
 
     if (fileDialog.mode === "duplicate") {
       setFiles((current) => [...current, { ...sourceFile, path: nextPath }]);
-      setActivePath(nextPath);
+      selectActivePath(nextPath);
       closeFileDialog();
       return;
     }
 
     if (activeFile.path === "main.odo") return;
     setFiles((current) => current.map((file) => (file.path === sourcePath ? { ...file, path: nextPath } : file)));
-    setActivePath(nextPath);
+    selectActivePath(nextPath);
     closeFileDialog();
   };
 
@@ -829,13 +1337,13 @@ export function CodeLab() {
     if (activeFile.path === "main.odo" || files.length <= 1) return;
     if (!window.confirm(`Delete ${activeFile.path}?`)) return;
     setFiles((current) => current.filter((file) => file.path !== activeFile.path));
-    setActivePath("main.odo");
+    selectActivePath("main.odo");
   };
 
   const onRestoreVersion = (filesJson: string) => {
     const restored = safeJson<CodeProjectFile[]>(filesJson, files);
     setFiles(restored);
-    setActivePath(restored.some((file) => file.path === "main.odo") ? "main.odo" : restored[0]?.path || "main.odo");
+    selectActivePath(restored.some((file) => file.path === "main.odo") ? "main.odo" : restored[0]?.path || "main.odo");
   };
 
   const onToggleEnabled = (enabled: boolean) => {
@@ -854,9 +1362,86 @@ export function CodeLab() {
   const publishRecord = getRecord("code-project:publish");
   const doneRecord = getRecord("code-project:done");
   const createRecord = getRecord("code-project:create");
+  const canvasRecord = getRecord("code-project:canvas");
+  const suggestRecord = getRecord("code-project:suggest");
+  const renameRecord = getRecord("code-project:rename");
+
+  const onSuggestCode = () => {
+    void runAction(
+      "code-project:suggest",
+      async () => {
+        const response = await fetch("/api/code/suggest", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            files,
+            activePath: activeFile.path,
+            cursorOffset,
+          }),
+        });
+        const payload = (await response.json().catch(() => ({}))) as { suggestion?: string; error?: string };
+        if (!response.ok) throw new Error(payload.error || `AI suggestion failed (${response.status}).`);
+        const suggestion = payload.suggestion?.trim() || "";
+        if (!suggestion) throw new Error("AI did not find a useful suggestion here.");
+        setAiSuggestion(suggestion);
+      },
+      { pendingLabel: "Getting a small AI code suggestion...", successMessage: "AI suggestion ready. Press Tab to accept." },
+    );
+  };
+
+  const onAcceptAiSuggestion = () => {
+    if (!aiSuggestion) return false;
+    insertAtCursor(aiSuggestion);
+    setAiSuggestion(null);
+    return true;
+  };
+
+  const onDismissAiSuggestion = () => {
+    if (!aiSuggestion) return false;
+    setAiSuggestion(null);
+    return true;
+  };
 
   const onGenerateCanvas = () => {
-    setCanvasPreview(buildCanvasPreview({ files, bundle: compileResult, projectName: activeProjectName, webhookBase }));
+    void runAction(
+      "code-project:canvas",
+      async () => {
+        const response = await fetch("/api/code/canvas", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            files,
+            projectName: activeProjectName,
+            webhookBase,
+          }),
+        });
+        const payload = (await response.json().catch(() => ({}))) as {
+          title?: string;
+          summary?: string[];
+          mermaid?: string;
+          generatedByAi?: boolean;
+          error?: string;
+        };
+        if (!response.ok || !payload.mermaid) {
+          throw new Error(payload.error || `Canvas generation failed (${response.status}).`);
+        }
+        setCanvasPreview(
+          buildCanvasPreview({
+            files,
+            bundle: compileResult,
+            projectName: activeProjectName,
+            webhookBase,
+            aiCanvas: {
+              title: payload.title,
+              summary: payload.summary,
+              mermaid: payload.mermaid,
+              generatedByAi: payload.generatedByAi,
+            },
+          }),
+        );
+      },
+      { pendingLabel: "Asking AI for a Mermaid canvas...", successMessage: "AI Mermaid canvas generated." },
+    );
   };
   const canvasIsStale = Boolean(canvasPreview && canvasPreview.hash !== stableFilesJson(files));
   const outlineItems = [
@@ -884,40 +1469,40 @@ export function CodeLab() {
     <section className="code-lab-shell">
       <header className="code-lab-topbar">
         <div className="code-lab-window-controls">
-          <button className="btn btn-ghost" type="button" onClick={() => router.back()}>
+          <CodeIconButton className="btn btn-ghost" icon="arrowLeft" label="Back" onClick={() => router.back()}>
             Back
-          </button>
+          </CodeIconButton>
           <div>
             <h2>Code Lab</h2>
             <p>{activeProjectName} · {activeStatus} · {activeFile.path}</p>
           </div>
         </div>
         <div className="code-lab-actions">
-          <button className="btn btn-ghost" type="button" onClick={() => router.push("/code/docs")}>
+          <CodeIconButton className="btn btn-ghost" icon="bookOpen" label="Docs" onClick={() => router.push("/code/docs")}>
             Docs
-          </button>
-          <button className="btn btn-ghost" type="button" onClick={() => {
+          </CodeIconButton>
+          <CodeIconButton className="btn btn-ghost" icon="spark" label="Load starter project" onClick={() => {
             setFiles(starterProjectFiles);
-            setActivePath("main.odo");
+            selectActivePath("main.odo");
             writeTerminal("starter", "Starter project loaded into the workspace.");
           }}>
             Starter
-          </button>
-          <button className="btn btn-ghost" type="button" onClick={onFormat}>
+          </CodeIconButton>
+          <CodeIconButton className="btn btn-ghost" icon="format" label="Format code" onClick={onFormat}>
             Format
-          </button>
-          <button className="btn btn-secondary" type="button" onClick={onRunTests} disabled={testRecord.pending}>
+          </CodeIconButton>
+          <CodeIconButton className="btn btn-secondary" icon="play" label="Run tests" onClick={onRunTests} disabled={testRecord.pending}>
             {testRecord.pending ? "Testing..." : "Run tests"}
-          </button>
-          <button className="btn btn-secondary" type="button" onClick={onSave} disabled={saveRecord.pending}>
+          </CodeIconButton>
+          <CodeIconButton className="btn btn-secondary" icon="save" label="Save all" onClick={onSave} disabled={saveRecord.pending}>
             {saveRecord.pending ? "Saving..." : "Save all"}
-          </button>
-          <button className="btn btn-primary" type="button" onClick={onPublish} disabled={!canPublish || publishRecord.pending}>
+          </CodeIconButton>
+          <CodeIconButton className="btn btn-primary" icon="upload" label="Publish" onClick={onPublish} disabled={!canPublish || publishRecord.pending}>
             {publishRecord.pending ? "Publishing..." : "Publish"}
-          </button>
-          <button className="btn btn-primary" type="button" onClick={onDoneCoding} disabled={doneRecord.pending}>
+          </CodeIconButton>
+          <CodeIconButton className="btn btn-primary" icon="check" label="Done coding" onClick={onDoneCoding} disabled={doneRecord.pending}>
             {doneRecord.pending ? "Finishing..." : "Done coding"}
-          </button>
+          </CodeIconButton>
         </div>
       </header>
 
@@ -935,33 +1520,69 @@ export function CodeLab() {
 
           <div className="code-lab-sidebar-section">Projects</div>
           {(projects || []).map((project) => (
-            <button
+            <div
               className={`code-program-row ${selectedProjectId === project._id ? "code-program-row-active" : ""}`}
               key={project._id}
-              type="button"
               onClick={() => {
                 setSelectedProjectId(project._id);
                 setLoadedProjectId(null);
               }}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter" && event.key !== " ") return;
+                event.preventDefault();
+                setSelectedProjectId(project._id);
+                setLoadedProjectId(null);
+              }}
+              role="button"
+              tabIndex={0}
             >
-              <strong>{project.name}</strong>
+              {editingProjectId === project._id ? (
+                <input
+                  aria-label="Project name"
+                  className="code-project-name-input"
+                  disabled={renameRecord.pending}
+                  onBlur={() => commitProjectRename(project)}
+                  onChange={(event) => setEditingProjectName(event.target.value)}
+                  onClick={(event) => event.stopPropagation()}
+                  onKeyDown={(event) => {
+                    event.stopPropagation();
+                    if (event.key === "Enter") event.currentTarget.blur();
+                    if (event.key === "Escape") cancelProjectRename();
+                  }}
+                  value={editingProjectName}
+                  autoFocus
+                />
+              ) : (
+                <button
+                  aria-label={`Rename ${project.name}`}
+                  className="code-project-name-button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    startProjectRename(project);
+                  }}
+                  title="Rename project"
+                  type="button"
+                >
+                  <strong>{project.name}</strong>
+                </button>
+              )}
               <span>{project.status} · {formatDate(project.updatedAt)}</span>
-            </button>
+            </div>
           ))}
 
           <div className="code-lab-sidebar-section">Files</div>
           <div className="code-file-actions">
-            <button type="button" onClick={() => openFileDialog("create")}>New</button>
-            <button type="button" onClick={() => openFileDialog("rename")} disabled={activeFile.path === "main.odo"}>Rename</button>
-            <button type="button" onClick={() => openFileDialog("duplicate")}>Copy</button>
-            <button type="button" onClick={onDeleteFile} disabled={activeFile.path === "main.odo"}>Delete</button>
+            <CodeIconButton icon="filePlus" label="New file" onClick={() => openFileDialog("create")} />
+            <CodeIconButton icon="rename" label="Rename file" onClick={() => openFileDialog("rename")} disabled={activeFile.path === "main.odo"} />
+            <CodeIconButton icon="copy" label="Copy file" onClick={() => openFileDialog("duplicate")} />
+            <CodeIconButton icon="trash" label="Delete file" onClick={onDeleteFile} disabled={activeFile.path === "main.odo"} />
           </div>
           {[...files].sort((a, b) => (a.path === "main.odo" ? -1 : b.path === "main.odo" ? 1 : a.path.localeCompare(b.path))).map((file) => (
             <button
               className={`code-file-row ${activeFile.path === file.path ? "code-file-row-active" : ""}`}
               key={file.path}
               type="button"
-              onClick={() => setActivePath(file.path)}
+              onClick={() => selectActivePath(file.path)}
             >
               <strong>{file.path}</strong>
               <span>
@@ -975,39 +1596,40 @@ export function CodeLab() {
           <div className="code-lab-menu-bar" role="toolbar" aria-label="Code editor menu">
             <div className="code-lab-menu-group">
               <span>File</span>
-              <button type="button" onClick={() => openFileDialog("create")}>New</button>
-              <button type="button" onClick={onSave} disabled={saveRecord.pending}>{saveRecord.pending ? "Saving" : "Save"}</button>
-              <button type="button" onClick={() => openFileDialog("rename")} disabled={activeFile.path === "main.odo"}>Rename</button>
-              <button type="button" onClick={() => openFileDialog("duplicate")}>Duplicate</button>
+              <CodeIconButton icon="filePlus" label="New file" onClick={() => openFileDialog("create")} />
+              <CodeIconButton icon="save" label={saveRecord.pending ? "Saving" : "Save"} onClick={onSave} disabled={saveRecord.pending} />
+              <CodeIconButton icon="rename" label="Rename file" onClick={() => openFileDialog("rename")} disabled={activeFile.path === "main.odo"} />
+              <CodeIconButton icon="copy" label="Duplicate file" onClick={() => openFileDialog("duplicate")} />
             </div>
             <div className="code-lab-menu-group">
               <span>Edit</span>
-              <button type="button" onClick={onFormat}>Format</button>
-              <button type="button" onClick={() => {
+              <CodeIconButton icon="format" label="Format code" onClick={onFormat} />
+              <CodeIconButton icon="spark" label="Load starter project" onClick={() => {
                 setFiles(starterProjectFiles);
-                setActivePath("main.odo");
+                selectActivePath("main.odo");
                 writeTerminal("starter", "Starter project loaded into the workspace.");
-              }}>Starter</button>
-              <button type="button" onClick={onGenerateCanvas}>Canvas</button>
-              <button type="button" onClick={() => router.push("/code/docs")}>Docs</button>
+              }} />
+              <CodeIconButton icon="diagram" label={canvasRecord.pending ? "Drawing canvas" : "Generate canvas"} onClick={onGenerateCanvas} disabled={canvasRecord.pending} />
+              <CodeIconButton icon="wand" label={suggestRecord.pending ? "Thinking" : "Suggest code"} onClick={onSuggestCode} disabled={suggestRecord.pending} />
+              <CodeIconButton icon="bookOpen" label="Docs" onClick={() => router.push("/code/docs")} />
             </div>
             <div className="code-lab-menu-group">
               <span>Run</span>
-              <button type="button" onClick={onRunTests} disabled={testRecord.pending}>{testRecord.pending ? "Testing" : "Tests"}</button>
-              <button type="button" onClick={onPublish} disabled={!canPublish || publishRecord.pending}>{publishRecord.pending ? "Publishing" : "Publish"}</button>
-              <button type="button" onClick={onDoneCoding} disabled={doneRecord.pending}>{doneRecord.pending ? "Running" : "Done"}</button>
+              <CodeIconButton icon="play" label={testRecord.pending ? "Testing" : "Run tests"} onClick={onRunTests} disabled={testRecord.pending} />
+              <CodeIconButton icon="upload" label={publishRecord.pending ? "Publishing" : "Publish"} onClick={onPublish} disabled={!canPublish || publishRecord.pending} />
+              <CodeIconButton icon="check" label={doneRecord.pending ? "Running" : "Done coding"} onClick={onDoneCoding} disabled={doneRecord.pending} />
             </div>
             <div className="code-lab-menu-group code-lab-menu-group-terminal">
               <span>Terminal</span>
-              <button type="button" onClick={() => {
+              <CodeIconButton icon="terminal" label="Preview terminal output" onClick={() => {
                 setLocalTestJson(JSON.stringify(localTestResult, null, 2));
                 writeTerminal("preview", localTestResult);
-              }}>Preview</button>
-              <button type="button" onClick={() => setTerminalOpen((open) => !open)}>{terminalOpen ? "Hide" : "Show"}</button>
-              <button type="button" onClick={() => {
+              }} />
+              <CodeIconButton icon={terminalOpen ? "eyeOff" : "eye"} label={terminalOpen ? "Hide terminal" : "Show terminal"} onClick={() => setTerminalOpen((open) => !open)} />
+              <CodeIconButton icon="trash" label="Clear terminal" onClick={() => {
                 setLocalTestJson("");
                 setTerminalOutput("");
-              }} disabled={!localTestJson && !terminalOutput}>Clear</button>
+              }} disabled={!localTestJson && !terminalOutput} />
             </div>
           </div>
           <div className="code-lab-editor-tabbar">
@@ -1018,19 +1640,23 @@ export function CodeLab() {
             value={activeFile.content}
             diagnostics={activeDiagnostics}
             filePaths={files.map((file) => file.path).filter((path) => path !== activeFile.path)}
+            aiSuggestion={aiSuggestion}
             onChange={replaceActiveFile}
             onSave={onSave}
             onRunTests={onRunTests}
             onPublish={onPublish}
             onFormat={onFormat}
+            onCursorChange={setCursorOffset}
+            onAcceptAiSuggestion={onAcceptAiSuggestion}
+            onDismissAiSuggestion={onDismissAiSuggestion}
           />
           {terminalOpen ? (
             <div className="code-terminal-panel" aria-label="Code Lab terminal">
               <header>
                 <strong>Terminal</strong>
                 <div>
-                  <button type="button" onClick={() => setTerminalOutput("")} disabled={!terminalOutput}>Clear</button>
-                  <button type="button" onClick={() => setTerminalOpen(false)}>Close</button>
+                  <CodeIconButton icon="trash" label="Clear terminal" onClick={() => setTerminalOutput("")} disabled={!terminalOutput} />
+                  <CodeIconButton icon="x" label="Close terminal" onClick={() => setTerminalOpen(false)} />
                 </div>
               </header>
               <pre>{terminalOutput || "No output."}</pre>
@@ -1051,7 +1677,7 @@ export function CodeLab() {
               <h3>Endpoints</h3>
               <div className="code-webhook-list">
                 {compileResult.manifest.webhooks.map((webhook) => (
-                  <button key={webhook.name} type="button" onClick={() => setActivePath(webhook.filePath)}>
+                  <button key={webhook.name} type="button" onClick={() => selectActivePath(webhook.filePath)}>
                     <strong>POST {webhookBase}/{webhook.name}</strong>
                     <span>{webhook.filePath}:{webhook.line}</span>
                   </button>
@@ -1065,7 +1691,7 @@ export function CodeLab() {
               <h3>Outline</h3>
               <div className="code-outline-list">
                 {outlineItems.map((item) => (
-                  <button key={item.key} type="button" onClick={() => setActivePath(item.filePath)}>
+                  <button key={item.key} type="button" onClick={() => selectActivePath(item.filePath)}>
                     <strong>{item.label}</strong>
                     <span>{item.filePath}:{item.line}</span>
                   </button>
@@ -1076,14 +1702,14 @@ export function CodeLab() {
 
           <section>
             <h3>Canvas</h3>
-            <button className="btn btn-secondary code-lab-wide-button" type="button" onClick={onGenerateCanvas}>
-              {canvasPreview ? "Regenerate canvas" : "Generate canvas"}
+            <button className="btn btn-secondary code-lab-wide-button" type="button" onClick={onGenerateCanvas} disabled={canvasRecord.pending}>
+              {canvasRecord.pending ? "Generating AI canvas..." : canvasPreview ? "Regenerate AI canvas" : "Generate AI canvas"}
             </button>
             {canvasPreview ? (
               <div className={`code-generated-canvas ${canvasIsStale ? "code-generated-canvas-stale" : ""}`}>
                 <div className="code-generated-canvas-head">
                   <strong>{canvasPreview.title}</strong>
-                  <span>{canvasIsStale ? "stale" : "current"}</span>
+                  <span>{canvasIsStale ? "stale" : canvasPreview.generatedByAi ? "AI" : "current"}</span>
                 </div>
                 <ul className="code-canvas-summary">
                   {canvasPreview.summary.map((line) => (
@@ -1096,7 +1722,7 @@ export function CodeLab() {
                       <h4>{lane.title}</h4>
                       {lane.items.length ? (
                         lane.items.slice(0, 10).map((item) => (
-                          <button key={`${lane.title}:${item.label}:${item.detail}`} type="button" onClick={() => item.filePath && setActivePath(item.filePath)}>
+                          <button key={`${lane.title}:${item.label}:${item.detail}`} type="button" onClick={() => item.filePath && selectActivePath(item.filePath)}>
                             <strong>{item.label}</strong>
                             <span>{item.detail}</span>
                           </button>

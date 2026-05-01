@@ -66,6 +66,12 @@ function summarizeOperation(operation: CompiledCodeOperation) {
   if (operation.module === "followups" && operation.operation === "create") return "Follow-up creation requested.";
   if (operation.module === "runtime") return `Runtime ${operation.operation} requested.`;
   if (operation.module === "outreach") return "Outreach run requested.";
+  if (operation.module === "platform") {
+    const via = typeof operation.args.via === "string" ? ` via ${operation.args.via}` : "";
+    const target = typeof operation.args.to === "string" ? ` to ${operation.args.to}` : "";
+    const targets = typeof operation.args.targets === "string" ? ` to ${operation.args.targets}` : "";
+    return `Cross-platform ${operation.operation}${via}${target || targets} requested.`;
+  }
   return `${operation.module}.${operation.operation} executed.`;
 }
 
