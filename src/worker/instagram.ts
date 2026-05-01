@@ -833,10 +833,9 @@ async function run() {
     }
   };
 
-  const executeSocialAction = async (action: InstagramClaimedSocialAction) => {
-    if (!ig) {
-      throw new Error("Instagram client is not initialized.");
-    }
+  let processingSocialActions = false;
+
+  const resolveSocialActionDelayBounds = async () => {
     const runtime = await readRuntimeSettings(convex);
     const socialDelayMin = Math.round(
       clamp(Math.max(runtime.instagramDmDelayMinMs ?? QUALITY_FIRST_IG_SOCIAL_DELAY_MIN_MS, QUALITY_FIRST_IG_SOCIAL_DELAY_MIN_MS), 5_000, 20 * 60_000),
@@ -844,7 +843,14 @@ async function run() {
     const socialDelayMax = Math.round(
       clamp(Math.max(runtime.instagramDmDelayMaxMs ?? QUALITY_FIRST_IG_SOCIAL_DELAY_MAX_MS, socialDelayMin), socialDelayMin, 30 * 60_000),
     );
-    await sleep(randomIntInclusive(socialDelayMin, socialDelayMax));
+    return { socialDelayMin, socialDelayMax };
+  };
+
+  const executeSocialAction = async (action: InstagramClaimedSocialAction, delayMs: number) => {
+    if (!ig) {
+      throw new Error("Instagram client is not initialized.");
+    }
+    await sleep(delayMs);
 
     let response: unknown;
     if (action.actionKind === "like_media") {
@@ -888,20 +894,22 @@ async function run() {
   };
 
   const pollSocialActions = async () => {
-    if (isShuttingDown || !ig) {
+    if (isShuttingDown || !ig || processingSocialActions) {
       return;
     }
+    processingSocialActions = true;
     try {
+      const { socialDelayMin, socialDelayMax } = await resolveSocialActionDelayBounds();
       const claimed = (await convex.mutation(convexRefs.instagramActionsClaimDue, {
         ...tenantConnectorArgs(),
         workerId,
         limit: 1,
-        leaseMs: 2 * 60_000,
+        leaseMs: socialDelayMax + 2 * 60_000,
       })) as InstagramClaimedSocialAction[];
 
       for (const action of claimed) {
         try {
-          await executeSocialAction(action);
+          await executeSocialAction(action, randomIntInclusive(socialDelayMin, socialDelayMax));
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
           await convex.mutation(convexRefs.instagramActionsMarkFailed, {
@@ -921,6 +929,8 @@ async function run() {
           detail: detail.slice(0, 300),
         })
         .catch(() => undefined);
+    } finally {
+      processingSocialActions = false;
     }
   };
 

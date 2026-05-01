@@ -26,7 +26,7 @@ function mockCtx(configValue?: string) {
         },
       }),
     },
-  } as Parameters<typeof isTenantConnectorEnabled>[0];
+  } as unknown as Parameters<typeof isTenantConnectorEnabled>[0];
 }
 
 const activePersonal: TenantBillingSnapshot = {
