@@ -9,7 +9,7 @@ This project combines:
 - stickers, memes, and optional voice notes so replies do not feel robotic
 - safe controls for when it should draft, send, pause, or ask you first
 
-This is a proprietary, self-hostable product. Deep technical references live in `docs/reference`.
+This is a source-available, noncommercial, self-hostable product. Deep technical references live in `docs/reference`.
 
 ## Table of Contents
 
@@ -257,15 +257,17 @@ bun test convex
 
 ## License
 
-This repository is proprietary and **not open source**. See [LICENSE](./LICENSE).
+This repository is source-available and **not open source**. See [LICENSE](./LICENSE), [USE_POLICY.md](./USE_POLICY.md), and [TRADEMARKS.md](./TRADEMARKS.md).
 
-- No rights are granted unless they are expressly authorized in a separate written agreement.
-- Self-hostability is a product and deployment feature, not a grant to copy, redistribute, or publish the source.
-- Do not publish the working tree or generated builds without explicit authorization.
+- You may read, fork, modify, and self-host Odogwu HQ for personal, noncommercial use.
+- Commercial use is not permitted.
+- You may not sell, host, resell, white-label, bundle, consult on, support, train on, or deploy Odogwu HQ or any fork for a business, client, customer, employer, paid community, or commercial product.
+- Self-hosting is free only for noncommercial use.
+- Odogwu HQ names, logos, marks, domains, icons, screenshots, trade dress, and brand assets are not licensed for use in forks.
 
 ## Contributing
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for private contribution workflow and contribution terms.
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for contribution workflow and contribution terms.
 
 ## Support and Security
 
@@ -277,18 +279,20 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for private contribution workflow and c
 
 Before any external distribution:
 
-1. Confirm the intended distribution channel: hosted service, desktop build, container image, or licensed source access.
+1. Confirm the intended distribution channel: public source, desktop build, container image, or release package.
 2. Confirm dependency license obligations for the chosen distribution format.
 3. Ensure secrets, auth artifacts, runtime state, and customer data are excluded.
-4. Ensure private admin, billing, tenant, and managed-secret features are only included in authorized builds.
+4. Ensure admin, billing, tenant, and managed-secret features do not expose private infrastructure or credentials.
 5. Confirm release notes and support terms match the actual distribution.
+6. Confirm all distributions include `LICENSE`, `NOTICE`, `USE_POLICY.md`, and `TRADEMARKS.md`.
 
 Manual repository settings still required:
 
-1. Keep the repository private unless a release plan explicitly says otherwise.
-2. Enable branch protection on `main` and require CI + CodeQL checks.
-3. Enable private vulnerability reporting and GitHub security features (secret scanning, Dependabot alerts, push protection).
-4. Scrub full git history for secrets before any authorized source handoff.
+1. Keep branch protection on `main` and require CI + CodeQL checks.
+2. Enable private vulnerability reporting and GitHub security features (secret scanning, Dependabot alerts, push protection).
+3. Scrub full git history for secrets before making the repository public.
+4. Add a repository description that says "source-available, free for noncommercial self-hosting, commercial use prohibited."
+5. Do not mark GitHub topics or package metadata as `open-source`.
 
 ## Reference Docs
 

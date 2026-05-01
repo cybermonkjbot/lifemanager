@@ -23,3 +23,6 @@ Describe the change and why it is needed.
 - [ ] No secrets or auth artifacts were committed.
 - [ ] Backward-compatibility impact is documented.
 - [ ] I considered security/privacy implications.
+- [ ] I confirm this contribution may be used under the contribution terms in `CONTRIBUTING.md`.
+- [ ] I did not add code, assets, models, datasets, generated output, or third-party material with incompatible license terms.
+- [ ] I preserved required license, notice, and trademark policy files.

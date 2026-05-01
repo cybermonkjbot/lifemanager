@@ -4,9 +4,25 @@ Thanks for contributing to Odogwu HQ.
 
 ## License Gate
 
-This is a proprietary repository. Do not submit external contributions unless the maintainers have explicitly authorized the work and the required contribution agreement is in place.
+This is a source-available, noncommercial repository. It is not open source.
+Commercial use is not permitted. See [LICENSE](./LICENSE),
+[USE_POLICY.md](./USE_POLICY.md), and [TRADEMARKS.md](./TRADEMARKS.md).
 
-By submitting an authorized contribution, you agree that the contribution may be used, modified, sublicensed, and distributed by the project owner under proprietary or other license terms.
+By submitting a contribution, you certify that:
+
+- you have the right to submit the contribution;
+- the contribution is your original work or is otherwise compatible with this
+  repository's license;
+- the contribution does not include secrets, customer data, private auth
+  artifacts, or third-party code that cannot be redistributed under this
+  repository's terms;
+- you grant Marvengrey Technologies Nig LTD a perpetual, worldwide,
+  irrevocable, royalty-free license to use, copy, modify, publish, distribute,
+  sublicense, relicense, and otherwise exploit your contribution as part of
+  Odogwu HQ and related products or services.
+
+If a maintainer asks you to sign a separate contributor agreement for a larger
+change, do not submit the contribution until that agreement is complete.
 
 ## Development Setup
 
@@ -43,6 +59,11 @@ bun run dev:all
 - Add or update tests for behavior changes.
 - Update docs when functionality or configuration changes.
 - Do not commit secrets, auth artifacts, or local runtime state.
+- Do not add dependencies, assets, models, datasets, generated output, or
+  copied snippets unless their licenses are compatible with noncommercial
+  source-available distribution.
+- Do not add names, logos, screenshots, or branding from third-party products
+  unless the project has permission to use them.
 
 ## Security and Sensitive Data
 

@@ -4,7 +4,7 @@
   "description": "AI communication double that can reply in your style across WhatsApp and Instagram.",
   "private": true,
   "author": "Marvengrey technologies Nig LTD",
-  "license": "UNLICENSED",
+  "license": "SEE LICENSE IN LICENSE",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/cybermonkjbot/lifemanager.git"
@@ -26,10 +26,13 @@
     "CODE_OF_CONDUCT.md",
     "CONTRIBUTING.md",
     "LICENSE",
+    "NOTICE",
     "README.md",
     "RELEASE.md",
     "SECURITY.md",
     "SUPPORT.md",
+    "TRADEMARKS.md",
+    "USE_POLICY.md",
     "bun.lock",
     "convex",
     "convex.json",
@@ -57,6 +60,10 @@
     "worker:raw": "bun run src/worker/index.ts",
     "worker:instagram": "bun run src/worker/supervisor.ts instagram",
     "worker:instagram:raw": "bun run src/worker/instagram.ts",
+    "worker:imessage": "bun run src/worker/supervisor.ts imessage",
+    "worker:imessage:raw": "bun run src/worker/imessage.ts",
+    "worker:telegram": "bun run src/worker/supervisor.ts telegram",
+    "worker:telegram:raw": "bun run src/worker/telegram.ts",
     "desktop:dev": "ODOGWU_DESKTOP_DEV=1 electron src/desktop/main.mjs",
     "desktop:dev:no-worker": "ODOGWU_DESKTOP_DEV=1 ODOGWU_DESKTOP_START_WORKER=0 electron src/desktop/main.mjs",
     "desktop:prepare:standalone": "node scripts/prepare-desktop-build.mjs",
@@ -76,7 +83,9 @@
     "dev:all": "concurrently -n next,convex,worker-wa,worker-ig -c cyan,magenta,yellow,green \"bun run dev:next\" \"bun run dev:convex\" \"bun run worker\" \"bun run worker:instagram\"",
     "build": "next build",
     "start": "mkdir -p .slm && sh -lc 'echo $$ > .slm/app.pid; exec next start'",
-    "lint": "bunx eslint ."
+    "lint": "bunx eslint .",
+    "test": "bun test $(find ./src ./convex ./shared \\( -name '*.test.ts' -o -name '*.test.tsx' \\) -print)",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@azure-rest/ai-inference": "^1.0.0-beta.6",
@@ -87,6 +96,7 @@
     "@codemirror/state": "^6.6.0",
     "@codemirror/view": "^6.41.1",
     "@lezer/highlight": "^1.2.3",
+    "@photon-ai/imessage-kit": "^3.0.0",
     "@splinetool/react-spline": "^4.1.0",
     "@xenova/transformers": "^2.17.2",
     "baileys": "^7.0.0-rc.9",
@@ -102,6 +112,7 @@
     "qrcode": "^1.5.4",
     "react": "19.2.4",
     "react-dom": "19.2.4",
+    "telegram": "^2.26.22",
     "zod": "^4.3.6"
   },
   "devDependencies": {

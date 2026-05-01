@@ -1,6 +1,7 @@
 # Release Process
 
-This repository is proprietary and is not published as an npm package by default.
+This repository is source-available for noncommercial use and is not published
+as an npm package by default.
 
 ## Release Checklist
 
@@ -17,6 +18,9 @@ This repository is proprietary and is not published as an npm package by default
 3. Verify docs
 - Confirm README and `docs/reference/*` reflect current behavior.
 - Confirm `.env.example` is still complete and sanitized.
+- Confirm `LICENSE`, `NOTICE`, `USE_POLICY.md`, and `TRADEMARKS.md` are
+  included in the release artifact.
+- Confirm release notes do not describe the project as open source.
 
 4. Promote to the release branch
 - Keep `main` as the playground branch.
@@ -34,6 +38,13 @@ This repository is proprietary and is not published as an npm package by default
 - Install the previous desktop version.
 - Publish the new release from `release`.
 - Launch the previous desktop version and confirm it downloads the GitHub Release update.
+
+7. Verify source hygiene before public release
+- Run secret scanning on the full git history.
+- Confirm local runtime directories such as `.slm`, `.wa_auth`, `.ig_auth`,
+  `.tmp`, `.next`, `dist`, and `node_modules` are not tracked.
+- Confirm third-party dependency licenses are compatible with the release
+  format.
 
 ## Patch Releases
 

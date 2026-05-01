@@ -23,11 +23,19 @@ Please include:
 - impact assessment
 - suggested mitigation if available
 
-## Proprietary Distribution Review
+## Source Distribution Review
 
-The hosted admin console, billing internals, tenant administration, and managed secret internals are private code. Do not publish the working tree or generated source snapshots without explicit authorization.
+Before making source, packages, installers, container images, or release
+artifacts available externally, verify that they exclude secrets, local auth
+state, customer data, generated runtime state, private deployment credentials,
+and infrastructure-only configuration.
 
-Before any external distribution, verify that the package, installer, container image, or licensed source handoff excludes secrets, local auth state, customer data, and any modules that are outside the authorized distribution scope.
+Public source releases must include `LICENSE`, `NOTICE`, `USE_POLICY.md`, and
+`TRADEMARKS.md`.
+
+The repository is source-available for noncommercial use only. Commercial use,
+hosted services, client deployments, paid support, resale, and white-labeling
+are not permitted.
 
 ## Response Targets
 

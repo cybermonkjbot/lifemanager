@@ -6,3 +6,6 @@ contact_links:
   - name: Support policy
     url: https://github.com/cybermonkjbot/lifemanager/blob/main/SUPPORT.md
     about: Read support scope and reporting expectations.
+  - name: License and allowed use
+    url: https://github.com/cybermonkjbot/lifemanager/blob/main/USE_POLICY.md
+    about: Read the source-available noncommercial use policy.

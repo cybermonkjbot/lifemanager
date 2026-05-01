@@ -20,3 +20,12 @@ To get help quickly, include:
 
 This project is maintained on a best-effort basis.
 Response times can vary.
+
+## License Questions
+
+Odogwu HQ is free to self-host for noncommercial use. Commercial use is not
+permitted. See [LICENSE](./LICENSE), [USE_POLICY.md](./USE_POLICY.md), and
+[TRADEMARKS.md](./TRADEMARKS.md).
+
+If you are unsure whether your use is commercial, assume it is not allowed
+unless the project owner confirms otherwise in writing.
