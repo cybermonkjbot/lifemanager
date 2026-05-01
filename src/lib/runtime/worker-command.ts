@@ -11,11 +11,15 @@ type WorkerCommand = {
 const ENTRY_ENV_BY_PROVIDER: Record<WorkerProvider, string> = {
   whatsapp: "ODOGWU_CONNECTOR_WHATSAPP_ENTRY",
   instagram: "ODOGWU_CONNECTOR_INSTAGRAM_ENTRY",
+  imessage: "ODOGWU_CONNECTOR_IMESSAGE_ENTRY",
+  telegram: "ODOGWU_CONNECTOR_TELEGRAM_ENTRY",
 };
 
 const SCRIPT_BY_PROVIDER: Record<WorkerProvider, string> = {
   whatsapp: "worker",
   instagram: "worker:instagram",
+  imessage: "worker:imessage",
+  telegram: "worker:telegram",
 };
 
 export function getWorkerCommand(provider: WorkerProvider, env: NodeJS.ProcessEnv = process.env): WorkerCommand {

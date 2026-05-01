@@ -18,6 +18,7 @@ export type VoiceModuleState = {
   pendingSamplePromptText?: string;
   pendingSampleMimeType?: string;
   installLogPath?: string;
+  installProgress?: number;
   installingPid?: number;
   lastError?: string;
 };
@@ -105,6 +106,7 @@ function normalizeState(raw: Partial<VoiceModuleState> | null | undefined): Voic
 
   const message = (raw.message || "").trim() || fallback.message;
   const updatedAt = Number.isFinite(raw.updatedAt) ? Number(raw.updatedAt) : Date.now();
+  const installProgress = Number(raw.installProgress);
 
   return {
     status,
@@ -119,6 +121,7 @@ function normalizeState(raw: Partial<VoiceModuleState> | null | undefined): Voic
     pendingSamplePromptText: raw.pendingSamplePromptText,
     pendingSampleMimeType: raw.pendingSampleMimeType,
     installLogPath: raw.installLogPath || fallback.installLogPath,
+    installProgress: Number.isFinite(installProgress) ? Math.max(0, Math.min(100, Math.round(installProgress))) : undefined,
     installingPid: Number.isFinite(raw.installingPid) ? Number(raw.installingPid) : undefined,
     lastError: raw.lastError,
   };

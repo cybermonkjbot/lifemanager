@@ -19,3 +19,9 @@ contextBridge.exposeInMainWorld("odogwuDesktopUpdates", {
     };
   },
 });
+
+contextBridge.exposeInMainWorld("odogwuDesktopNative", {
+  setBadgeCount: (count) => ipcRenderer.invoke("desktop-native-set-badge-count", count),
+  setProgress: (progress) => ipcRenderer.invoke("desktop-native-set-progress", progress),
+  openPath: (path) => ipcRenderer.invoke("desktop-native-open-path", path),
+});

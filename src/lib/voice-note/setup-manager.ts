@@ -21,6 +21,7 @@ import {
 const execFileAsync = promisify(execFile);
 const DEFAULT_INSTALL_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_SAMPLE_TIMEOUT_MS = 2 * 60 * 1000;
+type VoiceInstallProgressCallback = (progress: number, message: string) => void | Promise<void>;
 
 function parsePositiveInt(raw: string | undefined, fallback: number) {
   const parsed = Number(raw);
@@ -78,6 +79,7 @@ async function fileExists(path: string) {
 
 class VoiceNoteSetupManager {
   private isInstalling = false;
+  private activeInstallPromise: Promise<VoiceModuleStateSnapshot> | null = null;
 
   private async resetInstallLog() {
     await ensureVoiceModuleDataDir();
@@ -114,6 +116,16 @@ class VoiceNoteSetupManager {
     }
   }
 
+  private async updateInstallProgress(progress: number, message: string, onProgress?: VoiceInstallProgressCallback) {
+    await updateVoiceModuleState({
+      status: "installing",
+      message,
+      installProgress: progress,
+      lastError: undefined,
+    });
+    await onProgress?.(progress, message);
+  }
+
   private async getMissingVoicePackages(pythonBinPath: string, timeoutMs: number) {
     const modulePackages = [
       ["voxcpm", "voxcpm"],
@@ -148,7 +160,8 @@ class VoiceNoteSetupManager {
     }
   }
 
-  private async markReady(args: { modelId: string; pythonBinPath: string; reusedExisting: boolean }) {
+  private async markReady(args: { modelId: string; pythonBinPath: string; reusedExisting: boolean; onProgress?: VoiceInstallProgressCallback }) {
+    await this.updateInstallProgress(96, "Preparing voice sample.", args.onProgress);
     await this.preparePendingSample();
     const snapshot = await readVoiceModuleStateSnapshot();
     const hasSample = snapshot.hasSample;
@@ -164,8 +177,10 @@ class VoiceNoteSetupManager {
         : args.reusedExisting
           ? "Voice note packages are already available. Record a voice sample to enable cloning."
           : "Voice note module installed. Record a voice sample to enable cloning.",
+      installProgress: 100,
       lastError: undefined,
     });
+    await args.onProgress?.(100, "Voice note module is ready.");
     return await this.getState();
   }
 
@@ -223,7 +238,7 @@ class VoiceNoteSetupManager {
     return await readVoiceModuleStateSnapshot();
   }
 
-  async install(options?: { modelId?: string }): Promise<VoiceModuleStateSnapshot> {
+  async install(options?: { modelId?: string; onProgress?: VoiceInstallProgressCallback }): Promise<VoiceModuleStateSnapshot> {
     if (this.isInstalling) {
       return await this.getState();
     }
@@ -242,38 +257,50 @@ class VoiceNoteSetupManager {
         message: `Installing voice note module (${modelId})...`,
         modelId,
         installLogPath: getVoiceNoteInstallLogPath(),
+        installProgress: 6,
         pythonBinPath: undefined,
         lastError: undefined,
       });
+      await options?.onProgress?.(6, `Installing voice note module (${modelId})...`);
 
       const probeTimeoutMs = Math.min(60_000, installTimeoutMs);
+      await this.updateInstallProgress(14, "Checking existing voice environment.", options?.onProgress);
       const existingVenvReady =
         (await fileExists(pythonBinPath)) && (await this.commandSucceeds(pythonBinPath, ["--version"], probeTimeoutMs));
       if (existingVenvReady) {
+        await this.updateInstallProgress(24, "Checking installed voice packages.", options?.onProgress);
         const missingPackages = await this.getMissingVoicePackages(pythonBinPath, probeTimeoutMs);
         if (missingPackages.length === 0) {
-          return await this.markReady({ modelId, pythonBinPath, reusedExisting: true });
+          return await this.markReady({ modelId, pythonBinPath, reusedExisting: true, onProgress: options?.onProgress });
         }
       }
 
       if (!existingVenvReady) {
+        await this.updateInstallProgress(34, "Checking Python.", options?.onProgress);
         await this.runInstallCommand(basePythonBin, ["--version"], Math.min(25_000, installTimeoutMs));
+        await this.updateInstallProgress(44, "Checking base Python packages.", options?.onProgress);
         const baseMissingPackages = await this.getMissingVoicePackages(basePythonBin, probeTimeoutMs);
         if (baseMissingPackages.length === 0) {
-          return await this.markReady({ modelId, pythonBinPath: basePythonBin, reusedExisting: true });
+          return await this.markReady({ modelId, pythonBinPath: basePythonBin, reusedExisting: true, onProgress: options?.onProgress });
         }
+        await this.updateInstallProgress(54, "Creating isolated voice environment.", options?.onProgress);
         await this.runInstallCommand(basePythonBin, ["-m", "venv", venvDir], installTimeoutMs);
       }
 
+      await this.updateInstallProgress(62, "Verifying isolated voice environment.", options?.onProgress);
       await this.runInstallCommand(pythonBinPath, ["--version"], probeTimeoutMs);
+      await this.updateInstallProgress(68, "Resolving voice package requirements.", options?.onProgress);
       const missingPackages = await this.getMissingVoicePackages(pythonBinPath, probeTimeoutMs);
       if (missingPackages.length > 0) {
+        await this.updateInstallProgress(76, "Updating Python package installer.", options?.onProgress);
         await this.runInstallCommand(pythonBinPath, ["-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"], installTimeoutMs);
+        await this.updateInstallProgress(86, `Installing ${missingPackages.join(", ")}.`, options?.onProgress);
         await this.runInstallCommand(pythonBinPath, ["-m", "pip", "install", ...missingPackages], installTimeoutMs);
       }
+      await this.updateInstallProgress(92, "Verifying voice packages.", options?.onProgress);
       await this.runInstallCommand(pythonBinPath, ["-c", "import voxcpm, soundfile"], probeTimeoutMs);
 
-      return await this.markReady({ modelId, pythonBinPath, reusedExisting: missingPackages.length === 0 });
+      return await this.markReady({ modelId, pythonBinPath, reusedExisting: missingPackages.length === 0, onProgress: options?.onProgress });
     } catch (error) {
       const err = error instanceof Error ? error.message : String(error);
       await this.appendInstallLog(`ERROR: ${err}`);
@@ -281,12 +308,22 @@ class VoiceNoteSetupManager {
         status: "error",
         modelId,
         message: "Voice note module install failed. Check install log and retry.",
+        installProgress: undefined,
         lastError: err,
       });
       return await this.getState();
     } finally {
       this.isInstalling = false;
+      this.activeInstallPromise = null;
     }
+  }
+
+  async startInstall(options?: { modelId?: string; onProgress?: VoiceInstallProgressCallback }) {
+    if (!this.activeInstallPromise) {
+      this.activeInstallPromise = this.install(options);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    return await this.getState();
   }
 
   async saveSample(args: { audioBytes: Buffer; mimeType?: string; promptText?: string }) {
@@ -389,6 +426,7 @@ class VoiceNoteSetupManager {
       modelId: current.modelId,
       updatedAt: Date.now(),
       installLogPath: getVoiceNoteInstallLogPath(),
+      installProgress: undefined,
       sampleWavPath: undefined,
       samplePromptText: undefined,
       sampleMimeType: undefined,

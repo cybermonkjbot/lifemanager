@@ -3,16 +3,20 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { getRuntimeDataPath } from "./paths";
 
-export type WorkerProvider = "whatsapp" | "instagram";
+export type WorkerProvider = "whatsapp" | "instagram" | "imessage" | "telegram";
 
 const WORKER_PID_PATHS: Record<WorkerProvider, string> = {
   whatsapp: getRuntimeDataPath("worker.pid"),
   instagram: getRuntimeDataPath("worker-instagram.pid"),
+  imessage: getRuntimeDataPath("worker-imessage.pid"),
+  telegram: getRuntimeDataPath("worker-telegram.pid"),
 };
 
 const WORKER_SUPERVISOR_PID_PATHS: Record<WorkerProvider, string> = {
   whatsapp: getRuntimeDataPath("worker-supervisor.pid"),
   instagram: getRuntimeDataPath("worker-instagram-supervisor.pid"),
+  imessage: getRuntimeDataPath("worker-imessage-supervisor.pid"),
+  telegram: getRuntimeDataPath("worker-telegram-supervisor.pid"),
 };
 
 type StopWorkerResult = {

@@ -181,11 +181,19 @@ function isStaleRunningState(state: SetupPreparationState) {
 async function runPreparation() {
   try {
     const voiceManager = getVoiceNoteSetupManager();
+    const syncVoiceInstallProgress = async (voiceProgress: number, message: string) => {
+      await updateSetupPreparationState({
+        status: "running",
+        message,
+        detail: "Installing local voice packages.",
+        progress: Math.max(58, Math.min(96, 58 + Math.round(voiceProgress * 0.38))),
+      });
+    };
     const existingVoiceState = await voiceManager.getState();
     if (existingVoiceState.status === "ready") {
       const ffmpegReady = await commandWorks(process.env.SLM_FFMPEG_PATH || "ffmpeg", ["-version"]);
       const transcription = await resolveTranscriptionReadiness();
-      const verifiedVoiceState = await voiceManager.install();
+      const verifiedVoiceState = await voiceManager.install({ onProgress: syncVoiceInstallProgress });
       if (!ffmpegReady || !transcription.ready) {
         const details = [
           !ffmpegReady ? "Install ffmpeg for audio conversion." : "",
@@ -266,7 +274,7 @@ async function runPreparation() {
       progress: 58,
     });
 
-    const voiceState = await voiceManager.install();
+    const voiceState = await voiceManager.install({ onProgress: syncVoiceInstallProgress });
     if (voiceState.status === "ready") {
       if (!ffmpegReady || !transcription.ready) {
         const details = [

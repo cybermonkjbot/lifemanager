@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu, shell } from "electron";
+import { app, BrowserWindow, clipboard, ipcMain, Menu, screen, shell } from "electron";
 import { spawn } from "node:child_process";
 import { createDecipheriv, createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -11,6 +11,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, "..", "..");
 const appIconPath = join(projectRoot, "public", "icons", "icon.png");
 const preloadPath = join(__dirname, "preload.cjs");
+const appName = "Odogwu HQ";
+const appUserModelId = "com.odogwuhq.desktop";
+const appProtocol = "odogwuhq";
 const isDev = process.env.ODOGWU_DESKTOP_DEV === "1" || !app.isPackaged;
 const desktopRuntimeCookieName = "odogwu_desktop_runtime";
 const desktopRuntimeHeaderName = "x-odogwu-desktop-runtime";
@@ -18,6 +21,8 @@ const desktopRuntimeSecret = process.env.ODOGWU_DESKTOP_RUNTIME_SECRET || random
 const children = new Set();
 
 let mainWindow = null;
+let currentAppUrl = "";
+let pendingDeepLink = "";
 let updateCheckInFlight = false;
 let autoUpdater = null;
 let installingUpdate = false;
@@ -25,6 +30,7 @@ let updateState = {
   status: "idle",
   version: "",
   error: "",
+  progress: null,
 };
 
 function publishUpdateState(nextState) {
@@ -33,6 +39,100 @@ function publishUpdateState(nextState) {
     ...nextState,
   };
   mainWindow?.webContents.send("desktop-update-state", updateState);
+}
+
+function getNavigationTargets() {
+  return [
+    { label: "Home", path: "/", accelerator: "CommandOrControl+1" },
+    { label: "Review Queue", path: "/review", accelerator: "CommandOrControl+2" },
+    { label: "Conversations", path: "/conversations", accelerator: "CommandOrControl+3" },
+    { label: "Status", path: "/status", accelerator: "CommandOrControl+4" },
+    { label: "Media Library", path: "/media", accelerator: "CommandOrControl+5" },
+    { label: "Memes", path: "/memes" },
+    { label: "Catch Up", path: "/backlog" },
+    { label: "Settings", path: "/settings", accelerator: "CommandOrControl+," },
+  ];
+}
+
+function toAppUrl(appUrl, path) {
+  const target = new URL(appUrl);
+  const pathValue = String(path || "/");
+  if (pathValue.startsWith("http://") || pathValue.startsWith("https://")) {
+    return pathValue;
+  }
+  return new URL(pathValue.startsWith("/") ? pathValue : `/${pathValue}`, target.origin).toString();
+}
+
+async function showMainWindow(appUrl = currentAppUrl || "") {
+  if (!appUrl) {
+    return;
+  }
+
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    await createWindow(appUrl);
+  }
+
+  if (mainWindow?.isMinimized()) {
+    mainWindow.restore();
+  }
+  mainWindow?.show();
+  mainWindow?.focus();
+}
+
+async function navigateToPath(appUrl, path) {
+  await showMainWindow(appUrl);
+  const url = toAppUrl(appUrl, path);
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    await mainWindow.loadURL(url);
+  }
+}
+
+function getDeepLinkFromArgv(argv = process.argv) {
+  return argv.find((arg) => typeof arg === "string" && arg.startsWith(`${appProtocol}://`)) || "";
+}
+
+function getPathFromDeepLink(link) {
+  try {
+    const url = new URL(link);
+    if (url.protocol !== `${appProtocol}:`) {
+      return "";
+    }
+
+    const hostPath = url.hostname && url.hostname !== "open" ? `/${url.hostname}` : "";
+    const path = `${hostPath}${url.pathname || ""}` || "/";
+    return `${path}${url.search || ""}${url.hash || ""}`;
+  } catch {
+    return "";
+  }
+}
+
+async function handleDeepLink(link) {
+  const path = getPathFromDeepLink(link);
+  if (!path) {
+    return;
+  }
+  if (!currentAppUrl) {
+    pendingDeepLink = link;
+    return;
+  }
+  await navigateToPath(currentAppUrl, path);
+}
+
+function registerProtocolClient() {
+  if (app.isPackaged) {
+    app.setAsDefaultProtocolClient(appProtocol);
+    return;
+  }
+
+  app.setAsDefaultProtocolClient(appProtocol, process.execPath, [process.argv[1]]);
+}
+
+function configurePlatformIdentity() {
+  app.setName(appName);
+  if (process.platform === "win32") {
+    app.setAppUserModelId(appUserModelId);
+  }
+  registerProtocolClient();
 }
 
 function quoteWindowsArg(value) {
@@ -363,33 +463,72 @@ function startWhatsappWorker(appUrl) {
   return spawnManaged("WhatsApp connector", getBunBin(), ["run", "worker"], env);
 }
 
+function createNavigationMenuItems(appUrl) {
+  return getNavigationTargets().map((target) => ({
+    label: target.label,
+    accelerator: target.accelerator,
+    click: () => {
+      void navigateToPath(appUrl, target.path);
+    },
+  }));
+}
+
 function createMenu(appUrl) {
+  const navigationItems = createNavigationMenuItems(appUrl);
+  const hostedUrl = process.env.ODOGWU_HOSTED_DASHBOARD_URL;
   const template = [
+    ...(process.platform === "darwin"
+      ? [
+          {
+            label: appName,
+            submenu: [
+              { role: "about" },
+              { type: "separator" },
+              {
+                label: "Settings...",
+                accelerator: "Command+,",
+                click: () => {
+                  void navigateToPath(appUrl, "/settings");
+                },
+              },
+              { type: "separator" },
+              { role: "services" },
+              { type: "separator" },
+              { role: "hide" },
+              { role: "hideOthers" },
+              { role: "unhide" },
+              { type: "separator" },
+              { role: "quit" },
+            ],
+          },
+        ]
+      : []),
     {
-      label: "Odogwu HQ",
+      label: "File",
       submenu: [
         {
-          label: "Open Local App",
+          label: "Open Home",
+          accelerator: "CommandOrControl+O",
           click: () => {
-            if (mainWindow) {
-              mainWindow.loadURL(appUrl);
-              mainWindow.show();
-            }
+            void navigateToPath(appUrl, "/");
           },
         },
         {
           label: "Open Hosted Dashboard",
           click: () => {
-            const hostedUrl = process.env.ODOGWU_HOSTED_DASHBOARD_URL;
             if (hostedUrl) {
               shell.openExternal(hostedUrl);
             }
           },
-          enabled: Boolean(process.env.ODOGWU_HOSTED_DASHBOARD_URL),
+          enabled: Boolean(hostedUrl),
         },
         { type: "separator" },
-        { role: "quit" },
+        ...(process.platform === "darwin" ? [{ role: "close" }] : [{ role: "quit" }]),
       ],
+    },
+    {
+      label: "Navigate",
+      submenu: navigationItems,
     },
     {
       label: "Edit",
@@ -400,6 +539,9 @@ function createMenu(appUrl) {
         { role: "cut" },
         { role: "copy" },
         { role: "paste" },
+        { role: "pasteAndMatchStyle" },
+        { role: "delete" },
+        { type: "separator" },
         { role: "selectAll" },
       ],
     },
@@ -417,26 +559,320 @@ function createMenu(appUrl) {
         { role: "togglefullscreen" },
       ],
     },
+    {
+      label: "Window",
+      submenu:
+        process.platform === "darwin"
+          ? [{ role: "minimize" }, { role: "zoom" }, { type: "separator" }, { role: "front" }]
+          : [{ role: "minimize" }, { role: "close" }],
+    },
+    {
+      role: "help",
+      submenu: [
+        {
+          label: "Open Project on GitHub",
+          click: () => {
+            shell.openExternal("https://github.com/cybermonkjbot/lifemanager");
+          },
+        },
+      ],
+    },
   ];
 
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
+function configureDockMenu(appUrl) {
+  if (process.platform !== "darwin" || !app.dock) {
+    return;
+  }
+
+  app.dock.setMenu(
+    Menu.buildFromTemplate([
+      {
+        label: "Open Review Queue",
+        click: () => {
+          void navigateToPath(appUrl, "/review");
+        },
+      },
+      {
+        label: "Open Conversations",
+        click: () => {
+          void navigateToPath(appUrl, "/conversations");
+        },
+      },
+      {
+        label: "Open Settings",
+        click: () => {
+          void navigateToPath(appUrl, "/settings");
+        },
+      },
+    ]),
+  );
+}
+
+function configureWindowsJumpList() {
+  if (process.platform !== "win32") {
+    return;
+  }
+
+  app.setJumpList([
+    {
+      type: "tasks",
+      items: [
+        {
+          type: "task",
+          title: "Open Review Queue",
+          description: "Review pending replies and follow-ups",
+          program: process.execPath,
+          args: `${appProtocol}://review`,
+          iconPath: appIconPath,
+          iconIndex: 0,
+        },
+        {
+          type: "task",
+          title: "Open Conversations",
+          description: "Go straight to conversations",
+          program: process.execPath,
+          args: `${appProtocol}://conversations`,
+          iconPath: appIconPath,
+          iconIndex: 0,
+        },
+        {
+          type: "task",
+          title: "Open Settings",
+          description: "Adjust desktop and automation settings",
+          program: process.execPath,
+          args: `${appProtocol}://settings`,
+          iconPath: appIconPath,
+          iconIndex: 0,
+        },
+      ],
+    },
+    { type: "recent" },
+  ]);
+}
+
+function getWindowStatePath() {
+  return join(app.getPath("userData"), "window-state.json");
+}
+
+function readWindowState() {
+  try {
+    const parsed = JSON.parse(readFileSync(getWindowStatePath(), "utf8"));
+    if (!Number.isFinite(parsed.width) || !Number.isFinite(parsed.height)) {
+      return {};
+    }
+
+    const bounds = {
+      width: Math.max(1040, Math.round(parsed.width)),
+      height: Math.max(720, Math.round(parsed.height)),
+      ...(Number.isFinite(parsed.x) ? { x: Math.round(parsed.x) } : {}),
+      ...(Number.isFinite(parsed.y) ? { y: Math.round(parsed.y) } : {}),
+    };
+    if (!Number.isFinite(bounds.x) || !Number.isFinite(bounds.y)) {
+      return {
+        ...bounds,
+        isMaximized: Boolean(parsed.isMaximized),
+        isFullScreen: Boolean(parsed.isFullScreen),
+      };
+    }
+
+    const display = screen.getDisplayMatching(bounds);
+    const visibleEnough =
+      bounds.x < display.workArea.x + display.workArea.width - 80 &&
+      bounds.y < display.workArea.y + display.workArea.height - 80 &&
+      bounds.x + bounds.width > display.workArea.x + 80 &&
+      bounds.y + bounds.height > display.workArea.y + 80;
+
+    return visibleEnough
+      ? {
+          ...bounds,
+          isMaximized: Boolean(parsed.isMaximized),
+          isFullScreen: Boolean(parsed.isFullScreen),
+        }
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeWindowState(window) {
+  if (!window || window.isDestroyed()) {
+    return;
+  }
+
+  const bounds = window.isMaximized() ? window.getNormalBounds() : window.getBounds();
+  writeFileSync(
+    getWindowStatePath(),
+    JSON.stringify(
+      {
+        ...bounds,
+        isMaximized: window.isMaximized(),
+        isFullScreen: window.isFullScreen(),
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+}
+
+function normalizeContextMenuTemplate(template) {
+  return template.filter((item, index, items) => {
+    if (item.type !== "separator") {
+      return true;
+    }
+    return index > 0 && index < items.length - 1 && items[index - 1]?.type !== "separator";
+  });
+}
+
+function installContextMenu(window) {
+  window.webContents.on("context-menu", (_event, params) => {
+    const template = [];
+
+    if (params.linkURL) {
+      template.push(
+        {
+          label: "Open Link in Browser",
+          click: () => {
+            shell.openExternal(params.linkURL);
+          },
+        },
+        {
+          label: "Copy Link",
+          click: () => {
+            clipboard.writeText(params.linkURL);
+          },
+        },
+        { type: "separator" },
+      );
+    }
+
+    if (params.mediaType === "image") {
+      template.push(
+        {
+          label: "Copy Image",
+          click: () => {
+            window.webContents.copyImageAt(params.x, params.y);
+          },
+        },
+        {
+          label: "Copy Image Address",
+          enabled: Boolean(params.srcURL),
+          click: () => {
+            clipboard.writeText(params.srcURL);
+          },
+        },
+        { type: "separator" },
+      );
+    }
+
+    if (params.isEditable) {
+      for (const suggestion of params.dictionarySuggestions?.slice(0, 5) || []) {
+        template.push({
+          label: suggestion,
+          click: () => {
+            window.webContents.replaceMisspelling(suggestion);
+          },
+        });
+      }
+      if (params.misspelledWord) {
+        template.push({
+          label: `Add "${params.misspelledWord}" to Dictionary`,
+          click: () => {
+            window.webContents.session.addWordToSpellCheckerDictionary(params.misspelledWord);
+          },
+        });
+      }
+      if (params.misspelledWord || params.dictionarySuggestions?.length) {
+        template.push({ type: "separator" });
+      }
+      template.push(
+        { role: "undo", enabled: params.editFlags.canUndo },
+        { role: "redo", enabled: params.editFlags.canRedo },
+        { type: "separator" },
+        { role: "cut", enabled: params.editFlags.canCut },
+        { role: "copy", enabled: params.editFlags.canCopy },
+        { role: "paste", enabled: params.editFlags.canPaste },
+        { role: "pasteAndMatchStyle", enabled: params.editFlags.canPaste },
+        { role: "delete", enabled: params.editFlags.canDelete },
+        { type: "separator" },
+        { role: "selectAll", enabled: params.editFlags.canSelectAll },
+      );
+    } else if (params.selectionText) {
+      template.push({ role: "copy" }, { role: "selectAll" });
+    }
+
+    if (isDev) {
+      if (template.length > 0) {
+        template.push({ type: "separator" });
+      }
+      template.push({
+        label: "Inspect Element",
+        click: () => {
+          window.webContents.inspectElement(params.x, params.y);
+        },
+      });
+    }
+
+    const normalizedTemplate = normalizeContextMenuTemplate(template);
+    if (normalizedTemplate.length > 0) {
+      Menu.buildFromTemplate(normalizedTemplate).popup({ window });
+    }
+  });
+}
+
 async function createWindow(appUrl) {
+  const windowState = readWindowState();
   mainWindow = new BrowserWindow({
-    width: 1320,
-    height: 900,
+    width: windowState.width || 1320,
+    height: windowState.height || 900,
+    ...(Number.isFinite(windowState.x) ? { x: windowState.x } : {}),
+    ...(Number.isFinite(windowState.y) ? { y: windowState.y } : {}),
     minWidth: 1040,
     minHeight: 720,
-    title: "Odogwu HQ",
+    title: appName,
     icon: appIconPath,
     backgroundColor: "#0f1117",
+    show: false,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
       preload: preloadPath,
       sandbox: true,
     },
+  });
+
+  installContextMenu(mainWindow);
+
+  if (windowState.isMaximized) {
+    mainWindow.maximize();
+  } else if (windowState.isFullScreen) {
+    mainWindow.setFullScreen(true);
+  }
+
+  let windowStateSaveTimer = null;
+  const scheduleWindowStateSave = () => {
+    if (windowStateSaveTimer) {
+      clearTimeout(windowStateSaveTimer);
+    }
+    windowStateSaveTimer = setTimeout(() => writeWindowState(mainWindow), 350);
+  };
+
+  mainWindow.on("ready-to-show", () => {
+    mainWindow?.show();
+  });
+  mainWindow.on("resize", scheduleWindowStateSave);
+  mainWindow.on("move", scheduleWindowStateSave);
+  mainWindow.on("close", () => {
+    if (windowStateSaveTimer) {
+      clearTimeout(windowStateSaveTimer);
+    }
+    writeWindowState(mainWindow);
+  });
+  mainWindow.on("closed", () => {
+    mainWindow = null;
   });
 
   await mainWindow.webContents.session.cookies.set({
@@ -502,20 +938,24 @@ async function setupAutoUpdates() {
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
   autoUpdater.on("checking-for-update", () => {
-    publishUpdateState({ status: "checking", error: "" });
+    publishUpdateState({ status: "checking", error: "", progress: null });
   });
   autoUpdater.on("update-available", (info) => {
-    publishUpdateState({ status: "downloading", version: info?.version || "", error: "" });
+    publishUpdateState({ status: "downloading", version: info?.version || "", error: "", progress: 0 });
   });
   autoUpdater.on("update-not-available", () => {
-    publishUpdateState({ status: "idle", error: "" });
+    publishUpdateState({ status: "idle", error: "", progress: null });
   });
   autoUpdater.on("error", (error) => {
-    publishUpdateState({ status: "error", error: error?.message || "Update check failed." });
+    publishUpdateState({ status: "error", error: error?.message || "Update check failed.", progress: null });
     console.error("[desktop] update check failed:", error);
   });
+  autoUpdater.on("download-progress", (progress) => {
+    const percent = Math.max(0, Math.min(100, Math.round(Number(progress?.percent) || 0)));
+    publishUpdateState({ status: "downloading", progress: percent, error: "" });
+  });
   autoUpdater.on("update-downloaded", (info) => {
-    publishUpdateState({ status: "ready", version: info?.version || updateState.version || "", error: "" });
+    publishUpdateState({ status: "ready", version: info?.version || updateState.version || "", error: "", progress: 100 });
     console.log("[desktop] update downloaded; it will install when the app quits.");
   });
 
@@ -548,7 +988,7 @@ ipcMain.handle("desktop-update-restart", async () => {
 
   try {
     installingUpdate = true;
-    publishUpdateState({ status: "restarting", error: "" });
+    publishUpdateState({ status: "restarting", error: "", progress: 100 });
     await stopChildren();
     autoUpdater.quitAndInstall(false, true);
     return { ok: true };
@@ -558,6 +998,29 @@ ipcMain.handle("desktop-update-restart", async () => {
     publishUpdateState({ status: "ready", error: message });
     return { ok: false, error: message };
   }
+});
+
+ipcMain.handle("desktop-native-set-badge-count", (_event, value) => {
+  const count = Math.max(0, Math.trunc(Number(value) || 0));
+  app.setBadgeCount(count);
+  if (process.platform === "darwin" && app.dock) {
+    app.dock.setBadge(count > 0 ? String(count) : "");
+  }
+  return { ok: true };
+});
+
+ipcMain.handle("desktop-native-set-progress", (_event, value) => {
+  const progress = Number(value);
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return { ok: false, error: "Main window is not available." };
+  }
+  mainWindow.setProgressBar(Number.isFinite(progress) ? Math.max(-1, Math.min(1, progress)) : -1);
+  return { ok: true };
+});
+
+ipcMain.handle("desktop-native-open-path", async (_event, path) => {
+  await navigateToPath(currentAppUrl, String(path || "/"));
+  return { ok: true };
 });
 
 async function stopChildren() {
@@ -578,28 +1041,62 @@ async function stopChildren() {
   }
 }
 
-app.setName("Odogwu HQ");
-if (process.platform === "darwin" && app.dock) {
-  app.dock.setIcon(appIconPath);
-}
+configurePlatformIdentity();
 
-app.whenReady()
-  .then(async () => {
-    const port = Number(process.env.ODOGWU_DESKTOP_PORT || "") || (await findOpenPort());
-    const appUrl = await startLocalAppRuntime(port);
-    startWhatsappWorker(appUrl);
-    createMenu(appUrl);
-    await createWindow(appUrl);
-    await setupAutoUpdates();
-  })
-  .catch((error) => {
-    console.error("[desktop] failed to launch:", error);
-    app.quit();
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on("second-instance", (_event, argv) => {
+    const deepLink = getDeepLinkFromArgv(argv);
+    if (deepLink) {
+      void handleDeepLink(deepLink);
+      return;
+    }
+    void showMainWindow();
   });
 
+  app.on("open-url", (event, url) => {
+    event.preventDefault();
+    void handleDeepLink(url);
+  });
+
+  app.whenReady()
+    .then(async () => {
+      if (process.platform === "darwin" && app.dock) {
+        app.dock.setIcon(appIconPath);
+      }
+
+      const port = Number(process.env.ODOGWU_DESKTOP_PORT || "") || (await findOpenPort());
+      const appUrl = await startLocalAppRuntime(port);
+      currentAppUrl = appUrl;
+      startWhatsappWorker(appUrl);
+      createMenu(appUrl);
+      configureDockMenu(appUrl);
+      configureWindowsJumpList();
+      await createWindow(appUrl);
+      await setupAutoUpdates();
+
+      const startupDeepLink = pendingDeepLink || getDeepLinkFromArgv(process.argv);
+      pendingDeepLink = "";
+      if (startupDeepLink) {
+        await handleDeepLink(startupDeepLink);
+      }
+    })
+    .catch((error) => {
+      console.error("[desktop] failed to launch:", error);
+      app.quit();
+    });
+}
+
 app.on("activate", () => {
-  if (BrowserWindow.getAllWindows().length === 0 && mainWindow) {
-    mainWindow.show();
+  void showMainWindow();
+});
+
+app.on("window-all-closed", () => {
+  if (process.platform !== "darwin") {
+    app.quit();
   }
 });
 

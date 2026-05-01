@@ -303,7 +303,7 @@ type OutboxClaimedItem = {
   threadId: string;
   toolRunId?: string;
   jid: string;
-  messageProvider: "whatsapp" | "instagram";
+  messageProvider: "whatsapp" | "instagram" | "imessage" | "telegram";
   outreachMode?: "proactive" | "good_morning" | "compliment";
   contextPack?: ContextPackSnapshot;
   messageText: string;
@@ -2010,6 +2010,7 @@ async function run() {
     const verifiedConnector = await convex
       .mutation(convexRefs.tenantAccountsVerifyConnectorToken, {
         tokenHash: connectorTokenHash,
+        provider: "whatsapp",
       })
       .catch(() => null);
     if (!verifiedConnector) {

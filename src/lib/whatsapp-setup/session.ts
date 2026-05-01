@@ -5,8 +5,9 @@ import { ConvexHttpClient } from "convex/browser";
 import { convexRefs } from "../convex-refs";
 import { getWorkerCommand } from "../runtime/worker-command";
 import { ensureWorkerStopped, getWorkerRuntimeStatus } from "../runtime/worker-lock";
+import { readLocalTenantConnectorCredentials, tenantConnectorEnv, verifyLocalTenantConnectorAccess } from "../tenant-connector-runtime";
 
-type SetupStatus = "idle" | "starting" | "qr_ready" | "code_ready" | "syncing" | "connected" | "error";
+type SetupStatus = "idle" | "starting" | "qr_ready" | "code_ready" | "connecting" | "syncing" | "connected" | "error";
 export type SetupMode = "qr" | "pairing_code";
 
 export type SetupStartOptions = {
@@ -115,7 +116,12 @@ class WhatsAppSetupManager {
       });
 
       try {
-        const workerCommand = getWorkerCommand("whatsapp");
+        const connectorCredentials = await readLocalTenantConnectorCredentials();
+        const workerEnv = {
+          ...process.env,
+          ...tenantConnectorEnv(connectorCredentials),
+        };
+        const workerCommand = getWorkerCommand("whatsapp", workerEnv);
         const child = spawn(workerCommand.command, workerCommand.args, {
           cwd: ".",
           env: workerCommand.env,
@@ -213,7 +219,7 @@ class WhatsAppSetupManager {
       ...next,
       updatedAt: Date.now(),
     };
-    void this.pushStateToConvex();
+    void this.pushStateToConvex(this.state);
   }
 
   private getConvexClient() {
@@ -228,7 +234,7 @@ class WhatsAppSetupManager {
     return this.convexClient;
   }
 
-  private async pushStateToConvex(forcedState?: SetupState) {
+  private async pushStateToConvex(forcedState?: Omit<SetupState, "hasAuth"> & { hasAuth?: boolean }) {
     const client = this.getConvexClient();
     if (!client) {
       return;
@@ -239,18 +245,24 @@ class WhatsAppSetupManager {
       forcedState ||
       ({
         ...this.state,
-        hasAuth,
-      } satisfies SetupState);
+      } satisfies Omit<SetupState, "hasAuth">);
 
     try {
+      const connectorCredentials = await readLocalTenantConnectorCredentials();
       await client.mutation(convexRefs.systemUpsertSetupStatus, {
+        ...(connectorCredentials
+          ? {
+              tenantId: connectorCredentials.tenantId,
+              connectorTokenHash: connectorCredentials.connectorTokenHash,
+            }
+          : {}),
         provider: "whatsapp",
         status: snapshot.status,
         mode: snapshot.mode,
         message: snapshot.message,
         qrDataUrl: snapshot.qrDataUrl,
         pairingCode: snapshot.pairingCode,
-        hasAuth: snapshot.hasAuth,
+        hasAuth,
         updatedAt: snapshot.updatedAt,
       });
     } catch {
@@ -267,7 +279,14 @@ class WhatsAppSetupManager {
     const authState = hasAuth ?? (await this.hasRegisteredCreds());
 
     try {
+      const connectorCredentials = await readLocalTenantConnectorCredentials();
       await client.mutation(convexRefs.systemReportSetupListener, {
+        ...(connectorCredentials
+          ? {
+              tenantId: connectorCredentials.tenantId,
+              connectorTokenHash: connectorCredentials.connectorTokenHash,
+            }
+          : {}),
         provider: "whatsapp",
         listenerActive,
         listenerMessage,
@@ -561,21 +580,25 @@ class WhatsAppSetupManager {
 
       if (update.connection === "open") {
         connectionOpened = true;
+        const mode = this.setupMode;
+        this.clearRetryTimer();
+        this.retryCount = 0;
+        this.setState({
+          status: "connecting",
+          mode,
+          message: "QR scanned. Connecting to WhatsApp...",
+          qrDataUrl: undefined,
+          pairingCode: undefined,
+        });
+
+        await this.sleep(500);
+
         try {
           await saveCreds();
         } catch {
           // best effort auth flush before closing temporary setup socket
         }
 
-        const mode = this.setupMode;
-        const persistedAuth = await this.waitForRegisteredCreds(5000);
-        if (persistedAuth) {
-          this.markConnectedAndStopSetupSocket(mode);
-          return;
-        }
-
-        this.clearRetryTimer();
-        this.retryCount = 0;
         this.setState({
           status: "syncing",
           mode,
@@ -583,6 +606,13 @@ class WhatsAppSetupManager {
           qrDataUrl: undefined,
           pairingCode: undefined,
         });
+
+        const persistedAuth = await this.waitForRegisteredCreds(5000);
+        if (persistedAuth) {
+          this.markConnectedAndStopSetupSocket(mode);
+          return;
+        }
+
         return;
       }
 
@@ -687,7 +717,7 @@ class WhatsAppSetupManager {
     const hasExplicitInvalidation = this.hasExplicitInvalidationMessage(this.state.message);
     const setupSessionActive = Boolean(this.socket) && !this.manuallyStopped;
 
-    if (!hasAuth && this.state.status === "syncing") {
+    if (!hasAuth && (this.state.status === "connecting" || this.state.status === "syncing")) {
       const syncAgeMs = Date.now() - this.state.updatedAt;
       if (syncAgeMs <= WhatsAppSetupManager.SYNCING_GRACE_MS) {
         return {
@@ -770,7 +800,7 @@ class WhatsAppSetupManager {
       return snapshot;
     }
 
-    if (hasAuth && (this.state.status === "syncing" || this.state.status === "connected")) {
+    if (hasAuth && (this.state.status === "connecting" || this.state.status === "syncing" || this.state.status === "connected")) {
       if (setupSessionActive) {
         const snapshot: SetupState = {
           ...this.state,
@@ -837,6 +867,17 @@ class WhatsAppSetupManager {
     }
 
     const mode: SetupMode = options?.mode === "pairing_code" ? "pairing_code" : "qr";
+    if (!(await verifyLocalTenantConnectorAccess("whatsapp"))) {
+      this.setState({
+        status: "error",
+        mode,
+        message: "WhatsApp is disabled for this tenant plan. Enable it from admin entitlements before connecting.",
+        qrDataUrl: undefined,
+        pairingCode: undefined,
+      });
+      return this.getState();
+    }
+
     const normalizedPhone = this.normalizePhone(options?.phoneNumber);
     if (mode === "pairing_code" && normalizedPhone.length < 8) {
       this.setState({

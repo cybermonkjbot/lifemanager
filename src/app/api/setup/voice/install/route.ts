@@ -32,6 +32,6 @@ export async function POST(request: NextRequest) {
   }
 
   const manager = getVoiceNoteSetupManager();
-  const state = await manager.install({ modelId });
+  const state = await manager.startInstall({ modelId });
   return NextResponse.json(state);
 }

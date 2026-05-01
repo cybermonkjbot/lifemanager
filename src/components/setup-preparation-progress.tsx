@@ -152,7 +152,14 @@ export function SetupPreparationProgress({
           <span>{statusLabel}</span>
           <strong>{state.message}</strong>
         </div>
-        <div className="setup-prep-mini-track" aria-label={`Preparation ${progress}% complete`}>
+        <div
+          className="setup-prep-mini-track"
+          role="progressbar"
+          aria-label="Preparation progress"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={progress}
+        >
           <span style={{ width: `${progress}%` }} />
         </div>
         <button className="btn btn-ghost" type="button" onClick={() => setHidden(true)}>
@@ -169,7 +176,14 @@ export function SetupPreparationProgress({
         <h2>Getting OdogwuHQ ready</h2>
         <p>{state.message}</p>
 
-        <div className="setup-prep-progress" aria-label={`Preparation ${progress}% complete`}>
+        <div
+          className="setup-prep-progress"
+          role="progressbar"
+          aria-label="Preparation progress"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={progress}
+        >
           <span style={{ width: `${progress}%` }} />
         </div>
 

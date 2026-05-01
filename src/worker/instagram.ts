@@ -10,7 +10,7 @@ import pino from "pino";
 import { convexRefs } from "../lib/convex-refs";
 import { acquireWorkerLock, releaseWorkerLockSync } from "../lib/runtime/worker-lock";
 
-type MessageProvider = "whatsapp" | "instagram";
+type MessageProvider = "whatsapp" | "instagram" | "imessage" | "telegram";
 
 type SetupStatus = {
   status: "idle" | "starting" | "authenticating" | "qr_ready" | "code_ready" | "challenge_required" | "syncing" | "connected" | "error";
@@ -26,6 +26,19 @@ type RuntimeSettings = {
   instagramDmDelayMaxMs?: number;
   instagramTypingMinMs?: number;
   instagramTypingMaxMs?: number;
+};
+
+type InstagramSocialActionKind = "like_media" | "comment_media" | "follow_user";
+
+type InstagramClaimedSocialAction = {
+  actionId: string;
+  actionKind: InstagramSocialActionKind;
+  targetMediaId?: string;
+  targetUserId?: string;
+  targetUsername?: string;
+  targetUrl?: string;
+  commentText?: string;
+  reason: string;
 };
 
 type OutboxClaimedItem = {
@@ -68,6 +81,8 @@ const QUALITY_FIRST_IG_DELAY_MIN_MS = 14_000;
 const QUALITY_FIRST_IG_DELAY_MAX_MS = 70_000;
 const QUALITY_FIRST_IG_TYPING_MIN_MS = 2_800;
 const QUALITY_FIRST_IG_TYPING_MAX_MS = 11_000;
+const QUALITY_FIRST_IG_SOCIAL_DELAY_MIN_MS = 45_000;
+const QUALITY_FIRST_IG_SOCIAL_DELAY_MAX_MS = 8 * 60_000;
 
 const logger = pino({
   name: "slm-instagram-worker",
@@ -340,6 +355,7 @@ async function run() {
     const verifiedConnector = await convex
       .mutation(convexRefs.tenantAccountsVerifyConnectorToken, {
         tokenHash: connectorTokenHash,
+        provider: "instagram",
       })
       .catch(() => null);
     if (!verifiedConnector) {
@@ -817,6 +833,97 @@ async function run() {
     }
   };
 
+  const executeSocialAction = async (action: InstagramClaimedSocialAction) => {
+    if (!ig) {
+      throw new Error("Instagram client is not initialized.");
+    }
+    const runtime = await readRuntimeSettings(convex);
+    const socialDelayMin = Math.round(
+      clamp(Math.max(runtime.instagramDmDelayMinMs ?? QUALITY_FIRST_IG_SOCIAL_DELAY_MIN_MS, QUALITY_FIRST_IG_SOCIAL_DELAY_MIN_MS), 5_000, 20 * 60_000),
+    );
+    const socialDelayMax = Math.round(
+      clamp(Math.max(runtime.instagramDmDelayMaxMs ?? QUALITY_FIRST_IG_SOCIAL_DELAY_MAX_MS, socialDelayMin), socialDelayMin, 30 * 60_000),
+    );
+    await sleep(randomIntInclusive(socialDelayMin, socialDelayMax));
+
+    let response: unknown;
+    if (action.actionKind === "like_media") {
+      if (!action.targetMediaId) {
+        throw new Error("Instagram media id is missing.");
+      }
+      response = await ig.media.like({
+        mediaId: action.targetMediaId,
+        d: 1,
+        moduleInfo: {
+          module_name: "feed_timeline",
+        },
+      });
+    } else if (action.actionKind === "comment_media") {
+      if (!action.targetMediaId) {
+        throw new Error("Instagram media id is missing.");
+      }
+      const text = (action.commentText || "").trim();
+      if (!text) {
+        throw new Error("Instagram comment text is missing.");
+      }
+      response = await ig.media.comment({
+        mediaId: action.targetMediaId,
+        text,
+        module: "comments_v2",
+      });
+    } else if (action.actionKind === "follow_user") {
+      if (!action.targetUserId) {
+        throw new Error("Instagram user id is missing.");
+      }
+      response = await ig.friendship.create(action.targetUserId, action.targetMediaId);
+    } else {
+      throw new Error(`Unsupported Instagram social action: ${action.actionKind}`);
+    }
+
+    await convex.mutation(convexRefs.instagramActionsMarkCompleted, {
+      ...tenantConnectorArgs(),
+      actionId: action.actionId as Id<"instagramSocialActions">,
+      providerResultId: extractProviderMessageId(response),
+    });
+  };
+
+  const pollSocialActions = async () => {
+    if (isShuttingDown || !ig) {
+      return;
+    }
+    try {
+      const claimed = (await convex.mutation(convexRefs.instagramActionsClaimDue, {
+        ...tenantConnectorArgs(),
+        workerId,
+        limit: 1,
+        leaseMs: 2 * 60_000,
+      })) as InstagramClaimedSocialAction[];
+
+      for (const action of claimed) {
+        try {
+          await executeSocialAction(action);
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          await convex.mutation(convexRefs.instagramActionsMarkFailed, {
+            ...tenantConnectorArgs(),
+            actionId: action.actionId as Id<"instagramSocialActions">,
+            error: detail.slice(0, 300),
+          });
+        }
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      logger.warn({ err: detail }, "Instagram social action poll failed");
+      await convex
+        .mutation(convexRefs.systemRecordEvent, {
+          source: "worker",
+          eventType: "instagram.social.poll_error",
+          detail: detail.slice(0, 300),
+        })
+        .catch(() => undefined);
+    }
+  };
+
   const runtime = await readRuntimeSettings(convex);
   const outboxPollMs = Math.round(
     clamp(
@@ -832,12 +939,20 @@ async function run() {
       90_000,
     ),
   );
+  const socialPollMs = Math.round(
+    clamp(
+      Number(process.env.SLM_INSTAGRAM_SOCIAL_POLL_MS || 45_000),
+      15_000,
+      10 * 60_000,
+    ),
+  );
 
   logger.info(
     {
       workerId,
       outboxPollMs,
       inboxPollMs,
+      socialPollMs,
       authDir,
       storyJid: IG_STORY_JID,
     },
@@ -867,6 +982,10 @@ async function run() {
   }, outboxPollMs);
 
   setInterval(() => {
+    runBackgroundTask("instagram.social.poll", pollSocialActions);
+  }, socialPollMs);
+
+  setInterval(() => {
     runBackgroundTask("instagram.connected_account.heartbeat", () =>
       reportListener(true, "Instagram worker listener is online.", true),
     );
@@ -874,6 +993,7 @@ async function run() {
 
   runBackgroundTask("instagram.inbox.poll.startup", pollInbox);
   runBackgroundTask("instagram.outbox.poll.startup", pollOutbox);
+  runBackgroundTask("instagram.social.poll.startup", pollSocialActions);
 }
 
 const shouldBootWorkerProcess = Boolean(process.argv[1] && /instagram\.(ts|js)$/.test(process.argv[1]));

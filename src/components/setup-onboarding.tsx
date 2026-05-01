@@ -105,8 +105,8 @@ const setupStages: Array<{
   {
     id: "connect",
     label: "Connect",
-    sentence: "Scan the WhatsApp QR code on this computer.",
-    helper: "Keep this window open while pairing. Setup will continue once the local session is connected.",
+    sentence: "Connect the accounts OdogwuHQ should use.",
+    helper: "Pair WhatsApp first, then sign in to Instagram if you enabled it.",
   },
   {
     id: "finish",
@@ -491,25 +491,43 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
   const router = useRouter();
   const searchParams = useSearchParams();
   const wantsWhatsAppConnect = searchParams.get("connect") === "whatsapp";
+  const wantsInstagramConnect = searchParams.get("connect") === "instagram";
   const wantsVoiceConnect = searchParams.get("connect") === "voice";
   const whatsappReturnTo = searchParams.get("returnTo");
   const safeWhatsAppReturnTo =
     whatsappReturnTo && whatsappReturnTo.startsWith("/") && !whatsappReturnTo.startsWith("//") ? whatsappReturnTo : "/";
+  const instagramReturnTo = searchParams.get("returnTo");
+  const safeInstagramReturnTo =
+    instagramReturnTo && instagramReturnTo.startsWith("/") && !instagramReturnTo.startsWith("//") ? instagramReturnTo : "/settings";
   const voiceReturnTo = searchParams.get("returnTo");
   const safeVoiceReturnTo =
     voiceReturnTo && voiceReturnTo.startsWith("/") && !voiceReturnTo.startsWith("//") ? voiceReturnTo : "/settings?section=voice";
   const shouldExitAfterWhatsAppConnect = initialInstanceState.setupCompleted && wantsWhatsAppConnect;
+  const shouldExitAfterInstagramConnect = initialInstanceState.setupCompleted && wantsInstagramConnect;
   const shouldExitAfterVoiceSave = initialInstanceState.setupCompleted && wantsVoiceConnect;
+  const needsLegalAcceptance = !legalAcceptanceIsCurrent(initialInstanceState);
+  const resolvePostLegalStage = (): SetupStage => {
+    if (!initialInstanceState.setupCompleted) {
+      return "welcome";
+    }
+    if (wantsWhatsAppConnect || wantsInstagramConnect) {
+      return "connect";
+    }
+    if (wantsVoiceConnect) {
+      return "voice";
+    }
+    return "finish";
+  };
   const [stage, setStage] = useState<SetupStage>(
-    wantsWhatsAppConnect
-      ? "connect"
-      : wantsVoiceConnect
-        ? "voice"
-      : initialInstanceState.setupCompleted
-        ? "finish"
-        : legalAcceptanceIsCurrent(initialInstanceState)
-          ? "welcome"
-          : "legal",
+    needsLegalAcceptance
+      ? "legal"
+      : wantsWhatsAppConnect || wantsInstagramConnect
+        ? "connect"
+        : wantsVoiceConnect
+          ? "voice"
+          : initialInstanceState.setupCompleted
+            ? "finish"
+            : "welcome",
   );
   const [legalScrolledToEnd, setLegalScrolledToEnd] = useState(false);
   const [legalDeclined, setLegalDeclined] = useState(false);
@@ -521,9 +539,12 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
   const [pin, setPin] = useState("");
   const [pinConfirm, setPinConfirm] = useState("");
   const [whatsappConnected, setWhatsappConnected] = useState(false);
+  const [instagramConnected, setInstagramConnected] = useState(false);
   const [voiceOnboardingState, setVoiceOnboardingState] = useState<VoiceSetupState | null>(null);
   const stageTitleRef = useRef<HTMLHeadingElement>(null);
   const legalScrollRef = useRef<HTMLDivElement>(null);
+  const whatsappAutoExitHandledRef = useRef(false);
+  const instagramAutoExitHandledRef = useRef(false);
   const { runAction, getRecord, notices, dismissNotice, pushNotice } = useActionStateRegistry();
 
   const securityRecord = getRecord("setup:onboarding:security");
@@ -554,7 +575,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                 : stage === "defaults"
                   ? "profile"
                   : stage === "connect"
-                    ? shouldExitAfterWhatsAppConnect
+                    ? shouldExitAfterWhatsAppConnect || shouldExitAfterInstagramConnect
                       ? null
                       : "defaults"
                     : stage === "finish"
@@ -566,7 +587,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                         : stage === "prepare"
                           ? "voice"
                         : null;
-  const showSetupNotices = instanceState.setupCompleted && !wantsVoiceConnect && !wantsWhatsAppConnect;
+  const showSetupNotices = notices.length > 0;
   const pinSource = instanceState.pinSource;
   const envManagedPin = pinSource === "env";
   const filePinExists = pinSource === "file";
@@ -617,6 +638,18 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
   const profileDescriptionEnough = isProfileDescriptionEnough(profileDescription);
   const soulDefaults = summarizeSoulDefaults(preferences);
   const setupAiToolAvailable = instanceState.setupAiSettingsToolAvailable;
+  const connectInitialScreen = shouldExitAfterInstagramConnect
+    ? "instagram"
+    : shouldExitAfterWhatsAppConnect
+      ? "whatsapp"
+      : preferences.instagramEnabled
+        ? "options"
+        : "whatsapp";
+  const connectReady = shouldExitAfterInstagramConnect
+    ? instagramConnected
+    : shouldExitAfterWhatsAppConnect
+      ? whatsappConnected
+      : whatsappConnected && (!preferences.instagramEnabled || instagramConnected);
   const showRomanticSetup =
     preferences.soulProfile.useCase === "personal" ||
     preferences.soulProfile.useCase === "mixed" ||
@@ -968,6 +1001,78 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
     setStage("finish");
   };
 
+  const exitInstagramSetup = () => {
+    if (shouldExitAfterInstagramConnect) {
+      router.push(safeInstagramReturnTo);
+      return;
+    }
+    setStage("finish");
+  };
+
+  const continueFromConnections = () => {
+    if (shouldExitAfterInstagramConnect) {
+      exitInstagramSetup();
+      return;
+    }
+    exitWhatsAppSetup();
+  };
+
+  const skipInstagramAndContinue = async () => {
+    const result = await saveInstanceSetup(
+      "setup:onboarding:preferences",
+      {
+        preferences: {
+          ...preferences,
+          instagramEnabled: false,
+        },
+        account,
+      },
+      {
+        successMessage: "Instagram skipped for now.",
+      },
+    );
+    if (!result.value?.state) {
+      return;
+    }
+    setPreferences(result.value.state.preferences);
+    setStage("finish");
+  };
+
+  useEffect(() => {
+    if (
+      stage !== "connect" ||
+      !whatsappConnected ||
+      whatsappAutoExitHandledRef.current ||
+      (!shouldExitAfterWhatsAppConnect && preferences.instagramEnabled)
+    ) {
+      return;
+    }
+
+    whatsappAutoExitHandledRef.current = true;
+    const timer = window.setTimeout(() => {
+      exitWhatsAppSetup();
+    }, 900);
+
+    return () => window.clearTimeout(timer);
+    // exitWhatsAppSetup reads stable setup-entry values for this onboarding mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [preferences.instagramEnabled, shouldExitAfterWhatsAppConnect, stage, whatsappConnected]);
+
+  useEffect(() => {
+    if (!shouldExitAfterInstagramConnect || stage !== "connect" || !instagramConnected || instagramAutoExitHandledRef.current) {
+      return;
+    }
+
+    instagramAutoExitHandledRef.current = true;
+    const timer = window.setTimeout(() => {
+      exitInstagramSetup();
+    }, 900);
+
+    return () => window.clearTimeout(timer);
+    // exitInstagramSetup reads stable setup-entry values for this onboarding mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [instagramConnected, shouldExitAfterInstagramConnect, stage]);
+
   const applyProfileLocally = () => {
     setPreferences((current) => derivePreferencesFromSoulProfile(inferSoulProfileFromDescription(current.soulProfile), current));
     setStage("defaults");
@@ -1007,7 +1112,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
       { legalAccepted: true },
       {
         successMessage: "Policies accepted.",
-        nextStage: "welcome",
+        nextStage: resolvePostLegalStage(),
       },
     );
   };
@@ -1740,10 +1845,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                 void saveInstanceSetup(
                   "setup:onboarding:preferences",
                   {
-                    preferences: {
-                      ...preferences,
-                      instagramEnabled: false,
-                    },
+                    preferences,
                     account,
                   },
                   {
@@ -1836,6 +1938,18 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                 <label className="setup-toggle-card">
                   <input
                     type="checkbox"
+                    checked={preferences.instagramEnabled}
+                    onChange={(event) => setPreferences((current) => ({ ...current, instagramEnabled: event.target.checked }))}
+                  />
+                  <span>
+                    <strong>Enable Instagram</strong>
+                    <span>Show Instagram sign-in during account connection.</span>
+                  </span>
+                </label>
+
+                <label className="setup-toggle-card">
+                  <input
+                    type="checkbox"
                     checked={preferences.quietHoursEnabled}
                     onChange={(event) => setPreferences((current) => ({ ...current, quietHoursEnabled: event.target.checked }))}
                   />
@@ -1903,18 +2017,35 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
               <SetupWizard
                 realtimeEnabled={realtimeEnabled}
                 embedded
-                initialScreen="whatsapp"
+                initialScreen={connectInitialScreen}
                 showNotices={false}
                 onWhatsAppConnectedChange={setWhatsappConnected}
+                onInstagramConnectedChange={setInstagramConnected}
               />
               <div className="wizard-actions">
-                {whatsappConnected ? (
-                  <button className="btn btn-primary setup-primary-action" type="button" onClick={exitWhatsAppSetup}>
-                    {shouldExitAfterWhatsAppConnect ? "Done" : "Continue"}
+                {connectReady ? (
+                  <button className="btn btn-primary setup-primary-action" type="button" onClick={continueFromConnections}>
+                    {shouldExitAfterWhatsAppConnect || shouldExitAfterInstagramConnect ? "Done" : "Continue"}
+                  </button>
+                ) : null}
+                {!shouldExitAfterWhatsAppConnect && !shouldExitAfterInstagramConnect && preferences.instagramEnabled && whatsappConnected && !instagramConnected ? (
+                  <button
+                    className="btn btn-ghost setup-secondary-action"
+                    type="button"
+                    disabled={preferencesRecord.pending}
+                    aria-disabled={preferencesRecord.pending}
+                    onClick={() => void skipInstagramAndContinue()}
+                  >
+                    {preferencesRecord.pending ? "Saving..." : "Skip Instagram for now"}
                   </button>
                 ) : null}
                 {shouldExitAfterWhatsAppConnect ? (
                   <button className="btn btn-ghost setup-secondary-action" type="button" onClick={() => router.push(safeWhatsAppReturnTo)}>
+                    Back home
+                  </button>
+                ) : null}
+                {shouldExitAfterInstagramConnect ? (
+                  <button className="btn btn-ghost setup-secondary-action" type="button" onClick={() => router.push(safeInstagramReturnTo)}>
                     Back home
                   </button>
                 ) : null}
@@ -1944,7 +2075,12 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                 </div>
                 <div>
                   <span>Tools</span>
-                  <strong>{preferences.memesEnabled ? "Meme tools on" : "Meme tools off"}</strong>
+                  <strong>
+                    {[
+                      preferences.memesEnabled ? "Meme tools on" : "Meme tools off",
+                      preferences.instagramEnabled ? "Instagram on" : "Instagram off",
+                    ].join(" / ")}
+                  </strong>
                 </div>
                 <div>
                   <span>Quiet hours</span>
@@ -2019,20 +2155,8 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                 showToolControls={false}
                 showAdvancedControls={false}
                 initialState={voiceOnboardingState}
-                title="Tell OdogwuHQ what you sound like"
-                description="Record a short voice note now so OdogwuHQ can generate local Vox voice notes in your tone later."
-                privacyCopy="Your voice sample stays secure and local on this machine."
                 onStateChange={setVoiceOnboardingState}
-                onSampleSaved={() => {
-                  if (shouldExitAfterVoiceSave) {
-                    router.push(safeVoiceReturnTo);
-                  }
-                }}
               />
-              <div className="setup-local-assurance" role="note">
-                <strong>Local by default.</strong>
-                <span>The recording is stored on this computer. You can replace it or remove it from Settings later.</span>
-              </div>
               <div className="wizard-actions">
                 <button className="btn btn-ghost setup-secondary-action" type="button" onClick={exitVoiceSetup}>
                   {shouldExitAfterVoiceSave ? "Back to Settings" : "Skip for now"}

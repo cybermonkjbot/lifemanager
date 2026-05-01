@@ -2,6 +2,8 @@
 
 import { ActionNotices } from "@/components/action-notices";
 import { LoadingIndicator } from "@/components/loading-state";
+import { useTenantScopeArgs } from "@/components/tenant-scope-provider";
+import { LiveWaveform } from "@/components/ui/live-waveform";
 import { getSetupBootstrapHeaderName } from "@/lib/setup-bootstrap-auth";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
 import { api } from "../../convex/_generated/api";
@@ -16,10 +18,13 @@ type SetupStatus =
   | "qr_ready"
   | "code_ready"
   | "challenge_required"
+  | "code_required"
+  | "password_required"
+  | "connecting"
   | "syncing"
   | "connected"
   | "error";
-type SetupMode = "qr" | "pairing_code" | "password" | "challenge_code";
+type SetupMode = "qr" | "pairing_code" | "password" | "challenge_code" | "local" | "phone_code";
 type WhatsAppSetupMode = "qr" | "pairing_code";
 type VoiceSetupStatus = "not_installed" | "installing" | "ready" | "error";
 
@@ -37,6 +42,11 @@ type SetupState = {
   updatedAt: number;
   hasAuth: boolean;
   hasConnectedBefore?: boolean;
+  macos?: boolean;
+  databaseReadable?: boolean;
+  databasePath?: string;
+  phoneNumberMasked?: string;
+  codeDelivery?: "app" | "sms";
 };
 
 type SetupWizardProps = {
@@ -45,10 +55,12 @@ type SetupWizardProps = {
   initialScreen?: SetupWizardScreen;
   setupSecret?: string;
   showNotices?: boolean;
+  includeVoiceOption?: boolean;
   onWhatsAppConnectedChange?: (connected: boolean) => void;
+  onInstagramConnectedChange?: (connected: boolean) => void;
 };
 
-type SetupWizardScreen = "options" | "whatsapp" | "pairing" | "instagram" | "voice";
+type SetupWizardScreen = "options" | "whatsapp" | "pairing" | "instagram" | "imessage" | "telegram" | "voice";
 
 export type VoiceSetupState = {
   status: VoiceSetupStatus;
@@ -58,6 +70,7 @@ export type VoiceSetupState = {
   hasPendingSample?: boolean;
   samplePromptText?: string;
   installLog?: string;
+  installProgress?: number;
   updatedAt: number;
 };
 
@@ -90,63 +103,6 @@ function buildWaveformFromSamples(samples: Float32Array) {
   });
 }
 
-function WaveformBars({
-  values,
-  progress = 0,
-  label,
-  onSeek,
-}: {
-  values: number[];
-  progress?: number;
-  label: string;
-  onSeek?: (ratio: number) => void;
-}) {
-  return (
-    <div
-      className={`voice-waveform ${onSeek ? "voice-waveform-seekable" : ""}`}
-      aria-label={label}
-      role={onSeek ? "slider" : "img"}
-      aria-valuemin={onSeek ? 0 : undefined}
-      aria-valuemax={onSeek ? 100 : undefined}
-      aria-valuenow={onSeek ? Math.round(progress * 100) : undefined}
-      tabIndex={onSeek ? 0 : undefined}
-      onClick={
-        onSeek
-          ? (event) => {
-              const bounds = event.currentTarget.getBoundingClientRect();
-              onSeek(Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width)));
-            }
-          : undefined
-      }
-      onKeyDown={
-        onSeek
-          ? (event) => {
-              if (event.key === "ArrowLeft") {
-                event.preventDefault();
-                onSeek(Math.max(0, progress - 0.05));
-              }
-              if (event.key === "ArrowRight") {
-                event.preventDefault();
-                onSeek(Math.min(1, progress + 0.05));
-              }
-            }
-          : undefined
-      }
-    >
-      {values.map((value, index) => {
-        const active = index / Math.max(1, values.length - 1) <= progress;
-        return (
-          <span
-            key={index}
-            className={active ? "voice-waveform-bar-active" : ""}
-            style={{ height: `${Math.round(Math.max(0.12, Math.min(1, value)) * 100)}%` }}
-          />
-        );
-      })}
-    </div>
-  );
-}
-
 const setupWizardScreens: Record<
   SetupWizardScreen,
   {
@@ -165,6 +121,12 @@ const setupWizardScreens: Record<
   instagram: {
     title: "Connect Instagram",
   },
+  imessage: {
+    title: "Connect iMessage",
+  },
+  telegram: {
+    title: "Connect Telegram",
+  },
   voice: {
     title: "Voice sample",
   },
@@ -181,6 +143,9 @@ function statusToneClass(status: SetupStatus, listenerActive?: boolean) {
     status === "qr_ready" ||
     status === "code_ready" ||
     status === "challenge_required" ||
+    status === "code_required" ||
+    status === "password_required" ||
+    status === "connecting" ||
     status === "syncing"
   ) {
     return "status-syncing";
@@ -196,6 +161,9 @@ function statusLabel(status: SetupStatus) {
   if (status === "qr_ready") return "QR Ready";
   if (status === "code_ready") return "Code Ready";
   if (status === "challenge_required") return "Challenge Required";
+  if (status === "code_required") return "Code Required";
+  if (status === "password_required") return "Password Required";
+  if (status === "connecting") return "Connecting";
   if (status === "syncing") return "Syncing";
   if (status === "connected") return "Connected";
   return "Error";
@@ -233,6 +201,8 @@ function simplifySetupMessage(message?: string) {
   let next = message.replace(/\s+\(PID\s+\d+\)\.?/gi, ".").trim();
   next = next.replace(/run\s+`bun run worker`\s+manually\.?/gi, "Please try again.");
   next = next.replace(/run\s+`bun run worker:instagram`\s+manually\.?/gi, "Please try again.");
+  next = next.replace(/run\s+`bun run worker:imessage`\s+manually\.?/gi, "Please try again.");
+  next = next.replace(/run\s+`bun run worker:telegram`\s+manually\.?/gi, "Please try again.");
   next = next.replace(/worker listener is offline\.?/gi, "Connection is idle.");
   return next;
 }
@@ -260,7 +230,13 @@ function getRevokedGuidance(state: SetupState | null) {
     return null;
   }
 
-  if (state.status === "starting" || state.status === "qr_ready" || state.status === "code_ready" || state.status === "syncing") {
+  if (
+    state.status === "starting" ||
+    state.status === "qr_ready" ||
+    state.status === "code_ready" ||
+    state.status === "connecting" ||
+    state.status === "syncing"
+  ) {
     return null;
   }
 
@@ -356,24 +332,33 @@ async function readVoiceSetupResponse(response: Response) {
 function SetupWizardContent({
   liveState,
   instagramLiveState,
+  imessageLiveState,
+  telegramLiveState,
   realtimeEnabled,
   initialScreen = "options",
   embedded = false,
   setupSecret,
   showNotices = true,
+  includeVoiceOption = true,
   onWhatsAppConnectedChange,
+  onInstagramConnectedChange,
 }: {
   liveState: SetupState | null | undefined;
   instagramLiveState: SetupState | null | undefined;
+  imessageLiveState: SetupState | null | undefined;
+  telegramLiveState: SetupState | null | undefined;
   realtimeEnabled: boolean;
   initialScreen?: SetupWizardScreen;
   embedded?: boolean;
   setupSecret?: string;
   showNotices?: boolean;
+  includeVoiceOption?: boolean;
   onWhatsAppConnectedChange?: (connected: boolean) => void;
+  onInstagramConnectedChange?: (connected: boolean) => void;
 }) {
   const [localState, setLocalState] = useState<SetupState | null>(null);
   const [voiceState, setVoiceState] = useState<VoiceSetupState | null>(null);
+  const [isMacLike, setIsMacLike] = useState(false);
   const [phoneNumber, setPhoneNumber] = useState("");
   const [activeScreen, setActiveScreen] = useState<SetupWizardScreen>(initialScreen);
   const autoQrLastStartedAtRef = useRef(0);
@@ -409,7 +394,13 @@ function SetupWizardContent({
   const normalizedPhone = phoneNumber.replace(/[^\d]/g, "");
   const hasPhoneForPairing = normalizedPhone.length >= 8;
   const instagramStatus = instagramLiveState?.status ?? "idle";
+  const instagramConnected = instagramStatus === "connected" || instagramLiveState?.listenerActive === true;
   const instagramStatusText = instagramLiveState?.listenerActive ? "Connected" : statusLabel(instagramStatus);
+  const imessageStatus = imessageLiveState?.status ?? "idle";
+  const imessageConnected = imessageStatus === "connected" || imessageLiveState?.listenerActive === true;
+  const imessageStatusText = !isMacLike && !imessageConnected ? "macOS Only" : imessageLiveState?.listenerActive ? "Connected" : statusLabel(imessageStatus);
+  const telegramStatus = telegramLiveState?.status ?? "idle";
+  const telegramStatusText = telegramLiveState?.listenerActive ? "Connected" : statusLabel(telegramStatus);
   const whatsappStatusText = state?.listenerActive ? "Connected" : statusLabel(status);
   const voiceStatusText = voiceStatusLabel(voiceState?.status);
   const activeScreenMeta = setupWizardScreens[activeScreen];
@@ -422,11 +413,23 @@ function SetupWizardContent({
         : undefined,
     [setupSecret],
   );
+
+  useEffect(() => {
+    if (typeof navigator === "undefined") {
+      return;
+    }
+    const platform = `${navigator.platform || ""} ${navigator.userAgent || ""}`.toLowerCase();
+    setIsMacLike(platform.includes("mac"));
+  }, []);
   const showBackToOptions = !embedded && activeScreen !== "options";
 
   useEffect(() => {
     onWhatsAppConnectedChange?.(isConnected);
   }, [isConnected, onWhatsAppConnectedChange]);
+
+  useEffect(() => {
+    onInstagramConnectedChange?.(instagramConnected);
+  }, [instagramConnected, onInstagramConnectedChange]);
 
   const refreshVoiceState = useCallback(async () => {
     try {
@@ -449,12 +452,14 @@ function SetupWizardContent({
   const controls = useMemo(() => {
     const isIdleOrError = status === "idle" || status === "error";
     const isStarting = status === "starting";
+    const isConnecting = status === "connecting";
     const isSyncing = status === "syncing";
     const isReady = status === "qr_ready" || status === "code_ready";
-    const isSetupSessionActive = isStarting || isSyncing || isReady;
+    const isSetupSessionActive = isStarting || isConnecting || isSyncing || isReady;
     const hasActiveQrSession = state?.mode === "qr" && status === "qr_ready";
     const hasActiveSetupState =
       isStarting ||
+      isConnecting ||
       isSyncing ||
       isReady ||
       isConnected ||
@@ -633,9 +638,10 @@ function SetupWizardContent({
     const shouldPollForAutoStart = status === "connected" && !state?.listenerActive;
     const shouldPoll = realtimeEnabled
       ? status === "qr_ready" ||
-        ((status === "starting" || status === "syncing") && !state?.qrDataUrl && !state?.pairingCode) ||
+        ((status === "starting" || status === "connecting" || status === "syncing") && !state?.qrDataUrl && !state?.pairingCode) ||
         shouldPollForAutoStart
       : status === "starting" ||
+          status === "connecting" ||
           status === "syncing" ||
           status === "qr_ready" ||
           status === "code_ready" ||
@@ -700,11 +706,33 @@ function SetupWizardContent({
                   {instagramStatusText}
                 </span>
               </button>
-              <button className="setup-option-card" type="button" onClick={() => setActiveScreen("voice")}>
-                <p className="setup-option-kicker">Voice Notes</p>
-                <h4>Add sample</h4>
-                <span className={`status-pill ${voiceStatusToneClass(voiceState?.status)}`}>{voiceStatusText}</span>
+              <button
+                className="setup-option-card"
+                type="button"
+                onClick={() => setActiveScreen("imessage")}
+                disabled={!isMacLike && !imessageConnected}
+                aria-disabled={!isMacLike && !imessageConnected}
+              >
+                <p className="setup-option-kicker">iMessage</p>
+                <h4>Local Mac</h4>
+                <span className={`status-pill ${statusToneClass(imessageStatus, imessageLiveState?.listenerActive)}`}>
+                  {imessageStatusText}
+                </span>
               </button>
+              <button className="setup-option-card" type="button" onClick={() => setActiveScreen("telegram")}>
+                <p className="setup-option-kicker">Telegram</p>
+                <h4>Phone login</h4>
+                <span className={`status-pill ${statusToneClass(telegramStatus, telegramLiveState?.listenerActive)}`}>
+                  {telegramStatusText}
+                </span>
+              </button>
+              {includeVoiceOption ? (
+                <button className="setup-option-card" type="button" onClick={() => setActiveScreen("voice")}>
+                  <p className="setup-option-kicker">Voice Notes</p>
+                  <h4>Add sample</h4>
+                  <span className={`status-pill ${voiceStatusToneClass(voiceState?.status)}`}>{voiceStatusText}</span>
+                </button>
+              ) : null}
             </div>
           </section>
 
@@ -912,6 +940,25 @@ function SetupWizardContent({
               realtimeEnabled={realtimeEnabled}
               setupSecret={setupSecret}
               showNotices={showNotices}
+              onConnectedChange={onInstagramConnectedChange}
+            />
+          </section>
+
+          <section id="setup-panel-imessage" className="setup-flow-panel" hidden={activeScreen !== "imessage"}>
+            <IMessageSetupPanel
+              liveState={imessageLiveState}
+              realtimeEnabled={realtimeEnabled}
+              setupSecret={setupSecret}
+              showNotices={showNotices}
+            />
+          </section>
+
+          <section id="setup-panel-telegram" className="setup-flow-panel" hidden={activeScreen !== "telegram"}>
+            <TelegramSetupPanel
+              liveState={telegramLiveState}
+              realtimeEnabled={realtimeEnabled}
+              setupSecret={setupSecret}
+              showNotices={showNotices}
             />
           </section>
 
@@ -963,11 +1010,11 @@ export function VoiceSetupPanel({
   const [isRecording, setIsRecording] = useState(false);
   const [recordingError, setRecordingError] = useState<string | null>(null);
   const [recordingMs, setRecordingMs] = useState(0);
-  const [liveWaveform, setLiveWaveform] = useState(IDLE_WAVEFORM);
   const [previewWaveform, setPreviewWaveform] = useState(IDLE_WAVEFORM);
   const [previewDurationMs, setPreviewDurationMs] = useState(0);
   const [previewProgress, setPreviewProgress] = useState(0);
   const [isPreviewPlaying, setIsPreviewPlaying] = useState(false);
+  const [autoSaveStatus, setAutoSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
@@ -1141,8 +1188,122 @@ export function VoiceSetupPanel({
     };
   }, [fetchVoiceState, state?.status]);
 
-  const startRecording = async () => {
+  const saveVoiceSample = useCallback(
+    async (sampleBlob: Blob, samplePromptText: string) => {
+      setAutoSaveStatus("saving");
+      const transcript = samplePromptText.trim() || DEFAULT_VOICE_SAMPLE_PROMPT;
+      if (!samplePromptText.trim()) {
+        setPromptText(DEFAULT_VOICE_SAMPLE_PROMPT);
+      }
+
+      const result = await runAction(
+        "setup:voice:upload_sample",
+        async () => {
+          if (sampleBlob.size === 0) {
+            throw new Error("Record a voice sample before saving.");
+          }
+
+          const payload = new FormData();
+          payload.append(
+            "sample",
+            new File([sampleBlob], "voice-sample.webm", {
+              type: sampleBlob.type || "audio/webm",
+            }),
+          );
+          payload.append("promptText", transcript);
+
+          const response = await fetch("/api/setup/voice/sample", {
+            method: "POST",
+            headers: setupHeaders,
+            body: payload,
+          });
+          const next = await readVoiceSetupResponse(response);
+          applyState(next);
+          onSampleSaved?.(next);
+          return next;
+        },
+        {
+          pendingLabel: "Saving voice sample...",
+          errorMessage: "Could not save the voice sample. Record again or retry.",
+        },
+      );
+
+      if (result.error) {
+        setAutoSaveStatus("error");
+        setRecordingError(result.error);
+        return;
+      }
+
+      setAutoSaveStatus("saved");
+      setRecordingError(null);
+    },
+    [applyState, onSampleSaved, runAction, setupHeaders],
+  );
+
+  const beginRecordingFromStream = useCallback(
+    (stream: MediaStream) => {
+      if (recorderRef.current) {
+        return;
+      }
+
+      try {
+        streamRef.current = stream;
+        chunksRef.current = [];
+        recordingStartedAtRef.current = Date.now();
+
+        const updateTimer = () => {
+          setRecordingMs(Math.min(MAX_VOICE_RECORDING_MS, Date.now() - recordingStartedAtRef.current));
+          animationFrameRef.current = window.requestAnimationFrame(updateTimer);
+        };
+        updateTimer();
+
+        const preferredMimeTypes = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
+        const selectedMimeType = preferredMimeTypes.find((value) => MediaRecorder.isTypeSupported(value));
+        const recorder = selectedMimeType ? new MediaRecorder(stream, { mimeType: selectedMimeType }) : new MediaRecorder(stream);
+        recorderRef.current = recorder;
+
+        recorder.ondataavailable = (event: BlobEvent) => {
+          if (event.data && event.data.size > 0) {
+            chunksRef.current.push(event.data);
+          }
+        };
+        recorder.onerror = () => {
+          setRecordingError("Recording failed. Check microphone permissions and retry.");
+        };
+        recorder.onstop = () => {
+          const nextBlob = new Blob(chunksRef.current, { type: recorder.mimeType || "audio/webm" });
+          if (nextBlob.size > 0) {
+            setRecordedBlob(nextBlob);
+            void saveVoiceSample(nextBlob, promptText);
+          }
+          setIsRecording(false);
+          setRecordingMs(Math.min(MAX_VOICE_RECORDING_MS, Date.now() - recordingStartedAtRef.current));
+          stopAudioAnalyzer();
+          recorderRef.current = null;
+          stopMediaStream();
+        };
+
+        recorder.start(250);
+        maxRecordingTimerRef.current = window.setTimeout(() => {
+          const activeRecorder = recorderRef.current;
+          if (activeRecorder && activeRecorder.state !== "inactive") {
+            activeRecorder.stop();
+            setRecordingError("Recording stopped at the 5 minute limit.");
+          }
+        }, MAX_VOICE_RECORDING_MS);
+      } catch {
+        setRecordingError("Recording failed. Check microphone permissions and retry.");
+        setIsRecording(false);
+        stopAudioAnalyzer();
+        stopMediaStream();
+      }
+    },
+    [promptText, saveVoiceSample, stopAudioAnalyzer, stopMediaStream],
+  );
+
+  const startRecording = () => {
     setRecordingError(null);
+    setAutoSaveStatus("idle");
     setPreviewProgress(0);
     setIsPreviewPlaying(false);
     previewAudioRef.current?.pause();
@@ -1157,93 +1318,18 @@ export function VoiceSetupPanel({
       return;
     }
 
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      streamRef.current = stream;
-      chunksRef.current = [];
-      const AudioContextCtor = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-      if (AudioContextCtor) {
-        const audioContext = new AudioContextCtor();
-        const source = audioContext.createMediaStreamSource(stream);
-        const analyser = audioContext.createAnalyser();
-        analyser.fftSize = 256;
-        source.connect(analyser);
-        audioContextRef.current = audioContext;
-        const data = new Uint8Array(analyser.frequencyBinCount);
-        recordingStartedAtRef.current = Date.now();
-        const updateLiveWaveform = () => {
-          analyser.getByteTimeDomainData(data);
-          const blockSize = Math.max(1, Math.floor(data.length / VOICE_WAVEFORM_BARS));
-          const values = Array.from({ length: VOICE_WAVEFORM_BARS }, (_, index) => {
-            const start = index * blockSize;
-            const end = Math.min(data.length, start + blockSize);
-            let sum = 0;
-            for (let cursor = start; cursor < end; cursor += 1) {
-              sum += Math.abs((data[cursor] || 128) - 128) / 128;
-            }
-            return Math.max(0.12, Math.min(1, (sum / Math.max(1, end - start)) * 3.2));
-          });
-          setLiveWaveform(values);
-          setRecordingMs(Math.min(MAX_VOICE_RECORDING_MS, Date.now() - recordingStartedAtRef.current));
-          animationFrameRef.current = window.requestAnimationFrame(updateLiveWaveform);
-        };
-        updateLiveWaveform();
-      } else {
-        recordingStartedAtRef.current = Date.now();
-        const updateTimer = () => {
-          setRecordingMs(Math.min(MAX_VOICE_RECORDING_MS, Date.now() - recordingStartedAtRef.current));
-          setLiveWaveform((current) => current.map((value, index) => 0.14 + Math.abs(Math.sin(Date.now() / 240 + index)) * value));
-          animationFrameRef.current = window.requestAnimationFrame(updateTimer);
-        };
-        updateTimer();
-      }
-      const preferredMimeTypes = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
-      const selectedMimeType = preferredMimeTypes.find((value) => MediaRecorder.isTypeSupported(value));
-      const recorder = selectedMimeType ? new MediaRecorder(stream, { mimeType: selectedMimeType }) : new MediaRecorder(stream);
-      recorderRef.current = recorder;
-
-      recorder.ondataavailable = (event: BlobEvent) => {
-        if (event.data && event.data.size > 0) {
-          chunksRef.current.push(event.data);
-        }
-      };
-      recorder.onerror = () => {
-        setRecordingError("Recording failed. Check microphone permissions and retry.");
-      };
-      recorder.onstop = () => {
-        const nextBlob = new Blob(chunksRef.current, { type: recorder.mimeType || "audio/webm" });
-        if (nextBlob.size > 0) {
-          setRecordedBlob(nextBlob);
-        }
-        setIsRecording(false);
-        setRecordingMs(Math.min(MAX_VOICE_RECORDING_MS, Date.now() - recordingStartedAtRef.current));
-        stopAudioAnalyzer();
-        recorderRef.current = null;
-        stopMediaStream();
-      };
-
-      recorder.start(250);
-      maxRecordingTimerRef.current = window.setTimeout(() => {
-        const activeRecorder = recorderRef.current;
-        if (activeRecorder && activeRecorder.state !== "inactive") {
-          activeRecorder.stop();
-          setRecordingError("Recording stopped at the 5 minute limit.");
-        }
-      }, MAX_VOICE_RECORDING_MS);
-      setRecordedBlob(null);
-      setPreviewWaveform(IDLE_WAVEFORM);
-      setIsRecording(true);
-    } catch {
-      setRecordingError("Could not access microphone. Allow permissions and retry.");
-      setIsRecording(false);
-      stopAudioAnalyzer();
-      stopMediaStream();
-    }
+    setRecordedBlob(null);
+    setPreviewWaveform(IDLE_WAVEFORM);
+    setRecordingMs(0);
+    setIsRecording(true);
   };
 
   const stopRecording = () => {
     const recorder = recorderRef.current;
     if (!recorder) {
+      setIsRecording(false);
+      stopAudioAnalyzer();
+      stopMediaStream();
       return;
     }
     if (recorder.state !== "inactive") {
@@ -1273,40 +1359,14 @@ export function VoiceSetupPanel({
     setPreviewProgress(ratio);
   };
 
-  const uploadSample = () => {
-    void runAction(
-      "setup:voice:upload_sample",
-      async () => {
-        if (!recordedBlob || recordedBlob.size === 0) {
-          throw new Error("Record a voice sample before saving.");
-        }
-        if (!promptText.trim()) {
-          throw new Error("Enter the transcript of the recorded voice sample.");
-        }
-
-        const payload = new FormData();
-        payload.append(
-          "sample",
-          new File([recordedBlob], "voice-sample.webm", {
-            type: recordedBlob.type || "audio/webm",
-          }),
-        );
-        payload.append("promptText", promptText.trim());
-
-        const response = await fetch("/api/setup/voice/sample", {
-          method: "POST",
-          headers: setupHeaders,
-          body: payload,
-        });
-        const next = await readVoiceSetupResponse(response);
-        applyState(next);
-        onSampleSaved?.(next);
-      },
-      {
-        pendingLabel: "Saving sample...",
-      },
-    );
-  };
+  const primaryRecorderAction = recordedBlob && !isRecording ? togglePreviewPlayback : isRecording ? stopRecording : startRecording;
+  const primaryRecorderLabel = recordedBlob && !isRecording
+    ? isPreviewPlaying
+      ? "Pause preview"
+      : "Play preview"
+    : isRecording
+      ? "Stop recording"
+      : "Record voice sample";
 
   const installVoiceModule = () => {
     void runAction(
@@ -1353,28 +1413,37 @@ export function VoiceSetupPanel({
   const pendingReset = isPending("setup:voice:reset");
   const pendingRefresh = isPending("setup:voice:refresh");
   const statusText = voiceStatusLabel(state?.status);
+  const voiceInstallActive = pendingInstall || state?.status === "installing";
+  const voiceInstallProgress =
+    state?.status === "ready" ? 100 : voiceInstallActive ? Math.max(6, Math.min(96, Math.round(state?.installProgress ?? 6))) : 0;
   const canUseRecordButton = !anyPending;
-  const canStopRecording = isRecording;
-  const canSaveSample = !anyPending && !isRecording && Boolean(recordedBlob) && Boolean(promptText.trim());
   const canInstall = !anyPending && !isRecording && Boolean(modelId.trim());
   const displayedDurationMs = isRecording ? recordingMs : previewDurationMs || recordingMs;
-  const hasUnsavedRecording = Boolean(recordedBlob);
-  const sampleStateLabel = state?.hasSample
-    ? "Saved locally"
-    : state?.hasPendingSample
-      ? "Waiting for tools"
-      : hasUnsavedRecording
-        ? "Ready to save"
-        : "Not recorded";
-  const sampleStateCopy = state?.hasSample
-    ? "You can replace this sample from Settings."
-    : state?.hasPendingSample
-      ? "Preparation will finish processing when voice tools are ready."
-      : hasUnsavedRecording
-        ? "Review it, then save the sample before continuing."
-        : "You can skip this step and add a sample later.";
-  const recorderStateLabel = isRecording ? "Recording now" : hasUnsavedRecording ? "Recording captured" : "Ready";
-  const recorderActionLabel = isRecording ? "Stop" : hasUnsavedRecording ? "Record again" : "Record";
+  const hasLocalRecording = Boolean(recordedBlob);
+  const sampleStateLabel = (() => {
+    if (pendingUploadSample || autoSaveStatus === "saving") return "Saving...";
+    if (autoSaveStatus === "error") return "Save failed";
+    if (autoSaveStatus === "saved" || state?.hasSample) return "Saved locally";
+    if (state?.hasPendingSample) return "Waiting for tools";
+    return "Not recorded";
+  })();
+  const sampleStateCopy = (() => {
+    if (pendingUploadSample || autoSaveStatus === "saving") return "This recording is being saved automatically.";
+    if (autoSaveStatus === "error") return "The last recording is still here. Retry, or record again to overwrite it.";
+    if (autoSaveStatus === "saved") return "The latest recording replaced any previous sample.";
+    if (state?.hasSample) return "You can replace this sample from Settings.";
+    if (state?.hasPendingSample) return "Preparation will finish processing when voice tools are ready.";
+    return privacyCopy;
+  })();
+  const recorderStateLabel = isRecording ? "Recording now" : hasLocalRecording ? "Recording captured" : "Ready";
+  const recorderDisplayLabel = isRecording
+    ? "Recording"
+      : pendingUploadSample || autoSaveStatus === "saving"
+        ? "Saving"
+      : hasLocalRecording
+          ? ""
+          : "Ready to record";
+  const showSetupChrome = surface !== "plain";
   const rootClassName = [
     surface === "card" ? "setup-wizard-card" : "voice-setup-panel",
     className,
@@ -1385,29 +1454,52 @@ export function VoiceSetupPanel({
   return (
     <div className={rootClassName} aria-busy={anyPending}>
       {showNotices ? <ActionNotices notices={notices} onDismiss={dismissNotice} /> : null}
-      <div className="voice-setup-heading">
-        <p className="setup-onboarding-kicker">Local voice</p>
-        <h3>{title}</h3>
-        <p>{description}</p>
-      </div>
+      {showSetupChrome ? (
+        <div className="voice-setup-heading">
+          <p className="setup-onboarding-kicker">Local voice</p>
+          <h3>{title}</h3>
+          <p>{description}</p>
+        </div>
+      ) : null}
 
-      <div className="voice-state-strip" aria-label="Voice setup state">
-        <div>
-          <span>Tools</span>
-          <strong>{statusText}</strong>
-          <small>{voiceSetupDetailLabel(state?.status)}</small>
+      {showSetupChrome ? (
+        <div className="voice-state-strip" aria-label="Voice setup state">
+          <div>
+            <span>Tools</span>
+            <strong>{statusText}</strong>
+            <small>{voiceSetupDetailLabel(state?.status)}</small>
+          </div>
+          <div>
+            <span>Recorder</span>
+            <strong>{recorderStateLabel}</strong>
+            <small>{isRecording ? `${formatVoiceDuration(displayedDurationMs)} of 5:00` : "Up to 5 minutes"}</small>
+          </div>
+          <div>
+            <span>Sample</span>
+            <strong>{sampleStateLabel}</strong>
+            <small>{sampleStateCopy}</small>
+          </div>
         </div>
-        <div>
-          <span>Recorder</span>
-          <strong>{recorderStateLabel}</strong>
-          <small>{isRecording ? `${formatVoiceDuration(displayedDurationMs)} of 5:00` : "Up to 5 minutes"}</small>
+      ) : null}
+
+      {voiceInstallActive ? (
+        <div className="voice-install-progress" role="status" aria-live="polite">
+          <div className="install-progress-copy">
+            <strong>Installing voice tools</strong>
+            <span>{state?.message || "Preparing local voice packages."}</span>
+          </div>
+          <div
+            className="install-progress-track"
+            role="progressbar"
+            aria-label="Voice tools installation progress"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={voiceInstallProgress}
+          >
+            <span style={{ width: `${voiceInstallProgress}%` }} />
+          </div>
         </div>
-        <div>
-          <span>Sample</span>
-          <strong>{sampleStateLabel}</strong>
-          <small>{sampleStateCopy}</small>
-        </div>
-      </div>
+      ) : null}
 
       <label className="voice-script-panel">
         <span className="voice-script-head">
@@ -1427,32 +1519,77 @@ export function VoiceSetupPanel({
         />
       </label>
 
-      <div className={`voice-recorder-console ${isRecording ? "voice-recorder-console-active" : ""}`}>
+      <div className={`voice-recorder-console ${isRecording ? "voice-recorder-console-active" : ""} ${recordedBlob && !isRecording ? "voice-recorder-console-preview" : ""}`}>
         <div className="voice-recorder-main">
-          <button
-            className="voice-record-button"
-            type="button"
-            onClick={isRecording ? stopRecording : startRecording}
-            disabled={!canUseRecordButton}
-            aria-disabled={!canUseRecordButton}
-            aria-label={isRecording ? "Stop recording" : recordedBlob ? "Record again" : "Record voice sample"}
-          >
-            <span aria-hidden="true" />
-          </button>
+          <div className="voice-recorder-icon-group">
+            <button
+              className={`voice-record-button ${recordedBlob && !isRecording ? "voice-record-button-playback" : ""}`}
+              type="button"
+              onClick={primaryRecorderAction}
+              disabled={!canUseRecordButton}
+              aria-disabled={!canUseRecordButton}
+              aria-label={primaryRecorderLabel}
+            >
+              <span aria-hidden="true" />
+            </button>
+            {recordedBlob && !isRecording ? (
+              <button className="voice-rerecord-button" type="button" onClick={startRecording} disabled={!canUseRecordButton} aria-disabled={!canUseRecordButton} aria-label="Re-record voice sample">
+                <span aria-hidden="true" />
+              </button>
+            ) : null}
+          </div>
           <div className="voice-recorder-surface">
             <div className="voice-recorder-meta">
-              <strong>{isRecording ? "Recording" : recordedBlob ? "Sample captured" : "Ready to record"}</strong>
+              {recorderDisplayLabel ? <strong>{recorderDisplayLabel}</strong> : <span aria-hidden="true" />}
               <span>{isRecording ? `${formatVoiceDuration(displayedDurationMs)} / 5:00` : formatVoiceDuration(displayedDurationMs)}</span>
             </div>
-            <WaveformBars values={isRecording ? liveWaveform : recordedBlob ? previewWaveform : IDLE_WAVEFORM} progress={isRecording ? 1 : 0} label="Live voice waveform" />
-          </div>
-        </div>
-
-        {previewUrl ? (
-          <div className="voice-preview-player">
+            {recordedBlob && !isRecording ? (
+              <div className="voice-recorder-preview-waveform">
+                <button
+                  className="voice-waveform-hitarea"
+                  type="button"
+                  onClick={(event) => {
+                    const bounds = event.currentTarget.getBoundingClientRect();
+                    seekPreview(Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width)));
+                  }}
+                  aria-label="Seek voice preview"
+                >
+                  <LiveWaveform
+                    values={previewWaveform}
+                    progress={previewProgress}
+                    mode="static"
+                    height={58}
+                    barWidth={6}
+                    barGap={4}
+                    barRadius={6}
+                    barHeight={6}
+                    sensitivity={1.8}
+                    className="voice-live-waveform"
+                  />
+                </button>
+              </div>
+            ) : (
+              <LiveWaveform
+                active={isRecording}
+                processing={pendingUploadSample || autoSaveStatus === "saving"}
+                mode="static"
+                height={58}
+                barWidth={6}
+                barGap={4}
+                barRadius={6}
+                barHeight={6}
+                sensitivity={1.8}
+                className="voice-live-waveform"
+                onStreamReady={beginRecordingFromStream}
+                onError={() => {
+                  setRecordingError("Could not access microphone. Allow permissions and retry.");
+                  setIsRecording(false);
+                }}
+              />
+            )}
             <audio
               ref={previewAudioRef}
-              src={previewUrl}
+              src={previewUrl || undefined}
               preload="metadata"
               onPlay={() => setIsPreviewPlaying(true)}
               onPause={() => setIsPreviewPlaying(false)}
@@ -1472,18 +1609,8 @@ export function VoiceSetupPanel({
                 }
               }}
             />
-            <button className="voice-play-button" type="button" onClick={togglePreviewPlayback} aria-label={isPreviewPlaying ? "Pause preview" : "Play preview"}>
-              <span aria-hidden="true">{isPreviewPlaying ? "Pause" : "Play"}</span>
-            </button>
-            <div className="voice-preview-main">
-              <div className="voice-recorder-meta">
-                <strong>Preview</strong>
-                <span>{formatVoiceDuration(previewProgress * (previewDurationMs || 0))} / {formatVoiceDuration(previewDurationMs)}</span>
-              </div>
-              <WaveformBars values={previewWaveform} progress={previewProgress} label="Voice preview waveform" onSeek={seekPreview} />
-            </div>
           </div>
-        ) : null}
+        </div>
       </div>
 
       {recordingError ? <p className="setup-revoked-notice">{recordingError}</p> : null}
@@ -1500,25 +1627,17 @@ export function VoiceSetupPanel({
             {pendingInstall ? "Installing..." : "Install tools"}
           </button>
         ) : null}
-        {isRecording ? (
-          <button className="btn btn-ghost" type="button" onClick={stopRecording} disabled={!canStopRecording} aria-disabled={!canStopRecording}>
-            Stop recording
+        {autoSaveStatus === "error" && recordedBlob ? (
+          <button
+            className="btn btn-ghost"
+            type="button"
+            onClick={() => void saveVoiceSample(recordedBlob, promptText)}
+            disabled={anyPending}
+            aria-disabled={anyPending}
+          >
+            Retry
           </button>
         ) : null}
-        {!isRecording ? (
-          <button className="btn btn-ghost" type="button" onClick={startRecording} disabled={!canUseRecordButton} aria-disabled={!canUseRecordButton}>
-            {recorderActionLabel}
-          </button>
-        ) : null}
-        <button
-          className="btn btn-primary"
-          type="button"
-          onClick={uploadSample}
-          disabled={!canSaveSample}
-          aria-disabled={!canSaveSample}
-        >
-          {pendingUploadSample ? "Saving..." : "Save voice sample"}
-        </button>
       </div>
 
       {showAdvancedControls ? (
@@ -1568,7 +1687,7 @@ export function VoiceSetupPanel({
   );
 }
 
-function InstagramSetupPanel({
+function IMessageSetupPanel({
   liveState,
   realtimeEnabled,
   setupSecret,
@@ -1578,6 +1697,324 @@ function InstagramSetupPanel({
   realtimeEnabled: boolean;
   setupSecret?: string;
   showNotices?: boolean;
+}) {
+  const [localState, setLocalState] = useState<SetupState | null>(null);
+  const { runAction, isPending, anyPending, notices, dismissNotice } = useActionStateRegistry();
+  const liveStateLoading = realtimeEnabled && liveState === undefined && !localState;
+  const state = useMemo(() => {
+    if (!liveState) return localState;
+    if (!localState) return liveState;
+    return (localState.updatedAt || 0) > (liveState.updatedAt || 0) ? localState : liveState;
+  }, [liveState, localState]);
+  const status = state?.status ?? "idle";
+  const isConnected = status === "connected" || state?.listenerActive === true;
+  const isMac = state?.macos !== false;
+  const pendingStart = isPending("setup:imessage:start");
+  const pendingRefresh = isPending("setup:imessage:refresh");
+  const pendingStop = isPending("setup:imessage:stop");
+  const pendingRestart = isPending("setup:imessage:restart_worker");
+  const pendingReset = isPending("setup:imessage:reset");
+  const canStart = !anyPending && isMac;
+  const canRefresh = !anyPending;
+  const canStop = !pendingStop && !pendingReset && (status !== "idle" || Boolean(state?.listenerActive));
+  const canRestart = !anyPending && Boolean(state?.hasAuth || state?.databaseReadable) && isMac;
+  const canReset = !anyPending;
+  const setupHeaders = useMemo(
+    () => (setupSecret ? { [getSetupBootstrapHeaderName()]: setupSecret } : undefined),
+    [setupSecret],
+  );
+
+  const refresh = useCallback(() => {
+    void runAction(
+      "setup:imessage:refresh",
+      async () => {
+        const response = await fetch("/api/setup/imessage/status", { cache: "no-store", headers: setupHeaders });
+        const next = await readSetupResponse(response);
+        setLocalState(next);
+      },
+      { pendingLabel: "Refreshing...", suppressSuccessNotice: true },
+    );
+  }, [runAction, setupHeaders]);
+
+  const postAction = (key: string, path: string, pendingLabel: string) => {
+    void runAction(
+      key,
+      async () => {
+        const response = await fetch(path, { method: "POST", headers: setupHeaders });
+        const next = await readSetupResponse(response);
+        setLocalState(next);
+      },
+      { pendingLabel },
+    );
+  };
+
+  useEffect(() => {
+    if (!realtimeEnabled) refresh();
+  }, [refresh, realtimeEnabled]);
+
+  return (
+    <div className="setup-wizard-card" aria-busy={anyPending}>
+      {showNotices ? <ActionNotices notices={notices} onDismiss={dismissNotice} /> : null}
+      <h3>Connect iMessage</h3>
+      <p className="queue-meta">Uses Messages on this Mac. Full Disk Access must allow this app or terminal to read Messages.</p>
+
+      <div className="setup-status-row">
+        <span className={`status-pill ${statusToneClass(status, state?.listenerActive)}`}>
+          {state?.listenerActive ? "Connected" : !isMac ? "macOS Only" : statusLabel(status)}
+        </span>
+        {state?.message ? <span className="queue-meta">{simplifySetupMessage(state.message)}</span> : null}
+      </div>
+      {liveStateLoading ? <LoadingIndicator label="Loading live setup status…" /> : null}
+      {state?.databasePath ? <p className="queue-meta">Database: {state.databasePath}</p> : null}
+
+      <div className="wizard-actions">
+        <button
+          className="btn btn-primary"
+          type="button"
+          onClick={() => postAction("setup:imessage:start", "/api/setup/imessage/start", "Starting iMessage...")}
+          disabled={!canStart}
+          aria-disabled={!canStart}
+        >
+          {pendingStart ? "Starting..." : isConnected ? "Start again" : "Start iMessage"}
+        </button>
+        <button className="btn btn-ghost" type="button" onClick={refresh} disabled={!canRefresh} aria-disabled={!canRefresh}>
+          {pendingRefresh ? "Refreshing..." : "Refresh"}
+        </button>
+      </div>
+
+      <details className="setup-advanced">
+        <summary>More actions</summary>
+        <div className="wizard-actions">
+          <button
+            className="btn btn-ghost"
+            type="button"
+            onClick={() => postAction("setup:imessage:stop", "/api/setup/imessage/stop", "Stopping iMessage...")}
+            disabled={!canStop}
+            aria-disabled={!canStop}
+          >
+            {pendingStop ? "Stopping..." : "Stop worker"}
+          </button>
+          <button
+            className="btn btn-ghost"
+            type="button"
+            onClick={() => postAction("setup:imessage:restart_worker", "/api/setup/imessage/restart-worker", "Restarting iMessage...")}
+            disabled={!canRestart}
+            aria-disabled={!canRestart}
+          >
+            {pendingRestart ? "Restarting..." : "Restart worker"}
+          </button>
+          <button
+            className="btn btn-ghost"
+            type="button"
+            onClick={() => postAction("setup:imessage:reset", "/api/setup/imessage/reset", "Resetting iMessage...")}
+            disabled={!canReset}
+            aria-disabled={!canReset}
+          >
+            {pendingReset ? "Resetting..." : "Reset"}
+          </button>
+        </div>
+      </details>
+    </div>
+  );
+}
+
+function TelegramSetupPanel({
+  liveState,
+  realtimeEnabled,
+  setupSecret,
+  showNotices = true,
+}: {
+  liveState: SetupState | null | undefined;
+  realtimeEnabled: boolean;
+  setupSecret?: string;
+  showNotices?: boolean;
+}) {
+  const [localState, setLocalState] = useState<SetupState | null>(null);
+  const [phoneNumber, setPhoneNumber] = useState("");
+  const [code, setCode] = useState("");
+  const { runAction, isPending, anyPending, notices, dismissNotice } = useActionStateRegistry();
+  const liveStateLoading = realtimeEnabled && liveState === undefined && !localState;
+  const state = useMemo(() => {
+    if (!liveState) return localState;
+    if (!localState) return liveState;
+    return (localState.updatedAt || 0) > (liveState.updatedAt || 0) ? localState : liveState;
+  }, [liveState, localState]);
+  const status = state?.status ?? "idle";
+  const isConnected = status === "connected" || state?.listenerActive === true;
+  const requiresCode = status === "code_required";
+  const pendingStart = isPending("setup:telegram:start");
+  const pendingChallenge = isPending("setup:telegram:challenge");
+  const pendingRefresh = isPending("setup:telegram:refresh");
+  const pendingStop = isPending("setup:telegram:stop");
+  const pendingRestart = isPending("setup:telegram:restart_worker");
+  const pendingReset = isPending("setup:telegram:reset");
+  const canStart = !anyPending && Boolean(phoneNumber.trim());
+  const canChallenge = !anyPending && requiresCode && Boolean(code.trim());
+  const canRefresh = !anyPending;
+  const canStop = !pendingStop && !pendingReset && (status !== "idle" || Boolean(state?.listenerActive));
+  const canRestart = !anyPending && Boolean(state?.hasAuth);
+  const canReset = !anyPending;
+  const setupHeaders = useMemo(
+    () => (setupSecret ? { [getSetupBootstrapHeaderName()]: setupSecret } : undefined),
+    [setupSecret],
+  );
+
+  const refresh = useCallback(() => {
+    void runAction(
+      "setup:telegram:refresh",
+      async () => {
+        const response = await fetch("/api/setup/telegram/status", { cache: "no-store", headers: setupHeaders });
+        const next = await readSetupResponse(response);
+        setLocalState(next);
+      },
+      { pendingLabel: "Refreshing...", suppressSuccessNotice: true },
+    );
+  }, [runAction, setupHeaders]);
+
+  const postAction = (key: string, path: string, pendingLabel: string) => {
+    void runAction(
+      key,
+      async () => {
+        const response = await fetch(path, { method: "POST", headers: setupHeaders });
+        const next = await readSetupResponse(response);
+        setLocalState(next);
+      },
+      { pendingLabel },
+    );
+  };
+
+  const startSetup = () => {
+    void runAction(
+      "setup:telegram:start",
+      async () => {
+        const response = await fetch("/api/setup/telegram/start", {
+          method: "POST",
+          headers: { "content-type": "application/json", ...(setupHeaders || {}) },
+          body: JSON.stringify({ phoneNumber: phoneNumber.trim() }),
+        });
+        const next = await readSetupResponse(response);
+        setLocalState(next);
+      },
+      { pendingLabel: "Requesting code..." },
+    );
+  };
+
+  const submitChallenge = () => {
+    void runAction(
+      "setup:telegram:challenge",
+      async () => {
+        const response = await fetch("/api/setup/telegram/challenge", {
+          method: "POST",
+          headers: { "content-type": "application/json", ...(setupHeaders || {}) },
+          body: JSON.stringify({ code: code.trim() }),
+        });
+        const next = await readSetupResponse(response);
+        setLocalState(next);
+      },
+      { pendingLabel: "Submitting Telegram challenge..." },
+    );
+  };
+
+  useEffect(() => {
+    if (!realtimeEnabled) refresh();
+  }, [refresh, realtimeEnabled]);
+
+  useEffect(() => {
+    if (status !== "starting" && status !== "code_required" && status !== "connected") {
+      return;
+    }
+    if (status === "connected" && state?.listenerActive) {
+      return;
+    }
+    let cancelled = false;
+    const interval = setInterval(async () => {
+      try {
+        const response = await fetch("/api/setup/telegram/status", { cache: "no-store", headers: setupHeaders });
+        const next = await readSetupResponse(response);
+        if (!cancelled) setLocalState(next);
+      } catch {
+        // best effort polling only
+      }
+    }, status === "connected" ? 1_500 : 2_200);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [setupHeaders, state?.listenerActive, status]);
+
+  return (
+    <div className="setup-wizard-card" aria-busy={anyPending}>
+      {showNotices ? <ActionNotices notices={notices} onDismiss={dismissNotice} /> : null}
+      <h3>Connect Telegram</h3>
+      <p className="queue-meta">Enter your Telegram phone number, then submit the login code sent by Telegram.</p>
+
+      <div className="setup-status-row">
+        <span className={`status-pill ${statusToneClass(status, state?.listenerActive)}`}>
+          {state?.listenerActive ? "Connected" : statusLabel(status)}
+        </span>
+        {state?.message ? <span className="queue-meta">{simplifySetupMessage(state.message)}</span> : null}
+      </div>
+      {liveStateLoading ? <LoadingIndicator label="Loading live setup status…" /> : null}
+      {state?.phoneNumberMasked ? <p className="queue-meta">Phone: {state.phoneNumberMasked}</p> : null}
+
+      <div className="setup-field-grid">
+        <label className="setup-input-group">
+          <span className="queue-meta">Phone number</span>
+          <input type="text" inputMode="tel" placeholder="+2348012345678" value={phoneNumber} onChange={(event) => setPhoneNumber(event.target.value)} disabled={anyPending} aria-disabled={anyPending} />
+        </label>
+      </div>
+
+      <div className="wizard-actions">
+        <button className="btn btn-primary" type="button" onClick={startSetup} disabled={!canStart} aria-disabled={!canStart}>
+          {pendingStart ? "Requesting..." : isConnected ? "Request new code" : "Request code"}
+        </button>
+      </div>
+
+      {requiresCode ? (
+        <div className="setup-field-grid">
+          <label className="setup-input-group">
+            <span className="queue-meta">Login code</span>
+            <input type="text" inputMode="numeric" value={code} onChange={(event) => setCode(event.target.value)} disabled={anyPending} aria-disabled={anyPending} />
+          </label>
+          <button className="btn btn-ghost" type="button" onClick={submitChallenge} disabled={!canChallenge} aria-disabled={!canChallenge}>
+            {pendingChallenge ? "Submitting..." : "Submit"}
+          </button>
+        </div>
+      ) : null}
+
+      <details className="setup-advanced">
+        <summary>More actions</summary>
+        <div className="wizard-actions">
+          <button className="btn btn-ghost" type="button" onClick={refresh} disabled={!canRefresh} aria-disabled={!canRefresh}>
+            {pendingRefresh ? "Refreshing..." : "Refresh"}
+          </button>
+          <button className="btn btn-ghost" type="button" onClick={() => postAction("setup:telegram:stop", "/api/setup/telegram/stop", "Stopping Telegram...")} disabled={!canStop} aria-disabled={!canStop}>
+            {pendingStop ? "Stopping..." : "Stop worker"}
+          </button>
+          <button className="btn btn-ghost" type="button" onClick={() => postAction("setup:telegram:restart_worker", "/api/setup/telegram/restart-worker", "Restarting Telegram...")} disabled={!canRestart} aria-disabled={!canRestart}>
+            {pendingRestart ? "Restarting..." : "Restart worker"}
+          </button>
+          <button className="btn btn-ghost" type="button" onClick={() => postAction("setup:telegram:reset", "/api/setup/telegram/reset", "Resetting Telegram...")} disabled={!canReset} aria-disabled={!canReset}>
+            {pendingReset ? "Resetting..." : "Reset session"}
+          </button>
+        </div>
+      </details>
+    </div>
+  );
+}
+
+function InstagramSetupPanel({
+  liveState,
+  realtimeEnabled,
+  setupSecret,
+  showNotices = true,
+  onConnectedChange,
+}: {
+  liveState: SetupState | null | undefined;
+  realtimeEnabled: boolean;
+  setupSecret?: string;
+  showNotices?: boolean;
+  onConnectedChange?: (connected: boolean) => void;
 }) {
   const [localState, setLocalState] = useState<SetupState | null>(null);
   const [username, setUsername] = useState("");
@@ -1623,6 +2060,10 @@ function InstagramSetupPanel({
         : undefined,
     [setupSecret],
   );
+
+  useEffect(() => {
+    onConnectedChange?.(isConnected);
+  }, [isConnected, onConnectedChange]);
 
   const refresh = () => {
     void runAction(
@@ -1923,26 +2364,37 @@ function SetupWizardRealtimeWrapper({
   initialScreen,
   setupSecret,
   showNotices,
+  includeVoiceOption,
   onWhatsAppConnectedChange,
+  onInstagramConnectedChange,
 }: {
   embedded?: boolean;
   initialScreen?: SetupWizardScreen;
   setupSecret?: string;
   showNotices?: boolean;
+  includeVoiceOption?: boolean;
   onWhatsAppConnectedChange?: (connected: boolean) => void;
+  onInstagramConnectedChange?: (connected: boolean) => void;
 }) {
-  const liveState = useQuery(api.system.setupStatus, { provider: "whatsapp" }) as SetupState | null | undefined;
-  const instagramLiveState = useQuery(api.system.setupStatus, { provider: "instagram" }) as SetupState | null | undefined;
+  const tenantScope = useTenantScopeArgs();
+  const liveState = useQuery(api.system.setupStatus, { ...tenantScope, provider: "whatsapp" }) as SetupState | null | undefined;
+  const instagramLiveState = useQuery(api.system.setupStatus, { ...tenantScope, provider: "instagram" }) as SetupState | null | undefined;
+  const imessageLiveState = useQuery(api.system.setupStatus, { ...tenantScope, provider: "imessage" }) as SetupState | null | undefined;
+  const telegramLiveState = useQuery(api.system.setupStatus, { ...tenantScope, provider: "telegram" }) as SetupState | null | undefined;
   return (
     <SetupWizardContent
       liveState={liveState}
       instagramLiveState={instagramLiveState}
+      imessageLiveState={imessageLiveState}
+      telegramLiveState={telegramLiveState}
       realtimeEnabled={true}
       embedded={embedded}
       initialScreen={initialScreen}
       setupSecret={setupSecret}
       showNotices={showNotices}
+      includeVoiceOption={includeVoiceOption}
       onWhatsAppConnectedChange={onWhatsAppConnectedChange}
+      onInstagramConnectedChange={onInstagramConnectedChange}
     />
   );
 }
@@ -1953,19 +2405,25 @@ export function SetupWizard({
   initialScreen = "options",
   setupSecret,
   showNotices = true,
+  includeVoiceOption = true,
   onWhatsAppConnectedChange,
+  onInstagramConnectedChange,
 }: SetupWizardProps) {
   if (!realtimeEnabled) {
     return (
       <SetupWizardContent
         liveState={null}
         instagramLiveState={null}
+        imessageLiveState={null}
+        telegramLiveState={null}
         realtimeEnabled={false}
         embedded={embedded}
         initialScreen={initialScreen}
         setupSecret={setupSecret}
         showNotices={showNotices}
+        includeVoiceOption={includeVoiceOption}
         onWhatsAppConnectedChange={onWhatsAppConnectedChange}
+        onInstagramConnectedChange={onInstagramConnectedChange}
       />
     );
   }
@@ -1976,7 +2434,9 @@ export function SetupWizard({
       initialScreen={initialScreen}
       setupSecret={setupSecret}
       showNotices={showNotices}
+      includeVoiceOption={includeVoiceOption}
       onWhatsAppConnectedChange={onWhatsAppConnectedChange}
+      onInstagramConnectedChange={onInstagramConnectedChange}
     />
   );
 }

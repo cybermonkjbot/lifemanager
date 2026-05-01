@@ -16,6 +16,8 @@ const logger = pino({
 const WORKER_ENTRY_BY_PROVIDER: Record<WorkerProvider, string> = {
   whatsapp: "src/worker/index.ts",
   instagram: "src/worker/instagram.ts",
+  imessage: "src/worker/imessage.ts",
+  telegram: "src/worker/telegram.ts",
 };
 
 const CHILD_STOP_TIMEOUT_MS = 4500;
@@ -27,7 +29,7 @@ function parseProvider(argvValue: string | undefined): WorkerProvider {
   if (!argvValue || argvValue.trim() === "") {
     return "whatsapp";
   }
-  if (argvValue === "whatsapp" || argvValue === "instagram") {
+  if (argvValue === "whatsapp" || argvValue === "instagram" || argvValue === "imessage" || argvValue === "telegram") {
     return argvValue;
   }
   throw new Error(`Unknown worker provider: ${argvValue}`);

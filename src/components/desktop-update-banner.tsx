@@ -8,6 +8,7 @@ type DesktopUpdateState = {
   status: DesktopUpdateStatus;
   version?: string;
   error?: string;
+  progress?: number | null;
 };
 
 type DesktopUpdateApi = {
@@ -81,6 +82,7 @@ export function DesktopUpdateBanner() {
   if (!copy) {
     return null;
   }
+  const progress = Number.isFinite(Number(state.progress)) ? Math.max(0, Math.min(100, Math.round(Number(state.progress)))) : null;
 
   const restart = async () => {
     setRestartError("");
@@ -95,6 +97,18 @@ export function DesktopUpdateBanner() {
       <div>
         <span>{copy.title}</span>
         <p>{copy.body}</p>
+        {state.status === "downloading" || state.status === "restarting" ? (
+          <div
+            className={`install-progress-track ${progress === null ? "install-progress-track-indeterminate" : ""}`}
+            role="progressbar"
+            aria-label="Desktop update installation progress"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={progress ?? undefined}
+          >
+            <span style={progress === null ? undefined : { width: `${progress}%` }} />
+          </div>
+        ) : null}
         {restartError ? <em>{restartError}</em> : null}
       </div>
       {state.status === "ready" ? (
