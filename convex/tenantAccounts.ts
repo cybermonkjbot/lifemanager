@@ -2,7 +2,12 @@ import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
-import { isTenantBillingActive, tenantBillingInactiveReason } from "./lib/billingAccess";
+import {
+  assertTenantConnectorEnabled,
+  isTenantBillingActive,
+  tenantBillingInactiveReason,
+  type ConnectorProvider,
+} from "./lib/billingAccess";
 import { consumeRateLimit } from "./lib/rateLimit";
 
 const TRIAL_DAYS = 7;
@@ -299,6 +304,7 @@ export const issueConnectorToken = mutation({
 export const verifyConnectorToken = mutation({
   args: {
     tokenHash: v.string(),
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("imessage"), v.literal("telegram"))),
   },
   handler: async (ctx, args) => {
     const now = Date.now();
@@ -311,6 +317,11 @@ export const verifyConnectorToken = mutation({
     }
     const tenant = await ctx.db.get(token.tenantId);
     if (!tenant || !isTenantBillingActive(tenant, now)) {
+      return null;
+    }
+    try {
+      await assertTenantConnectorEnabled(ctx, tenant, args.provider as ConnectorProvider | undefined);
+    } catch {
       return null;
     }
     await ctx.db.patch(token._id, {

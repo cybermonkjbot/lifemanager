@@ -6,6 +6,24 @@ import { matchesInstancePin } from "./instance-pin";
 import { getConvexAdminSecret } from "./managed-secret-crypto";
 
 const MIN_ADMIN_PIN_LENGTH = 4;
+const CONVEX_UNAVAILABLE_ERROR_CODES = new Set([
+  "EAI_AGAIN",
+  "ECONNABORTED",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ENETDOWN",
+  "ENETUNREACH",
+  "ENOTFOUND",
+  "ETIMEDOUT",
+  "ConnectionRefused",
+]);
+
+export class AdminCredentialBackendUnavailableError extends Error {
+  constructor() {
+    super("Admin credential backend is unavailable.");
+    this.name = "AdminCredentialBackendUnavailableError";
+  }
+}
 
 type AdminCredential = {
   email: string;
@@ -65,6 +83,30 @@ function getOptionalAdminSecretForConvex() {
   return getConvexAdminSecret() || null;
 }
 
+function getNestedErrorCode(error: unknown): string | null {
+  if (!error || typeof error !== "object") {
+    return null;
+  }
+  const candidate = error as { code?: unknown; cause?: unknown };
+  if (typeof candidate.code === "string") {
+    return candidate.code;
+  }
+  return getNestedErrorCode(candidate.cause);
+}
+
+function isConvexBackendUnavailableError(error: unknown) {
+  const code = getNestedErrorCode(error);
+  if (code && CONVEX_UNAVAILABLE_ERROR_CODES.has(code)) {
+    return true;
+  }
+  const message = error instanceof Error ? error.message.toLowerCase() : "";
+  return (
+    message.includes("fetch failed") ||
+    message.includes("failed to fetch") ||
+    message.includes("unable to connect")
+  );
+}
+
 function requireAdminSecretForConvex() {
   const adminSecret = getOptionalAdminSecretForConvex();
   if (!adminSecret) {
@@ -96,18 +138,26 @@ async function resolveBootstrapAdmin(emailNormalized: string): Promise<PublicAdm
 
 export async function listAdminUsers(): Promise<PublicAdminUser[]> {
   const adminSecret = getOptionalAdminSecretForConvex();
-  const rows = adminSecret
-    ? (await createConvexClient().query(convexRefs.adminUsersList, {
+  let rows: Array<{
+    email: string;
+    canMasqueradeTenants: boolean;
+    createdAt: number;
+    updatedAt: number;
+    createdBy?: string;
+  }> = [];
+  if (adminSecret) {
+    try {
+      rows = (await createConvexClient().query(convexRefs.adminUsersList, {
         adminSecret,
         limit: 200,
-      })) as Array<{
-        email: string;
-        canMasqueradeTenants: boolean;
-        createdAt: number;
-        updatedAt: number;
-        createdBy?: string;
-      }>
-    : [];
+      })) as typeof rows;
+    } catch (error) {
+      if (!isConvexBackendUnavailableError(error)) {
+        throw error;
+      }
+      console.warn("Convex admin user list is unavailable; using bootstrap admin fallback.");
+    }
+  }
 
   if (rows.length > 0) {
     return rows.map((admin) => ({
@@ -144,19 +194,41 @@ export async function verifyAdminCredentials(email: string, pin: string) {
   const adminSecret = getOptionalAdminSecretForConvex();
   let hasConvexAdmins = false;
   if (adminSecret) {
-    const credential = (await createConvexClient().query(convexRefs.adminUsersGetCredential, {
-      adminSecret,
-      email: emailNormalized,
-    })) as AdminCredential | null;
-    if (credential && verifyPin(normalizedPin, credential.pinSalt, credential.pinHash)) {
-      return {
-        email: credential.email,
-        emailNormalized,
-        canMasqueradeTenants: credential.canMasqueradeTenants === true,
-        source: "convex" as const,
-      };
+    let convexUnavailable = false;
+    try {
+      const credential = (await createConvexClient().query(convexRefs.adminUsersGetCredential, {
+        adminSecret,
+        email: emailNormalized,
+      })) as AdminCredential | null;
+      if (credential && verifyPin(normalizedPin, credential.pinSalt, credential.pinHash)) {
+        return {
+          email: credential.email,
+          emailNormalized,
+          canMasqueradeTenants: credential.canMasqueradeTenants === true,
+          source: "convex" as const,
+        };
+      }
+      hasConvexAdmins = await hasConfiguredConvexAdmins(adminSecret);
+    } catch (error) {
+      if (!isConvexBackendUnavailableError(error)) {
+        throw error;
+      }
+      convexUnavailable = true;
+      console.warn("Convex admin credential backend is unavailable; trying bootstrap admin fallback.");
     }
-    hasConvexAdmins = await hasConfiguredConvexAdmins(adminSecret);
+
+    if (convexUnavailable) {
+      const bootstrapAdmin = await resolveBootstrapAdmin(emailNormalized);
+      if (bootstrapAdmin && await matchesInstancePin(normalizedPin)) {
+        return {
+          email: bootstrapAdmin.email,
+          emailNormalized,
+          canMasqueradeTenants: true,
+          source: "bootstrap" as const,
+        };
+      }
+      throw new AdminCredentialBackendUnavailableError();
+    }
   }
 
   if (!hasConvexAdmins) {

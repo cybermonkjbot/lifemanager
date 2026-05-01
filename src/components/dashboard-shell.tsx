@@ -98,6 +98,7 @@ export async function DashboardShell({
   await requireInstancePageAccess();
 
   const realtimeEnabled = Boolean(convexUrl);
+  const convexAuthEnabled = process.env.ODOGWU_REQUIRE_CONVEX_AUTH === "1";
   const pinEnabled = await isInstancePinEnabled();
   const cookieStore = await cookies();
   const localConfig = await readLocalInstanceConfig();
@@ -121,7 +122,7 @@ export async function DashboardShell({
 
   return (
     <div className="shell-root">
-      <ConvexAppProvider convexUrl={convexUrl}>
+      <ConvexAppProvider convexUrl={convexUrl} authEnabled={realtimeEnabled && convexAuthEnabled}>
         <TenantScopeProvider tenantId={tenantScopeId}>
           {realtimeEnabled ? <RuntimeStateOverlay canManageRuntime={canManageRuntime} /> : null}
           <div className="shell-main-wrap">

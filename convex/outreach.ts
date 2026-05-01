@@ -206,7 +206,7 @@ async function runOutreachBatch(ctx: MutationCtx, tenantId?: Id<"tenantAccounts"
 
     const eligible: Array<{
       threadId: Id<"threads">;
-      messageProvider: "whatsapp" | "instagram";
+      messageProvider: "whatsapp" | "instagram" | "imessage" | "telegram";
       jid: string;
       name: string;
       sourceMessageId: Id<"messages">;

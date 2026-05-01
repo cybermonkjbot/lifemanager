@@ -74,7 +74,8 @@ type OrchestratorTool =
   | "stale_threads_scan"
   | "stalled_talking_stage_scan"
   | "memory_recall_search"
-  | "communication_plan_preview";
+  | "communication_plan_preview"
+  | "request_capability_scan";
 
 type ManagerArtifact =
   | {
@@ -131,6 +132,18 @@ type ManagerArtifact =
       }>;
       safetyNotes: string[];
       nextPrompts: string[];
+    }
+  | {
+      kind: "request_support_plan";
+      title: string;
+      description: string;
+      requests: Array<{
+        label: string;
+        status: "supported" | "needs_more_context" | "not_supported";
+        response: string;
+        nextStep: string;
+        href?: string;
+      }>;
     };
 
 type ToolResult = {
@@ -187,6 +200,7 @@ function formatQuietHoursPolicy(settings: RuntimeSettings | null) {
   }`;
 }
 type CampaignPlanArtifact = Extract<ManagerArtifact, { kind: "campaign_plan" }>;
+type RequestSupportPlanArtifact = Extract<ManagerArtifact, { kind: "request_support_plan" }>;
 type ArtifactPerson = PeopleListArtifact["people"][number];
 
 function compactText(value: string, maxChars: number) {
@@ -291,6 +305,34 @@ function normalizeManagerArtifacts(value: unknown): ManagerArtifact[] {
         title: compactText(readString(row.title, "Previous visible previews"), 80),
         description: compactText(readString(row.description, "Previews carried forward from the current Home chat."), 220),
         previews: previews.slice(0, 16),
+      });
+    }
+    if (kind === "request_support_plan") {
+      const requests: Extract<ManagerArtifact, { kind: "request_support_plan" }>["requests"] = [];
+      for (const request of asArray(row.requests)) {
+        const requestRow = asRecord(request);
+        const label = readString(requestRow.label);
+        if (!label) {
+          continue;
+        }
+        const status =
+          requestRow.status === "supported" || requestRow.status === "needs_more_context" || requestRow.status === "not_supported"
+            ? requestRow.status
+            : "needs_more_context";
+        const href = readString(requestRow.href);
+        requests.push({
+          label: compactText(label, 90),
+          status,
+          response: compactText(readString(requestRow.response, "I can explain the current support status for this request."), 180),
+          nextStep: compactText(readString(requestRow.nextStep, "Ask a more specific follow-up and I will route it if possible."), 180),
+          ...(href.startsWith("/") ? { href } : {}),
+        });
+      }
+      normalized.push({
+        kind: "request_support_plan",
+        title: compactText(readString(row.title, "Request support scan"), 80),
+        description: compactText(readString(row.description, "Home checked what it can handle for this request."), 220),
+        requests: requests.slice(0, 8),
       });
     }
   }
@@ -844,8 +886,19 @@ function getPromptTools(message: string): OrchestratorTool[] {
   if (/\b(run|start|trigger|execute)\b[\s\S]{0,40}\boutreach\b/i.test(message) || normalized === "outreach run") {
     tools.add("outreach_run");
   }
+  if (shouldRunRequestCapabilityScan(message, [...tools])) {
+    tools.add("request_capability_scan");
+  }
 
-  return [...tools].slice(0, 8);
+  const orderedTools = [...tools];
+  if (tools.has("request_capability_scan")) {
+    const prioritizedTools: OrchestratorTool[] = [
+      "request_capability_scan",
+      ...orderedTools.filter((tool) => tool !== "request_capability_scan"),
+    ];
+    return prioritizedTools.slice(0, 8);
+  }
+  return orderedTools.slice(0, 8);
 }
 
 function formatQueueSnapshot(snapshot: unknown) {
@@ -853,10 +906,11 @@ function formatQueueSnapshot(snapshot: unknown) {
   const needsReply = asArray(data.needsReply);
   const followups = asArray(data.followupConfirmations);
   const todos = asArray(data.todoCandidates);
+  const socialActions = asArray(data.socialActions);
   const guardrails = asArray(data.guardrailFlags);
   const topDrafts = needsReply.slice(0, 3).map((item, index) => `${index + 1}. ${getThreadLabel(item)}`);
   return [
-    `Review: ${needsReply.length} replies, ${followups.length} follow-up confirmations, ${todos.length} task suggestions, ${guardrails.length} safety flags.`,
+    `Review: ${needsReply.length} replies, ${followups.length} follow-up confirmations, ${todos.length} task suggestions, ${socialActions.length} Instagram social actions, ${guardrails.length} safety flags.`,
     topDrafts.length ? `Top reply threads:\n${topDrafts.join("\n")}` : "No reply drafts are currently waiting.",
   ].join("\n");
 }
@@ -921,6 +975,129 @@ function isCommunicationPreviewRequest(message: string) {
 
 function isCampaignRequest(message: string) {
   return /\b(campaign|marketing|mass|bulk|blast|broadcast|everyone|everybody|all contacts|all my|many people|send .{0,80}(everyone|everybody|all|list)|meme|memes|status|story|promo|promotion|announce|announcement)\b/i.test(
+    message,
+  );
+}
+
+function splitRequestClauses(message: string) {
+  return message
+    .split(/\b(?:and then|then|also|plus|and|,|;)\b/i)
+    .map((item) => item.replace(/\s+/g, " ").trim())
+    .filter((item) => item.length >= 4)
+    .slice(0, 8);
+}
+
+function hasActionIntent(message: string) {
+  return /\b(can you|could you|please|help me|i need|need you to|find|scan|show|list|draft|write|rewrite|send|message|dm|text|remind|schedule|book|call|email|pay|buy|order|open|create|delete|update|change|summari[sz]e|search|look|check|plan|build|generate|post|upload|download|export|import)\b/i.test(
+    message,
+  );
+}
+
+function classifyRequestSupport(label: string): RequestSupportPlanArtifact["requests"][number] {
+  const normalized = label.toLowerCase();
+  if (/\b(email|gmail|outlook|inbox|mail)\b/i.test(normalized)) {
+    return {
+      label,
+      status: "not_supported",
+      response: "Home orchestrator does not yet have a wired email inbox/send workflow.",
+      nextStep: "Use the connected email surface when available, or ask me to draft text you can paste.",
+    };
+  }
+  if (/\b(calendar|meeting|appointment|schedule a|book|reservation)\b/i.test(normalized)) {
+    return {
+      label,
+      status: "not_supported",
+      response: "Calendar booking is not wired into the Home orchestrator yet.",
+      nextStep: "I can draft the invite message or reminder text, but I cannot place it on a calendar from here.",
+    };
+  }
+  if (/\b(pay|payment|transfer|buy|purchase|order|checkout|bank|wallet)\b/i.test(normalized)) {
+    return {
+      label,
+      status: "not_supported",
+      response: "Payments and purchases are intentionally not executable from Home chat.",
+      nextStep: "I can help prepare a checklist or message, but the actual transaction needs to happen outside this flow.",
+    };
+  }
+  if (/\b(call|phone|voice call|video call)\b/i.test(normalized)) {
+    return {
+      label,
+      status: "not_supported",
+      response: "Starting calls from Home orchestrator is not wired yet.",
+      nextStep: "I can draft what to say or identify who needs a call from chat history.",
+    };
+  }
+  if (/\b(file|pdf|document|spreadsheet|attachment|upload|download|export)\b/i.test(normalized)) {
+    return {
+      label,
+      status: "needs_more_context",
+      response: "Home can reason about chat state, but file handling needs a specific app surface or attachment context.",
+      nextStep: "Tell me what file source to use, or open the relevant tool page for document/media work.",
+    };
+  }
+  if (/\b(post|story|status|meme|campaign|broadcast|announce)\b/i.test(normalized)) {
+    return {
+      label,
+      status: "supported",
+      response: "Home can plan campaigns/status work and show a reviewable UI plan before anything is sent.",
+      nextStep: "Ask for a campaign or status plan with the audience and tone.",
+    };
+  }
+  if (/\b(send|message|dm|text|draft|rewrite|reply|follow[\s-]?up|remind)\b/i.test(normalized)) {
+    return {
+      label,
+      status: "supported",
+      response: "Home can find recipients, draft previews, and require approval before external sends.",
+      nextStep: "Ask me to find the people first or draft from the visible list.",
+    };
+  }
+  if (/\b(find|scan|search|show|list|who|people|contacts|messages|history|talked about|remember)\b/i.test(normalized)) {
+    return {
+      label,
+      status: "supported",
+      response: "Home can scan contacts, chat history, follow-ups, queue state, and memory recall.",
+      nextStep: "Ask for the specific group, topic, or timeframe you want scanned.",
+    };
+  }
+  if (/\b(setting|config|configuration|system|health|worker|outbox|queue|todo|task)\b/i.test(normalized)) {
+    return {
+      label,
+      status: "supported",
+      response: "Home can inspect dashboard state such as queue, system health, settings, tasks, and follow-ups.",
+      nextStep: "Ask for the exact state view or priority ordering you want.",
+    };
+  }
+  return {
+    label,
+    status: "needs_more_context",
+    response: "I can see this is a request, but it does not map cleanly to a Home tool yet.",
+    nextStep: "Ask with the target, source, and desired output so I can route it or explain the missing workflow.",
+  };
+}
+
+function buildRequestSupportPlanArtifact(message: string): RequestSupportPlanArtifact {
+  const clauses = splitRequestClauses(message);
+  const requestLabels = clauses.length ? clauses : [message];
+  const requests = requestLabels.map((label) => classifyRequestSupport(compactText(label, 90)));
+  const unsupported = requests.filter((request) => request.status !== "supported").length;
+  return {
+    kind: "request_support_plan",
+    title: unsupported ? "Request Support Scan" : "Supported Request Scan",
+    description: unsupported
+      ? `${unsupported} request${unsupported === 1 ? "" : "s"} need more support or another workflow.`
+      : "These requests map to Home orchestrator workflows.",
+    requests,
+  };
+}
+
+function shouldRunRequestCapabilityScan(message: string, requestedTools: OrchestratorTool[]) {
+  if (!hasActionIntent(message)) {
+    return false;
+  }
+  if (requestedTools.length === 0) {
+    return true;
+  }
+  return /\b(email|calendar|meeting|appointment|book|reservation|pay|payment|transfer|buy|purchase|order|call|file|pdf|document|spreadsheet|attachment|upload|download|export)\b/i.test(
     message,
   );
 }
@@ -1022,6 +1199,7 @@ function scoreToolResultForReturn(result: ToolResult, message: string) {
   }
   if (isCampaignRequest(message) && result.tool === "campaign_plan") score += 1500;
   if (isCommunicationPreviewRequest(message) && result.tool === "communication_plan_preview") score += 1400;
+  if (result.tool === "request_capability_scan") score += 1300;
   if (result.tool === "current_artifact_context") score += 620;
 
   const data = result.data;
@@ -1150,6 +1328,16 @@ function buildArtifactToolReply(result: ToolResult) {
     return peopleList.people.length
       ? `${peopleList.title}: ${peopleList.people.length} match${peopleList.people.length === 1 ? "" : "es"} found. The list is shown below.`
       : `${peopleList.title}: no matches found.`;
+  }
+
+  const requestSupportPlan = (result.artifacts || []).find(
+    (artifact): artifact is RequestSupportPlanArtifact => artifact.kind === "request_support_plan",
+  );
+  if (requestSupportPlan) {
+    const unsupported = requestSupportPlan.requests.filter((request) => request.status !== "supported").length;
+    return unsupported
+      ? `I scanned the request and found ${unsupported} part${unsupported === 1 ? "" : "s"} that Home does not fully support yet. I put the support status and next steps below.`
+      : "I scanned the request and the parts map to Home workflows. I put the supported routes below.";
   }
 
   return null;
@@ -2115,6 +2303,7 @@ async function runTool(tool: OrchestratorTool, message: string): Promise<ToolRes
         draftLimit: 20,
         followupLimit: 20,
         todoLimit: 20,
+        socialActionLimit: 20,
         guardrailLimit: 20,
       });
       return { tool, status: "success", summary: formatQueueSnapshot(data), data };
@@ -2254,6 +2443,19 @@ async function runTool(tool: OrchestratorTool, message: string): Promise<ToolRes
         data: { requiresConfirmation: true },
       };
     }
+    if (tool === "request_capability_scan") {
+      const artifact = buildRequestSupportPlanArtifact(message);
+      const unsupported = artifact.requests.filter((request) => request.status !== "supported").length;
+      return {
+        tool,
+        status: "success",
+        summary: unsupported
+          ? `Request scan found ${artifact.requests.length} request${artifact.requests.length === 1 ? "" : "s"}; ${unsupported} need another workflow or more context.`
+          : `Request scan found ${artifact.requests.length} request${artifact.requests.length === 1 ? "" : "s"} supported by Home workflows.`,
+        data: { requestCount: artifact.requests.length, unsupportedCount: unsupported },
+        artifacts: [artifact],
+      };
+    }
     if (tool === "settings_snapshot") {
       const data = await convex.query(convexRefs.settingsGet, {});
       return { tool, status: "success", summary: formatSettingsSnapshot(data), data };
@@ -2370,13 +2572,15 @@ export async function POST(request: Request) {
   const artifactContext = artifacts.length
     ? [
         `VISIBLE UI ARTIFACTS (${artifacts.length})`,
-	        ...artifacts.map((artifact) =>
-	          artifact.kind === "people_list"
-	            ? `- ${artifact.title}: ${artifact.people.length} people shown in chat.`
-	            : artifact.kind === "communication_preview"
-	              ? `- ${artifact.title}: ${artifact.previews.length} draft previews shown in chat; approval required before sending.`
-	              : `- ${artifact.title}: campaign plan with ${artifact.estimatedRecipients} estimated recipients; approval required before sending.`,
-	        ),
+        ...artifacts.map((artifact) =>
+          artifact.kind === "people_list"
+            ? `- ${artifact.title}: ${artifact.people.length} people shown in chat.`
+            : artifact.kind === "communication_preview"
+              ? `- ${artifact.title}: ${artifact.previews.length} draft previews shown in chat; approval required before sending.`
+              : artifact.kind === "campaign_plan"
+                ? `- ${artifact.title}: campaign plan with ${artifact.estimatedRecipients} estimated recipients; approval required before sending.`
+                : `- ${artifact.title}: request support scan with ${artifact.requests.length} request statuses shown in chat.`,
+        ),
       ].join("\n")
     : "";
   const toolContext = toolResults.length

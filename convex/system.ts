@@ -33,7 +33,7 @@ const tenantScopeArgs = {
 async function getProviderConnectionHistory(
   ctx: QueryCtx,
   tenantId: Id<"tenantAccounts"> | undefined,
-  provider: "whatsapp" | "instagram",
+  provider: "whatsapp" | "instagram" | "imessage" | "telegram",
 ) {
   const history: {
     hasConnectedBefore: boolean;
@@ -91,6 +91,32 @@ async function getProviderConnectionHistory(
   }
 
   return history;
+}
+
+function providerLabel(provider: "whatsapp" | "instagram" | "imessage" | "telegram") {
+  if (provider === "instagram") {
+    return "Instagram";
+  }
+  if (provider === "imessage") {
+    return "iMessage";
+  }
+  if (provider === "telegram") {
+    return "Telegram";
+  }
+  return "WhatsApp";
+}
+
+function providerSetupMode(provider: "whatsapp" | "instagram" | "imessage" | "telegram") {
+  if (provider === "instagram") {
+    return "password" as const;
+  }
+  if (provider === "imessage") {
+    return "local" as const;
+  }
+  if (provider === "telegram") {
+    return "phone_code" as const;
+  }
+  return "qr" as const;
 }
 
 async function resolveTenantForOptionalQuery(
@@ -1031,7 +1057,7 @@ export const setIgnoreGroupsByDefault = mutation({
 export const setupStatus = query({
   args: {
     ...tenantScopeArgs,
-    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("imessage"), v.literal("telegram"))),
   },
   handler: async (ctx, args) => {
     const tenantId = await resolveTenantForOptionalQuery(ctx, args);
@@ -1058,7 +1084,7 @@ export const setupStatus = query({
         return {
           ...record,
           status: "connected" as const,
-          message: provider === "instagram" ? "Instagram connected." : "WhatsApp connected.",
+          message: `${providerLabel(provider)} connected.`,
           hasAuth: true,
           listenerActive: true,
           listenerLastSeenAt: connectionHistory.lastConnectionSeenAt ?? record.listenerLastSeenAt,
@@ -1077,11 +1103,9 @@ export const setupStatus = query({
         key: provider,
         provider,
         status: connectionHistory.hasActiveConnection ? ("connected" as const) : ("idle" as const),
-        mode: provider === "instagram" ? ("password" as const) : ("qr" as const),
+        mode: providerSetupMode(provider),
         message: connectionHistory.hasActiveConnection
-          ? provider === "instagram"
-            ? "Instagram connected."
-            : "WhatsApp connected."
+          ? `${providerLabel(provider)} connected.`
           : "Setup not started.",
         hasAuth: connectionHistory.hasActiveConnection,
         listenerActive: connectionHistory.hasActiveConnection ? true : undefined,
@@ -1102,7 +1126,8 @@ export const setupStatus = query({
 
 export const upsertSetupStatus = mutation({
   args: {
-    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
+    ...tenantScopeArgs,
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("imessage"), v.literal("telegram"))),
     status: v.union(
       v.literal("idle"),
       v.literal("starting"),
@@ -1110,11 +1135,19 @@ export const upsertSetupStatus = mutation({
       v.literal("qr_ready"),
       v.literal("code_ready"),
       v.literal("challenge_required"),
+      v.literal("connecting"),
       v.literal("syncing"),
       v.literal("connected"),
       v.literal("error"),
     ),
-    mode: v.union(v.literal("qr"), v.literal("pairing_code"), v.literal("password"), v.literal("challenge_code")),
+    mode: v.union(
+      v.literal("qr"),
+      v.literal("pairing_code"),
+      v.literal("password"),
+      v.literal("challenge_code"),
+      v.literal("local"),
+      v.literal("phone_code"),
+    ),
     message: v.string(),
     qrDataUrl: v.optional(v.string()),
     pairingCode: v.optional(v.string()),
@@ -1124,18 +1157,25 @@ export const upsertSetupStatus = mutation({
   },
   handler: async (ctx, args) => {
     const provider = args.provider || "whatsapp";
-    let existing = await ctx.db
-      .query("setupRuntime")
-      .withIndex("by_provider", (q) => q.eq("provider", provider))
-      .first();
-    if (!existing && provider === "whatsapp") {
+    const tenantId = args.connectorTokenHash ? await resolveTenantForMutation(ctx, args) : undefined;
+    let existing = tenantId
+      ? await ctx.db
+          .query("setupRuntime")
+          .withIndex("by_tenantId_and_provider", (q) => q.eq("tenantId", tenantId).eq("provider", provider))
+          .first()
+      : await ctx.db
+          .query("setupRuntime")
+          .withIndex("by_provider", (q) => q.eq("provider", provider))
+          .first();
+    if (!existing && !tenantId && provider === "whatsapp") {
       existing = await ctx.db
         .query("setupRuntime")
         .withIndex("by_key", (q) => q.eq("key", "whatsapp"))
         .first();
     }
     const payload = {
-      ...args,
+      ...withoutTenantScope(args),
+      tenantId,
       provider,
       key: provider,
     };
@@ -1153,7 +1193,7 @@ export const reportSetupListener = mutation({
   args: {
     tenantId: v.optional(v.id("tenantAccounts")),
     connectorTokenHash: v.optional(v.string()),
-    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("imessage"), v.literal("telegram"))),
     listenerActive: v.boolean(),
     listenerWorkerId: v.optional(v.string()),
     listenerMessage: v.optional(v.string()),
@@ -1199,11 +1239,9 @@ export const reportSetupListener = mutation({
 
     return await ctx.db.insert("setupRuntime", {
       status: "idle",
-      mode: provider === "instagram" ? "password" : "qr",
+      mode: providerSetupMode(provider),
       message: args.listenerActive
-        ? provider === "instagram"
-          ? "Worker connected to Instagram."
-          : "Worker connected to WhatsApp."
+        ? `Worker connected to ${providerLabel(provider)}.`
         : "Setup not started.",
       hasAuth: args.hasAuth ?? false,
       ...patch,

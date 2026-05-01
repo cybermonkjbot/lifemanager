@@ -84,14 +84,21 @@ export async function createTodoFromCandidate(candidateId: string) {
 }
 
 type IgnoreTargetType = "contact" | "group" | "keyword";
+type IgnoreProvider = "whatsapp" | "instagram" | "imessage" | "telegram";
 
-export async function upsertIgnoreTarget(targetValue: string, enabled: boolean, targetType?: IgnoreTargetType) {
+export async function upsertIgnoreTarget(
+  targetValue: string,
+  enabled: boolean,
+  targetType?: IgnoreTargetType,
+  provider?: IgnoreProvider,
+) {
   const client = createConvexClient();
   const payload: {
     tenantId?: string;
     targetValue: string;
     enabled: boolean;
     targetType?: IgnoreTargetType;
+    provider?: IgnoreProvider;
   } = {
     ...(await getTenantScopeArgs()),
     targetValue,
@@ -99,6 +106,9 @@ export async function upsertIgnoreTarget(targetValue: string, enabled: boolean, 
   };
   if (targetType) {
     payload.targetType = targetType;
+  }
+  if (provider) {
+    payload.provider = provider;
   }
   return await client.mutation(convexRefs.rulesUpsertIgnoreRule, payload);
 }

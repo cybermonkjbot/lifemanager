@@ -117,7 +117,7 @@ async function findExplicitIgnoreRule(args: {
   ctx: QueryCtx;
   threadKind: "direct" | "group" | "broadcast_or_system";
   jid: string;
-  provider?: "whatsapp" | "instagram";
+  provider?: "whatsapp" | "instagram" | "imessage" | "telegram";
 }) {
   if (args.threadKind === "group") {
     return await args.ctx.db
@@ -170,7 +170,7 @@ export const list = query({
     tenantId: v.optional(v.id("tenantAccounts")),
     connectorTokenHash: v.optional(v.string()),
     limit: v.optional(v.number()),
-    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("all"))),
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("imessage"), v.literal("telegram"), v.literal("all"))),
   },
   handler: async (ctx, args) => {
     const tenantId = await resolveTenantForQuery(ctx, args);
@@ -246,7 +246,7 @@ export const listContacts = query({
     tenantId: v.optional(v.id("tenantAccounts")),
     connectorTokenHash: v.optional(v.string()),
     limit: v.optional(v.number()),
-    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("all"))),
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("imessage"), v.literal("telegram"), v.literal("all"))),
   },
   handler: async (ctx, args) => {
     const tenantId = await resolveTenantForQuery(ctx, args);
@@ -345,7 +345,7 @@ export const listContacts = query({
 export const getAvatarCache = query({
   args: {
     ...tenantScopeArgs,
-    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("imessage"), v.literal("telegram"))),
     threadJid: v.string(),
   },
   handler: async (ctx, args) => {
@@ -379,7 +379,7 @@ export const getAvatarCache = query({
 export const updateAvatarCache = mutation({
   args: {
     ...tenantScopeArgs,
-    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("imessage"), v.literal("telegram"))),
     threadId: v.optional(v.id("threads")),
     threadJid: v.optional(v.string()),
     avatarMediaAssetId: v.optional(v.id("mediaAssets")),
@@ -487,7 +487,7 @@ export const getEligibility = query({
 
 export const getEligibilityByJid = query({
   args: {
-    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("imessage"), v.literal("telegram"))),
     threadJid: v.string(),
     isGroup: v.optional(v.boolean()),
     threadKind: v.optional(v.union(v.literal("direct"), v.literal("group"), v.literal("broadcast_or_system"))),
@@ -564,7 +564,7 @@ export const getEligibilityByJid = query({
 
 export const upsertMetadata = mutation({
   args: {
-    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("imessage"), v.literal("telegram"))),
     threadJid: v.string(),
     title: v.optional(v.string()),
     isGroup: v.optional(v.boolean()),
@@ -654,7 +654,7 @@ export const upsertMetadata = mutation({
 
 export const upsertContactMetadata = mutation({
   args: {
-    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("imessage"), v.literal("telegram"))),
     jids: v.array(v.string()),
     savedName: v.optional(v.string()),
     notifyName: v.optional(v.string()),

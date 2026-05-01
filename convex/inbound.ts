@@ -33,7 +33,7 @@ const refConversationIntelligenceIngestMessageSignals = makeFunctionReference<"m
 );
 type IngestMode = "live" | "history_sync" | "history_fetch";
 type InboundMessageType = "text" | "reaction" | "sticker" | "meme" | "image" | "video" | "audio" | "document";
-type MessageProvider = "whatsapp" | "instagram";
+type MessageProvider = "whatsapp" | "instagram" | "imessage" | "telegram";
 
 type IngestHistoricalResult = {
   threadId: Id<"threads">;
@@ -64,7 +64,10 @@ function normalizeTimestampMs(raw: number | undefined, fallbackMs: number) {
 }
 
 function normalizeProvider(provider?: MessageProvider): MessageProvider {
-  return provider === "instagram" ? "instagram" : "whatsapp";
+  if (provider === "instagram" || provider === "imessage" || provider === "telegram") {
+    return provider;
+  }
+  return "whatsapp";
 }
 
 function clamp01(value: number) {
@@ -265,7 +268,7 @@ export const ingest = mutation({
   args: {
     tenantId: v.optional(v.id("tenantAccounts")),
     connectorTokenHash: v.optional(v.string()),
-    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("imessage"), v.literal("telegram"))),
     threadJid: v.string(),
     senderJid: v.string(),
     senderTitle: v.optional(v.string()),
@@ -964,7 +967,7 @@ export const ingestHistorical = mutation({
   args: {
     tenantId: v.optional(v.id("tenantAccounts")),
     connectorTokenHash: v.optional(v.string()),
-    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("imessage"), v.literal("telegram"))),
     ingestMode: v.union(v.literal("history_sync"), v.literal("history_fetch")),
     direction: v.union(v.literal("inbound"), v.literal("outbound")),
     threadJid: v.string(),

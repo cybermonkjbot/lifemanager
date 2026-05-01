@@ -613,7 +613,7 @@ export const list = query({
   args: {
     tenantId: v.optional(v.id("tenantAccounts")),
     connectorTokenHash: v.optional(v.string()),
-    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("all"))),
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("imessage"), v.literal("telegram"), v.literal("all"))),
     limit: v.optional(v.number()),
     importance: v.optional(importanceOrAllValidator),
     recommendation: v.optional(recommendationOrAllValidator),

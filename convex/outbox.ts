@@ -43,7 +43,7 @@ const refChatRebuildThreadStyleProfile = makeFunctionReference<"mutation">("chat
 const refConversationIntelligenceIngestMessageSignals = makeFunctionReference<"mutation">(
   "conversationIntelligence:ingestMessageSignals",
 );
-type MessageProvider = "whatsapp" | "instagram";
+type MessageProvider = "whatsapp" | "instagram" | "imessage" | "telegram";
 const OUTBOUND_DUPLICATE_WINDOW_MS = 6 * 60 * 60 * 1000;
 const OUTBOUND_DUPLICATE_MIN_KEY_LENGTH = 16;
 const IGNORE_CONTACT_FALLBACK_SCAN_LIMIT = 1000;
@@ -62,7 +62,7 @@ async function findExplicitIgnoreRule(args: {
   ctx: MutationCtx | QueryCtx;
   threadKind: "direct" | "group" | "broadcast_or_system";
   jid: string;
-  provider?: "whatsapp" | "instagram";
+  provider?: "whatsapp" | "instagram" | "imessage" | "telegram";
 }) {
   if (args.threadKind === "group") {
     return await args.ctx.db
@@ -160,7 +160,10 @@ async function recordAiFeedbackSignal(args: {
 }
 
 function normalizeMessageProvider(provider?: MessageProvider): MessageProvider {
-  return provider === "instagram" ? "instagram" : "whatsapp";
+  if (provider === "instagram" || provider === "imessage" || provider === "telegram") {
+    return provider;
+  }
+  return "whatsapp";
 }
 
 function normalizeOutboundDuplicateKey(text: string | undefined) {
@@ -394,7 +397,7 @@ export const claimDue = mutation({
     tenantId: v.optional(v.id("tenantAccounts")),
     connectorTokenHash: v.optional(v.string()),
     workerId: v.string(),
-    messageProvider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
+    messageProvider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("imessage"), v.literal("telegram"))),
     limit: v.optional(v.number()),
     leaseMs: v.optional(v.number()),
   },
@@ -472,7 +475,7 @@ export const claimDue = mutation({
       typingMs: number;
       jid: string;
       idempotencyKey: string;
-      messageProvider: "whatsapp" | "instagram";
+      messageProvider: "whatsapp" | "instagram" | "imessage" | "telegram";
       provider: "azure" | "codex" | "heuristic";
       sendKind: "text" | "reaction" | "sticker" | "meme" | "voice_note";
       isStatusPost?: boolean;
@@ -1288,7 +1291,7 @@ export const getSendDisposition = query({
 
 export const suppressForManualIntervention = mutation({
   args: {
-    messageProvider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
+    messageProvider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("imessage"), v.literal("telegram"))),
     threadJid: v.string(),
     providerMessageId: v.optional(v.string()),
     whatsappMessageId: v.optional(v.string()),
@@ -1780,7 +1783,7 @@ export const markSent = mutation({
     tenantId: v.optional(v.id("tenantAccounts")),
     connectorTokenHash: v.optional(v.string()),
     outboxId: v.id("outbox"),
-    messageProvider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
+    messageProvider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("imessage"), v.literal("telegram"))),
     providerMessageId: v.optional(v.string()),
     whatsappMessageId: v.optional(v.string()),
   },

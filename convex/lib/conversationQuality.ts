@@ -18,7 +18,7 @@ export type QualityMessageSnapshot = {
 export type QualityThreadCandidate = {
   threadId: Id<"threads">;
   title: string;
-  provider?: "whatsapp" | "instagram";
+  provider?: "whatsapp" | "instagram" | "imessage" | "telegram";
   lastMessageAt: number;
   messages: QualityMessageSnapshot[];
   negativeFeedbackCount: number;
@@ -27,7 +27,7 @@ export type QualityThreadCandidate = {
 export type QualityThreadSample = {
   threadId: Id<"threads">;
   title: string;
-  provider?: "whatsapp" | "instagram";
+  provider?: "whatsapp" | "instagram" | "imessage" | "telegram";
   lastMessageAt: number;
   score: number;
   autoOutboundCount: number;

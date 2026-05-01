@@ -16,6 +16,8 @@ export type AdminPlanConfig = {
   monthlyAiSpendUsd: number;
   whatsappEnabled: boolean;
   instagramEnabled: boolean;
+  imessageEnabled: boolean;
+  telegramEnabled: boolean;
   mediaEnabled: boolean;
   selfHostedEnabled: boolean;
 };
@@ -289,6 +291,8 @@ export function AdminEntitlementsDashboard({ initialConfig }: { initialConfig: A
                 <NumberField label="Monthly spend USD" value={plan.monthlyAiSpendUsd} onChange={(monthlyAiSpendUsd) => updatePlan({ monthlyAiSpendUsd })} step={0.01} />
                 <ToggleField label="WhatsApp" checked={plan.whatsappEnabled} onChange={(whatsappEnabled) => updatePlan({ whatsappEnabled })} />
                 <ToggleField label="Instagram" checked={plan.instagramEnabled} onChange={(instagramEnabled) => updatePlan({ instagramEnabled })} />
+                <ToggleField label="iMessage" checked={plan.imessageEnabled} onChange={(imessageEnabled) => updatePlan({ imessageEnabled })} />
+                <ToggleField label="Telegram" checked={plan.telegramEnabled} onChange={(telegramEnabled) => updatePlan({ telegramEnabled })} />
                 <ToggleField label="Media" checked={plan.mediaEnabled} onChange={(mediaEnabled) => updatePlan({ mediaEnabled })} />
                 <ToggleField label="Self-hosted" checked={plan.selfHostedEnabled} onChange={(selfHostedEnabled) => updatePlan({ selfHostedEnabled })} />
               </div>

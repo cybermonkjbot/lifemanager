@@ -76,7 +76,7 @@ function isAiDeterministicMode(value: string): value is AiDeterministicMode {
 }
 
 function isDirectWhatsAppThread(thread: {
-  provider?: "whatsapp" | "instagram";
+  provider?: "whatsapp" | "instagram" | "imessage" | "telegram";
   jid: string;
   isGroup: boolean;
   threadKind?: "direct" | "group" | "broadcast_or_system";
@@ -750,8 +750,9 @@ export const save = mutation({
     await setScopedConfigValue(ctx, tenantId, "sendMaxGlobalInWindow", String(normalized.sendMaxGlobalInWindow));
     await setScopedConfigValue(ctx, tenantId, "voiceNotesAutoEnabled", normalized.voiceNotesAutoEnabled ? "true" : "false");
     await setScopedConfigValue(ctx, tenantId, "voiceNotesAutoProbability", String(normalized.voiceNotesAutoProbability));
-    await setConfigValue(
+    await setScopedConfigValue(
       ctx,
+      tenantId,
       "voiceNotesAutoMaxPerThreadPerDay",
       String(normalized.voiceNotesAutoMaxPerThreadPerDay),
     );
@@ -761,13 +762,15 @@ export const save = mutation({
     await setScopedConfigValue(ctx, tenantId, "romanticMorningStartHour", String(normalized.romanticMorningStartHour));
     await setScopedConfigValue(ctx, tenantId, "romanticMorningEndHour", String(normalized.romanticMorningEndHour));
     await setScopedConfigValue(ctx, tenantId, "romanticMorningLeadRatio", String(normalized.romanticMorningLeadRatio));
-    await setConfigValue(
+    await setScopedConfigValue(
       ctx,
+      tenantId,
       "romanticMorningCollisionCooldownHours",
       String(normalized.romanticMorningCollisionCooldownHours),
     );
-    await setConfigValue(
+    await setScopedConfigValue(
       ctx,
+      tenantId,
       "romanticMorningMaxPerThreadPerDay",
       String(normalized.romanticMorningMaxPerThreadPerDay),
     );
@@ -776,8 +779,9 @@ export const save = mutation({
     await setScopedConfigValue(ctx, tenantId, "outreachMaxContactsPerRun", String(normalized.outreachMaxContactsPerRun));
     await setScopedConfigValue(ctx, tenantId, "outreachContactJids", normalized.outreachContactJids.join("\n"));
     await setScopedConfigValue(ctx, tenantId, "outreachStarterTemplate", normalized.outreachStarterTemplate);
-    await setConfigValue(
+    await setScopedConfigValue(
       ctx,
+      tenantId,
       "conversationIntelligenceEnabled",
       normalized.conversationIntelligenceEnabled ? "true" : "false",
     );
@@ -786,8 +790,9 @@ export const save = mutation({
     await setScopedConfigValue(ctx, tenantId, "topicLaneMaxActive", String(normalized.topicLaneMaxActive));
     await setScopedConfigValue(ctx, tenantId, "pivotReplyEnabled", normalized.pivotReplyEnabled ? "true" : "false");
     await setScopedConfigValue(ctx, tenantId, "antiDwellingEnabled", normalized.antiDwellingEnabled ? "true" : "false");
-    await setConfigValue(
+    await setScopedConfigValue(
       ctx,
+      tenantId,
       "antiDwellingEndgameCloseCooldownMinutes",
       String(normalized.antiDwellingEndgameCloseCooldownMinutes),
     );

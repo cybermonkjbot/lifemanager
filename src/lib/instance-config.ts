@@ -235,6 +235,10 @@ export function sanitizeInstanceSetupPreferences(
 }
 
 export async function readLocalInstanceConfig(): Promise<LocalInstanceConfig | null> {
+  if (process.env.SLM_DISABLE_LOCAL_INSTANCE_CONFIG === "1") {
+    return null;
+  }
+
   try {
     const raw = await readFile(INSTANCE_CONFIG_PATH, "utf8");
     const parsed = JSON.parse(raw) as Partial<LocalInstanceConfig>;

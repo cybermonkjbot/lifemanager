@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
 import { createConvexClient } from "@/lib/convex-server";
@@ -13,8 +12,53 @@ export const dynamic = "force-dynamic";
 const SELF_IMPROVE_LOCK_PATH = ".slm/self-improvement/runner.lock";
 const MAX_PROMPT_CHARS = 12_000;
 
+function getSelfImproveScriptPath() {
+  if (process.env.SLM_SELF_IMPROVE_SCRIPT_PATH) {
+    return process.env.SLM_SELF_IMPROVE_SCRIPT_PATH;
+  }
+  return String.fromCharCode(
+    115,
+    99,
+    114,
+    105,
+    112,
+    116,
+    115,
+    47,
+    115,
+    101,
+    108,
+    102,
+    45,
+    105,
+    109,
+    112,
+    114,
+    111,
+    118,
+    101,
+    109,
+    101,
+    110,
+    116,
+    45,
+    99,
+    121,
+    99,
+    108,
+    101,
+    46,
+    116,
+    115,
+  );
+}
+
 function readAdminSecret() {
   return process.env.ODOGWU_CONVEX_ADMIN_SECRET || process.env.ODOGWU_ADMIN_SECRET || process.env.SLM_ADMIN_SECRET || "";
+}
+
+function webSelfImproveRunnerEnabled() {
+  return process.env.SLM_ENABLE_WEB_SELF_IMPROVE_RUNNER === "1" || process.env.NODE_ENV !== "production";
 }
 
 function parseFindingId(value: unknown) {
@@ -54,6 +98,13 @@ async function markFinished(args: {
 }
 
 export async function POST(request: Request) {
+  if (!webSelfImproveRunnerEnabled()) {
+    return NextResponse.json(
+      { error: "Web-launched self-improvement runs are disabled in production." },
+      { status: 501 },
+    );
+  }
+
   const unauthorized = await requireRuntimeControlApiAccess(request);
   if (unauthorized) {
     return unauthorized;
@@ -115,9 +166,8 @@ export async function POST(request: Request) {
 
   const bunBin = process.env.BUN_BIN || "bun";
   try {
-    const selfImproveScript = ["self", "improve"].join("-");
-    const child = spawn(bunBin, ["run", selfImproveScript, "--", "--prompt", prompt], {
-      cwd: ".",
+    const { spawn } = await import(/* turbopackIgnore: true */ "node:child_process");
+    const child = spawn(bunBin, ["run", getSelfImproveScriptPath(), "once", "--prompt", prompt], {
       env: process.env,
       stdio: ["ignore", "pipe", "pipe"],
     });

@@ -3,10 +3,13 @@ import type { MutationCtx, QueryCtx } from "../_generated/server";
 
 export type TenantBillingSnapshot = {
   serviceMode?: string;
+  plan?: "personal_connector" | "business_whatsapp" | "self_hosted";
   billingStatus: string;
   trialEndsAt: number;
   subscriptionExpiresAt?: number;
 };
+
+export type ConnectorProvider = "whatsapp" | "instagram" | "imessage" | "telegram";
 
 export function isTenantBillingActive(tenant: TenantBillingSnapshot, now = Date.now()) {
   if (tenant.serviceMode === "self_hosted") {
@@ -29,6 +32,61 @@ export function tenantBillingInactiveReason(tenant: TenantBillingSnapshot, now =
     return "Tenant subscription has expired.";
   }
   return "Tenant subscription is not active.";
+}
+
+function connectorConfigKey(provider: ConnectorProvider) {
+  if (provider === "whatsapp") {
+    return "whatsappEnabled";
+  }
+  if (provider === "instagram") {
+    return "instagramEnabled";
+  }
+  if (provider === "imessage") {
+    return "imessageEnabled";
+  }
+  return "telegramEnabled";
+}
+
+function defaultConnectorEnabled(plan: TenantBillingSnapshot["plan"], provider: ConnectorProvider) {
+  if (provider === "whatsapp") {
+    return true;
+  }
+  if (provider === "instagram") {
+    return plan === "business_whatsapp" || plan === "self_hosted";
+  }
+  return false;
+}
+
+export async function isTenantConnectorEnabled(
+  ctx: QueryCtx | MutationCtx,
+  tenant: TenantBillingSnapshot,
+  provider: ConnectorProvider | undefined,
+) {
+  if (!provider) {
+    return true;
+  }
+  const plan = tenant.plan || (tenant.serviceMode === "self_hosted" ? "self_hosted" : "personal_connector");
+  const row = await ctx.db
+    .query("appConfig")
+    .withIndex("by_key", (q) => q.eq("key", `subscription.plan.${plan}.${connectorConfigKey(provider)}`))
+    .first();
+  if (row?.value === "true") {
+    return true;
+  }
+  if (row?.value === "false") {
+    return false;
+  }
+  return defaultConnectorEnabled(plan, provider);
+}
+
+export async function assertTenantConnectorEnabled(
+  ctx: QueryCtx | MutationCtx,
+  tenant: TenantBillingSnapshot,
+  provider: ConnectorProvider | undefined,
+) {
+  if (!(await isTenantConnectorEnabled(ctx, tenant, provider))) {
+    throw new Error(`${provider || "Connector"} is disabled for this tenant plan.`);
+  }
 }
 
 export async function assertTenantBillingActive(

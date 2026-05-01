@@ -435,6 +435,110 @@ export const createGuardrailHold = mutation({
   },
 });
 
+export const sendManualReply = mutation({
+  args: {
+    threadId: v.id("threads"),
+    sourceMessageId: v.id("messages"),
+    text: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    const text = args.text.trim();
+    if (!text) {
+      throw new Error("Reply text cannot be empty.");
+    }
+    const thread = await ctx.db.get(args.threadId);
+    if (!thread) {
+      throw new Error("Thread not found.");
+    }
+    await assertTenantBillingActive(ctx, thread.tenantId, now);
+    const sourceMessage = await ctx.db.get(args.sourceMessageId);
+    if (!sourceMessage || sourceMessage.threadId !== args.threadId) {
+      throw new Error("Source message not found for this thread.");
+    }
+    const messageProvider = thread.provider || "whatsapp";
+
+    const activeOutbox = [
+      ...(await ctx.db
+        .query("outbox")
+        .withIndex("by_thread_and_status", (q) => q.eq("threadId", args.threadId).eq("status", "pending"))
+        .take(60)),
+      ...(await ctx.db
+        .query("outbox")
+        .withIndex("by_thread_and_status", (q) => q.eq("threadId", args.threadId).eq("status", "claimed"))
+        .take(60)),
+    ];
+
+    let suppressedOutbox = 0;
+    for (const item of activeOutbox) {
+      await ctx.db.patch(item._id, {
+        status: "failed",
+        workerId: undefined,
+        leaseExpiresAt: undefined,
+        error: "Suppressed: manual reply was queued from conversation thread.",
+        updatedAt: now,
+      });
+      suppressedOutbox += 1;
+
+      const draft = await ctx.db.get(item.draftId);
+      if (draft && draft.status !== "sent" && draft.status !== "rejected") {
+        await ctx.db.patch(draft._id, {
+          status: "rejected",
+          updatedAt: now,
+        });
+      }
+    }
+
+    const draftId = await ctx.db.insert("replyDrafts", {
+      tenantId: thread.tenantId,
+      messageProvider,
+      threadId: args.threadId,
+      sourceMessageId: args.sourceMessageId,
+      toolRunId: `manual:${now}`,
+      text,
+      sendKind: "text",
+      status: "approved",
+      confidence: 1,
+      provider: "heuristic",
+      delayMs: 0,
+      typingMs: 0,
+      reason: "Manual reply from conversation thread.",
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const { outboxId } = await enqueueOutbox(ctx, {
+      messageProvider,
+      threadId: args.threadId,
+      draftId,
+      toolRunId: `manual:${now}`,
+      messageText: text,
+      sendKind: "text",
+      sendAt: now,
+      idempotencyKey: `manual:${args.threadId}:${args.sourceMessageId}:${now}`,
+      provider: "heuristic",
+      now,
+    });
+
+    await ctx.db.insert("systemEvents", {
+      source: "dashboard",
+      eventType: "draft.manual_reply.queued",
+      threadId: args.threadId,
+      outboxId,
+      detail: suppressedOutbox
+        ? `Manual reply queued and ${suppressedOutbox} active outbox item(s) suppressed.`
+        : "Manual reply queued from conversation thread.",
+      createdAt: now,
+    });
+
+    await ctx.scheduler.runAfter(0, internal.backlog.refreshThread, {
+      threadId: args.threadId,
+    });
+
+    return { draftId, outboxId, suppressedOutbox };
+  },
+});
+
 export const approve = mutation({
   args: {
     draftId: v.id("replyDrafts"),

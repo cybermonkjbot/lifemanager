@@ -7,7 +7,7 @@ import {
   normalizeAdminNextPath,
   verifyAdminRequest,
 } from "@/lib/admin-auth";
-import { verifyAdminCredentials } from "@/lib/admin-users";
+import { AdminCredentialBackendUnavailableError, verifyAdminCredentials } from "@/lib/admin-users";
 import { consumeRequestRateLimit, rateLimitHeaders } from "@/lib/rate-limit";
 import { isElectronEnvironment } from "@/lib/runtime-env";
 import { requestHasSameOrigin } from "@/lib/secure-cookies";
@@ -42,7 +42,18 @@ export async function POST(request: NextRequest) {
       { status: 303, headers },
     );
   }
-  const admin = await verifyAdminCredentials(email, pin);
+  let admin: Awaited<ReturnType<typeof verifyAdminCredentials>>;
+  try {
+    admin = await verifyAdminCredentials(email, pin);
+  } catch (error) {
+    if (error instanceof AdminCredentialBackendUnavailableError) {
+      return NextResponse.redirect(
+        new URL(`/admin/unlock?next=${encodeURIComponent(nextPath)}&error=backend_unavailable`, request.url),
+        303,
+      );
+    }
+    throw error;
+  }
   if (!admin) {
     return NextResponse.redirect(new URL(`/admin/unlock?next=${encodeURIComponent(nextPath)}&error=1`, request.url), 303);
   }

@@ -30,6 +30,7 @@ import type * as followupsMarkQueued from "../followupsMarkQueued.js";
 import type * as followupsPromoter from "../followupsPromoter.js";
 import type * as grounding from "../grounding.js";
 import type * as inbound from "../inbound.js";
+import type * as instagramActions from "../instagramActions.js";
 import type * as lib_aiSmartness from "../lib/aiSmartness.js";
 import type * as lib_aliasNormalization from "../lib/aliasNormalization.js";
 import type * as lib_billingAccess from "../lib/billingAccess.js";
@@ -102,6 +103,7 @@ declare const fullApi: ApiFromModules<{
   followupsPromoter: typeof followupsPromoter;
   grounding: typeof grounding;
   inbound: typeof inbound;
+  instagramActions: typeof instagramActions;
   "lib/aiSmartness": typeof lib_aiSmartness;
   "lib/aliasNormalization": typeof lib_aliasNormalization;
   "lib/billingAccess": typeof lib_billingAccess;

@@ -75,6 +75,9 @@ export const convexRefs = {
   outboxDeferClaimed: makeFunctionReference<"mutation">("outbox:deferClaimed"),
   outboxMarkSent: makeFunctionReference<"mutation">("outbox:markSent"),
   outboxMarkFailed: makeFunctionReference<"mutation">("outbox:markFailed"),
+  instagramActionsClaimDue: makeFunctionReference<"mutation">("instagramActions:claimDue"),
+  instagramActionsMarkCompleted: makeFunctionReference<"mutation">("instagramActions:markCompleted"),
+  instagramActionsMarkFailed: makeFunctionReference<"mutation">("instagramActions:markFailed"),
 
   systemPauseAutonomy: makeFunctionReference<"mutation">("system:pauseAutonomy"),
   systemResumeAutonomy: makeFunctionReference<"mutation">("system:resumeAutonomy"),

@@ -17,6 +17,8 @@ const planConfigValidator = v.object({
   monthlyAiSpendUsd: v.number(),
   whatsappEnabled: v.boolean(),
   instagramEnabled: v.boolean(),
+  imessageEnabled: v.boolean(),
+  telegramEnabled: v.boolean(),
   mediaEnabled: v.boolean(),
   selfHostedEnabled: v.boolean(),
 });
@@ -106,6 +108,8 @@ function defaultPlanConfig(plan: typeof PLAN_IDS[number]) {
       monthlyAiSpendUsd: 75,
       whatsappEnabled: true,
       instagramEnabled: true,
+      imessageEnabled: false,
+      telegramEnabled: false,
       mediaEnabled: true,
       selfHostedEnabled: false,
     };
@@ -122,6 +126,8 @@ function defaultPlanConfig(plan: typeof PLAN_IDS[number]) {
       monthlyAiSpendUsd: 0,
       whatsappEnabled: true,
       instagramEnabled: true,
+      imessageEnabled: false,
+      telegramEnabled: false,
       mediaEnabled: true,
       selfHostedEnabled: true,
     };
@@ -137,6 +143,8 @@ function defaultPlanConfig(plan: typeof PLAN_IDS[number]) {
     monthlyAiSpendUsd: 15,
     whatsappEnabled: true,
     instagramEnabled: false,
+    imessageEnabled: false,
+    telegramEnabled: false,
     mediaEnabled: true,
     selfHostedEnabled: false,
   };
@@ -156,6 +164,8 @@ function readPlanConfig(map: Map<string, string>, plan: typeof PLAN_IDS[number])
     monthlyAiSpendUsd: numberFromConfig(map.get(`${prefix}monthlyAiSpendUsd`), defaults.monthlyAiSpendUsd),
     whatsappEnabled: boolFromConfig(map.get(`${prefix}whatsappEnabled`), defaults.whatsappEnabled),
     instagramEnabled: boolFromConfig(map.get(`${prefix}instagramEnabled`), defaults.instagramEnabled),
+    imessageEnabled: boolFromConfig(map.get(`${prefix}imessageEnabled`), defaults.imessageEnabled),
+    telegramEnabled: boolFromConfig(map.get(`${prefix}telegramEnabled`), defaults.telegramEnabled),
     mediaEnabled: boolFromConfig(map.get(`${prefix}mediaEnabled`), defaults.mediaEnabled),
     selfHostedEnabled: boolFromConfig(map.get(`${prefix}selfHostedEnabled`), defaults.selfHostedEnabled),
   };
@@ -173,6 +183,8 @@ async function writePlanConfig(ctx: MutationCtx, plan: typeof PLAN_IDS[number], 
   await setConfigValue(ctx, `${prefix}monthlyAiSpendUsd`, String(clampNumber(raw.monthlyAiSpendUsd, 0, 100_000)));
   await setConfigValue(ctx, `${prefix}whatsappEnabled`, raw.whatsappEnabled ? "true" : "false");
   await setConfigValue(ctx, `${prefix}instagramEnabled`, raw.instagramEnabled ? "true" : "false");
+  await setConfigValue(ctx, `${prefix}imessageEnabled`, raw.imessageEnabled ? "true" : "false");
+  await setConfigValue(ctx, `${prefix}telegramEnabled`, raw.telegramEnabled ? "true" : "false");
   await setConfigValue(ctx, `${prefix}mediaEnabled`, raw.mediaEnabled ? "true" : "false");
   await setConfigValue(ctx, `${prefix}selfHostedEnabled`, raw.selfHostedEnabled ? "true" : "false");
 }

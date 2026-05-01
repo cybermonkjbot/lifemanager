@@ -4,7 +4,7 @@ import type { MutationCtx } from "../_generated/server";
 export type OutboxSendKind = "text" | "reaction" | "sticker" | "meme" | "voice_note";
 
 export type EnqueueOutboxArgs = {
-  messageProvider: "whatsapp" | "instagram";
+  messageProvider: "whatsapp" | "instagram" | "imessage" | "telegram";
   threadId: Id<"threads">;
   draftId: Id<"replyDrafts">;
   toolRunId?: string;

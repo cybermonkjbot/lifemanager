@@ -236,7 +236,7 @@ async function assertFollowupBillingActive(ctx: MutationCtx, followUp: Doc<"foll
 
 export const list = query({
   args: {
-    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("all"))),
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("imessage"), v.literal("telegram"), v.literal("all"))),
     limit: v.optional(v.number()),
     status: v.optional(followupStatusOrAll),
     sort: v.optional(followupSort),
@@ -275,7 +275,7 @@ export const timeline = query({
   args: {
     tenantId: v.optional(v.id("tenantAccounts")),
     connectorTokenHash: v.optional(v.string()),
-    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("all"))),
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("imessage"), v.literal("telegram"), v.literal("all"))),
     limit: v.optional(v.number()),
     filter: v.optional(followupTimelineFilter),
   },

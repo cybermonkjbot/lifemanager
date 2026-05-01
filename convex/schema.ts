@@ -199,7 +199,7 @@ export default defineSchema({
   tenantConnectedAccounts: defineTable({
     tenantId: v.id("tenantAccounts"),
     deviceId: v.string(),
-    provider: v.union(v.literal("whatsapp"), v.literal("instagram")),
+    provider: v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("imessage"), v.literal("telegram")),
     providerAccountId: v.string(),
     accountLabel: v.optional(v.string()),
     displayName: v.optional(v.string()),
@@ -219,7 +219,7 @@ export default defineSchema({
 
   threads: defineTable({
     tenantId: v.optional(v.id("tenantAccounts")),
-    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("imessage"), v.literal("telegram"))),
     jid: v.string(),
     title: v.optional(v.string()),
     baileysSavedName: v.optional(v.string()),
@@ -260,7 +260,7 @@ export default defineSchema({
     .index("by_ignored", ["isIgnored"]),
 
   callSessions: defineTable({
-    provider: v.union(v.literal("whatsapp"), v.literal("instagram")),
+    provider: v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("imessage"), v.literal("telegram")),
     callId: v.string(),
     threadId: v.id("threads"),
     threadJid: v.string(),
@@ -296,7 +296,7 @@ export default defineSchema({
 
   messages: defineTable({
     tenantId: v.optional(v.id("tenantAccounts")),
-    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("imessage"), v.literal("telegram"))),
     threadId: v.id("threads"),
     direction: v.union(v.literal("inbound"), v.literal("outbound")),
     origin: v.optional(v.union(v.literal("live"), v.literal("history_sync"), v.literal("history_fetch"))),
@@ -459,7 +459,7 @@ export default defineSchema({
 
   replyDrafts: defineTable({
     tenantId: v.optional(v.id("tenantAccounts")),
-    messageProvider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
+    messageProvider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("imessage"), v.literal("telegram"))),
     threadId: v.id("threads"),
     sourceMessageId: v.id("messages"),
     toolRunId: v.optional(v.string()),
@@ -500,7 +500,7 @@ export default defineSchema({
 
   outbox: defineTable({
     tenantId: v.optional(v.id("tenantAccounts")),
-    messageProvider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
+    messageProvider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("imessage"), v.literal("telegram"))),
     threadId: v.id("threads"),
     draftId: v.id("replyDrafts"),
     toolRunId: v.optional(v.string()),
@@ -557,9 +557,51 @@ export default defineSchema({
     .index("by_idempotencyKey", ["idempotencyKey"])
     .index("by_mediaAssetId", ["mediaAssetId"]),
 
+  instagramSocialActions: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
+    actionKind: v.union(v.literal("like_media"), v.literal("comment_media"), v.literal("follow_user")),
+    targetMediaId: v.optional(v.string()),
+    targetUserId: v.optional(v.string()),
+    targetUsername: v.optional(v.string()),
+    targetUrl: v.optional(v.string()),
+    commentText: v.optional(v.string()),
+    reason: v.string(),
+    provider: v.union(v.literal("codex"), v.literal("heuristic")),
+    confidence: v.number(),
+    safetyLevel: v.union(v.literal("review_required"), v.literal("limited_auto")),
+    status: v.union(
+      v.literal("pending_review"),
+      v.literal("approved"),
+      v.literal("claimed"),
+      v.literal("completed"),
+      v.literal("failed"),
+      v.literal("rejected"),
+    ),
+    sendAt: v.number(),
+    workerId: v.optional(v.string()),
+    leaseExpiresAt: v.optional(v.number()),
+    attempts: v.number(),
+    idempotencyKey: v.string(),
+    error: v.optional(v.string()),
+    providerResultId: v.optional(v.string()),
+    completedAt: v.optional(v.number()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_status_and_createdAt", ["status", "createdAt"])
+    .index("by_tenantId_and_status_and_createdAt", ["tenantId", "status", "createdAt"])
+    .index("by_status_and_sendAt", ["status", "sendAt"])
+    .index("by_tenantId_and_status_and_sendAt", ["tenantId", "status", "sendAt"])
+    .index("by_status_and_leaseExpiresAt", ["status", "leaseExpiresAt"])
+    .index("by_status_and_completedAt", ["status", "completedAt"])
+    .index("by_status_and_actionKind_and_completedAt", ["status", "actionKind", "completedAt"])
+    .index("by_tenantId_and_status_and_completedAt", ["tenantId", "status", "completedAt"])
+    .index("by_tenantId_and_status_and_actionKind_and_completedAt", ["tenantId", "status", "actionKind", "completedAt"])
+    .index("by_idempotencyKey", ["idempotencyKey"]),
+
   inboundDedupeKeys: defineTable({
     tenantId: v.optional(v.id("tenantAccounts")),
-    provider: v.union(v.literal("whatsapp"), v.literal("instagram")),
+    provider: v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("imessage"), v.literal("telegram")),
     providerMessageId: v.string(),
     threadId: v.id("threads"),
     messageId: v.id("messages"),
@@ -1125,7 +1167,7 @@ export default defineSchema({
   setupRuntime: defineTable({
     tenantId: v.optional(v.id("tenantAccounts")),
     key: v.string(),
-    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("imessage"), v.literal("telegram"))),
     status: v.union(
       v.literal("idle"),
       v.literal("starting"),
@@ -1133,11 +1175,19 @@ export default defineSchema({
       v.literal("qr_ready"),
       v.literal("code_ready"),
       v.literal("challenge_required"),
+      v.literal("connecting"),
       v.literal("syncing"),
       v.literal("connected"),
       v.literal("error"),
     ),
-    mode: v.union(v.literal("qr"), v.literal("pairing_code"), v.literal("password"), v.literal("challenge_code")),
+    mode: v.union(
+      v.literal("qr"),
+      v.literal("pairing_code"),
+      v.literal("password"),
+      v.literal("challenge_code"),
+      v.literal("local"),
+      v.literal("phone_code"),
+    ),
     message: v.string(),
     qrDataUrl: v.optional(v.string()),
     pairingCode: v.optional(v.string()),
@@ -1155,7 +1205,7 @@ export default defineSchema({
 
   messageReactions: defineTable({
     tenantId: v.optional(v.id("tenantAccounts")),
-    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("imessage"), v.literal("telegram"))),
     threadId: v.id("threads"),
     messageId: v.id("messages"),
     actorJid: v.string(),

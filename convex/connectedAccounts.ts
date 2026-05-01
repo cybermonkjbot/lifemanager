@@ -3,7 +3,7 @@ import type { Id } from "./_generated/dataModel";
 import { mutation, type MutationCtx } from "./_generated/server";
 import { resolveTenantConnectorForMutation } from "./lib/tenantSecurity";
 
-const providerValidator = v.union(v.literal("whatsapp"), v.literal("instagram"));
+const providerValidator = v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("imessage"), v.literal("telegram"));
 const authStateValidator = v.union(
   v.literal("connected"),
   v.literal("disconnected"),

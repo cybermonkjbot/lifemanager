@@ -31,11 +31,12 @@ export const list = query({
   args: {
     tenantId: v.optional(v.id("tenantAccounts")),
     connectorTokenHash: v.optional(v.string()),
-    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("all"))),
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("imessage"), v.literal("telegram"), v.literal("all"))),
     draftLimit: v.optional(v.number()),
     followupLimit: v.optional(v.number()),
     todoLimit: v.optional(v.number()),
     guardrailLimit: v.optional(v.number()),
+    socialActionLimit: v.optional(v.number()),
     includeResolvedGuardrails: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
@@ -46,6 +47,7 @@ export const list = query({
     const followupLimit = Math.min(args.followupLimit ?? 40, 100);
     const todoLimit = Math.min(args.todoLimit ?? 40, 100);
     const guardrailLimit = Math.min(args.guardrailLimit ?? 20, 100);
+    const socialActionLimit = Math.min(args.socialActionLimit ?? 30, 100);
     const includeResolvedGuardrails = Boolean(args.includeResolvedGuardrails);
 
     const pendingDrafts = tenantId
@@ -118,6 +120,23 @@ export const list = query({
           )
         ).filter((event): event is (typeof guardrailFlagWindow)[number] => Boolean(event))
       : guardrailFlagWindow;
+
+    const pendingSocialActions =
+      messageProvider === "instagram" || messageProvider === "all"
+        ? tenantId
+          ? await ctx.db
+              .query("instagramSocialActions")
+              .withIndex("by_tenantId_and_status_and_createdAt", (q) =>
+                q.eq("tenantId", tenantId).eq("status", "pending_review"),
+              )
+              .order("desc")
+              .take(socialActionLimit)
+          : await ctx.db
+              .query("instagramSocialActions")
+              .withIndex("by_status_and_createdAt", (q) => q.eq("status", "pending_review"))
+              .order("desc")
+              .take(socialActionLimit)
+        : [];
 
     const mediaPreviewCache = new Map<
       Id<"mediaAssets">,
@@ -264,6 +283,7 @@ export const list = query({
         messageProvider === "all"
           ? enrichedGuardrailFlags
           : enrichedGuardrailFlags.filter((item) => (item.thread?.provider || "whatsapp") === messageProvider),
+      socialActions: pendingSocialActions,
     };
   },
 });

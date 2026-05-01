@@ -72,7 +72,7 @@ type TenantConnectorTokenRow = {
 type TenantConnectedAccountRow = {
   _id: string;
   deviceId: string;
-  provider: "whatsapp" | "instagram";
+  provider: "whatsapp" | "instagram" | "imessage" | "telegram";
   providerAccountId: string;
   accountLabel?: string;
   displayName?: string;

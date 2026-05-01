@@ -1,6 +1,6 @@
 import type { Doc } from "../_generated/dataModel";
 
-export type MessageProvider = "whatsapp" | "instagram";
+export type MessageProvider = "whatsapp" | "instagram" | "imessage" | "telegram";
 
 export type ThreadKind = "direct" | "group" | "broadcast_or_system";
 export type EligibilityReason = "group_ignored" | "archived" | "broadcast_or_system" | "explicit_ignore" | "temporary_ghost";

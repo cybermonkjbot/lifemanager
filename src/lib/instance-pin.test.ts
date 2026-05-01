@@ -1,12 +1,20 @@
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
-import {
+
+const testDataDir = mkdtempSync(join(tmpdir(), "odogwu-instance-pin-test-"));
+process.env.SLM_DATA_DIR = testDataDir;
+process.env.SLM_DISABLE_LOCAL_INSTANCE_CONFIG = "1";
+
+const {
   buildInstancePinSessionToken,
   isInstancePinEnabled,
   matchesInstancePin,
   normalizeInstanceNextPath,
   verifyInstancePinSessionToken,
-} from "./instance-pin";
+} = await import("./instance-pin");
 
 function restoreEnv(previous: Record<string, string | undefined>) {
   for (const [key, value] of Object.entries(previous)) {
@@ -23,6 +31,8 @@ test("instance pin helpers stay disabled when no PIN is configured", async () =>
     SLM_INSTANCE_PIN: process.env.SLM_INSTANCE_PIN,
     SLM_INSTANCE_PIN_TTL_DAYS: process.env.SLM_INSTANCE_PIN_TTL_DAYS,
     SLM_INSTANCE_COOKIE_SECRET: process.env.SLM_INSTANCE_COOKIE_SECRET,
+    SLM_DATA_DIR: process.env.SLM_DATA_DIR,
+    SLM_DISABLE_LOCAL_INSTANCE_CONFIG: process.env.SLM_DISABLE_LOCAL_INSTANCE_CONFIG,
   };
 
   delete process.env.SLM_INSTANCE_PIN;
@@ -43,6 +53,8 @@ test("instance pin session token verifies and rejects tampering or expiry in env
     SLM_INSTANCE_PIN: process.env.SLM_INSTANCE_PIN,
     SLM_INSTANCE_PIN_TTL_DAYS: process.env.SLM_INSTANCE_PIN_TTL_DAYS,
     SLM_INSTANCE_COOKIE_SECRET: process.env.SLM_INSTANCE_COOKIE_SECRET,
+    SLM_DATA_DIR: process.env.SLM_DATA_DIR,
+    SLM_DISABLE_LOCAL_INSTANCE_CONFIG: process.env.SLM_DISABLE_LOCAL_INSTANCE_CONFIG,
   };
 
   process.env.SLM_INSTANCE_PIN = "2468";

@@ -33,7 +33,7 @@ export async function AdminLivePage({
 
   return (
     <AdminConsoleShell>
-      <ConvexAppProvider convexUrl={getConvexUrl()}>
+      <ConvexAppProvider convexUrl={getConvexUrl()} authEnabled={process.env.ODOGWU_REQUIRE_CONVEX_AUTH === "1"}>
         {masqueradeSession ? <AdminMasqueradeBanner session={masqueradeSession} /> : null}
         <header className="admin-console-header">
           <div>

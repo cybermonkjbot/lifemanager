@@ -23,7 +23,7 @@ export const backfillProvidersBatch = internalMutation({
 
     const messageRows = await ctx.db.query("messages").withIndex("by_createdAt").order("desc").take(limit * 8);
     for (const row of messageRows) {
-      const patch: { provider?: "whatsapp" | "instagram"; providerMessageId?: string } = {};
+      const patch: { provider?: "whatsapp" | "instagram" | "imessage" | "telegram"; providerMessageId?: string } = {};
       if (!row.provider) {
         patch.provider = PROVIDER_DEFAULT;
       }
@@ -66,7 +66,7 @@ export const backfillProvidersBatch = internalMutation({
         .take(limit * 4);
       for (const row of outboxRows) {
         const patch: {
-          messageProvider?: "whatsapp" | "instagram";
+          messageProvider?: "whatsapp" | "instagram" | "imessage" | "telegram";
           reactionTargetProviderMessageId?: string;
           replyTargetProviderMessageId?: string;
         } = {};
@@ -91,7 +91,7 @@ export const backfillProvidersBatch = internalMutation({
 
     const reactionRows = await ctx.db.query("messageReactions").withIndex("by_threadId").take(limit * 3);
     for (const row of reactionRows) {
-      const patch: { provider?: "whatsapp" | "instagram"; providerMessageId?: string } = {};
+      const patch: { provider?: "whatsapp" | "instagram" | "imessage" | "telegram"; providerMessageId?: string } = {};
       if (!row.provider) {
         patch.provider = PROVIDER_DEFAULT;
       }

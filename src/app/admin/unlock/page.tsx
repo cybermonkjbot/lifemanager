@@ -21,7 +21,9 @@ export default async function AdminUnlockPage({ searchParams }: AdminUnlockPageP
 
   const params = searchParams ? await searchParams : {};
   const nextPath = normalizeAdminNextPath(getSingleValue(params.next));
-  const hasError = getSingleValue(params.error) === "1";
+  const error = getSingleValue(params.error);
+  const hasError = error === "1";
+  const backendUnavailable = error === "backend_unavailable";
 
   return (
     <main className="admin-unlock-shell">
@@ -45,6 +47,11 @@ export default async function AdminUnlockPage({ searchParams }: AdminUnlockPageP
           </label>
 
           {hasError ? <p className="admin-alert" role="alert">Admin email or PIN did not match.</p> : null}
+          {backendUnavailable ? (
+            <p className="admin-alert" role="alert">
+              Admin login is temporarily unavailable because Convex could not be reached.
+            </p>
+          ) : null}
 
           <button className="btn btn-primary admin-primary-action" type="submit">
             Unlock console

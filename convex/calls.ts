@@ -4,7 +4,7 @@ import { getConfig } from "./lib/config";
 import { classifyThreadKind } from "./lib/threadEligibility";
 
 type CallStatus = "offer" | "ringing" | "timeout" | "reject" | "accept" | "terminate";
-type MessageProvider = "whatsapp" | "instagram";
+type MessageProvider = "whatsapp" | "instagram" | "imessage" | "telegram";
 
 const CALL_ENDED_STATUSES = new Set<CallStatus>(["timeout", "reject", "terminate"]);
 const CALL_FALLBACK_SEND_EVENT_TYPE = "inbound.call.rejected_with_fallback";
@@ -23,7 +23,10 @@ function normalizeTimestampMs(raw: number | undefined, fallbackMs: number) {
 }
 
 function normalizeProvider(provider?: MessageProvider): MessageProvider {
-  return provider === "instagram" ? "instagram" : "whatsapp";
+  if (provider === "instagram" || provider === "imessage" || provider === "telegram") {
+    return provider;
+  }
+  return "whatsapp";
 }
 
 function normalizeMinDurationMs(raw: number | undefined) {
@@ -67,7 +70,7 @@ export function isCallSessionQualifiedForReplyBarrier(args: {
 
 export const recordEvent = mutation({
   args: {
-    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"))),
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("imessage"), v.literal("telegram"))),
     callId: v.string(),
     threadJid: v.string(),
     fromJid: v.optional(v.string()),

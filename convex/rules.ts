@@ -7,10 +7,25 @@ import { assertTenantOwned, resolveTenantForMutation, resolveTenantForQuery } fr
 import { assertTenantBillingActive } from "./lib/billingAccess";
 
 const IGNORE_CONTACT_FALLBACK_SCAN_LIMIT = 2000;
+const providerValidator = v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("imessage"), v.literal("telegram"));
 const tenantScopeArgs = {
   tenantId: v.optional(v.id("tenantAccounts")),
   connectorTokenHash: v.optional(v.string()),
 };
+
+function inferProviderFromTarget(targetValue: string) {
+  const normalized = targetValue.trim().toLowerCase();
+  if (normalized.startsWith("ig:") || normalized.startsWith("instagram:")) {
+    return "instagram" as const;
+  }
+  if (normalized.startsWith("imessage:")) {
+    return "imessage" as const;
+  }
+  if (normalized.startsWith("telegram:")) {
+    return "telegram" as const;
+  }
+  return "whatsapp" as const;
+}
 
 async function resolveTenantForOptionalMutation(
   ctx: MutationCtx,
@@ -58,12 +73,14 @@ export const upsertIgnoreRule = mutation({
     targetType: v.optional(v.union(v.literal("contact"), v.literal("group"), v.literal("keyword"))),
     threadId: v.optional(v.id("threads")),
     targetValue: v.optional(v.string()),
+    provider: v.optional(providerValidator),
     enabled: v.boolean(),
   },
   handler: async (ctx, args) => {
     const tenantId = await resolveTenantForOptionalMutation(ctx, args);
     let targetType = args.targetType;
     let targetValue = args.targetValue?.trim() || "";
+    let provider = args.provider || inferProviderFromTarget(targetValue);
 
     if (args.threadId) {
       const thread = await ctx.db.get(args.threadId);
@@ -71,13 +88,14 @@ export const upsertIgnoreRule = mutation({
         throw new Error("Thread not found.");
       }
       assertTenantOwned(tenantId, thread.tenantId);
-      const threadKind = thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup });
+      provider = thread.provider || provider;
+      const threadKind = thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup, provider });
       targetType = threadKind === "group" ? "group" : "contact";
       if (!targetValue) {
         targetValue = thread.jid;
       }
     } else if (!targetType) {
-      const inferredThreadKind = classifyThreadKind({ jid: targetValue });
+      const inferredThreadKind = classifyThreadKind({ jid: targetValue, provider });
       targetType = inferredThreadKind === "group" ? "group" : "contact";
     }
 
@@ -91,7 +109,7 @@ export const upsertIgnoreRule = mutation({
     const now = Date.now();
     const targets =
       targetType === "contact"
-        ? directIgnoreRuleCandidates({ jid: targetValue, provider: "whatsapp" })
+        ? directIgnoreRuleCandidates({ jid: targetValue, provider })
         : [targetValue];
 
     let firstRuleId: string | null = null;
@@ -128,7 +146,7 @@ export const upsertIgnoreRule = mutation({
     }
 
     if (targetType === "contact") {
-      const lookupKey = directIgnoreContactKey({ jid: targetValue, provider: "whatsapp" });
+      const lookupKey = directIgnoreContactKey({ jid: targetValue, provider });
       if (lookupKey) {
         const directThreads = tenantId
           ? await ctx.db
@@ -140,10 +158,10 @@ export const upsertIgnoreRule = mutation({
               .withIndex("by_threadKind_and_lastMessageAt", (q) => q.eq("threadKind", "direct"))
               .take(IGNORE_CONTACT_FALLBACK_SCAN_LIMIT);
         for (const thread of directThreads) {
-          if ((thread.provider || "whatsapp") !== "whatsapp") {
+          if ((thread.provider || "whatsapp") !== provider) {
             continue;
           }
-          const threadLookupKey = directIgnoreContactKey({ jid: thread.jid, provider: "whatsapp" });
+          const threadLookupKey = directIgnoreContactKey({ jid: thread.jid, provider });
           if (!threadLookupKey || threadLookupKey !== lookupKey) {
             continue;
           }
