@@ -1,0 +1,24 @@
+# Keep generated archives and source handoffs clean.
+.DS_Store export-ignore
+.env export-ignore
+.env.local export-ignore
+.env.development export-ignore
+.env.production export-ignore
+.env.test export-ignore
+.next/ export-ignore
+.playwright-mcp/ export-ignore
+.slm*/ export-ignore
+.tmp/ export-ignore
+.wa_auth/ export-ignore
+.ig_auth/ export-ignore
+coverage/ export-ignore
+dist/ export-ignore
+node_modules/ export-ignore
+test-results/ export-ignore
+playwright-report/ export-ignore
+*.log export-ignore
+*.pid export-ignore
+*.pem export-ignore
+*.tsbuildinfo export-ignore
+*-before-*.png export-ignore
+*-after-*.png export-ignore
