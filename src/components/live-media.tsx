@@ -107,7 +107,7 @@ export function LiveMedia() {
           Showing {visibleItems.length} of {(mediaItems || []).length} item{(mediaItems || []).length === 1 ? "" : "s"}
         </p>
 
-        {loading ? <LoadingBlock label="Loading media…" rows={4} /> : null}
+        {loading ? <LoadingBlock label="Loading media…" rows={4} variant="media" /> : null}
         {!loading && visibleItems.length === 0 ? (
           <EmptyState
             variant="media"

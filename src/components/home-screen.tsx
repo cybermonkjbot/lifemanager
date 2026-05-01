@@ -65,6 +65,18 @@ type ManagerArtifact =
       }>;
       safetyNotes: string[];
       nextPrompts: string[];
+    }
+  | {
+      kind: "request_support_plan";
+      title: string;
+      description: string;
+      requests: Array<{
+        label: string;
+        status: "supported" | "needs_more_context" | "not_supported";
+        response: string;
+        nextStep: string;
+        href?: string;
+      }>;
     };
 
 type ChatMessage = {
@@ -74,6 +86,15 @@ type ChatMessage = {
   kind?: CommandFeedback["kind"];
   toolSummaries?: string[];
   artifacts?: ManagerArtifact[];
+};
+
+type HomeChatHistorySession = {
+  id: string;
+  title: string;
+  preview: string;
+  messages: ChatMessage[];
+  savedAt: number;
+  updatedAt: number;
 };
 
 type InlineAction = {
@@ -132,6 +153,7 @@ const errorPrompts = [
 
 const commandPrefixes = ["go to ", "go ", "open ", "navigate to ", "navigate ", "take me to ", "nav "];
 const HOME_AI_SESSION_STORAGE_KEY = "slm.home.ask_odogwu_session.v1";
+const HOME_AI_HISTORY_STORAGE_KEY = "slm.home.ask_odogwu_history.v1";
 const defaultRobotSceneUrl = "https://my.spline.design/interactiveaiassistant-1MceEbo4oJdzWd3AQPZq9CSB/";
 const emptyStateIntro =
   "I can read your chats, draft replies in your style, show what needs approval, and keep conversations moving when you allow it.";
@@ -165,11 +187,12 @@ function isManagerArtifact(value: unknown): value is ManagerArtifact {
   if (!value || typeof value !== "object") {
     return false;
   }
-  const artifact = value as { kind?: unknown; people?: unknown; previews?: unknown; steps?: unknown };
+  const artifact = value as { kind?: unknown; people?: unknown; previews?: unknown; steps?: unknown; requests?: unknown };
   return (
     (artifact.kind === "people_list" && Array.isArray(artifact.people)) ||
     (artifact.kind === "communication_preview" && Array.isArray(artifact.previews)) ||
-    (artifact.kind === "campaign_plan" && Array.isArray(artifact.steps))
+    (artifact.kind === "campaign_plan" && Array.isArray(artifact.steps)) ||
+    (artifact.kind === "request_support_plan" && Array.isArray(artifact.requests))
   );
 }
 
@@ -203,6 +226,50 @@ function normalizeStoredMessage(value: unknown): ChatMessage | null {
   };
 }
 
+function chatHistoryTitle(messages: ChatMessage[]) {
+  const firstUserMessage = messages.find((message) => message.role === "user")?.text;
+  const fallback = messages.find((message) => message.text.trim())?.text;
+  return compactLabel(firstUserMessage || fallback || "Odogwu HQ chat", 72);
+}
+
+function chatHistoryPreview(messages: ChatMessage[]) {
+  const latestMessage = [...messages].reverse().find((message) => message.text.trim());
+  return compactLabel(latestMessage?.text || "No messages", 120);
+}
+
+function compactLabel(value: string, maxLength: number) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return `${normalized.slice(0, Math.max(0, maxLength - 1)).trim()}…`;
+}
+
+function normalizeStoredHistorySession(value: unknown): HomeChatHistorySession | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const row = value as Record<string, unknown>;
+  const id = typeof row.id === "string" && row.id.trim() ? row.id : "";
+  const rawMessages = Array.isArray(row.messages) ? row.messages : [];
+  const messages = rawMessages.map(normalizeStoredMessage).filter((message): message is ChatMessage => Boolean(message)).slice(-40);
+  if (!id || messages.length === 0) {
+    return null;
+  }
+  const savedAt = typeof row.savedAt === "number" && Number.isFinite(row.savedAt) ? row.savedAt : Date.now();
+  const updatedAt = typeof row.updatedAt === "number" && Number.isFinite(row.updatedAt) ? row.updatedAt : savedAt;
+  const title = typeof row.title === "string" && row.title.trim() ? compactLabel(row.title, 72) : chatHistoryTitle(messages);
+  const preview = typeof row.preview === "string" && row.preview.trim() ? compactLabel(row.preview, 120) : chatHistoryPreview(messages);
+  return {
+    id,
+    title,
+    preview,
+    messages,
+    savedAt,
+    updatedAt,
+  };
+}
+
 function readStoredHomeSession() {
   if (typeof window === "undefined") {
     return { messages: [] as ChatMessage[], input: "" };
@@ -222,6 +289,62 @@ function readStoredHomeSession() {
     window.localStorage.removeItem(HOME_AI_SESSION_STORAGE_KEY);
     return { messages: [] as ChatMessage[], input: "" };
   }
+}
+
+function readStoredHomeHistory() {
+  if (typeof window === "undefined") {
+    return [] as HomeChatHistorySession[];
+  }
+  try {
+    const raw = window.localStorage.getItem(HOME_AI_HISTORY_STORAGE_KEY);
+    if (!raw) {
+      return [];
+    }
+    const payload = JSON.parse(raw) as { sessions?: unknown };
+    return Array.isArray(payload.sessions)
+      ? payload.sessions
+          .map(normalizeStoredHistorySession)
+          .filter((session): session is HomeChatHistorySession => Boolean(session))
+          .sort((left, right) => right.updatedAt - left.updatedAt)
+          .slice(0, 30)
+      : [];
+  } catch {
+    window.localStorage.removeItem(HOME_AI_HISTORY_STORAGE_KEY);
+    return [];
+  }
+}
+
+function writeStoredHomeHistory(sessions: HomeChatHistorySession[]) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  const cleanSessions = sessions
+    .filter((session) => session.messages.length > 0)
+    .sort((left, right) => right.updatedAt - left.updatedAt)
+    .slice(0, 30);
+  if (!cleanSessions.length) {
+    window.localStorage.removeItem(HOME_AI_HISTORY_STORAGE_KEY);
+    return;
+  }
+  window.localStorage.setItem(HOME_AI_HISTORY_STORAGE_KEY, JSON.stringify({ sessions: cleanSessions }));
+}
+
+function archiveHomeSession(messages: ChatMessage[]) {
+  if (typeof window === "undefined" || messages.length === 0) {
+    return [] as HomeChatHistorySession[];
+  }
+  const now = Date.now();
+  const session: HomeChatHistorySession = {
+    id: `${now}-${Math.random().toString(36).slice(2, 8)}`,
+    title: chatHistoryTitle(messages),
+    preview: chatHistoryPreview(messages),
+    messages: messages.slice(-40),
+    savedAt: now,
+    updatedAt: now,
+  };
+  const nextHistory = [session, ...readStoredHomeHistory()].slice(0, 30);
+  writeStoredHomeHistory(nextHistory);
+  return nextHistory;
 }
 
 function writeStoredHomeSession(messages: ChatMessage[], input: string) {
@@ -381,6 +504,7 @@ function sendablePreviews(artifacts?: ManagerArtifact[]) {
 function artifactCountLabel(artifact: ManagerArtifact) {
   if (artifact.kind === "people_list") return String(artifact.people.length);
   if (artifact.kind === "communication_preview") return String(artifact.previews.length);
+  if (artifact.kind === "request_support_plan") return String(artifact.requests.length);
   return String(artifact.estimatedRecipients);
 }
 
@@ -462,45 +586,55 @@ function artifactContextText(artifacts?: ManagerArtifact[]) {
     return "";
   }
   const lines = artifacts.flatMap((artifact) => {
-    if (artifact.kind === "people_list") {
-      return [
-        `People list: ${artifact.title} (${artifact.people.length})`,
-        artifact.description,
-        ...artifact.people.slice(0, 12).map((person, index) => {
-          const parts = [
-            `${index + 1}. ${person.title}`,
-            person.threadId ? `threadId=${person.threadId}` : "",
-            person.provider ? `provider=${person.provider}` : "",
-            person.reason ? `reason=${person.reason}` : "",
-          ].filter(Boolean);
-          return parts.join(" | ");
-        }),
-      ];
+    switch (artifact.kind) {
+      case "people_list":
+        return [
+          `People list: ${artifact.title} (${artifact.people.length})`,
+          artifact.description,
+          ...artifact.people.slice(0, 12).map((person, index) => {
+            const parts = [
+              `${index + 1}. ${person.title}`,
+              person.threadId ? `threadId=${person.threadId}` : "",
+              person.provider ? `provider=${person.provider}` : "",
+              person.reason ? `reason=${person.reason}` : "",
+            ].filter(Boolean);
+            return parts.join(" | ");
+          }),
+        ];
+      case "communication_preview":
+        return [
+          `Communication previews: ${artifact.title} (${artifact.previews.length})`,
+          artifact.description,
+          ...artifact.previews.slice(0, 8).map((preview, index) => {
+            const parts = [
+              `${index + 1}. ${preview.title}`,
+              preview.threadId ? `threadId=${preview.threadId}` : "",
+              `intent=${preview.messageIntent}`,
+              `preview=${preview.previewText}`,
+            ].filter(Boolean);
+            return parts.join(" | ");
+          }),
+        ];
+      case "campaign_plan":
+        return [
+          `Campaign plan: ${artifact.title} (${artifact.estimatedRecipients} estimated recipients)`,
+          artifact.description,
+          `objective=${artifact.objective}`,
+          `audience=${artifact.audienceSummary}`,
+          `content=${artifact.contentType}`,
+          `channels=${artifact.channels.join(", ")}`,
+          ...artifact.steps.slice(0, 5).map((step, index) => `${index + 1}. ${step.label} | ${step.status} | ${step.detail}`),
+        ];
+      case "request_support_plan":
+        return [
+          `Request support scan: ${artifact.title} (${artifact.requests.length})`,
+          artifact.description,
+          ...artifact.requests.slice(0, 8).map((request, index) => {
+            const parts = [`${index + 1}. ${request.label}`, `status=${request.status}`, request.response, `next=${request.nextStep}`];
+            return parts.filter(Boolean).join(" | ");
+          }),
+        ];
     }
-    if (artifact.kind === "communication_preview") {
-      return [
-      `Communication previews: ${artifact.title} (${artifact.previews.length})`,
-      artifact.description,
-      ...artifact.previews.slice(0, 8).map((preview, index) => {
-        const parts = [
-          `${index + 1}. ${preview.title}`,
-          preview.threadId ? `threadId=${preview.threadId}` : "",
-          `intent=${preview.messageIntent}`,
-          `preview=${preview.previewText}`,
-        ].filter(Boolean);
-        return parts.join(" | ");
-      }),
-      ];
-    }
-    return [
-      `Campaign plan: ${artifact.title} (${artifact.estimatedRecipients} estimated recipients)`,
-      artifact.description,
-      `objective=${artifact.objective}`,
-      `audience=${artifact.audienceSummary}`,
-      `content=${artifact.contentType}`,
-      `channels=${artifact.channels.join(", ")}`,
-      ...artifact.steps.slice(0, 5).map((step, index) => `${index + 1}. ${step.label} | ${step.status} | ${step.detail}`),
-    ];
   });
   return lines.filter(Boolean).join("\n");
 }
@@ -558,10 +692,20 @@ function buildScreenSuggestions(messages: ChatMessage[], isWorking: boolean) {
   const artifacts = latest.artifacts || [];
   const hasCampaignPlan = artifacts.some((artifact) => artifact.kind === "campaign_plan");
   const hasCommunicationPreview = artifacts.some((artifact) => artifact.kind === "communication_preview" && artifact.previews.length > 0);
+  const hasRequestSupportPlan = artifacts.some((artifact) => artifact.kind === "request_support_plan");
   const peopleLists = artifacts.filter((artifact): artifact is Extract<ManagerArtifact, { kind: "people_list" }> => artifact.kind === "people_list");
   const totalPeople = peopleLists.reduce((sum, artifact) => sum + artifact.people.length, 0);
   const titles = peopleLists.map((artifact) => artifact.title.toLowerCase()).join(" ");
   const summaries = (latest.toolSummaries || []).join(" ").toLowerCase();
+
+  if (hasRequestSupportPlan) {
+    return uniqueSuggestions([
+      "Show what Home can do for this request now.",
+      "Break this into supported next steps.",
+      "Draft text I can use outside Home.",
+      "Find the closest supported workflow.",
+    ]);
+  }
 
   if (hasCampaignPlan) {
     return uniqueSuggestions([
@@ -725,6 +869,35 @@ function getCommandTarget(command: string) {
   return { mode: "unknown" as const, target };
 }
 
+function HistoryIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M3 12a9 9 0 1 0 2.64-6.36" />
+      <path d="M3 4v5h5" />
+      <path d="M12 7v5l3 2" />
+    </svg>
+  );
+}
+
+function NewChatIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h7" />
+      <path d="M18 4v6" />
+      <path d="M15 7h6" />
+    </svg>
+  );
+}
+
+function SendIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M22 2L11 13" />
+      <path d="M22 2L15 22l-4-9-9-4 20-7z" />
+    </svg>
+  );
+}
+
 export function HomeScreen() {
   const router = useRouter();
   const pathname = usePathname();
@@ -736,6 +909,8 @@ export function HomeScreen() {
   const [isAwaitingOrchestrator, setIsAwaitingOrchestrator] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [doneConfirmOpen, setDoneConfirmOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [chatHistory, setChatHistory] = useState<HomeChatHistorySession[]>([]);
   const [sessionLoaded, setSessionLoaded] = useState(false);
   const [inlineOperation, setInlineOperation] = useState<InlineOperation | null>(null);
   const robotSceneUrl = process.env.NEXT_PUBLIC_SPLINE_ACTIVITY_SCENE_URL || defaultRobotSceneUrl;
@@ -749,9 +924,19 @@ export function HomeScreen() {
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
+    const inputEl = inputRef.current;
+    if (!inputEl) {
+      return;
+    }
+    inputEl.style.height = "0px";
+    inputEl.style.height = `${Math.min(inputEl.scrollHeight, 118)}px`;
+  }, [input]);
+
+  useEffect(() => {
     const stored = readStoredHomeSession();
     setMessages(stored.messages);
     setInput(stored.input);
+    setChatHistory(readStoredHomeHistory());
     setFeedback({
       kind: "idle",
       message: stored.messages.length ? "Session restored" : "Ready",
@@ -888,7 +1073,7 @@ export function HomeScreen() {
           })
           .filter((summary) => summary.trim().length > 0) || [];
       const artifacts = payload.manager?.artifacts?.filter(isManagerArtifact) || [];
-      setFeedback({ kind: "success", message: "Response ready" });
+      setFeedback({ kind: "idle", message: "Ready" });
       appendMessage(makeMessage("assistant", replyText, "success", toolSummaries, artifacts));
     } catch (error) {
       const message = error instanceof Error ? error.message : "Could not get a response.";
@@ -1155,7 +1340,9 @@ export function HomeScreen() {
   };
 
   const confirmDone = () => {
+    const nextHistory = archiveHomeSession(messages);
     setDoneConfirmOpen(false);
+    setChatHistory(nextHistory);
     if (typeof window !== "undefined") {
       window.localStorage.removeItem(HOME_AI_SESSION_STORAGE_KEY);
     }
@@ -1166,7 +1353,19 @@ export function HomeScreen() {
     inputRef.current?.focus();
   };
 
-  const canFinishSession = messages.length > 0 && !isAwaitingOrchestrator && !isInlineOperationRunning;
+  const loadHistorySession = (session: HomeChatHistorySession) => {
+    setMessages(session.messages);
+    setInput("");
+    setInlineOperation(null);
+    setFeedback({ kind: "idle", message: "History loaded" });
+    setHistoryOpen(false);
+    window.requestAnimationFrame(() => {
+      inputRef.current?.focus();
+    });
+  };
+
+  const canStartNewChat = messages.length > 0 && !isAwaitingOrchestrator && !isInlineOperationRunning;
+  const canOpenHistory = chatHistory.length > 0 && !isAwaitingOrchestrator && !isInlineOperationRunning;
 
   return (
     <section className="home-shell home-ai-shell" aria-label="AI chat with Odogwu HQ">
@@ -1174,11 +1373,28 @@ export function HomeScreen() {
         <header className="home-ai-header">
           <div className="home-ai-header-actions">
             <p className={`home-ai-status home-command-${feedback.kind}`}>{feedback.message}</p>
-            {canFinishSession ? (
-              <button type="button" className="home-ai-done-button" onClick={() => setDoneConfirmOpen(true)}>
-                Done
+            <div className="home-ai-session-actions" aria-label="Chat session actions">
+              <button
+                type="button"
+                className="home-ai-icon-button"
+                onClick={() => setHistoryOpen(true)}
+                disabled={!canOpenHistory}
+                aria-label="Open chat history"
+                title="Chat history"
+              >
+                <HistoryIcon />
               </button>
-            ) : null}
+              <button
+                type="button"
+                className="home-ai-icon-button home-ai-new-chat-button"
+                onClick={() => setDoneConfirmOpen(true)}
+                disabled={!canStartNewChat}
+                aria-label="Start a new chat"
+                title="New chat"
+              >
+                <NewChatIcon />
+              </button>
+            </div>
           </div>
         </header>
 
@@ -1297,6 +1513,37 @@ export function HomeScreen() {
                                 ))}
                               </div>
                             </div>
+                          ) : artifact.kind === "request_support_plan" ? (
+                            <div className="home-ai-request-support-list">
+                              {artifact.requests.slice(0, 8).map((request, requestIndex) => (
+                                <article key={`${request.label}-${requestIndex}`} className={`home-ai-request-support-row ${request.status}`}>
+                                  <div>
+                                    <div className="home-ai-request-support-topline">
+                                      <h3>{request.label}</h3>
+                                      <span>
+                                        {request.status === "supported"
+                                          ? "Supported"
+                                          : request.status === "needs_more_context"
+                                            ? "Needs context"
+                                            : "Not supported"}
+                                      </span>
+                                    </div>
+                                    <p>{request.response}</p>
+                                    <small>{request.nextStep}</small>
+                                  </div>
+                                  {request.href ? (
+                                    <button
+                                      type="button"
+                                      className="home-ai-inline-action"
+                                      onClick={() => runInlineAction({ label: "Open", href: request.href }, message.id, message.artifacts)}
+                                      disabled={isAwaitingOrchestrator || isInlineOperationRunning}
+                                    >
+                                      Open
+                                    </button>
+                                  ) : null}
+                                </article>
+                              ))}
+                            </div>
                           ) : artifact.kind === "people_list" ? (
                             <div className="home-ai-person-list">
                               {artifact.people.slice(0, 10).map((person, personIndex) => {
@@ -1342,10 +1589,10 @@ export function HomeScreen() {
                                 );
                               })}
                             </div>
-                          ) : (
-                            <div className="home-ai-preview-list">
-                              {artifact.previews.slice(0, 8).map((preview, previewIndex) => (
-                                <article key={`${preview.threadId || preview.title}-${previewIndex}`} className="home-ai-preview-row">
+	                          ) : artifact.kind === "communication_preview" ? (
+	                            <div className="home-ai-preview-list">
+	                              {artifact.previews.slice(0, 8).map((preview, previewIndex) => (
+	                                <article key={`${preview.threadId || preview.title}-${previewIndex}`} className="home-ai-preview-row">
                                   <div className="home-ai-preview-topline">
                                     <h3>{preview.title}</h3>
                                     <span>Needs approval</span>
@@ -1365,9 +1612,9 @@ export function HomeScreen() {
                                     ))}
                                   </div>
                                 </article>
-                              ))}
-                            </div>
-                          )}
+	                              ))}
+	                            </div>
+	                          ) : null}
                         </section>
                       ))}
                     </div>
@@ -1404,37 +1651,79 @@ export function HomeScreen() {
         </div>
 
         <form className="home-ai-composer" onSubmit={onSubmit}>
-          <textarea
-            ref={inputRef}
-            value={input}
-            onChange={(event) => setInput(event.target.value)}
-            onKeyDown={onInputKeyDown}
-            placeholder="Ask it who needs a reply, what to say, or what it can handle for you..."
-            aria-label="Message Odogwu HQ"
-	            disabled={isAwaitingOrchestrator || isInlineOperationRunning}
-	            rows={1}
-	          />
-	          <button type="submit" disabled={isAwaitingOrchestrator || isInlineOperationRunning || !input.trim()}>
-	            {isAwaitingOrchestrator || isInlineOperationRunning ? "Working" : "Send"}
-	          </button>
+          <div className="home-ai-composer-field">
+            <textarea
+              ref={inputRef}
+              value={input}
+              onChange={(event) => setInput(event.target.value)}
+              onKeyDown={onInputKeyDown}
+              placeholder="Ask it who needs a reply, what to say, or what it can handle for you..."
+              aria-label="Message Odogwu HQ"
+              disabled={isAwaitingOrchestrator || isInlineOperationRunning}
+              rows={1}
+            />
+            <button
+              type="submit"
+              className="home-ai-send-icon-button"
+              disabled={isAwaitingOrchestrator || isInlineOperationRunning || !input.trim()}
+              aria-label={isAwaitingOrchestrator || isInlineOperationRunning ? "Odogwu HQ is working" : "Send message"}
+              title={isAwaitingOrchestrator || isInlineOperationRunning ? "Working" : "Send"}
+            >
+              <SendIcon />
+              <span className="sr-only">{isAwaitingOrchestrator || isInlineOperationRunning ? "Working" : "Send"}</span>
+            </button>
+          </div>
         </form>
 
         <UIModal
           open={doneConfirmOpen}
           onClose={() => setDoneConfirmOpen(false)}
-          title="Finish This Session?"
-          description="This clears the current chat transcript and returns to the empty state for a new conversation."
+          title="Start New Chat?"
+          description="This saves the current transcript to history and opens a fresh conversation."
         >
           <div className="home-ai-done-confirm">
-            <p>Are you sure you are done with this process?</p>
+            <p>Start a fresh orchestrator chat?</p>
             <div className="home-ai-done-actions">
               <button type="button" className="btn btn-ghost" onClick={() => setDoneConfirmOpen(false)}>
                 Keep Working
               </button>
               <button type="button" className="btn btn-primary home-ai-confirm-done" onClick={confirmDone}>
-                Yes, I&apos;m Done
+                Start New Chat
               </button>
             </div>
+          </div>
+        </UIModal>
+        <UIModal
+          open={historyOpen}
+          onClose={() => setHistoryOpen(false)}
+          title="Chat History"
+          description="Reopen a previous Odogwu HQ orchestrator conversation."
+          size="wide"
+        >
+          <div className="home-ai-history-list">
+            {chatHistory.length ? (
+              chatHistory.map((session) => (
+                <button key={session.id} type="button" className="home-ai-history-row" onClick={() => loadHistorySession(session)}>
+                  <span>
+                    <strong>{session.title}</strong>
+                    <small>{session.preview}</small>
+                  </span>
+                  <time dateTime={new Date(session.updatedAt).toISOString()}>
+                    {new Intl.DateTimeFormat(undefined, {
+                      month: "short",
+                      day: "numeric",
+                      hour: "numeric",
+                      minute: "2-digit",
+                    }).format(new Date(session.updatedAt))}
+                  </time>
+                </button>
+              ))
+            ) : (
+              <div className="home-ai-history-empty">
+                <strong>No saved chats yet.</strong>
+                <span>Use the new chat button after a conversation to keep it here.</span>
+              </div>
+            )}
           </div>
         </UIModal>
       </div>

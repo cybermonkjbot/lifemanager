@@ -252,7 +252,7 @@ export function LiveMemes() {
           Meme availability, tags, and cleanup live in <Link href="/settings?section=media">Media Settings</Link>.
         </p>
 
-        {loading ? <LoadingBlock label="Loading generated memes..." rows={4} /> : null}
+        {loading ? <LoadingBlock label="Loading generated memes..." rows={4} variant="media" /> : null}
         {!loading && generatedMemes.length === 0 ? (
           <EmptyState
             variant="media"

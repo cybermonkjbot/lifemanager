@@ -356,7 +356,7 @@ function SpendingContent(props: LiveSpendingProps) {
         <article className="panel-card">
           <h3>Azure Cost Summary</h3>
           {loading ? (
-            <LoadingBlock label="Calculating Azure spend…" rows={4} />
+            <LoadingBlock label="Calculating Azure spend…" rows={4} variant="metric" />
           ) : analytics ? (
             <>
               <div className="stack">
@@ -397,7 +397,7 @@ function SpendingContent(props: LiveSpendingProps) {
 
         <article className="panel-card">
           <h3>Model Breakdown</h3>
-          {loading ? <LoadingBlock label="Loading model spend…" rows={4} compact /> : null}
+          {loading ? <LoadingBlock label="Loading model spend…" rows={4} compact variant="metric" /> : null}
           {!loading && analytics ? <ModelBreakdown models={analytics.models} totalCost={analytics.totals.estimatedCostUsd} /> : null}
           {!loading && analytics ? (
             <p className="queue-meta" style={{ marginTop: 10 }}>
@@ -408,7 +408,7 @@ function SpendingContent(props: LiveSpendingProps) {
 
         <article className="panel-card">
           <h3>Daily Spend Trend</h3>
-          {loading ? <LoadingBlock label="Loading daily spend…" rows={5} compact /> : null}
+          {loading ? <LoadingBlock label="Loading daily spend…" rows={5} compact variant="chart" /> : null}
           {!loading && analytics ? <DailyCostBars days={analytics.daily} /> : null}
           {!loading && analytics && totalDays > 0 ? (
             <p className="queue-meta" style={{ marginTop: 10 }}>
@@ -419,7 +419,7 @@ function SpendingContent(props: LiveSpendingProps) {
 
         <article className="panel-card">
           <h3>Status Breakdown</h3>
-          {loading ? <LoadingBlock label="Loading status breakdown…" rows={3} compact /> : null}
+          {loading ? <LoadingBlock label="Loading status breakdown…" rows={3} compact variant="metric" /> : null}
           {!loading && analytics ? <StatusBreakdown statuses={analytics.statuses} /> : null}
           {!loading && analytics ? (
             <p className="queue-meta" style={{ marginTop: 10 }}>

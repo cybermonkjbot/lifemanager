@@ -3,6 +3,7 @@
 import { formatDateTime, trim } from "@/lib/format";
 import { isImageLikeMedia, type UnifiedMediaItem } from "@/lib/ui/media";
 import { LoadingIndicator } from "@/components/loading-state";
+import { useTenantScopeArgs } from "@/components/tenant-scope-provider";
 import { ModalTabs, UIModal } from "@/components/ui-modal";
 import { api } from "../../convex/_generated/api";
 import { useQuery } from "convex/react";
@@ -203,6 +204,7 @@ function polarPlacement(index: number, total: number, mediaSpreadMode: boolean) 
 }
 
 export function LiveActivityCore({ splineSceneUrl }: LiveActivityCoreProps) {
+  const tenantScope = useTenantScopeArgs();
   const [feedFilter, setFeedFilter] = useState<ActivityFeedFilter>("all");
   const [mediaFilter, setMediaFilter] = useState<MediaFilter>("all");
   const [coreZoom, setCoreZoom] = useState(DEFAULT_CORE_ZOOM);
@@ -219,8 +221,8 @@ export function LiveActivityCore({ splineSceneUrl }: LiveActivityCoreProps) {
   } | null>(null);
   const mediaViewportRef = useRef<HTMLDivElement | null>(null);
 
-  const logs = useQuery(api.system.logFeed, { limit: 56 }) as ActivityLogRow[] | undefined;
-  const mediaItems = useQuery(api.media.listUnifiedMedia, { filter: mediaFilter, limit: 120 }) as UnifiedMediaItem[] | undefined;
+  const logs = useQuery(api.system.logFeed, { ...tenantScope, limit: 56 }) as ActivityLogRow[] | undefined;
+  const mediaItems = useQuery(api.media.listUnifiedMedia, { ...tenantScope, filter: mediaFilter, limit: 120 }) as UnifiedMediaItem[] | undefined;
   const splineSource = useMemo(() => resolveSplineSource(splineSceneUrl), [splineSceneUrl]);
 
   const activityNodes = useMemo<ActivityCoreNode[]>(

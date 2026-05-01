@@ -18,7 +18,10 @@ export default async function SetupPage() {
   const convexUrl = selfHostedConvexUrl || getConvexUrl();
 
   return (
-    <ConvexAppProvider convexUrl={convexUrl}>
+    <ConvexAppProvider
+      convexUrl={convexUrl}
+      authEnabled={initialInstanceState.setupCompleted && process.env.ODOGWU_REQUIRE_CONVEX_AUTH === "1"}
+    >
       <SetupOnboarding
         realtimeEnabled={Boolean(convexUrl)}
         initialInstanceState={initialInstanceState}

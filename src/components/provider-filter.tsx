@@ -5,7 +5,7 @@ import { api } from "../../convex/_generated/api";
 import { useQuery } from "convex/react";
 import { useEffect } from "react";
 
-export type ProviderFilterValue = "all" | "whatsapp" | "instagram";
+export type ProviderFilterValue = "all" | "whatsapp" | "instagram" | "imessage" | "telegram";
 
 type ProviderFilterProps = {
   value: ProviderFilterValue;
@@ -32,12 +32,47 @@ export function ProviderFilter({
   const instagramConnected = Boolean(
     instagramSetup?.hasAuth || instagramSetup?.listenerActive || instagramSetup?.status === "connected",
   );
+  const imessageSetup = useQuery(api.system.setupStatus, { ...tenantScope, provider: "imessage" }) as
+    | {
+        status?: string;
+        hasAuth?: boolean;
+        listenerActive?: boolean;
+      }
+    | null
+    | undefined;
+  const imessageConnected = Boolean(
+    imessageSetup?.hasAuth || imessageSetup?.listenerActive || imessageSetup?.status === "connected",
+  );
+  const telegramSetup = useQuery(api.system.setupStatus, { ...tenantScope, provider: "telegram" }) as
+    | {
+        status?: string;
+        hasAuth?: boolean;
+        listenerActive?: boolean;
+      }
+    | null
+    | undefined;
+  const telegramConnected = Boolean(
+    telegramSetup?.hasAuth || telegramSetup?.listenerActive || telegramSetup?.status === "connected",
+  );
 
   useEffect(() => {
-    if (!instagramConnected && value === "instagram") {
+    if (
+      (!instagramConnected && instagramSetup !== undefined && value === "instagram") ||
+      (!imessageConnected && imessageSetup !== undefined && value === "imessage") ||
+      (!telegramConnected && telegramSetup !== undefined && value === "telegram")
+    ) {
       onChange("all");
     }
-  }, [instagramConnected, onChange, value]);
+  }, [
+    imessageConnected,
+    imessageSetup,
+    instagramConnected,
+    instagramSetup,
+    onChange,
+    telegramConnected,
+    telegramSetup,
+    value,
+  ]);
 
   return (
     <div className="queue-focus-tabs" role="tablist" aria-label={label}>
@@ -68,6 +103,28 @@ export function ProviderFilter({
           onClick={() => onChange("instagram")}
         >
           Instagram
+        </button>
+      ) : null}
+      {imessageConnected ? (
+        <button
+          type="button"
+          role="tab"
+          aria-selected={value === "imessage"}
+          className={`btn ${value === "imessage" ? "btn-primary" : "btn-ghost"}`}
+          onClick={() => onChange("imessage")}
+        >
+          iMessage
+        </button>
+      ) : null}
+      {telegramConnected ? (
+        <button
+          type="button"
+          role="tab"
+          aria-selected={value === "telegram"}
+          className={`btn ${value === "telegram" ? "btn-primary" : "btn-ghost"}`}
+          onClick={() => onChange("telegram")}
+        >
+          Telegram
         </button>
       ) : null}
     </div>

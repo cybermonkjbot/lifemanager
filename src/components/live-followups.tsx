@@ -499,7 +499,7 @@ function FollowupsContent() {
         <span>{items.length}</span>
       </div>
       <div className="followups-drip-list">
-        {loading ? <LoadingBlock label={`Loading ${title.toLowerCase()} follow-ups…`} rows={2} compact /> : null}
+        {loading ? <LoadingBlock label={`Loading ${title.toLowerCase()} follow-ups…`} rows={2} compact variant="followup" /> : null}
         {items.map((item) => (
           <TimelineCard
             key={item._id}
@@ -551,7 +551,7 @@ function FollowupsContent() {
                 </div>
               </dl>
             </div>
-            {loading ? <LoadingBlock label="Loading next follow-up…" rows={3} /> : null}
+            {loading ? <LoadingBlock label="Loading next follow-up…" rows={2} variant="followup" /> : null}
             {!loading && priorityFollowup ? (
               <TimelineCard
                 item={priorityFollowup}

@@ -21,7 +21,7 @@ import { type KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState }
 
 type NeedsReplyItem = {
   _id: string;
-  messageProvider?: "whatsapp" | "instagram";
+  messageProvider?: "whatsapp" | "instagram" | "imessage" | "telegram";
   provider: string;
   delayMs: number;
   typingMs: number;
@@ -71,30 +71,48 @@ type GuardrailFlagItem = {
   resolvedAt?: number;
 };
 
+type InstagramSocialActionItem = {
+  _id: string;
+  actionKind: "like_media" | "comment_media" | "follow_user";
+  targetMediaId?: string;
+  targetUserId?: string;
+  targetUsername?: string;
+  targetUrl?: string;
+  commentText?: string;
+  reason: string;
+  provider: "codex" | "heuristic";
+  confidence: number;
+  status: "pending_review" | "approved" | "claimed" | "completed" | "failed" | "rejected";
+  createdAt: number;
+};
+
 type QueueData = {
   needsReply: NeedsReplyItem[];
   followupConfirmations: FollowupConfirmationItem[];
   todoCandidates: TodoCandidateItem[];
   guardrailFlags: GuardrailFlagItem[];
+  socialActions?: InstagramSocialActionItem[];
 };
 
-type QueueTab = "needsReply" | "followups" | "todos" | "guardrails";
+type QueueTab = "needsReply" | "followups" | "todos" | "social" | "guardrails";
 
 const EMPTY_NEEDS_REPLY: NeedsReplyItem[] = [];
 const EMPTY_FOLLOWUPS: FollowupConfirmationItem[] = [];
 const EMPTY_TODO_CANDIDATES: TodoCandidateItem[] = [];
 const EMPTY_OPEN_TODOS: OpenTodoItem[] = [];
 const EMPTY_GUARDRAILS: GuardrailFlagItem[] = [];
+const EMPTY_SOCIAL_ACTIONS: InstagramSocialActionItem[] = [];
 
 type QueueReviewState =
   | { kind: "needsReply"; item: NeedsReplyItem }
   | { kind: "followups"; item: FollowupConfirmationItem }
   | { kind: "todos"; item: TodoCandidateItem }
+  | { kind: "social"; item: InstagramSocialActionItem }
   | { kind: "guardrails"; item: GuardrailFlagItem }
   | null;
 
 function isQueueTab(value: string | null): value is QueueTab {
-  return value === "needsReply" || value === "followups" || value === "todos" || value === "guardrails";
+  return value === "needsReply" || value === "followups" || value === "todos" || value === "social" || value === "guardrails";
 }
 
 function QueueContent() {
@@ -116,6 +134,8 @@ function QueueContent() {
   const resolveGuardrail = useMutation(api.queue.resolveGuardrail);
   const clearAllGuardrails = useMutation(api.queue.clearAllGuardrails);
   const clearAllBacklog = useMutation(api.backlog.clearAll);
+  const approveInstagramAction = useMutation(api.instagramActions.approve);
+  const rejectInstagramAction = useMutation(api.instagramActions.reject);
 
   const { runAction, getRecord, isPending, notices, dismissNotice, pushNotice } = useActionStateRegistry();
   const [tab, setTab] = useState<QueueTab>("needsReply");
@@ -149,6 +169,7 @@ function QueueContent() {
   const todoCandidates = queue?.todoCandidates ?? EMPTY_TODO_CANDIDATES;
   const openTodos = todosData?.todos ?? EMPTY_OPEN_TODOS;
   const guardrailFlags = queue?.guardrailFlags ?? EMPTY_GUARDRAILS;
+  const socialActions = queue?.socialActions ?? EMPTY_SOCIAL_ACTIONS;
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -240,9 +261,17 @@ function QueueContent() {
       needsReply: needsReply.length,
       followups: followupConfirmations.length,
       todos: todoCandidates.length + openTodos.length,
+      social: socialActions.length,
       guardrails: guardrailFlags.length,
     }),
-    [followupConfirmations.length, guardrailFlags.length, needsReply.length, openTodos.length, todoCandidates.length],
+    [
+      followupConfirmations.length,
+      guardrailFlags.length,
+      needsReply.length,
+      openTodos.length,
+      socialActions.length,
+      todoCandidates.length,
+    ],
   );
 
   const closeReviewOnSuccess = (
@@ -346,6 +375,42 @@ function QueueContent() {
         successMessage: "Follow-up dismissed.",
       },
     ).then((outcome) => closeReviewOnSuccess("followups", followUpId, outcome));
+  };
+
+  const onApproveSocialAction = (actionId: string) => {
+    const key = `instagram-social:approve:${actionId}`;
+    void runAction(
+      key,
+      async () => {
+        await approveInstagramAction({
+          ...tenantScope,
+          actionId: actionId as Id<"instagramSocialActions">,
+          delayMs: 10 * 60 * 1000,
+        });
+      },
+      {
+        pendingLabel: "Approving action...",
+        successMessage: "Instagram action approved and queued.",
+      },
+    ).then((outcome) => closeReviewOnSuccess("social", actionId, outcome));
+  };
+
+  const onRejectSocialAction = (actionId: string) => {
+    const key = `instagram-social:reject:${actionId}`;
+    void runAction(
+      key,
+      async () => {
+        await rejectInstagramAction({
+          ...tenantScope,
+          actionId: actionId as Id<"instagramSocialActions">,
+          reason: "Rejected from review queue.",
+        });
+      },
+      {
+        pendingLabel: "Rejecting action...",
+        successMessage: "Instagram action rejected.",
+      },
+    ).then((outcome) => closeReviewOnSuccess("social", actionId, outcome));
   };
 
   const onConvertTodo = (item: TodoCandidateItem) => {
@@ -790,10 +855,49 @@ function QueueContent() {
     </div>
   );
 
+  const formatSocialActionLabel = (actionKind: InstagramSocialActionItem["actionKind"]) => {
+    if (actionKind === "comment_media") return "Comment";
+    if (actionKind === "follow_user") return "Follow";
+    return "Like";
+  };
+
+  const renderSocialActions = () => (
+    <div className="stack">
+      {queueLoading ? <LoadingBlock label="Loading Instagram actions…" rows={2} compact /> : null}
+      {socialActions.map((item) => {
+        const target = item.targetUsername ? `@${item.targetUsername}` : item.targetUrl || item.targetMediaId || item.targetUserId || "Instagram target";
+        return (
+          <div key={item._id} className="queue-item queue-item-condensed">
+            <div>
+              <p className="queue-title">{formatSocialActionLabel(item.actionKind)} · {target}</p>
+              {item.commentText ? <p className="queue-body">{trim(item.commentText, 180)}</p> : null}
+              <p className="queue-meta">
+                Model: {item.provider} · Confidence: {Math.round(item.confidence * 100)}% · {formatDateTime(item.createdAt)}
+              </p>
+              <p className="queue-meta">{trim(item.reason, 180)}</p>
+            </div>
+            <button type="button" className="btn btn-primary" onClick={() => setReviewState({ kind: "social", item })}>
+              Review
+            </button>
+          </div>
+        );
+      })}
+      {!queueLoading && socialActions.length === 0 ? (
+        <EmptyState
+          variant="queue"
+          compact
+          title="No Instagram actions waiting."
+          description="Instagram likes, follows, and comments only wait here when they need confirmation."
+        />
+      ) : null}
+    </div>
+  );
+
   const queueTabs = [
     { id: "needsReply", label: "Needs reply", count: counts.needsReply },
     { id: "followups", label: "Follow-ups", count: counts.followups },
     { id: "todos", label: "Tasks", count: counts.todos },
+    { id: "social", label: "Social", count: counts.social },
     { id: "guardrails", label: "Safety", count: counts.guardrails },
   ] satisfies Array<{ id: QueueTab; label: string; count: number }>;
 
@@ -889,6 +993,7 @@ function QueueContent() {
           {tab === "needsReply" ? renderNeedsReply() : null}
           {tab === "followups" ? renderFollowups() : null}
           {tab === "todos" ? renderTodos() : null}
+          {tab === "social" ? renderSocialActions() : null}
           {tab === "guardrails" ? renderGuardrails() : null}
         </div>
       </section>
@@ -901,8 +1006,10 @@ function QueueContent() {
             ? "Review reply"
             : reviewState?.kind === "followups"
               ? "Review follow-up"
-              : reviewState?.kind === "todos"
-                ? "Review task"
+            : reviewState?.kind === "todos"
+              ? "Review task"
+              : reviewState?.kind === "social"
+                ? "Review Instagram action"
                 : "Safety flag"
         }
       >
@@ -1151,6 +1258,50 @@ function QueueContent() {
             {getRecord(`todo:${reviewState.item._id}`).error ? (
               <p className="queue-meta action-inline-error" role="alert">
                 {getRecord(`todo:${reviewState.item._id}`).error}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+
+        {reviewState?.kind === "social" ? (
+          <div className="stack compact">
+            <p className="queue-title">{formatSocialActionLabel(reviewState.item.actionKind)}</p>
+            <p className="queue-meta">
+              Target: {reviewState.item.targetUsername ? `@${reviewState.item.targetUsername}` : reviewState.item.targetUrl || reviewState.item.targetMediaId || reviewState.item.targetUserId || "Instagram target"}
+            </p>
+            {reviewState.item.commentText ? <p className="queue-body">{trim(reviewState.item.commentText, 360)}</p> : null}
+            <p className="queue-meta">{reviewState.item.reason}</p>
+            <p className="queue-meta">
+              Model: {reviewState.item.provider} · Confidence: {Math.round(reviewState.item.confidence * 100)}%
+            </p>
+            <div className="queue-actions">
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => onApproveSocialAction(reviewState.item._id)}
+                disabled={getRecord(`instagram-social:approve:${reviewState.item._id}`).pending}
+                aria-disabled={getRecord(`instagram-social:approve:${reviewState.item._id}`).pending}
+              >
+                {getRecord(`instagram-social:approve:${reviewState.item._id}`).pending ? "Approving..." : "Approve"}
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={() => onRejectSocialAction(reviewState.item._id)}
+                disabled={getRecord(`instagram-social:reject:${reviewState.item._id}`).pending}
+                aria-disabled={getRecord(`instagram-social:reject:${reviewState.item._id}`).pending}
+              >
+                {getRecord(`instagram-social:reject:${reviewState.item._id}`).pending ? "Rejecting..." : "Reject"}
+              </button>
+            </div>
+            {getRecord(`instagram-social:approve:${reviewState.item._id}`).error ? (
+              <p className="queue-meta action-inline-error" role="alert">
+                {getRecord(`instagram-social:approve:${reviewState.item._id}`).error}
+              </p>
+            ) : null}
+            {getRecord(`instagram-social:reject:${reviewState.item._id}`).error ? (
+              <p className="queue-meta action-inline-error" role="alert">
+                {getRecord(`instagram-social:reject:${reviewState.item._id}`).error}
               </p>
             ) : null}
           </div>

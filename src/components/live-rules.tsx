@@ -16,15 +16,45 @@ type KnownContact = {
   jid: string;
   title?: string;
   isIgnored?: boolean;
+  provider?: "whatsapp" | "instagram" | "imessage" | "telegram";
   threadKind?: "direct" | "group" | "broadcast_or_system";
 };
 
-function inferTargetType(targetValue: string): "contact" | "group" {
-  return targetValue.endsWith("@g.us") ? "group" : "contact";
+type IgnoreProvider = NonNullable<KnownContact["provider"]>;
+
+function inferProviderFromTarget(targetValue: string): IgnoreProvider {
+  const normalized = normalizeTarget(targetValue);
+  if (normalized.startsWith("ig:") || normalized.startsWith("instagram:")) {
+    return "instagram";
+  }
+  if (normalized.startsWith("imessage:")) {
+    return "imessage";
+  }
+  if (normalized.startsWith("telegram:")) {
+    return "telegram";
+  }
+  return "whatsapp";
+}
+
+function inferTargetType(targetValue: string, provider: IgnoreProvider): "contact" | "group" {
+  return provider === "whatsapp" && targetValue.endsWith("@g.us") ? "group" : "contact";
 }
 
 function formatTargetType(targetType: "contact" | "group") {
   return targetType === "group" ? "Group" : "Contact";
+}
+
+function formatProvider(provider?: IgnoreProvider) {
+  if (provider === "instagram") {
+    return "Instagram";
+  }
+  if (provider === "imessage") {
+    return "iMessage";
+  }
+  if (provider === "telegram") {
+    return "Telegram";
+  }
+  return "WhatsApp";
 }
 
 function normalizeTarget(value: string) {
@@ -52,6 +82,12 @@ function contactName(contact?: KnownContact | null, targetValue?: string) {
 
 function isLikelyTargetJid(value: string) {
   const normalized = normalizeTarget(value);
+  if (normalized.startsWith("ig:") || normalized.startsWith("instagram:")) {
+    return normalized.length > 3;
+  }
+  if (normalized.startsWith("imessage:") || normalized.startsWith("telegram:")) {
+    return normalized.includes(":") && normalized.split(":").some((part) => part.length > 0);
+  }
   if (!normalized.includes("@")) {
     return false;
   }
@@ -72,6 +108,7 @@ function RulesContent() {
   const { runAction, getRecord, notices, dismissNotice } = useActionStateRegistry();
 
   const [targetValue, setTargetValue] = useState("");
+  const [targetProvider, setTargetProvider] = useState<IgnoreProvider | undefined>(undefined);
   const [search, setSearch] = useState("");
   const key = "rules:add-ignore";
 
@@ -102,7 +139,8 @@ function RulesContent() {
   }, [knownContacts]);
 
   const normalizedTarget = normalizeTarget(targetValue);
-  const inferredTargetType = inferTargetType(normalizedTarget);
+  const inferredProvider = targetProvider || inferProviderFromTarget(normalizedTarget);
+  const inferredTargetType = inferTargetType(normalizedTarget, inferredProvider);
   const invalidTarget = normalizedTarget.length > 0 && !isLikelyTargetJid(normalizedTarget);
 
   const duplicateActiveRule = useMemo(() => {
@@ -144,9 +182,11 @@ function RulesContent() {
         await upsertIgnoreRule({
           ...tenantScope,
           targetValue: normalizedTarget,
+          provider: inferredProvider,
           enabled: true,
         });
         setTargetValue("");
+        setTargetProvider(undefined);
       },
       {
         pendingLabel: "Adding...",
@@ -172,15 +212,21 @@ function RulesContent() {
                   if (!event.target.value) {
                     return;
                   }
-                  setTargetValue(event.target.value);
+                  const contact = knownContacts.find((item) => item._id === event.target.value);
+                  if (!contact) {
+                    return;
+                  }
+                  setTargetValue(contact.jid);
+                  setTargetProvider(contact.provider || "whatsapp");
                 }}
                 disabled={record.pending || contactsLoading}
                 aria-disabled={record.pending || contactsLoading}
               >
                 <option value="">{contactsLoading ? "Loading conversations..." : "Choose a conversation"}</option>
                 {knownContacts.map((contact) => (
-                  <option key={contact._id} value={contact.jid}>
-                    {contactName(contact)} · {formatTargetType(contact.threadKind === "group" ? "group" : "contact")}
+                  <option key={contact._id} value={contact._id}>
+                    {contactName(contact)} · {formatProvider(contact.provider)} ·{" "}
+                    {formatTargetType(contact.threadKind === "group" ? "group" : "contact")}
                   </option>
                 ))}
               </SearchableSelect>
@@ -191,15 +237,20 @@ function RulesContent() {
               <input
                 type="text"
                 name="targetValue"
-                placeholder="Paste a WhatsApp contact or group address"
+                placeholder="Paste a WhatsApp, Instagram, iMessage, or Telegram address"
                 value={targetValue}
-                onChange={(event) => setTargetValue(event.target.value)}
+                onChange={(event) => {
+                  setTargetValue(event.target.value);
+                  setTargetProvider(undefined);
+                }}
                 aria-disabled={record.pending || rulesLoading || contactsLoading}
                 disabled={record.pending || rulesLoading || contactsLoading}
               />
             </label>
 
-            <p className="queue-meta">Detected type: {formatTargetType(inferredTargetType)}</p>
+            <p className="queue-meta">
+              Detected: {formatProvider(inferredProvider)} {formatTargetType(inferredTargetType).toLowerCase()}
+            </p>
             <button
               type="submit"
               className="btn btn-primary"
@@ -218,7 +269,7 @@ function RulesContent() {
           ) : null}
           {invalidTarget ? (
             <p className="queue-meta action-inline-error" role="status">
-              Enter a valid WhatsApp contact or group address.
+              Enter a valid contact or group address.
             </p>
           ) : null}
 

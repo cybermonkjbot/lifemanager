@@ -6,6 +6,7 @@ import { EmptyState } from "@/components/empty-state";
 import { LiveRules } from "@/components/live-rules";
 import { LiveStyleLab } from "@/components/live-style-lab";
 import { LoadingBlock } from "@/components/loading-state";
+import { SetupWizard } from "@/components/setup-wizard";
 import { useTenantScopeArgs } from "@/components/tenant-scope-provider";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
 import { formatDateTime } from "@/lib/format";
@@ -13,7 +14,6 @@ import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { useMutation, useQuery } from "convex/react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type SettingsState = {
@@ -57,6 +57,8 @@ type SettingsState = {
   outboxPollMs: number;
   inboundMergeWindowMs: number;
   manualInterventionCooldownMs: number;
+  inboundConcurrency: number;
+  outboxSendConcurrency: number;
   statusRetentionMs: number;
   statusCleanupIntervalMs: number;
   statusCleanupBatchLimit: number;
@@ -129,7 +131,7 @@ type SettingsState = {
 
 type KnownContact = {
   _id: string;
-  provider?: "whatsapp" | "instagram";
+  provider?: "whatsapp" | "instagram" | "imessage" | "telegram";
   jid: string;
   title?: string;
 };
@@ -219,7 +221,17 @@ type MergeSuggestion = {
 };
 
 type SetupState = {
-  status?: "idle" | "starting" | "authenticating" | "qr_ready" | "code_ready" | "challenge_required" | "syncing" | "connected" | "error";
+  status?:
+    | "idle"
+    | "starting"
+    | "authenticating"
+    | "qr_ready"
+    | "code_ready"
+    | "challenge_required"
+    | "connecting"
+    | "syncing"
+    | "connected"
+    | "error";
   hasAuth?: boolean;
   listenerActive?: boolean;
   message?: string;
@@ -242,7 +254,7 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string }> = [
 const SETTINGS_TAB_SUMMARIES: Record<SettingsTab, string> = {
   runtime: "Model, reply limits, and quality checks.",
   automation: "Quiet hours, pacing, outreach, and posting.",
-  connections: "WhatsApp pairing and account sessions.",
+  connections: "Messaging account sessions and workers.",
   voice: "Voice sample and local Vox generation.",
   personality: "Tone profiles used across conversations.",
   media: "Stickers, memes, uploads, and cleanup.",
@@ -269,7 +281,21 @@ const SETTINGS_TAB_KEYWORDS: Record<SettingsTab, string[]> = {
     "voice",
     "voxcpm",
   ],
-  connections: ["connection", "connect", "disconnect", "whatsapp", "pair", "pairing", "qr", "session", "credentials", "account"],
+  connections: [
+    "connection",
+    "connect",
+    "disconnect",
+    "whatsapp",
+    "instagram",
+    "imessage",
+    "telegram",
+    "pair",
+    "pairing",
+    "qr",
+    "session",
+    "credentials",
+    "account",
+  ],
   voice: ["voice", "voice note", "sample", "record", "microphone", "vox", "voxcpm", "local"],
   personality: ["profile", "persona", "intensity", "prompt", "tone", "personality"],
   media: ["media", "meme", "sticker", "asset", "merge", "context", "library"],
@@ -321,6 +347,8 @@ const SETTINGS_TAB_FIELDS: Record<SettingsTab, Array<keyof SettingsState>> = {
     "outboxPollMs",
     "inboundMergeWindowMs",
     "manualInterventionCooldownMs",
+    "inboundConcurrency",
+    "outboxSendConcurrency",
     "statusRetentionMs",
     "statusCleanupIntervalMs",
     "statusCleanupBatchLimit",
@@ -396,7 +424,6 @@ const SETTINGS_TAB_FIELDS: Record<SettingsTab, Array<keyof SettingsState>> = {
   rules: [],
 };
 const SETTINGS_SEARCH_STORAGE_KEY = "slm.settings.search";
-const WHATSAPP_RECONNECT_HREF = "/setup?connect=whatsapp&returnTo=%2Fsettings%3Fsection%3Dconnections";
 
 function fieldValueChanged<T extends keyof SettingsState>(field: T, draft: SettingsState, remote: SettingsState) {
   return JSON.stringify(draft[field]) !== JSON.stringify(remote[field]);
@@ -470,6 +497,8 @@ function toState(source: Partial<SettingsState> | undefined): SettingsState {
     outboxPollMs: source?.outboxPollMs ?? 3000,
     inboundMergeWindowMs: source?.inboundMergeWindowMs ?? 45000,
     manualInterventionCooldownMs: source?.manualInterventionCooldownMs ?? 90_000,
+    inboundConcurrency: source?.inboundConcurrency ?? 4,
+    outboxSendConcurrency: source?.outboxSendConcurrency ?? 4,
     statusRetentionMs: source?.statusRetentionMs ?? 40 * 60 * 1000,
     statusCleanupIntervalMs: source?.statusCleanupIntervalMs ?? 40 * 60 * 1000,
     statusCleanupBatchLimit: source?.statusCleanupBatchLimit ?? 160,
@@ -589,6 +618,8 @@ function stateEquals(a: SettingsState, b: SettingsState) {
     nearlyEqual(a.outboxPollMs, b.outboxPollMs) &&
     nearlyEqual(a.inboundMergeWindowMs, b.inboundMergeWindowMs) &&
     nearlyEqual(a.manualInterventionCooldownMs, b.manualInterventionCooldownMs) &&
+    nearlyEqual(a.inboundConcurrency, b.inboundConcurrency) &&
+    nearlyEqual(a.outboxSendConcurrency, b.outboxSendConcurrency) &&
     nearlyEqual(a.statusRetentionMs, b.statusRetentionMs) &&
     nearlyEqual(a.statusCleanupIntervalMs, b.statusCleanupIntervalMs) &&
     nearlyEqual(a.statusCleanupBatchLimit, b.statusCleanupBatchLimit) &&
@@ -701,58 +732,6 @@ function contactDisplayName(contact?: KnownContact | null, jid?: string) {
     return title;
   }
   return contactFallbackName(contact?.jid || jid || "");
-}
-
-function setupStatusLabel(state?: SetupState | null) {
-  if (state?.listenerActive) return "Connected";
-  if (state?.status === "starting") return "Starting";
-  if (state?.status === "authenticating") return "Authenticating";
-  if (state?.status === "qr_ready") return "QR Ready";
-  if (state?.status === "code_ready") return "Code Ready";
-  if (state?.status === "challenge_required") return "Challenge Required";
-  if (state?.status === "syncing") return "Syncing";
-  if (state?.status === "connected") return "Connected";
-  if (state?.status === "error") return "Error";
-  if (state?.hasAuth) return "Paired";
-  return "Disconnected";
-}
-
-function setupStatusToneClass(state?: SetupState | null) {
-  if (state?.listenerActive || state?.status === "connected") {
-    return "status-active";
-  }
-  if (
-    state?.status === "starting" ||
-    state?.status === "authenticating" ||
-    state?.status === "qr_ready" ||
-    state?.status === "code_ready" ||
-    state?.status === "challenge_required" ||
-    state?.status === "syncing"
-  ) {
-    return "status-syncing";
-  }
-  return "status-paused";
-}
-
-async function readWhatsAppSetupResponse(response: Response) {
-  let body: SetupState | null = null;
-
-  try {
-    body = (await response.json()) as SetupState;
-  } catch {
-    // fallback handled below
-  }
-
-  if (!response.ok) {
-    const reason = body?.message || `WhatsApp setup request failed (${response.status})`;
-    throw new Error(reason);
-  }
-
-  if (!body) {
-    throw new Error("WhatsApp setup request returned an empty response.");
-  }
-
-  return body;
 }
 
 function RecipientPickerField({
@@ -1105,7 +1084,6 @@ function ProfileEditorForm({ profile, pending, error, onSave }: ProfileEditorFor
 }
 
 export function LiveSettings() {
-  const router = useRouter();
   const tenantScope = useTenantScopeArgs();
   const saveSettings = useMutation(api.settings.save);
   const upsertPersonalityProfile = useMutation(api.personality.upsertProfile);
@@ -1119,7 +1097,6 @@ export function LiveSettings() {
   const deleteAsset = useMutation(api.media.deleteAsset);
   const settings = useQuery(api.settings.get, tenantScope) as SettingsState | undefined;
   const defaults = useQuery(api.settings.defaults, {}) as SettingsState | undefined;
-  const whatsappSetup = useQuery(api.system.setupStatus, { ...tenantScope, provider: "whatsapp" }) as SetupState | null | undefined;
   const instagramSetup = useQuery(api.system.setupStatus, { ...tenantScope, provider: "instagram" }) as SetupState | null | undefined;
   const contacts = useQuery(api.threads.listContacts, { ...tenantScope, limit: 300 }) as KnownContact[] | undefined;
   const profilesQuery = useQuery(api.personality.listProfiles, tenantScope) as PersonalityProfile[] | undefined;
@@ -1279,7 +1256,6 @@ export function LiveSettings() {
   const key = "settings:save";
   const profileKey = "personality:profile";
   const mediaKey = "media:library";
-  const whatsappDisconnectKey = "connections:whatsapp:disconnect";
 
   const remoteState = useMemo(() => toState(settings), [settings]);
   const defaultState = useMemo(() => toState(defaults), [defaults]);
@@ -1313,32 +1289,10 @@ export function LiveSettings() {
   const [newProfileDescription, setNewProfileDescription] = useState("");
   const [newProfilePrompt, setNewProfilePrompt] = useState("");
   const [newProfileIntensity, setNewProfileIntensity] = useState(0.65);
-  const [localWhatsAppSetup, setLocalWhatsAppSetup] = useState<SetupState | null>(null);
 
   useEffect(() => {
     setDraft(remoteState);
   }, [remoteState]);
-
-  useEffect(() => {
-    let cancelled = false;
-    const refreshWhatsAppSetup = async () => {
-      try {
-        const response = await fetch("/api/setup/whatsapp/status", { cache: "no-store" });
-        const next = await readWhatsAppSetupResponse(response);
-        if (!cancelled) {
-          setLocalWhatsAppSetup(next);
-        }
-      } catch {
-        // Convex setup status still provides best-effort state if the local runtime API is locked.
-      }
-    };
-
-    void refreshWhatsAppSetup();
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1395,18 +1349,6 @@ export function LiveSettings() {
 
   const selectedEditorSlug = editorSlug || profiles[0]?.slug || "";
   const selectedEditorProfile = profiles.find((profile) => profile.slug === selectedEditorSlug) || null;
-  const effectiveWhatsAppSetup = useMemo(() => {
-    if (!whatsappSetup) {
-      return localWhatsAppSetup;
-    }
-    if (!localWhatsAppSetup) {
-      return whatsappSetup;
-    }
-    return (localWhatsAppSetup.updatedAt || 0) > (whatsappSetup.updatedAt || 0) ? localWhatsAppSetup : whatsappSetup;
-  }, [localWhatsAppSetup, whatsappSetup]);
-  const whatsappConnected = Boolean(
-    effectiveWhatsAppSetup?.hasAuth || effectiveWhatsAppSetup?.listenerActive || effectiveWhatsAppSetup?.status === "connected",
-  );
   const instagramConnected = Boolean(
     instagramSetup?.hasAuth || instagramSetup?.listenerActive || instagramSetup?.status === "connected",
   );
@@ -1420,7 +1362,6 @@ export function LiveSettings() {
   const record = getRecord(key);
   const profileRecord = getRecord(profileKey);
   const mediaRecord = getRecord(mediaKey);
-  const whatsappDisconnectRecord = getRecord(whatsappDisconnectKey);
   const showRuntime = tab === "runtime";
   const showAutomation = tab === "automation";
   const showConnections = tab === "connections";
@@ -1460,32 +1401,6 @@ export function LiveSettings() {
       return haystack.includes(normalizedSettingsSearch);
     });
   }, [normalizedSettingsSearch]);
-
-  const disconnectWhatsApp = () => {
-    if (typeof window !== "undefined") {
-      const confirmed = window.confirm(
-        "Disconnect WhatsApp on this computer? Automation will stop until you scan a fresh QR code.",
-      );
-      if (!confirmed) {
-        return;
-      }
-    }
-
-    void runAction(
-      whatsappDisconnectKey,
-      async () => {
-        const response = await fetch("/api/setup/whatsapp/reset", {
-          method: "POST",
-        });
-        const next = await readWhatsAppSetupResponse(response);
-        setLocalWhatsAppSetup(next);
-        router.push(WHATSAPP_RECONNECT_HREF);
-      },
-      {
-        pendingLabel: "Disconnecting WhatsApp...",
-      },
-    );
-  };
 
   const selectTab = useCallback((nextTab: SettingsTab) => {
     setTab(nextTab);
@@ -1574,6 +1489,8 @@ export function LiveSettings() {
           outboxPollMs: Math.round(draft.outboxPollMs),
           inboundMergeWindowMs: Math.round(draft.inboundMergeWindowMs),
           manualInterventionCooldownMs: Math.round(draft.manualInterventionCooldownMs),
+          inboundConcurrency: Math.round(draft.inboundConcurrency),
+          outboxSendConcurrency: Math.round(draft.outboxSendConcurrency),
           statusRetentionMs: Math.round(draft.statusRetentionMs),
           statusCleanupIntervalMs: Math.round(draft.statusCleanupIntervalMs),
           statusCleanupBatchLimit: Math.round(draft.statusCleanupBatchLimit),
@@ -2986,6 +2903,44 @@ export function LiveSettings() {
           </label>
 
           <label className="stack compact">
+            <span className="queue-meta">Inbound worker concurrency</span>
+            <input
+              type="number"
+              min={1}
+              max={16}
+              step={1}
+              value={draft.inboundConcurrency}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  inboundConcurrency: parseNumber(event.target.value, prev.inboundConcurrency),
+                }))
+              }
+              disabled={record.pending}
+              aria-disabled={record.pending}
+            />
+          </label>
+
+          <label className="stack compact">
+            <span className="queue-meta">Outbound send concurrency</span>
+            <input
+              type="number"
+              min={1}
+              max={16}
+              step={1}
+              value={draft.outboxSendConcurrency}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  outboxSendConcurrency: parseNumber(event.target.value, prev.outboxSendConcurrency),
+                }))
+              }
+              disabled={record.pending}
+              aria-disabled={record.pending}
+            />
+          </label>
+
+          <label className="stack compact">
             <span className="queue-meta">Quiet hours for automatic sends</span>
             <SearchableSelect
               value={draft.quietHoursEnabled ? "true" : "false"}
@@ -3494,60 +3449,13 @@ export function LiveSettings() {
 
         {showConnections ? (
           <article className="panel-card settings-connection-card">
-            <ActionNotices notices={notices} onDismiss={dismissNotice} />
-            <h3>WhatsApp Connection</h3>
-            <div className="stack compact">
-              <div className="settings-connection-row">
-                <span className="queue-meta">Session status</span>
-                <div className="settings-connection-value">
-                  <div className="setup-status-row">
-                    <span className={`status-pill ${setupStatusToneClass(effectiveWhatsAppSetup)}`}>
-                      {setupStatusLabel(effectiveWhatsAppSetup)}
-                    </span>
-                    <span className="queue-meta">
-                      {effectiveWhatsAppSetup?.listenerActive
-                        ? "Worker is listening now."
-                        : effectiveWhatsAppSetup?.hasAuth
-                          ? "Credentials exist on this computer."
-                          : "No paired credentials found on this computer."}
-                    </span>
-                  </div>
-                  {effectiveWhatsAppSetup?.message || effectiveWhatsAppSetup?.listenerMessage ? (
-                    <p className="queue-meta">
-                      {effectiveWhatsAppSetup.listenerMessage || effectiveWhatsAppSetup.message}
-                    </p>
-                  ) : null}
-                </div>
-              </div>
-
-              <div className="settings-connection-row">
-                <span className="queue-meta">Reset pairing</span>
-                <div className="settings-connection-value">
-                  <p className="queue-meta">
-                    Disconnect clears the local WhatsApp credentials and stops the worker so the next setup must scan a fresh QR code.
-                  </p>
-                  <div className="settings-connection-actions">
-                    <button
-                      type="button"
-                      className="btn btn-danger-ghost"
-                      onClick={disconnectWhatsApp}
-                      disabled={whatsappDisconnectRecord.pending}
-                      aria-disabled={whatsappDisconnectRecord.pending}
-                    >
-                      {whatsappDisconnectRecord.pending ? "Disconnecting..." : "Disconnect WhatsApp"}
-                    </button>
-                    <Link className="btn btn-primary" href={WHATSAPP_RECONNECT_HREF}>
-                      {whatsappConnected ? "Scan new QR" : "Connect WhatsApp"}
-                    </Link>
-                  </div>
-                </div>
+            <div className="settings-connection-header">
+              <div>
+                <h3>Connections</h3>
+                <p className="queue-meta">Manage local sessions for every messaging platform enabled for this workspace.</p>
               </div>
             </div>
-            {whatsappDisconnectRecord.error ? (
-              <p className="queue-meta action-inline-error" role="alert">
-                {whatsappDisconnectRecord.error}
-              </p>
-            ) : null}
+            <SetupWizard realtimeEnabled embedded includeVoiceOption={false} showNotices={false} />
           </article>
         ) : null}
 

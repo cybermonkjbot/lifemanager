@@ -39,6 +39,12 @@ export const dashboardNavItems: DashboardNavItem[] = [
     primary: true,
   },
   {
+    href: "/activity-core",
+    label: "Activity Core",
+    description: "Watch live tenant activity, media, and system signals.",
+    primary: true,
+  },
+  {
     href: "/memes",
     label: "Memes",
     description: "Generate, preview, and approve meme assets.",

@@ -55,7 +55,7 @@ type QueueNeedsReplyItem = {
   _id: string;
   text: string;
   provider: string;
-  messageProvider?: "whatsapp" | "instagram";
+  messageProvider?: "whatsapp" | "instagram" | "imessage" | "telegram";
   isStatusPost?: boolean;
   sendKind?: "text" | "reaction" | "sticker" | "meme" | "voice_note";
   mediaCaption?: string;
@@ -66,7 +66,7 @@ type QueueNeedsReplyItem = {
     label: string;
     url: string | null;
   } | null;
-  thread?: { _id?: string; title?: string; jid?: string; provider?: "whatsapp" | "instagram" } | null;
+  thread?: { _id?: string; title?: string; jid?: string; provider?: "whatsapp" | "instagram" | "imessage" | "telegram" } | null;
 };
 
 type QueuePayload = {
@@ -93,11 +93,21 @@ function statusMessageText(message: ThreadMessage) {
   return "Posted a status";
 }
 
-function resolveStatusDraftProvider(item: QueueNeedsReplyItem): "whatsapp" | "instagram" {
-  if (item.messageProvider === "instagram" || item.messageProvider === "whatsapp") {
+function resolveStatusDraftProvider(item: QueueNeedsReplyItem): "whatsapp" | "instagram" | "imessage" | "telegram" {
+  if (
+    item.messageProvider === "instagram" ||
+    item.messageProvider === "whatsapp" ||
+    item.messageProvider === "imessage" ||
+    item.messageProvider === "telegram"
+  ) {
     return item.messageProvider;
   }
-  if (item.thread?.provider === "instagram" || item.thread?.provider === "whatsapp") {
+  if (
+    item.thread?.provider === "instagram" ||
+    item.thread?.provider === "whatsapp" ||
+    item.thread?.provider === "imessage" ||
+    item.thread?.provider === "telegram"
+  ) {
     return item.thread.provider;
   }
   if (item.thread?.jid === STATUS_JID_INSTAGRAM) {

@@ -15,8 +15,9 @@ import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { useMutation, useQuery } from "convex/react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { formatDateTime, formatDateTimeWithRelative, trim } from "@/lib/format";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type FormEvent, type KeyboardEvent as ReactKeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 
 type LiveConversationsProps = {
   initialThreadId?: string;
@@ -38,10 +39,32 @@ function readStoredProviderFilter(): ProviderFilterValue {
     return "all";
   }
   const saved = window.localStorage.getItem(CONVERSATIONS_PROVIDER_STORAGE_KEY);
-  if (saved === "whatsapp" || saved === "instagram" || saved === "all") {
+  if (saved === "whatsapp" || saved === "instagram" || saved === "imessage" || saved === "telegram" || saved === "all") {
     return saved;
   }
   return "all";
+}
+
+function providerLabel(provider?: "whatsapp" | "instagram" | "imessage" | "telegram") {
+  if (provider === "instagram") {
+    return "Instagram";
+  }
+  if (provider === "imessage") {
+    return "iMessage";
+  }
+  if (provider === "telegram") {
+    return "Telegram";
+  }
+  return "WhatsApp";
+}
+
+function SendIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M22 2L11 13" />
+      <path d="M22 2L15 22l-4-9-9-4 20-7z" />
+    </svg>
+  );
 }
 
 type PersonalityProfile = {
@@ -196,7 +219,7 @@ type ThreadMediaItem = {
 
 type ThreadReviewNeedsReplyItem = {
   _id: string;
-  messageProvider?: "whatsapp" | "instagram";
+  messageProvider?: "whatsapp" | "instagram" | "imessage" | "telegram";
   provider: string;
   delayMs: number;
   typingMs: number;
@@ -1086,9 +1109,10 @@ function IdentityCorrectionForm({ facts, loading, pending, onSaveGender }: Ident
 
 function ConversationsContent({ initialThreadId }: { initialThreadId?: string }) {
   const tenantScope = useTenantScopeArgs();
+  const router = useRouter();
   type ThreadListItem = {
     _id: string;
-    provider?: "whatsapp" | "instagram";
+    provider?: "whatsapp" | "instagram" | "imessage" | "telegram";
     title?: string;
     jid: string;
     threadKind?: "direct" | "group" | "broadcast_or_system";
@@ -1153,6 +1177,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
   const snoozeDraft = useMutation(api.draft.snooze);
   const rejectDraft = useMutation(api.draft.reject);
   const updateDraftContent = useMutation(api.draft.updateDraftContent);
+  const sendManualReply = useMutation(api.draft.sendManualReply);
   const confirmFollowup = useMutation(api.followups.confirm);
   const snoozeFollowup = useMutation(api.followups.snooze);
   const rescheduleFollowup = useMutation(api.followups.reschedule);
@@ -1192,7 +1217,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
           baileysUnreadCount?: number;
           baileysMetadataUpdatedAt?: number;
           jid: string;
-          provider?: "whatsapp" | "instagram";
+          provider?: "whatsapp" | "instagram" | "imessage" | "telegram";
           threadKind?: "direct" | "group" | "broadcast_or_system";
           isArchived?: boolean;
           isIgnored?: boolean;
@@ -1272,11 +1297,13 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
   const [toolSummaryMessageId, setToolSummaryMessageId] = useState<string | null>(null);
   const [mediaPreviewModal, setMediaPreviewModal] = useState<MessageMediaPreview | null>(null);
+  const [manualReplyDraft, setManualReplyDraft] = useState<{ threadId?: string; text: string }>({ text: "" });
   const [draftEdits, setDraftEdits] = useState<Record<string, string>>({});
   const [autoTodoTitles, setAutoTodoTitles] = useState<Record<string, string>>({});
   const [autoFollowupReasons, setAutoFollowupReasons] = useState<Record<string, string>>({});
   const messageRowRefs = useRef(new Map<string, HTMLDivElement>());
   const conversationWindowRef = useRef<HTMLDivElement | null>(null);
+  const manualReplyInputRef = useRef<HTMLTextAreaElement | null>(null);
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const autoTodoAttemptedRef = useRef<Set<string>>(new Set());
@@ -1288,6 +1315,8 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
   const identityCorrectionKey = selectedThreadId ? `identity:thread:${selectedThreadId}` : "identity:thread:none";
   const ignoreThreadKey = selectedThreadId ? `conversation:ignore:${selectedThreadId}` : "conversation:ignore:none";
   const deleteThreadKey = selectedThreadId ? `conversation:delete:${selectedThreadId}` : "conversation:delete:none";
+  const manualReplyKey = selectedThreadId ? `conversation:manual-reply:${selectedThreadId}` : "conversation:manual-reply:none";
+  const manualReplyText = manualReplyDraft.threadId === selectedThreadId ? manualReplyDraft.text : "";
 
   const settingsRecord = getRecord(settingsKey);
   const promptProfileRecord = getRecord(promptProfileKey);
@@ -1295,8 +1324,18 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
   const identityCorrectionRecord = getRecord(identityCorrectionKey);
   const ignoreThreadRecord = getRecord(ignoreThreadKey);
   const deleteThreadRecord = getRecord(deleteThreadKey);
+  const manualReplyRecord = getRecord(manualReplyKey);
   const lastLoadStartedThreadRef = useRef<string | null>(null);
   const lastLoadedThreadRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const inputEl = manualReplyInputRef.current;
+    if (!inputEl) {
+      return;
+    }
+    inputEl.style.height = "0px";
+    inputEl.style.height = `${Math.min(inputEl.scrollHeight, 118)}px`;
+  }, [manualReplyText]);
 
   useEffect(() => {
     if (!selectedThreadId || lastLoadStartedThreadRef.current === selectedThreadId) {
@@ -2004,10 +2043,48 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
     const rows = thread?.messages || [];
     return rows.length > 0 ? rows[rows.length - 1]._id : null;
   }, [thread?.messages]);
+  const manualReplySourceMessageId = lastMessageId || lastInboundMessageId;
+  const canUseManualReply =
+    Boolean(selectedThreadId && thread && manualReplySourceMessageId) && thread?.thread.threadKind !== "broadcast_or_system";
   const inboundMessageIds = useMemo(
     () => (thread?.messages || []).filter((message) => message.direction === "inbound").map((message) => message._id),
     [thread?.messages],
   );
+
+  const submitManualReply = (event?: FormEvent<HTMLFormElement>) => {
+    event?.preventDefault();
+    const text = manualReplyText.trim();
+    if (!selectedThreadId || !manualReplySourceMessageId || !text || !canUseManualReply) {
+      return;
+    }
+
+    void runAction(
+      manualReplyKey,
+      async () => {
+        await sendManualReply({
+          threadId: selectedThreadId as Id<"threads">,
+          sourceMessageId: manualReplySourceMessageId as Id<"messages">,
+          text,
+        });
+        setManualReplyDraft({ threadId: selectedThreadId, text: "" });
+        window.requestAnimationFrame(() => {
+          jumpToLastMessage();
+          manualReplyInputRef.current?.focus();
+        });
+      },
+      {
+        pendingLabel: "Queueing reply...",
+        successMessage: "Manual reply queued.",
+      },
+    );
+  };
+
+  const onManualReplyKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      submitManualReply();
+    }
+  };
 
   const jumpToMessage = (messageId: string | null) => {
     if (!messageId) {
@@ -2332,15 +2409,39 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
   const showThreadSidebar = !isMobileViewport || !selectedThreadId;
   const showConversationPane = !isMobileViewport || (Boolean(selectedThreadId) && !mobileInspectorOpen);
   const showInspectorPane = Boolean(selectedThreadId) && (isMobileViewport ? mobileInspectorOpen : desktopInspectorOpen);
+  const goBack = () => {
+    if (window.history.length > 1) {
+      router.back();
+      return;
+    }
+    router.push("/");
+  };
 
   return (
     <section className={`conversations-workspace${showInspectorPane ? " inspector-open" : ""}`}>
       {showThreadSidebar ? (
       <article className="conversation-sidebar" aria-label="Conversation threads">
         <div className="conversation-sidebar-header">
-          <div>
-            <p className="conversation-kicker">Messages</p>
-            <h3>Conversations</h3>
+          <div className="conversation-sidebar-title-cluster">
+            <button
+              type="button"
+              className="btn btn-ghost btn-icon conversation-sidebar-back"
+              onClick={goBack}
+              aria-label="Go back"
+              title="Go back"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path
+                  fill="currentColor"
+                  d="M10.53 5.47a.75.75 0 0 1 0 1.06L5.81 11.25H20a.75.75 0 0 1 0 1.5H5.81l4.72 4.72a.75.75 0 1 1-1.06 1.06l-6-6a.75.75 0 0 1 0-1.06l6-6a.75.75 0 0 1 1.06 0Z"
+                />
+              </svg>
+              <span className="sr-only">Go back</span>
+            </button>
+            <div>
+              <p className="conversation-kicker">Messages</p>
+              <h3>Conversations</h3>
+            </div>
           </div>
           <span className="conversation-count-pill">{filteredThreadList.length}</span>
         </div>
@@ -2355,7 +2456,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
             <input
               type="text"
               value={threadSearch}
-              placeholder="Search thread..."
+              placeholder="Search conversations"
               onChange={(event) => setThreadSearch(event.target.value)}
             />
           </label>
@@ -2381,7 +2482,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
                   <p className="queue-meta">{formatDateTime(item.lastMessageAt)}</p>
                 </div>
                 <p className="queue-meta">
-                  {(item.provider || "whatsapp") === "instagram" ? "Instagram" : "WhatsApp"} ·{" "}
+                  {providerLabel(item.provider || "whatsapp")} ·{" "}
                   {item.threadKind === "broadcast_or_system" ? "Broadcast/System" : item.threadKind === "group" ? "Group" : "Direct"}
                   {item.isArchived ? " · Archived" : ""}
                 </p>
@@ -2425,7 +2526,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
                   <p className="queue-title">{thread.thread.title || thread.thread.jid}</p>
                   <p className="queue-meta">{thread.thread.jid}</p>
                   <p className="conversation-toolbar-summary">
-                    {(thread.thread.provider || "whatsapp") === "instagram" ? "Instagram" : "WhatsApp"} ·{" "}
+                    {providerLabel(thread.thread.provider || "whatsapp")} ·{" "}
                     {thread.thread.isIgnored ? "Auto-reply off" : "Auto-reply on"}
                     {reviewItemCount > 0 ? ` · ${reviewItemCount} to review` : ""}
                   </p>
@@ -2499,7 +2600,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
                 </div>
               </div>
               <div className="conversation-chat-chip-row" aria-label="Thread status">
-                <span className="conversation-chip">{(thread.thread.provider || "whatsapp") === "instagram" ? "Instagram" : "WhatsApp"}</span>
+                <span className="conversation-chip">{providerLabel(thread.thread.provider || "whatsapp")}</span>
                 <span className="conversation-chip">
                   {thread.thread.threadKind === "broadcast_or_system"
                     ? "Broadcast/System"
@@ -2696,6 +2797,39 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
                   <path fill="currentColor" d="M12 18a1 1 0 0 1-.7-.29l-6-6a1 1 0 1 1 1.4-1.42L12 15.58l5.3-5.3a1 1 0 1 1 1.4 1.42l-6 6A1 1 0 0 1 12 18Z" />
                 </svg>
               </button>
+              <form className="home-ai-composer conversation-manual-composer" onSubmit={submitManualReply}>
+                <div className="home-ai-composer-field conversation-manual-composer-field">
+                  <textarea
+                    ref={manualReplyInputRef}
+                    value={manualReplyText}
+                    onChange={(event) => setManualReplyDraft({ threadId: selectedThreadId, text: event.target.value })}
+                    onKeyDown={onManualReplyKeyDown}
+                    placeholder={
+                      canUseManualReply
+                        ? `Message ${threadGrounding?.theirName?.trim() || thread.thread.title || "this thread"}`
+                        : "Manual reply unavailable for this thread"
+                    }
+                    aria-label="Manual reply"
+                    disabled={!canUseManualReply || manualReplyRecord.pending}
+                    rows={1}
+                  />
+                  <button
+                    type="submit"
+                    className="home-ai-send-icon-button"
+                    disabled={!canUseManualReply || manualReplyRecord.pending || !manualReplyText.trim()}
+                    aria-label={manualReplyRecord.pending ? "Queueing reply" : "Send manual reply"}
+                    title={manualReplyRecord.pending ? "Queueing" : "Send"}
+                  >
+                    <SendIcon />
+                    <span className="sr-only">{manualReplyRecord.pending ? "Queueing" : "Send"}</span>
+                  </button>
+                </div>
+                {manualReplyRecord.error ? (
+                  <p className="queue-meta action-inline-error conversation-manual-error" role="alert">
+                    {manualReplyRecord.error}
+                  </p>
+                ) : null}
+              </form>
             </div>
           </div>
         ) : threadMissing ? (
@@ -2718,7 +2852,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
           }
           description={
             selectedThreadId && thread
-              ? `${thread.thread.jid} · ${(thread.thread.provider || "whatsapp") === "instagram" ? "Instagram" : "WhatsApp"} · ${
+              ? `${thread.thread.jid} · ${providerLabel(thread.thread.provider || "whatsapp")} · ${
                   thread.thread.threadKind === "broadcast_or_system"
                     ? "Broadcast/System"
                     : thread.thread.threadKind === "group"
@@ -3122,7 +3256,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
                 <dl className="conversation-inspector-list">
                   <div>
                     <dt>Channel</dt>
-                    <dd>{(thread.thread.provider || "whatsapp") === "instagram" ? "Instagram" : "WhatsApp"}</dd>
+                    <dd>{providerLabel(thread.thread.provider || "whatsapp")}</dd>
                   </div>
                   <div>
                     <dt>Type</dt>

@@ -48,6 +48,7 @@ function StyleLabContent() {
   const installPersonaPack = useMutation(api.personality.installPersonaPack);
   const { runAction, getRecord, notices, dismissNotice } = useActionStateRegistry();
   const key = "style:mimicry";
+  const [installingPackId, setInstallingPackId] = useState<string | null>(null);
 
   const profile = useQuery(api.style.getProfile, tenantScope) as
     | {
@@ -708,6 +709,7 @@ function StyleLabContent() {
             personaPacks.packs.map((pack) => {
               const activeForProfileSlugs = pack.activeForProfileSlugs || [];
               const isActive = activeForProfileSlugs.length > 0 || personaPacks.activePersonaPackId === pack.id;
+              const installingThisPack = installPackRecord.pending && installingPackId === pack.id;
               return (
                 <div key={pack.id} className="queue-item style-pack-row">
                   <div>
@@ -732,7 +734,8 @@ function StyleLabContent() {
                   <button
                     type="button"
                     className="btn btn-primary"
-                    onClick={() =>
+                    onClick={() => {
+                      setInstallingPackId(pack.id);
                       void runAction(
                         "style:persona-pack:install",
                         async () => {
@@ -746,13 +749,23 @@ function StyleLabContent() {
                           pendingLabel: "Installing persona pack...",
                           successMessage: `Persona pack ${pack.id} applied.`,
                         },
-                      )
-                    }
+                      ).finally(() => {
+                        setInstallingPackId((current) => (current === pack.id ? null : current));
+                      });
+                    }}
                     disabled={installPackRecord.pending}
                     aria-disabled={installPackRecord.pending}
                   >
-                    {installPackRecord.pending ? "Applying..." : isActive ? "Re-Apply Active Pack" : "Apply + Activate Pack"}
+                    {installingThisPack ? "Applying..." : isActive ? "Re-Apply Active Pack" : "Apply + Activate Pack"}
                   </button>
+                  {installingThisPack ? (
+                    <div className="style-pack-progress" role="status" aria-live="polite">
+                      <span>Installing persona pack</span>
+                      <div className="install-progress-track install-progress-track-indeterminate" role="progressbar" aria-label={`Installing ${pack.name}`}>
+                        <span />
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
               );
             })

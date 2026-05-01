@@ -68,7 +68,7 @@ type BacklogItem = {
 
 type NeedsReplyItem = {
   _id: string;
-  messageProvider?: "whatsapp" | "instagram";
+  messageProvider?: "whatsapp" | "instagram" | "imessage" | "telegram";
   provider: string;
   delayMs: number;
   typingMs: number;

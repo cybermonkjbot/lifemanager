@@ -12,6 +12,7 @@ type SetupStatus =
   | "qr_ready"
   | "code_ready"
   | "challenge_required"
+  | "connecting"
   | "syncing"
   | "connected"
   | "error";
@@ -28,7 +29,7 @@ type SetupSnapshot = {
 type RuntimeState = "normal" | "paused" | "offline" | "error";
 
 type ProviderIssue = {
-  provider: "whatsapp" | "instagram";
+  provider: "whatsapp" | "instagram" | "imessage" | "telegram";
   state: Exclude<RuntimeState, "normal" | "paused">;
   detail: string;
   hasAuth: boolean;
@@ -40,6 +41,7 @@ const TRANSITIONAL_SETUP_STATES = new Set<SetupStatus>([
   "qr_ready",
   "code_ready",
   "challenge_required",
+  "connecting",
   "syncing",
 ]);
 
@@ -54,8 +56,15 @@ function compactMessage(value: string | undefined, maxChars: number) {
   return `${trimmed.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
 }
 
-function evaluateProviderState(provider: "whatsapp" | "instagram", setup: SetupSnapshot) {
-  const label = provider === "whatsapp" ? "WhatsApp" : "Instagram";
+function evaluateProviderState(provider: "whatsapp" | "instagram" | "imessage" | "telegram", setup: SetupSnapshot) {
+  const label =
+    provider === "whatsapp"
+      ? "WhatsApp"
+      : provider === "instagram"
+        ? "Instagram"
+        : provider === "imessage"
+          ? "iMessage"
+          : "Telegram";
   if (!setup) {
     return provider === "whatsapp"
       ? {
@@ -77,7 +86,7 @@ function evaluateProviderState(provider: "whatsapp" | "instagram", setup: SetupS
   );
 
   if (status === "error") {
-    if (provider === "instagram" && !hasAuth) {
+    if ((provider === "instagram" || provider === "imessage" || provider === "telegram") && !hasAuth) {
       return null;
     }
     return {
@@ -96,7 +105,7 @@ function evaluateProviderState(provider: "whatsapp" | "instagram", setup: SetupS
     return null;
   }
 
-  if (provider === "instagram" && !hasAuth) {
+  if ((provider === "instagram" || provider === "imessage" || provider === "telegram") && !hasAuth) {
     return null;
   }
 
@@ -117,6 +126,8 @@ export function RuntimeStateOverlay({ canManageRuntime = true }: { canManageRunt
   const [reconnectError, setReconnectError] = useState("");
   const whatsappSetup = useQuery(api.system.setupStatus, { ...tenantScope, provider: "whatsapp" }) as SetupSnapshot | undefined;
   const instagramSetup = useQuery(api.system.setupStatus, { ...tenantScope, provider: "instagram" }) as SetupSnapshot | undefined;
+  const imessageSetup = useQuery(api.system.setupStatus, { ...tenantScope, provider: "imessage" }) as SetupSnapshot | undefined;
+  const telegramSetup = useQuery(api.system.setupStatus, { ...tenantScope, provider: "telegram" }) as SetupSnapshot | undefined;
   const health = useQuery(api.system.health, tenantScope) as
     | {
         config?: {
@@ -125,13 +136,21 @@ export function RuntimeStateOverlay({ canManageRuntime = true }: { canManageRunt
       }
     | undefined;
 
-  if (whatsappSetup === undefined || instagramSetup === undefined || health === undefined) {
+  if (
+    whatsappSetup === undefined ||
+    instagramSetup === undefined ||
+    imessageSetup === undefined ||
+    telegramSetup === undefined ||
+    health === undefined
+  ) {
     return null;
   }
 
   const issues = [
     evaluateProviderState("whatsapp", whatsappSetup),
     evaluateProviderState("instagram", instagramSetup),
+    evaluateProviderState("imessage", imessageSetup),
+    evaluateProviderState("telegram", telegramSetup),
   ].filter(Boolean) as ProviderIssue[];
 
   const autonomyPaused = Boolean(health?.config?.autonomyPaused);
