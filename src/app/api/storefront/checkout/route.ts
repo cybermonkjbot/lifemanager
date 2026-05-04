@@ -36,6 +36,16 @@ function readEmail(body: CheckoutRequestBody) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw) ? raw : "";
 }
 
+function checkoutItems(body: CheckoutRequestBody) {
+  return (body.items || []).slice(0, 5).map((item) => ({
+    productId: item.productId as Id<"storefrontProducts">,
+    name: item.name || "",
+    quantity: item.quantity || 1,
+    unitPrice: item.unitPrice || 0,
+    currency: item.currency || "NGN",
+  }));
+}
+
 export async function POST(request: Request) {
   const limited = await rateLimitJsonResponse(request, {
     scope: "storefront.checkout",
@@ -72,13 +82,7 @@ export async function POST(request: Request) {
       customerName: body.customerName,
       customerContact: body.customerContact || email,
       customerMessage: body.customerMessage,
-      items: body.items.map((item) => ({
-        ...(item.productId ? { productId: item.productId as Id<"storefrontProducts"> } : {}),
-        name: item.name || "",
-        quantity: item.quantity || 1,
-        unitPrice: item.unitPrice || 0,
-        currency: item.currency || "NGN",
-      })),
+      items: checkoutItems(body),
       source: "hosted_shop",
     });
     const txRef = `store_${orderIntentId}_${Date.now()}`;

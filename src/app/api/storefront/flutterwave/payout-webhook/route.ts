@@ -55,7 +55,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
   }
 
-  const payload = JSON.parse(rawBody || "{}") as {
+  let payload: {
     event?: string;
     data?: {
       id?: string | number;
@@ -64,6 +64,11 @@ export async function POST(request: NextRequest) {
       complete_message?: string;
     };
   };
+  try {
+    payload = JSON.parse(rawBody || "{}") as typeof payload;
+  } catch {
+    return NextResponse.json({ error: "Invalid webhook payload." }, { status: 400 });
+  }
   const reference = payload.data?.reference;
   if (!reference) {
     return NextResponse.json({ ok: true, ignored: true });

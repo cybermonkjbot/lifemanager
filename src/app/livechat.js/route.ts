@@ -34,6 +34,8 @@ export async function GET() {
     headers: {
       "content-type": "application/javascript; charset=utf-8",
       "cache-control": "public, max-age=300",
+      "x-content-type-options": "nosniff",
+      "referrer-policy": "strict-origin-when-cross-origin",
     },
   });
 }

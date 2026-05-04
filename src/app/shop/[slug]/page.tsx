@@ -27,8 +27,8 @@ export default async function ShopPage({
         profile={storefront.profile}
         products={storefront.products}
         initialProductSlug={query.product}
-        paymentResult={query.payment}
-        paymentMessage={query.message}
+        paymentResult={query.payment?.slice(0, 40)}
+        paymentMessage={query.message?.slice(0, 160)}
       />
     );
   }
@@ -48,11 +48,6 @@ export default async function ShopPage({
         <p>
           This storefront is not published yet.
         </p>
-        <div className="public-shop-actions">
-          <a className="btn btn-ghost" href="/storefront">
-            Manage storefront
-          </a>
-        </div>
       </section>
       <section className="public-shop-grid" aria-label="Storefront support">
         <article>

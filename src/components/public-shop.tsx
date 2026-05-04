@@ -19,9 +19,9 @@ export type PublicProfile = {
   slug: string;
   displayName: string;
   offerSummary: string;
-  brandVoice: string;
   liveChatEnabled: boolean;
   liveChatWelcomeMessage: string;
+  checkoutEnabled: boolean;
 };
 
 type PublicShopProps = {
@@ -209,13 +209,16 @@ export function PublicShop({ profile, products, initialProductSlug, paymentResul
             type="text"
             value={customerName}
             placeholder="Name"
+            maxLength={120}
             onChange={(event) => setCustomerName(event.target.value)}
             disabled={pending}
           />
           <input
             type="text"
+            inputMode="email"
             value={customerContact}
             placeholder="Email for checkout, or WhatsApp/phone for follow-up"
+            maxLength={160}
             onChange={(event) => setCustomerContact(event.target.value)}
             disabled={pending || checkoutPending}
           />
@@ -223,12 +226,15 @@ export function PublicShop({ profile, products, initialProductSlug, paymentResul
             value={customerMessage}
             rows={4}
             placeholder="Ask a question or share delivery/payment details."
+            maxLength={1200}
             onChange={(event) => setCustomerMessage(event.target.value)}
             disabled={pending || checkoutPending}
           />
-          <button className="btn btn-primary" type="button" disabled={checkoutPending || pending || !selectedProduct} onClick={() => void startCheckout()}>
-            {checkoutPending ? "Opening checkout..." : "Pay now"}
-          </button>
+          {profile.checkoutEnabled ? (
+            <button className="btn btn-primary" type="button" disabled={checkoutPending || pending || !selectedProduct} onClick={() => void startCheckout()}>
+              {checkoutPending ? "Opening checkout..." : "Pay now"}
+            </button>
+          ) : null}
           <button className="btn btn-ghost" type="submit" disabled={pending || checkoutPending || !selectedProduct}>
             {pending ? "Sending..." : "Send request"}
           </button>

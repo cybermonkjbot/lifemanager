@@ -41,6 +41,22 @@ function normalizeCurrency(value: string | undefined) {
   return currency || "NGN";
 }
 
+function normalizePublicImageUrl(value: string | undefined) {
+  const trimmed = value?.trim().slice(0, 1000) || "";
+  if (!trimmed) {
+    return undefined;
+  }
+  try {
+    const url = new URL(trimmed);
+    if (url.protocol !== "https:" && url.protocol !== "http:") {
+      return undefined;
+    }
+    return url.toString();
+  } catch {
+    return undefined;
+  }
+}
+
 function cleanPayoutText(value: string | undefined, limit: number) {
   return (value || "").trim().replace(/\s+/g, " ").slice(0, limit);
 }
@@ -139,6 +155,31 @@ function buildOrderMessage(args: {
     .join("\n");
 }
 
+function publicStorefrontProfile(profile: Doc<"storefrontProfiles">, options?: { checkoutEnabled?: boolean }) {
+  return {
+    slug: profile.slug,
+    displayName: profile.displayName,
+    offerSummary: profile.offerSummary,
+    liveChatEnabled: profile.liveChatEnabled,
+    liveChatWelcomeMessage: profile.liveChatWelcomeMessage,
+    checkoutEnabled: options?.checkoutEnabled === true,
+  };
+}
+
+function publicStorefrontProduct(product: Doc<"storefrontProducts">) {
+  return {
+    _id: product._id,
+    slug: product.slug,
+    name: product.name,
+    description: product.description,
+    price: product.price,
+    currency: product.currency,
+    stockStatus: product.stockStatus,
+    imageUrl: normalizePublicImageUrl(product.imageUrl),
+    tags: product.tags,
+  };
+}
+
 async function insertLedgerEntryIfMissing(
   ctx: MutationCtx,
   args: {
@@ -220,6 +261,11 @@ async function normalizeOrderItems(
       unitPrice: Math.max(0, Math.round(item.unitPrice * 100) / 100),
       currency: normalizeCurrency(item.currency),
     });
+  }
+
+  const currencies = new Set(items.map((item) => item.currency));
+  if (currencies.size > 1) {
+    throw new Error("All selected items must use the same currency.");
   }
 
   return items;
@@ -391,7 +437,7 @@ export const upsertProduct = mutation({
       price: Math.max(0, Math.round(args.price * 100) / 100),
       currency: normalizeCurrency(args.currency),
       stockStatus: args.stockStatus,
-      imageUrl: args.imageUrl?.trim().slice(0, 1000) || undefined,
+      imageUrl: normalizePublicImageUrl(args.imageUrl),
       tags: normalizeTags(args.tags),
       salesNotes: args.salesNotes?.trim().slice(0, 1600) || undefined,
       active: args.active ?? true,
@@ -567,6 +613,10 @@ export const prepareOrderCheckout = mutation({
     if (!profile || profile.tenantId !== intent.tenantId || !profile.enabled) {
       throw new Error("Storefront is not available.");
     }
+    const payoutAccount = await readPayoutAccountForTenant(ctx, intent.tenantId);
+    if (!payoutAccount || payoutAccount.kycStatus !== "verified") {
+      throw new Error("Checkout is not available until the storefront payout account is verified.");
+    }
     if ((intent.paymentStatus === "paid" || intent.status === "paid") && intent.paidAt) {
       throw new Error("This order has already been paid.");
     }
@@ -646,6 +696,13 @@ export const recordOrderPaymentEvent = mutation({
       .first();
     if (!intent) {
       throw new Error("Storefront order payment not found.");
+    }
+    if (intent.paymentStatus === "paid" && intent.status === "paid") {
+      return {
+        orderIntentId: intent._id,
+        storefrontSlug: intent.storefrontSlug,
+        status: "paid" as const,
+      };
     }
 
     const successful = args.status === "successful" || args.status === "success";
@@ -747,6 +804,9 @@ export const getPublicStorefront = query({
     if (!profile || !profile.enabled) {
       return null;
     }
+    if (!(await isTenantBusinessSellingEnabled(ctx, profile.tenantId))) {
+      return null;
+    }
 
     const productLimit = Math.min(Math.max(args.productLimit ?? 60, 1), 100);
     const products = await ctx.db
@@ -754,10 +814,13 @@ export const getPublicStorefront = query({
       .withIndex("by_tenantId_and_active_and_sortOrder", (q) => q.eq("tenantId", profile.tenantId).eq("active", true))
       .order("asc")
       .take(productLimit);
+    const payoutAccount = await readPayoutAccountForTenant(ctx, profile.tenantId);
 
     return {
-      profile,
-      products: products.filter((product) => product.stockStatus !== "sold_out"),
+      profile: publicStorefrontProfile(profile, { checkoutEnabled: payoutAccount?.kycStatus === "verified" }),
+      products: products
+        .filter((product) => product.stockStatus !== "sold_out")
+        .map(publicStorefrontProduct),
     };
   },
 });
@@ -788,15 +851,24 @@ export const createOrderIntent = mutation({
     if (items.length === 0) {
       throw new Error("Choose at least one item.");
     }
+    if (items.some((item) => !item.productId)) {
+      throw new Error("Public storefront orders must use published products.");
+    }
 
     const currency = items[0]?.currency || "NGN";
     const estimatedTotal = Math.round(
       items.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0) * 100,
     ) / 100;
+    if (estimatedTotal <= 0) {
+      throw new Error("Order total must be greater than zero.");
+    }
     const now = Date.now();
     const customerName = args.customerName?.trim().slice(0, 120) || undefined;
     const customerContact = args.customerContact?.trim().slice(0, 160) || undefined;
     const customerMessage = args.customerMessage?.trim().slice(0, 1200) || undefined;
+    if (!customerContact && !customerMessage) {
+      throw new Error("Add contact details or a message so the business can follow up.");
+    }
     const source = args.source || "hosted_shop";
     const orderIntentId = await ctx.db.insert("storefrontOrderIntents", {
       tenantId: profile.tenantId,
@@ -908,6 +980,9 @@ export const upsertLiveChatSession = mutation({
       .withIndex("by_slug", (q) => q.eq("slug", slug))
       .first();
     if (!profile || !profile.enabled || !profile.liveChatEnabled) {
+      throw new Error("Livechat is not available.");
+    }
+    if (!(await isTenantBusinessSellingEnabled(ctx, profile.tenantId))) {
       throw new Error("Livechat is not available.");
     }
 

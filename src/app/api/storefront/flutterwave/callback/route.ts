@@ -50,6 +50,9 @@ export async function GET(request: Request) {
     if (!secretKey) {
       throw new Error("We could not verify payment right now.");
     }
+    if (!txRef && !transactionId) {
+      throw new Error("Missing payment reference.");
+    }
     const verified = await verifyFlutterwaveTransaction({ secretKey, transactionId, txRef });
     const recorded = await createConvexClient().mutation(api.storefront.recordOrderPaymentEvent, {
       txRef: verified.tx_ref || txRef,
