@@ -1,7 +1,7 @@
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
-import { getConfig, setConfigValue } from "./lib/config";
+import { DEFAULT_APP_CONFIG, getConfig, setConfigValue } from "./lib/config";
 
 const PLAN_IDS = ["personal_connector", "business_whatsapp", "self_hosted"] as const;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -91,8 +91,50 @@ function numberFromConfig(value: string | undefined, fallback: number) {
 }
 
 async function readConfigMap(ctx: QueryCtx) {
-  const rows = await ctx.db.query("appConfig").take(200);
+  const rows = await ctx.db
+    .query("appConfig")
+    .withIndex("by_tenantId_and_key", (q) => q.eq("tenantId", undefined))
+    .take(300);
   return new Map(rows.map((row) => [row.key, row.value]));
+}
+
+async function readMutationConfigMap(ctx: MutationCtx) {
+  const rows = await ctx.db
+    .query("appConfig")
+    .withIndex("by_tenantId_and_key", (q) => q.eq("tenantId", undefined))
+    .take(300);
+  return new Map(rows.map((row) => [row.key, row.value]));
+}
+
+function serializeConfigValue(value: unknown) {
+  if (typeof value === "boolean") {
+    return value ? "true" : "false";
+  }
+  if (typeof value === "number") {
+    return String(value);
+  }
+  if (Array.isArray(value)) {
+    return value.join("\n");
+  }
+  if (value && typeof value === "object") {
+    return JSON.stringify(value);
+  }
+  return String(value ?? "");
+}
+
+async function seedConfigValue(
+  ctx: MutationCtx,
+  existing: Map<string, string>,
+  key: string,
+  value: unknown,
+  overwrite: boolean,
+) {
+  if (!overwrite && existing.has(key)) {
+    return "skipped" as const;
+  }
+  await setConfigValue(ctx, key, serializeConfigValue(value));
+  existing.set(key, serializeConfigValue(value));
+  return "seeded" as const;
 }
 
 function defaultPlanConfig(plan: typeof PLAN_IDS[number]) {
@@ -108,8 +150,8 @@ function defaultPlanConfig(plan: typeof PLAN_IDS[number]) {
       monthlyAiSpendUsd: 75,
       whatsappEnabled: true,
       instagramEnabled: true,
-      imessageEnabled: false,
-      telegramEnabled: false,
+      imessageEnabled: true,
+      telegramEnabled: true,
       mediaEnabled: true,
       selfHostedEnabled: false,
     };
@@ -126,8 +168,8 @@ function defaultPlanConfig(plan: typeof PLAN_IDS[number]) {
       monthlyAiSpendUsd: 0,
       whatsappEnabled: true,
       instagramEnabled: true,
-      imessageEnabled: false,
-      telegramEnabled: false,
+      imessageEnabled: true,
+      telegramEnabled: true,
       mediaEnabled: true,
       selfHostedEnabled: true,
     };
@@ -143,8 +185,8 @@ function defaultPlanConfig(plan: typeof PLAN_IDS[number]) {
     monthlyAiSpendUsd: 15,
     whatsappEnabled: true,
     instagramEnabled: false,
-    imessageEnabled: false,
-    telegramEnabled: false,
+    imessageEnabled: true,
+    telegramEnabled: true,
     mediaEnabled: true,
     selfHostedEnabled: false,
   };
@@ -310,6 +352,56 @@ export const savePlatformConfig = mutation({
       createdAt: Date.now(),
     });
     return true;
+  },
+});
+
+export const seedDefaultConfigs = mutation({
+  args: {
+    adminSecret: v.string(),
+    overwrite: v.optional(v.boolean()),
+  },
+  handler: async (ctx, args) => {
+    requireAdmin(args.adminSecret);
+    const overwrite = args.overwrite === true;
+    const existing = await readMutationConfigMap(ctx);
+    let seeded = 0;
+    let skipped = 0;
+
+    const seed = async (key: string, value: unknown) => {
+      const result = await seedConfigValue(ctx, existing, key, value, overwrite);
+      if (result === "seeded") {
+        seeded += 1;
+      } else {
+        skipped += 1;
+      }
+    };
+
+    for (const [key, value] of Object.entries(DEFAULT_APP_CONFIG)) {
+      await seed(key, value);
+    }
+
+    await seed("subscription.trialDays", 14);
+    await seed("subscription.graceDays", 3);
+    await seed("subscription.dunningEmailEnabled", true);
+    await seed("subscription.tenantReportsEnabled", true);
+    for (const plan of PLAN_IDS) {
+      const defaults = defaultPlanConfig(plan);
+      const prefix = `subscription.plan.${plan}.`;
+      for (const [key, value] of Object.entries(defaults)) {
+        await seed(`${prefix}${key}`, value);
+      }
+    }
+
+    await ctx.db.insert("systemEvents", {
+      source: "dashboard",
+      eventType: "admin.default_configs.seeded",
+      detail: overwrite
+        ? `Admin default configuration seed overwrote ${seeded} values.`
+        : `Admin default configuration seed created ${seeded} missing values.`,
+      createdAt: Date.now(),
+    });
+
+    return { seeded, skipped, overwrite };
   },
 });
 

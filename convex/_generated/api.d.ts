@@ -48,10 +48,12 @@ import type * as lib_outreachModes from "../lib/outreachModes.js";
 import type * as lib_personaPacks from "../lib/personaPacks.js";
 import type * as lib_rateLimit from "../lib/rateLimit.js";
 import type * as lib_staleness from "../lib/staleness.js";
+import type * as lib_storefrontProfile from "../lib/storefrontProfile.js";
 import type * as lib_tenantSecurity from "../lib/tenantSecurity.js";
 import type * as lib_threadEligibility from "../lib/threadEligibility.js";
 import type * as lib_time from "../lib/time.js";
 import type * as lib_types from "../lib/types.js";
+import type * as lib_urlPreview from "../lib/urlPreview.js";
 import type * as media from "../media.js";
 import type * as memory from "../memory.js";
 import type * as memoryBatch from "../memoryBatch.js";
@@ -68,11 +70,13 @@ import type * as romanceProtocol from "../romanceProtocol.js";
 import type * as rules from "../rules.js";
 import type * as settings from "../settings.js";
 import type * as statusBuilder from "../statusBuilder.js";
+import type * as storefront from "../storefront.js";
 import type * as style from "../style.js";
 import type * as system from "../system.js";
 import type * as tenantAccounts from "../tenantAccounts.js";
 import type * as threads from "../threads.js";
 import type * as todos from "../todos.js";
+import type * as urlPreviews from "../urlPreviews.js";
 
 import type {
   ApiFromModules,
@@ -121,10 +125,12 @@ declare const fullApi: ApiFromModules<{
   "lib/personaPacks": typeof lib_personaPacks;
   "lib/rateLimit": typeof lib_rateLimit;
   "lib/staleness": typeof lib_staleness;
+  "lib/storefrontProfile": typeof lib_storefrontProfile;
   "lib/tenantSecurity": typeof lib_tenantSecurity;
   "lib/threadEligibility": typeof lib_threadEligibility;
   "lib/time": typeof lib_time;
   "lib/types": typeof lib_types;
+  "lib/urlPreview": typeof lib_urlPreview;
   media: typeof media;
   memory: typeof memory;
   memoryBatch: typeof memoryBatch;
@@ -141,11 +147,13 @@ declare const fullApi: ApiFromModules<{
   rules: typeof rules;
   settings: typeof settings;
   statusBuilder: typeof statusBuilder;
+  storefront: typeof storefront;
   style: typeof style;
   system: typeof system;
   tenantAccounts: typeof tenantAccounts;
   threads: typeof threads;
   todos: typeof todos;
+  urlPreviews: typeof urlPreviews;
 }>;
 
 /**

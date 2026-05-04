@@ -86,6 +86,13 @@ test("forceDeclarativeStatusText rewrites question-style statuses", () => {
   assert.equal(/\b(what|why|when|where|who|how|which)\b/i.test(rewritten), false);
 });
 
+test("forceDeclarativeStatusText rewrites question-style statuses without question marks", () => {
+  const rewritten = forceDeclarativeStatusText("How far today");
+  assert.equal(/\?/.test(rewritten), false);
+  assert.equal(/\b(what|why|when|where|who|how|which)\b/i.test(rewritten), false);
+  assert.notEqual(rewritten, "How far today");
+});
+
 test("forceDeclarativeStatusText keeps declarative statuses unchanged", () => {
   const value = forceDeclarativeStatusText("Small wins are stacking up nicely.");
   assert.equal(value, "Small wins are stacking up nicely.");

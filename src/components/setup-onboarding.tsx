@@ -29,6 +29,7 @@ type SetupOnboardingProps = {
 type SetupStage =
   | "legal"
   | "welcome"
+  | "purpose"
   | "service"
   | "account"
   | "backend"
@@ -42,6 +43,27 @@ type SetupStage =
   | "voice"
   | "prepare";
 
+type ConnectorSetupScreen = "whatsapp" | "instagram" | "imessage" | "telegram";
+
+const connectorSetupScreens: ConnectorSetupScreen[] = ["whatsapp", "instagram", "imessage", "telegram"];
+
+function isConnectorSetupScreen(value: string | null): value is ConnectorSetupScreen {
+  return connectorSetupScreens.includes(value as ConnectorSetupScreen);
+}
+
+function connectorSetupLabel(provider: ConnectorSetupScreen) {
+  if (provider === "whatsapp") {
+    return "WhatsApp";
+  }
+  if (provider === "instagram") {
+    return "Instagram";
+  }
+  if (provider === "imessage") {
+    return "iMessage";
+  }
+  return "Telegram";
+}
+
 const setupStages: Array<{
   id: SetupStage;
   label: string;
@@ -53,6 +75,12 @@ const setupStages: Array<{
     label: "Welcome",
     sentence: "Set up OdogwuHQ for your desktop.",
     helper: "A guided setup for your private communication console.",
+  },
+  {
+    id: "purpose",
+    label: "Use",
+    sentence: "Tell us what this workspace is for.",
+    helper: "OdogwuHQ keeps the same conversation focus, then tunes labels, defaults, and business surfaces around your answer.",
   },
   {
     id: "service",
@@ -106,7 +134,7 @@ const setupStages: Array<{
     id: "connect",
     label: "Connect",
     sentence: "Connect the accounts OdogwuHQ should use.",
-    helper: "Pair WhatsApp first, then sign in to Instagram if you enabled it.",
+    helper: "Connect the messaging accounts OdogwuHQ should use on this computer.",
   },
   {
     id: "finish",
@@ -240,6 +268,46 @@ function cloneDefaultPreferences(): InstanceSetupPreferences {
     },
     soulPrivacy: {
       ...DEFAULT_INSTANCE_SETUP_PREFERENCES.soulPrivacy,
+    },
+  };
+}
+
+function applyProductUseDefaults(
+  productUse: InstanceSetupPreferences["productUse"],
+  current: InstanceSetupPreferences,
+): InstanceSetupPreferences {
+  const businessDescription =
+    "This is a business workspace. Help us reply to customers, protect the brand voice, follow up on leads, answer product questions, and move conversations toward clear next steps without sounding pushy.";
+  const personalDescription =
+    "This is a personal workspace. Help me keep conversations warm, reply in my natural voice, remember follow-ups, and respect my boundaries.";
+  const description = current.soulProfile.selfDescription.trim();
+  return {
+    ...current,
+    productUse,
+    mimicryPreset: productUse === "business" && current.mimicryPreset === "close" ? "balanced" : current.mimicryPreset,
+    soulProfile: {
+      ...current.soulProfile,
+      useCase: productUse,
+      selfDescription:
+        !description ||
+        description === businessDescription ||
+        description === personalDescription
+          ? productUse === "business"
+            ? businessDescription
+            : personalDescription
+          : current.soulProfile.selfDescription,
+      goals:
+        productUse === "business" && !current.soulProfile.goals.trim()
+          ? "Capture demand from conversations, follow up with leads, help customers buy, and keep service promises visible."
+          : current.soulProfile.goals,
+      relationships:
+        productUse === "business" && !current.soulProfile.relationships.trim()
+          ? "Customers, leads, returning buyers, suppliers, collaborators, and VIP clients."
+          : current.soulProfile.relationships,
+      boundaries:
+        productUse === "business" && !current.soulProfile.boundaries.trim()
+          ? "Do not overpromise, invent prices, confirm payments without evidence, or send sensitive business messages without review."
+          : current.soulProfile.boundaries,
     },
   };
 }
@@ -395,6 +463,7 @@ function summarizeSoulDefaults(preferences: InstanceSetupPreferences) {
 const soulUseCaseOptions = [
   { value: "", label: "Not set" },
   { value: "personal", label: "Personal" },
+  { value: "business", label: "Business" },
   { value: "professional", label: "Professional" },
   { value: "mixed", label: "Mixed" },
 ] as const;
@@ -429,6 +498,29 @@ const profileStarterChips = [
   {
     label: "Playful when safe",
     text: "A little humor is good with close people, but stay clean and respectful in professional chats.",
+  },
+] as const;
+
+const businessProfileStarterChips = [
+  {
+    label: "Customer-first",
+    text: "Reply like a helpful business owner: warm, clear, and focused on what the customer needs next.",
+  },
+  {
+    label: "Sales follow-up",
+    text: "Track leads, people who ask for price, people waiting for payment details, and customers who need a polite follow-up.",
+  },
+  {
+    label: "Brand safe",
+    text: "Never invent prices, availability, discounts, delivery timelines, or payment confirmation.",
+  },
+  {
+    label: "Nigerian market",
+    text: "Use natural Nigerian English when it fits, keep replies respectful, and make buying steps simple.",
+  },
+  {
+    label: "Human approval",
+    text: "Ask for approval before sensitive replies, refunds, escalations, major promises, or anything involving money.",
   },
 ] as const;
 
@@ -490,27 +582,26 @@ function formatReplyStyleLabel(value: InstanceMimicryPreset) {
 export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: SetupOnboardingProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const wantsWhatsAppConnect = searchParams.get("connect") === "whatsapp";
-  const wantsInstagramConnect = searchParams.get("connect") === "instagram";
+  const connectParam = searchParams.get("connect");
+  const requestedConnector: ConnectorSetupScreen | null = isConnectorSetupScreen(connectParam) ? connectParam : null;
   const wantsVoiceConnect = searchParams.get("connect") === "voice";
-  const whatsappReturnTo = searchParams.get("returnTo");
-  const safeWhatsAppReturnTo =
-    whatsappReturnTo && whatsappReturnTo.startsWith("/") && !whatsappReturnTo.startsWith("//") ? whatsappReturnTo : "/";
-  const instagramReturnTo = searchParams.get("returnTo");
-  const safeInstagramReturnTo =
-    instagramReturnTo && instagramReturnTo.startsWith("/") && !instagramReturnTo.startsWith("//") ? instagramReturnTo : "/settings";
+  const connectorReturnTo = searchParams.get("returnTo");
+  const defaultConnectorReturnTo = requestedConnector === "whatsapp" ? "/" : "/settings";
+  const safeConnectorReturnTo =
+    connectorReturnTo && connectorReturnTo.startsWith("/") && !connectorReturnTo.startsWith("//")
+      ? connectorReturnTo
+      : defaultConnectorReturnTo;
   const voiceReturnTo = searchParams.get("returnTo");
   const safeVoiceReturnTo =
     voiceReturnTo && voiceReturnTo.startsWith("/") && !voiceReturnTo.startsWith("//") ? voiceReturnTo : "/settings?section=voice";
-  const shouldExitAfterWhatsAppConnect = initialInstanceState.setupCompleted && wantsWhatsAppConnect;
-  const shouldExitAfterInstagramConnect = initialInstanceState.setupCompleted && wantsInstagramConnect;
+  const shouldExitAfterConnectorConnect = initialInstanceState.setupCompleted && requestedConnector !== null;
   const shouldExitAfterVoiceSave = initialInstanceState.setupCompleted && wantsVoiceConnect;
   const needsLegalAcceptance = !legalAcceptanceIsCurrent(initialInstanceState);
   const resolvePostLegalStage = (): SetupStage => {
     if (!initialInstanceState.setupCompleted) {
       return "welcome";
     }
-    if (wantsWhatsAppConnect || wantsInstagramConnect) {
+    if (requestedConnector) {
       return "connect";
     }
     if (wantsVoiceConnect) {
@@ -521,7 +612,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
   const [stage, setStage] = useState<SetupStage>(
     needsLegalAcceptance
       ? "legal"
-      : wantsWhatsAppConnect || wantsInstagramConnect
+      : requestedConnector
         ? "connect"
         : wantsVoiceConnect
           ? "voice"
@@ -540,11 +631,12 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
   const [pinConfirm, setPinConfirm] = useState("");
   const [whatsappConnected, setWhatsappConnected] = useState(false);
   const [instagramConnected, setInstagramConnected] = useState(false);
+  const [imessageConnected, setIMessageConnected] = useState(false);
+  const [telegramConnected, setTelegramConnected] = useState(false);
   const [voiceOnboardingState, setVoiceOnboardingState] = useState<VoiceSetupState | null>(null);
   const stageTitleRef = useRef<HTMLHeadingElement>(null);
   const legalScrollRef = useRef<HTMLDivElement>(null);
-  const whatsappAutoExitHandledRef = useRef(false);
-  const instagramAutoExitHandledRef = useRef(false);
+  const connectorAutoExitHandledRef = useRef(false);
   const { runAction, getRecord, notices, dismissNotice, pushNotice } = useActionStateRegistry();
 
   const securityRecord = getRecord("setup:onboarding:security");
@@ -558,8 +650,10 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
   const isLegalStage = stage === "legal";
   const isPreparationStage = stage === "prepare";
   const previousStage =
-    stage === "service"
+    stage === "purpose"
       ? "welcome"
+      : stage === "service"
+        ? "purpose"
       : stage === "account" || stage === "backend"
         ? "service"
         : stage === "ai"
@@ -574,8 +668,8 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                 ? "security"
                 : stage === "defaults"
                   ? "profile"
-                  : stage === "connect"
-                    ? shouldExitAfterWhatsAppConnect || shouldExitAfterInstagramConnect
+                    : stage === "connect"
+                    ? shouldExitAfterConnectorConnect
                       ? null
                       : "defaults"
                     : stage === "finish"
@@ -638,23 +732,22 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
   const profileDescriptionEnough = isProfileDescriptionEnough(profileDescription);
   const soulDefaults = summarizeSoulDefaults(preferences);
   const setupAiToolAvailable = instanceState.setupAiSettingsToolAvailable;
-  const connectInitialScreen = shouldExitAfterInstagramConnect
-    ? "instagram"
-    : shouldExitAfterWhatsAppConnect
-      ? "whatsapp"
-      : preferences.instagramEnabled
-        ? "options"
-        : "whatsapp";
-  const connectReady = shouldExitAfterInstagramConnect
-    ? instagramConnected
-    : shouldExitAfterWhatsAppConnect
-      ? whatsappConnected
-      : whatsappConnected && (!preferences.instagramEnabled || instagramConnected);
+  const connectorConnectedByProvider: Record<ConnectorSetupScreen, boolean> = {
+    whatsapp: whatsappConnected,
+    instagram: instagramConnected,
+    imessage: imessageConnected,
+    telegram: telegramConnected,
+  };
+  const anyConnectorConnected = whatsappConnected || instagramConnected || imessageConnected || telegramConnected;
+  const requestedConnectorConnected = requestedConnector ? connectorConnectedByProvider[requestedConnector] : false;
+  const connectInitialScreen = requestedConnector || (preferences.instagramEnabled ? "options" : "whatsapp");
+  const connectReady = requestedConnector ? requestedConnectorConnected : anyConnectorConnected;
   const showRomanticSetup =
-    preferences.soulProfile.useCase === "personal" ||
-    preferences.soulProfile.useCase === "mixed" ||
-    preferences.soulProfile.romanticPreference.trim().length > 0 ||
-    preferences.soulProfile.romanticInterests.trim().length > 0;
+    preferences.productUse !== "business" &&
+    (preferences.soulProfile.useCase === "personal" ||
+      preferences.soulProfile.useCase === "mixed" ||
+      preferences.soulProfile.romanticPreference.trim().length > 0 ||
+      preferences.soulProfile.romanticInterests.trim().length > 0);
   const visibleSoulReviewFields = soulReviewFields.filter(({ key }) => preferences.soulProfile[key].trim().length > 0);
 
   useEffect(() => {
@@ -710,6 +803,10 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
           : {}),
       },
     }));
+  };
+
+  const chooseProductUse = (productUse: InstanceSetupPreferences["productUse"]) => {
+    setPreferences((current) => applyProductUseDefaults(productUse, current));
   };
 
   const renderPrivacyControl = (field: SoulFieldKey) => (
@@ -864,6 +961,24 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
     setStage("security");
   };
 
+  const savePurposeAndContinue = async () => {
+    const result = await saveInstanceSetup(
+      "setup:onboarding:preferences",
+      {
+        preferences,
+        account,
+      },
+      {
+        successMessage: preferences.productUse === "business" ? "Business workspace selected." : "Personal workspace selected.",
+      },
+    );
+    if (!result.value?.state) {
+      return;
+    }
+    setPreferences(result.value.state.preferences);
+    setStage("service");
+  };
+
   const saveBackendAndContinue = async () => {
     const result = await saveInstanceSetup(
       "setup:onboarding:preferences",
@@ -993,28 +1108,16 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
     setStage("prepare");
   };
 
-  const exitWhatsAppSetup = () => {
-    if (shouldExitAfterWhatsAppConnect) {
-      router.push(safeWhatsAppReturnTo);
-      return;
-    }
-    setStage("finish");
-  };
-
-  const exitInstagramSetup = () => {
-    if (shouldExitAfterInstagramConnect) {
-      router.push(safeInstagramReturnTo);
+  const exitConnectorSetup = () => {
+    if (shouldExitAfterConnectorConnect) {
+      router.push(safeConnectorReturnTo);
       return;
     }
     setStage("finish");
   };
 
   const continueFromConnections = () => {
-    if (shouldExitAfterInstagramConnect) {
-      exitInstagramSetup();
-      return;
-    }
-    exitWhatsAppSetup();
+    exitConnectorSetup();
   };
 
   const skipInstagramAndContinue = async () => {
@@ -1041,37 +1144,28 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
   useEffect(() => {
     if (
       stage !== "connect" ||
-      !whatsappConnected ||
-      whatsappAutoExitHandledRef.current ||
-      (!shouldExitAfterWhatsAppConnect && preferences.instagramEnabled)
+      !requestedConnector ||
+      !shouldExitAfterConnectorConnect ||
+      !requestedConnectorConnected ||
+      connectorAutoExitHandledRef.current
     ) {
       return;
     }
 
-    whatsappAutoExitHandledRef.current = true;
+    connectorAutoExitHandledRef.current = true;
     const timer = window.setTimeout(() => {
-      exitWhatsAppSetup();
+      exitConnectorSetup();
     }, 900);
 
     return () => window.clearTimeout(timer);
-    // exitWhatsAppSetup reads stable setup-entry values for this onboarding mount.
+    // exitConnectorSetup reads stable setup-entry values for this onboarding mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [preferences.instagramEnabled, shouldExitAfterWhatsAppConnect, stage, whatsappConnected]);
-
-  useEffect(() => {
-    if (!shouldExitAfterInstagramConnect || stage !== "connect" || !instagramConnected || instagramAutoExitHandledRef.current) {
-      return;
-    }
-
-    instagramAutoExitHandledRef.current = true;
-    const timer = window.setTimeout(() => {
-      exitInstagramSetup();
-    }, 900);
-
-    return () => window.clearTimeout(timer);
-    // exitInstagramSetup reads stable setup-entry values for this onboarding mount.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [instagramConnected, shouldExitAfterInstagramConnect, stage]);
+  }, [
+    requestedConnector,
+    requestedConnectorConnected,
+    shouldExitAfterConnectorConnect,
+    stage,
+  ]);
 
   const applyProfileLocally = () => {
     setPreferences((current) => derivePreferencesFromSoulProfile(inferSoulProfileFromDescription(current.soulProfile), current));
@@ -1253,12 +1347,78 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                 </p>
 
                 <div className="wizard-actions">
-                  <button className="btn btn-primary setup-primary-action" type="button" onClick={() => setStage("service")}>
+                  <button className="btn btn-primary setup-primary-action" type="button" onClick={() => setStage("purpose")}>
                     Start setup
                   </button>
                 </div>
               </div>
             </div>
+          ) : null}
+
+          {stage === "purpose" ? (
+            <form
+              className="setup-onboarding-panel"
+              onSubmit={(event: FormEvent<HTMLFormElement>) => {
+                event.preventDefault();
+                void savePurposeAndContinue();
+              }}
+            >
+              <div className="setup-segmented-choice" role="radiogroup" aria-label="Workspace use">
+                <label
+                  className={preferences.productUse === "personal" ? "setup-segmented-option setup-segmented-option-active" : "setup-segmented-option"}
+                >
+                  <input
+                    type="radio"
+                    name="productUse"
+                    value="personal"
+                    checked={preferences.productUse === "personal"}
+                    onChange={() => chooseProductUse("personal")}
+                  />
+                  <strong>Personal</strong>
+                  <span>Chats, relationships, follow-ups, boundaries, and your own voice.</span>
+                </label>
+                <label
+                  className={preferences.productUse === "business" ? "setup-segmented-option setup-segmented-option-active" : "setup-segmented-option"}
+                >
+                  <input
+                    type="radio"
+                    name="productUse"
+                    value="business"
+                    checked={preferences.productUse === "business"}
+                    onChange={() => chooseProductUse("business")}
+                  />
+                  <strong>Business</strong>
+                  <span>Customers, leads, brand voice, sales follow-ups, livechat, and storefront tools.</span>
+                </label>
+              </div>
+
+              <div className="setup-soul-summary">
+                {preferences.productUse === "business" ? (
+                  <>
+                    <span>Conversation-first CRM.</span>
+                    <span>Brand voice controls.</span>
+                    <span>Storefront + livechat path.</span>
+                  </>
+                ) : (
+                  <>
+                    <span>Personal conversation memory.</span>
+                    <span>Review-first boundaries.</span>
+                    <span>Warm follow-ups.</span>
+                  </>
+                )}
+              </div>
+
+              <div className="wizard-actions">
+                <button
+                  className="btn btn-primary setup-primary-action"
+                  type="submit"
+                  disabled={preferencesRecord.pending}
+                  aria-disabled={preferencesRecord.pending}
+                >
+                  {preferencesRecord.pending ? "Continuing..." : "Continue"}
+                </button>
+              </div>
+            </form>
           ) : null}
 
           {stage === "service" ? (
@@ -1504,9 +1664,19 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
               </div>
 
               <div className="setup-soul-summary">
-                <span>7 day trial.</span>
-                <span>₦5,000/month.</span>
-                <span>WhatsApp session remains local.</span>
+                {preferences.productUse === "business" ? (
+                  <>
+                    <span>Business trial.</span>
+                    <span>Higher plans unlock storefront, livechat, and sales tools.</span>
+                    <span>Connected-app sessions remain local.</span>
+                  </>
+                ) : (
+                  <>
+                    <span>7 day trial.</span>
+                    <span>₦5,000/month.</span>
+                    <span>Connected-app sessions remain local.</span>
+                  </>
+                )}
               </div>
 
               {accountValidationMessage ? <p className="instance-lock-error">{accountValidationMessage}</p> : null}
@@ -1599,7 +1769,11 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
               <div className="setup-soul-panel">
                 <div className="setup-soul-head">
                   <div>
-                    <p className="queue-title">Describe yourself, your voice, your boundaries, and how this app should act for you.</p>
+                    <p className="queue-title">
+                      {preferences.productUse === "business"
+                        ? "Describe the business, brand voice, customers, offer, boundaries, and how OdogwuHQ should help sell through conversations."
+                        : "Describe yourself, your voice, your boundaries, and how this app should act for you."}
+                    </p>
                   </div>
                 </div>
 
@@ -1608,12 +1782,16 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                   <textarea
                     value={profileDescription}
                     rows={8}
-                    placeholder="Example: I run a busy business, reply warmly but directly, use light Nigerian English and occasional pidgin, avoid sensitive family topics, slow down at night, and keep anything romantic private unless I mention it."
+                    placeholder={
+                      preferences.productUse === "business"
+                        ? "Example: We sell skincare products in Lagos. Reply warmly and clearly, ask useful buying questions, never invent prices or stock, collect delivery details only after approval, and follow up with leads who asked for payment info."
+                        : "Example: I run a busy business, reply warmly but directly, use light Nigerian English and occasional pidgin, avoid sensitive family topics, slow down at night, and keep anything romantic private unless I mention it."
+                    }
                     onChange={(event) => updateSoulField("selfDescription", event.target.value)}
                   />
                 </label>
                 <div className="setup-chip-row" aria-label="Profile starters">
-                  {profileStarterChips.map((chip) => (
+                  {(preferences.productUse === "business" ? businessProfileStarterChips : profileStarterChips).map((chip) => (
                     <button className="setup-chip" key={chip.label} type="button" onClick={() => addProfileStarter(chip.text)}>
                       {chip.label}
                     </button>
@@ -1856,7 +2034,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
               }}
             >
                 <div className="setup-choice-group">
-                  <p className="queue-title">Send behavior</p>
+                  <p className="queue-title">{preferences.productUse === "business" ? "Customer reply behavior" : "Send behavior"}</p>
                   <div className="setup-choice-grid setup-choice-grid-two" role="radiogroup" aria-label="Send behavior">
                     {(["review_first", "autopilot"] as const).map((value) => (
                       <label
@@ -1878,7 +2056,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                 </div>
 
                 <div className="setup-choice-group">
-                  <p className="queue-title">Reply pace</p>
+                  <p className="queue-title">{preferences.productUse === "business" ? "Customer reply pace" : "Reply pace"}</p>
                   <div className="setup-choice-grid" role="radiogroup" aria-label="Reply pace">
                     {(["measured", "deliberate", "unhurried"] as const).map((value) => (
                       <label
@@ -1900,7 +2078,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                 </div>
 
                 <div className="setup-choice-group">
-                  <p className="queue-title">Reply style</p>
+                  <p className="queue-title">{preferences.productUse === "business" ? "Brand voice match" : "Reply style"}</p>
                   <div className="setup-choice-grid" role="radiogroup" aria-label="Reply style">
                     {(["light", "balanced", "close"] as const).map((value) => (
                       <label
@@ -1930,7 +2108,7 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                     />
                     <span>
                       <strong>Enable meme tools</strong>
-                      <span>Show meme creation and review.</span>
+                      <span>{preferences.productUse === "business" ? "Show reusable media and campaign assets." : "Show meme creation and review."}</span>
                     </span>
                   </label>
                 </div>
@@ -2021,14 +2199,16 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                 showNotices={false}
                 onWhatsAppConnectedChange={setWhatsappConnected}
                 onInstagramConnectedChange={setInstagramConnected}
+                onIMessageConnectedChange={setIMessageConnected}
+                onTelegramConnectedChange={setTelegramConnected}
               />
               <div className="wizard-actions">
                 {connectReady ? (
                   <button className="btn btn-primary setup-primary-action" type="button" onClick={continueFromConnections}>
-                    {shouldExitAfterWhatsAppConnect || shouldExitAfterInstagramConnect ? "Done" : "Continue"}
+                    {shouldExitAfterConnectorConnect ? "Done" : "Continue"}
                   </button>
                 ) : null}
-                {!shouldExitAfterWhatsAppConnect && !shouldExitAfterInstagramConnect && preferences.instagramEnabled && whatsappConnected && !instagramConnected ? (
+                {!shouldExitAfterConnectorConnect && preferences.instagramEnabled && anyConnectorConnected && !instagramConnected ? (
                   <button
                     className="btn btn-ghost setup-secondary-action"
                     type="button"
@@ -2039,14 +2219,9 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
                     {preferencesRecord.pending ? "Saving..." : "Skip Instagram for now"}
                   </button>
                 ) : null}
-                {shouldExitAfterWhatsAppConnect ? (
-                  <button className="btn btn-ghost setup-secondary-action" type="button" onClick={() => router.push(safeWhatsAppReturnTo)}>
-                    Back home
-                  </button>
-                ) : null}
-                {shouldExitAfterInstagramConnect ? (
-                  <button className="btn btn-ghost setup-secondary-action" type="button" onClick={() => router.push(safeInstagramReturnTo)}>
-                    Back home
+                {shouldExitAfterConnectorConnect ? (
+                  <button className="btn btn-ghost setup-secondary-action" type="button" onClick={() => router.push(safeConnectorReturnTo)}>
+                    Back to {requestedConnector ? connectorSetupLabel(requestedConnector) : "settings"}
                   </button>
                 ) : null}
               </div>
@@ -2065,6 +2240,10 @@ export function SetupOnboarding({ realtimeEnabled, initialInstanceState }: Setup
               </div>
 
               <div className="setup-finish-list" aria-label="Setup summary">
+                <div>
+                  <span>Workspace</span>
+                  <strong>{preferences.productUse === "business" ? "Business" : "Personal"}</strong>
+                </div>
                 <div>
                   <span>Account</span>
                   <strong>{preferences.serviceMode === "hosted" ? account.email || "Managed" : "Self-hosted"}</strong>

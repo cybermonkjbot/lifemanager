@@ -50,6 +50,7 @@ const IGNORE_CONTACT_FALLBACK_SCAN_LIMIT = 1000;
 const MAX_RATE_SCAN_THREAD = 1200;
 const MAX_RATE_SCAN_GLOBAL = 3200;
 const MAX_LEASE_RECOVERY_COUNT = 4;
+const STATUS_POST_LEASE_MS = 10 * 60 * 1000;
 
 function clamp01(value: number) {
   if (!Number.isFinite(value)) {
@@ -248,6 +249,14 @@ function stableHash(input: string) {
     hash = (hash * 31 + input.charCodeAt(index)) >>> 0;
   }
   return hash >>> 0;
+}
+
+export function resolveOutboxClaimLeaseMs(args: { isStatusPost?: boolean; baseLeaseMs: number }) {
+  const baseLeaseMs = Math.max(15_000, Math.min(args.baseLeaseMs, 10 * 60_000));
+  if (args.isStatusPost) {
+    return Math.max(baseLeaseMs, STATUS_POST_LEASE_MS);
+  }
+  return baseLeaseMs;
 }
 
 function classifyRetryError(error: string) {
@@ -1090,10 +1099,14 @@ export const claimDue = mutation({
         }
       }
 
+      const itemLeaseMs = resolveOutboxClaimLeaseMs({
+        isStatusPost: item.isStatusPost,
+        baseLeaseMs: leaseMs,
+      });
       await ctx.db.patch(item._id, {
         status: "claimed",
         workerId: args.workerId,
-        leaseExpiresAt: now + leaseMs,
+        leaseExpiresAt: now + itemLeaseMs,
         attempts: item.attempts + 1,
         updatedAt: now,
       });
@@ -2339,13 +2352,29 @@ export const recoverExpiredClaims = internalMutation({
       .take(limit);
 
     for (const item of expiredClaims) {
+      const nextRecoveryCount = (item.leaseRecoveryCount || 0) + 1;
+      const quarantine = nextRecoveryCount >= MAX_LEASE_RECOVERY_COUNT;
       await ctx.db.patch(item._id, {
-        status: "pending",
+        status: quarantine ? "failed" : "pending",
         workerId: undefined,
         leaseExpiresAt: undefined,
-        sendAt: Math.min(item.sendAt, now),
+        sendAt: quarantine ? item.sendAt : Math.min(item.sendAt, now),
+        error: quarantine ? "Outbox item quarantined after repeated lease expiries." : item.error,
+        leaseRecoveryCount: nextRecoveryCount,
+        lastLeaseRecoveredAt: now,
         updatedAt: now,
       });
+      if (quarantine) {
+        await ctx.db.insert("systemEvents", {
+          tenantId: item.tenantId,
+          source: "convex",
+          eventType: "outbox.quarantined.lease_expiry",
+          threadId: item.threadId,
+          outboxId: item._id,
+          detail: `Quarantined after ${nextRecoveryCount} lease recoveries.`,
+          createdAt: now,
+        });
+      }
     }
 
     if (expiredClaims.length > 0) {

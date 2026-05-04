@@ -14,6 +14,7 @@ import { generateTodoTitleWithAi } from "@/lib/ui/todos";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { useMutation, useQuery } from "convex/react";
+import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { formatDateTime, formatDateTimeWithRelative, trim } from "@/lib/format";
@@ -65,6 +66,71 @@ function SendIcon() {
       <path d="M22 2L15 22l-4-9-9-4 20-7z" />
     </svg>
   );
+}
+
+function PlusIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M12 5v14" />
+      <path d="M5 12h14" />
+    </svg>
+  );
+}
+
+function PhotoIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <path d="m3 16 5-5 4 4 3-3 6 6" />
+      <circle cx="15.5" cy="9.5" r="1.5" />
+    </svg>
+  );
+}
+
+function StickerIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M7 3h7l5 5v9a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4V7a4 4 0 0 1 4-4Z" />
+      <path d="M14 3v5h5" />
+      <path d="M8 13h.01" />
+      <path d="M14 13h.01" />
+      <path d="M8.5 16.5c1.8 1.4 4.2 1.4 6 0" />
+    </svg>
+  );
+}
+
+function MemeIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M4 5h16v14H4z" />
+      <path d="M7 8h10" />
+      <path d="M7 16h10" />
+      <path d="M8 12h.01" />
+      <path d="M16 12h.01" />
+    </svg>
+  );
+}
+
+function MicIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z" />
+      <path d="M5 11a7 7 0 0 0 14 0" />
+      <path d="M12 18v3" />
+    </svg>
+  );
+}
+
+function normalizeMediaKindFromMime(mimeType: string): "image" | "video" | "audio" | "document" {
+  if (mimeType.startsWith("image/")) return "image";
+  if (mimeType.startsWith("video/")) return "video";
+  if (mimeType.startsWith("audio/")) return "audio";
+  return "document";
+}
+
+async function hashFileSha256Hex(file: File) {
+  const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 type PersonalityProfile = {
@@ -173,6 +239,20 @@ type IdentityCorrectionFormProps = {
 
 type MessageMediaPreview = MediaPreviewResource;
 
+type MessageUrlPreview = {
+  _id: string;
+  sourceUrl: string;
+  normalizedUrl: string;
+  canonicalUrl?: string;
+  domain?: string;
+  title?: string;
+  description?: string;
+  imageUrl?: string;
+  siteName?: string;
+  status?: "available" | "unavailable" | "failed";
+  fetchedAt?: number;
+};
+
 type ThreadAvatarPreview = {
   assetId: string;
   url: string;
@@ -203,6 +283,7 @@ type ThreadMessage = {
   mediaAssetId?: string;
   mediaCaption?: string;
   mediaPreview?: MessageMediaPreview | null;
+  urlPreviews?: MessageUrlPreview[];
   messageAt: number;
 };
 
@@ -214,7 +295,19 @@ type ThreadMediaItem = {
   mediaAssetId?: string;
   mediaCaption?: string;
   mediaPreview?: MessageMediaPreview | null;
+  urlPreviews?: MessageUrlPreview[];
   messageAt: number;
+};
+
+type QuickMediaAsset = {
+  _id: string;
+  kind: "sticker" | "meme" | "image" | "video" | "audio" | "document";
+  label: string;
+  tags?: string[];
+  enabled: boolean;
+  fileUrl?: string | null;
+  mimeType: string;
+  createdAt: number;
 };
 
 type ThreadReviewNeedsReplyItem = {
@@ -236,6 +329,7 @@ type ThreadReviewNeedsReplyItem = {
         mediaAssetId?: string;
         mediaCaption?: string;
         mediaPreview?: MessageMediaPreview | null;
+        urlPreviews?: MessageUrlPreview[];
       }
     | null;
 };
@@ -256,6 +350,7 @@ type ThreadReviewFollowupItem = {
         mediaAssetId?: string;
         mediaCaption?: string;
         mediaPreview?: MessageMediaPreview | null;
+        urlPreviews?: MessageUrlPreview[];
       }
     | null;
 };
@@ -271,6 +366,7 @@ type ThreadReviewTodoItem = {
         text?: string;
         messageAt?: number;
         direction?: "inbound" | "outbound";
+        urlPreviews?: MessageUrlPreview[];
       }
     | null;
 };
@@ -286,6 +382,7 @@ type ThreadReviewGuardrailItem = {
         text?: string;
         messageAt?: number;
         direction?: "inbound" | "outbound";
+        urlPreviews?: MessageUrlPreview[];
       }
     | null;
 };
@@ -650,6 +747,49 @@ function renderMessageMediaPreview(message: ThreadMessage, onOpenImagePreview?: 
       mediaAssetId={message.mediaAssetId}
       onOpenImagePreview={onOpenImagePreview}
     />
+  );
+}
+
+function safePreviewHost(href: string) {
+  try {
+    return new URL(href).hostname.replace(/^www\./i, "");
+  } catch {
+    return "link";
+  }
+}
+
+function renderMessageUrlPreviews(previews?: MessageUrlPreview[]) {
+  const visiblePreviews = (previews || []).filter((preview) => preview.status !== "failed").slice(0, 3);
+  if (visiblePreviews.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="message-url-preview-stack">
+      {visiblePreviews.map((preview) => {
+        const href = preview.canonicalUrl || preview.normalizedUrl || preview.sourceUrl;
+        const title = preview.title || preview.domain || "Link preview";
+        return (
+          <a key={preview._id || href} className="message-url-preview" href={href} target="_blank" rel="noreferrer">
+            {preview.imageUrl ? (
+              <Image
+                className="message-url-preview-image"
+                src={preview.imageUrl}
+                alt=""
+                width={360}
+                height={138}
+                unoptimized
+              />
+            ) : null}
+            <span className="message-url-preview-body">
+              <span className="message-url-preview-domain">{preview.siteName || preview.domain || safePreviewHost(href)}</span>
+              <strong>{title}</strong>
+              {preview.description ? <span className="message-url-preview-description">{preview.description}</span> : null}
+            </span>
+          </a>
+        );
+      })}
+    </div>
   );
 }
 
@@ -1132,6 +1272,8 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
   const threads = useQuery(api.threads.list, { ...tenantScope, limit: 500, provider: providerFilter }) as
     | ThreadListItem[]
     | undefined;
+  const settings = useQuery(api.settings.get, tenantScope) as { productUse?: "personal" | "business" } | undefined;
+  const isBusiness = settings?.productUse === "business";
   const visibleThreads = threads || [];
   const threadsLoading = threads === undefined;
   const normalizedThreadSearch = threadSearch.trim().toLowerCase();
@@ -1190,6 +1332,8 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
   const autoBuildThreadPromptProfile = useMutation(api.personality.autoBuildThreadPromptProfile);
   const saveGroundingMutation = useMutation(api.grounding.saveThreadGrounding);
   const upsertContactMemoryFact = useMutation(api.chatTools.upsertContactMemoryFact);
+  const generateUploadUrl = useMutation(api.media.generateUploadUrl);
+  const registerAssetIfMissing = useMutation(api.media.registerAssetIfMissing);
   const ignoreThreadMutation = useMutation(api.backlog.ignoreThread);
   const deleteThreadMutation = useMutation(api.threads.deleteThread);
   const recordEvent = useMutation(api.system.recordEvent);
@@ -1286,6 +1430,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
     api.chatTools.contactMemoryFactsList,
     selectedThreadId ? { threadId: selectedThreadId as Id<"threads">, factType: "profile", limit: 80 } : "skip",
   ) as ContactMemoryFactsPayload | undefined;
+  const quickMediaAssets = useQuery(api.media.listAssets, { ...tenantScope, enabledOnly: true }) as QuickMediaAsset[] | undefined;
 	  const threadToolEvents = useQuery(
 	    api.threads.getToolEvents,
 	    selectedThreadId ? { ...tenantScope, threadId: selectedThreadId as Id<"threads">, limit: 260 } : "skip",
@@ -1298,12 +1443,17 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
   const [toolSummaryMessageId, setToolSummaryMessageId] = useState<string | null>(null);
   const [mediaPreviewModal, setMediaPreviewModal] = useState<MessageMediaPreview | null>(null);
   const [manualReplyDraft, setManualReplyDraft] = useState<{ threadId?: string; text: string }>({ text: "" });
+  const [composerActionsOpen, setComposerActionsOpen] = useState(false);
+  const [composerPanel, setComposerPanel] = useState<"stickers" | "memes" | null>(null);
+  const [memePrompt, setMemePrompt] = useState("");
+  const [memeCaption, setMemeCaption] = useState("");
   const [draftEdits, setDraftEdits] = useState<Record<string, string>>({});
   const [autoTodoTitles, setAutoTodoTitles] = useState<Record<string, string>>({});
   const [autoFollowupReasons, setAutoFollowupReasons] = useState<Record<string, string>>({});
   const messageRowRefs = useRef(new Map<string, HTMLDivElement>());
   const conversationWindowRef = useRef<HTMLDivElement | null>(null);
   const manualReplyInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const mediaFileInputRef = useRef<HTMLInputElement | null>(null);
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const autoTodoAttemptedRef = useRef<Set<string>>(new Set());
@@ -1316,6 +1466,8 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
   const ignoreThreadKey = selectedThreadId ? `conversation:ignore:${selectedThreadId}` : "conversation:ignore:none";
   const deleteThreadKey = selectedThreadId ? `conversation:delete:${selectedThreadId}` : "conversation:delete:none";
   const manualReplyKey = selectedThreadId ? `conversation:manual-reply:${selectedThreadId}` : "conversation:manual-reply:none";
+  const mediaReplyKey = selectedThreadId ? `conversation:media-reply:${selectedThreadId}` : "conversation:media-reply:none";
+  const memeGenerateKey = selectedThreadId ? `conversation:meme-generate:${selectedThreadId}` : "conversation:meme-generate:none";
   const manualReplyText = manualReplyDraft.threadId === selectedThreadId ? manualReplyDraft.text : "";
 
   const settingsRecord = getRecord(settingsKey);
@@ -1325,6 +1477,10 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
   const ignoreThreadRecord = getRecord(ignoreThreadKey);
   const deleteThreadRecord = getRecord(deleteThreadKey);
   const manualReplyRecord = getRecord(manualReplyKey);
+  const mediaReplyRecord = getRecord(mediaReplyKey);
+  const memeGenerateRecord = getRecord(memeGenerateKey);
+  const mediaUploadRecord = getRecord(`${mediaReplyKey}:upload`);
+  const voiceNoteRecord = getRecord(`${manualReplyKey}:voice-note`);
   const lastLoadStartedThreadRef = useRef<string | null>(null);
   const lastLoadedThreadRef = useRef<string | null>(null);
 
@@ -2046,6 +2202,21 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
   const manualReplySourceMessageId = lastMessageId || lastInboundMessageId;
   const canUseManualReply =
     Boolean(selectedThreadId && thread && manualReplySourceMessageId) && thread?.thread.threadKind !== "broadcast_or_system";
+  const selectedMessageProvider = thread?.thread.provider || "whatsapp";
+  const canUseMediaReply = canUseManualReply && (selectedMessageProvider === "whatsapp" || selectedMessageProvider === "instagram");
+  const canUseStickerReply = canUseManualReply && selectedMessageProvider === "whatsapp";
+  const canUseVoiceNoteReply = canUseManualReply && selectedMessageProvider === "whatsapp";
+  const quickStickers = useMemo(
+    () => (quickMediaAssets || []).filter((asset) => asset.kind === "sticker" && asset.enabled).slice(0, 8),
+    [quickMediaAssets],
+  );
+  const quickMemes = useMemo(
+    () =>
+      (quickMediaAssets || [])
+        .filter((asset) => (asset.kind === "meme" || asset.kind === "image" || asset.kind === "video") && asset.enabled)
+        .slice(0, 8),
+    [quickMediaAssets],
+  );
   const inboundMessageIds = useMemo(
     () => (thread?.messages || []).filter((message) => message.direction === "inbound").map((message) => message._id),
     [thread?.messages],
@@ -2075,6 +2246,193 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
       {
         pendingLabel: "Queueing reply...",
         successMessage: "Manual reply queued.",
+      },
+    );
+  };
+
+  const queueManualMediaReply = (asset: QuickMediaAsset | { _id: string; kind: QuickMediaAsset["kind"]; label: string }, caption = "") => {
+    if (!selectedThreadId || !manualReplySourceMessageId || !canUseManualReply) {
+      return;
+    }
+    const sendKind = asset.kind === "sticker" ? "sticker" : "meme";
+    if ((sendKind === "sticker" && !canUseStickerReply) || (sendKind === "meme" && !canUseMediaReply)) {
+      return;
+    }
+    const cleanedCaption = caption.trim();
+    const actionKey = `${mediaReplyKey}:${asset._id}`;
+
+    void runAction(
+      actionKey,
+      async () => {
+        await sendManualReply({
+          threadId: selectedThreadId as Id<"threads">,
+          sourceMessageId: manualReplySourceMessageId as Id<"messages">,
+          text: sendKind === "sticker" ? "" : cleanedCaption,
+          sendKind,
+          mediaAssetId: asset._id as Id<"mediaAssets">,
+          mediaCaption: sendKind === "sticker" ? undefined : cleanedCaption || undefined,
+        });
+        if (cleanedCaption && manualReplyText.trim() === cleanedCaption) {
+          setManualReplyDraft({ threadId: selectedThreadId, text: "" });
+        }
+        setComposerActionsOpen(false);
+        setComposerPanel(null);
+        window.requestAnimationFrame(jumpToLastMessage);
+      },
+      {
+        pendingLabel: sendKind === "sticker" ? "Queueing sticker..." : "Queueing media...",
+        successMessage: sendKind === "sticker" ? "Sticker queued." : "Media queued.",
+      },
+    );
+  };
+
+  const queueVoiceNoteReply = () => {
+    const text = manualReplyText.trim();
+    if (!selectedThreadId || !manualReplySourceMessageId || !canUseVoiceNoteReply || !text) {
+      return;
+    }
+
+    void runAction(
+      `${manualReplyKey}:voice-note`,
+      async () => {
+        await sendManualReply({
+          threadId: selectedThreadId as Id<"threads">,
+          sourceMessageId: manualReplySourceMessageId as Id<"messages">,
+          text,
+          sendKind: "voice_note",
+        });
+        setManualReplyDraft({ threadId: selectedThreadId, text: "" });
+        setComposerActionsOpen(false);
+        setComposerPanel(null);
+        window.requestAnimationFrame(jumpToLastMessage);
+      },
+      {
+        pendingLabel: "Queueing voice note...",
+        successMessage: "Voice note queued.",
+      },
+    );
+  };
+
+  const uploadAndQueueMedia = (file: File) => {
+    if (!selectedThreadId || !manualReplySourceMessageId || !canUseMediaReply) {
+      return;
+    }
+    const mediaKind = normalizeMediaKindFromMime(file.type || "application/octet-stream");
+    if (mediaKind !== "image" && mediaKind !== "video") {
+      void runAction(
+        `${mediaReplyKey}:unsupported`,
+        async () => {
+          throw new Error("Manual thread media currently supports image and video files.");
+        },
+        { pendingLabel: "Checking media...", successMessage: "Media checked." },
+      );
+      return;
+    }
+    const caption = manualReplyText.trim();
+
+    void runAction(
+      `${mediaReplyKey}:upload`,
+      async () => {
+        const [contentHash, uploadUrl] = await Promise.all([hashFileSha256Hex(file), generateUploadUrl({})]);
+        const upload = await fetch(uploadUrl as string, {
+          method: "POST",
+          headers: {
+            "Content-Type": file.type || "application/octet-stream",
+          },
+          body: file,
+        });
+        if (!upload.ok) {
+          throw new Error(`Upload failed (${upload.status}).`);
+        }
+        const payload = (await upload.json()) as { storageId?: string };
+        if (!payload.storageId) {
+          throw new Error("Upload response did not include a storage id.");
+        }
+        const assetId = await registerAssetIfMissing({
+          ...tenantScope,
+          kind: mediaKind,
+          label: file.name,
+          tags: ["manual", mediaKind],
+          fileId: payload.storageId as Id<"_storage">,
+          mimeType: file.type || "application/octet-stream",
+          contentHash,
+          source: "uploaded",
+          threadId: selectedThreadId as Id<"threads">,
+          enabled: true,
+        });
+        await sendManualReply({
+          threadId: selectedThreadId as Id<"threads">,
+          sourceMessageId: manualReplySourceMessageId as Id<"messages">,
+          text: caption,
+          sendKind: "meme",
+          mediaAssetId: assetId as Id<"mediaAssets">,
+          mediaCaption: caption || undefined,
+        });
+        if (caption) {
+          setManualReplyDraft({ threadId: selectedThreadId, text: "" });
+        }
+        setComposerActionsOpen(false);
+        setComposerPanel(null);
+        window.requestAnimationFrame(jumpToLastMessage);
+      },
+      {
+        pendingLabel: "Uploading and queueing media...",
+        successMessage: "Media queued.",
+      },
+    );
+  };
+
+  const generateAndQueueMeme = () => {
+    const prompt = memePrompt.trim() || manualReplyText.trim();
+    const caption = memeCaption.trim();
+    if (!selectedThreadId || !manualReplySourceMessageId || !canUseMediaReply || !prompt) {
+      return;
+    }
+
+    void runAction(
+      memeGenerateKey,
+      async () => {
+        const response = await fetch("/api/actions/generate-meme", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            prompt,
+            threadId: selectedThreadId,
+          }),
+        });
+        if (!response.ok) {
+          let errorMessage = `Meme generation failed (${response.status}).`;
+          try {
+            const payload = (await response.json()) as { error?: string };
+            errorMessage = payload.error || errorMessage;
+          } catch {
+            // Keep the status-based message.
+          }
+          throw new Error(errorMessage);
+        }
+        const payload = (await response.json()) as { assetId: string; label: string };
+        await sendManualReply({
+          threadId: selectedThreadId as Id<"threads">,
+          sourceMessageId: manualReplySourceMessageId as Id<"messages">,
+          text: caption,
+          sendKind: "meme",
+          mediaAssetId: payload.assetId as Id<"mediaAssets">,
+          mediaCaption: caption || undefined,
+        });
+        setMemePrompt("");
+        setMemeCaption("");
+        if (!caption && manualReplyText.trim() === prompt) {
+          setManualReplyDraft({ threadId: selectedThreadId, text: "" });
+        }
+        setComposerActionsOpen(false);
+        setComposerPanel(null);
+        window.requestAnimationFrame(jumpToLastMessage);
+      },
+      {
+        pendingLabel: "Generating and queueing meme...",
+        successMessage: "Meme queued.",
       },
     );
   };
@@ -2439,8 +2797,8 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
               <span className="sr-only">Go back</span>
             </button>
             <div>
-              <p className="conversation-kicker">Messages</p>
-              <h3>Conversations</h3>
+              <p className="conversation-kicker">{isBusiness ? "Customers" : "Messages"}</p>
+              <h3>{isBusiness ? "Customer Threads" : "Conversations"}</h3>
             </div>
           </div>
           <span className="conversation-count-pill">{filteredThreadList.length}</span>
@@ -2448,7 +2806,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
         <ProviderFilter
           value={providerFilter}
           onChange={setProviderFilter}
-          label="Conversations provider filter"
+          label={isBusiness ? "Customer threads provider filter" : "Conversations provider filter"}
         />
         <div className="queue-actions">
           <label className="setup-input-group inline search-field-group">
@@ -2456,7 +2814,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
             <input
               type="text"
               value={threadSearch}
-              placeholder="Search conversations"
+              placeholder={isBusiness ? "Search customers or leads" : "Search conversations"}
               onChange={(event) => setThreadSearch(event.target.value)}
             />
           </label>
@@ -2474,7 +2832,15 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
                 href={`/conversations?threadId=${item._id}`}
                 className={`thread-row${item._id === selectedThreadId ? " active" : ""}`}
                 aria-current={item._id === selectedThreadId ? "page" : undefined}
-                onClick={() => setMobileInspectorOpen(false)}
+                onClick={() => {
+                  setMobileInspectorOpen(false);
+                  if (item._id !== selectedThreadId) {
+                    setComposerActionsOpen(false);
+                    setComposerPanel(null);
+                    setMemePrompt("");
+                    setMemeCaption("");
+                  }
+                }}
               >
                 {renderThreadAvatar(item.title || item.jid, item.avatarPreview)}
                 <div className="thread-row-header">
@@ -2512,7 +2878,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
         {isMobileViewport && selectedThreadId ? (
           <div className="conversation-mobile-back-row">
             <Link href="/conversations" className="btn btn-ghost">
-              Back to Threads
+              {isBusiness ? "Back to Customers" : "Back to Threads"}
             </Link>
           </div>
         ) : null}
@@ -2529,6 +2895,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
                     {providerLabel(thread.thread.provider || "whatsapp")} ·{" "}
                     {thread.thread.isIgnored ? "Auto-reply off" : "Auto-reply on"}
                     {reviewItemCount > 0 ? ` · ${reviewItemCount} to review` : ""}
+                    {isBusiness ? " · Business mode" : ""}
                   </p>
                 </div>
                 <div className="conversation-chat-header-actions">
@@ -2613,16 +2980,16 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
                 </span>
                 {thread.thread.isArchived ? <span className="conversation-chip muted">Archived</span> : null}
                 <span className={`conversation-chip ${relationshipState?.conflictFlag ? "warn" : "ok"}`}>
-                  Conflict {relationshipState?.conflictFlag ? "Active" : "Clear"}
+                  {isBusiness ? "Escalation" : "Conflict"} {relationshipState?.conflictFlag ? "Active" : "Clear"}
                 </span>
-                {relationshipState?.repairNeeded ? <span className="conversation-chip warn">Repair Needed</span> : null}
+                {relationshipState?.repairNeeded ? <span className="conversation-chip warn">{isBusiness ? "Service recovery" : "Repair Needed"}</span> : null}
                 {thread.conversationState?.nextMove ? (
                   <span className="conversation-chip muted">
                     Next move {thread.conversationState.nextMove.replace("_", " ")}
                   </span>
                 ) : null}
                 {thread.conversationState?.conversationEndImminent ? (
-                  <span className="conversation-chip warn">Endgame Signal</span>
+                  <span className="conversation-chip warn">{isBusiness ? "Close-out Signal" : "Endgame Signal"}</span>
                 ) : null}
                 {typeof thread.conversationState?.topicDwellScore === "number" ? (
                   <span
@@ -2634,10 +3001,10 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
                   </span>
                 ) : null}
                 {mutualCheckInAgeDays === undefined ? (
-                  <span className="conversation-chip warn">Mutual Check-in None</span>
+                  <span className="conversation-chip warn">{isBusiness ? "Customer check-in none" : "Mutual Check-in None"}</span>
                 ) : (
                   <span className={`conversation-chip ${mutualCheckInAgeDays >= 7 ? "warn" : "ok"}`}>
-                    Mutual Check-in {mutualCheckInAgeDays}d
+                    {isBusiness ? "Customer check-in" : "Mutual Check-in"} {mutualCheckInAgeDays}d
                   </span>
                 )}
               </div>
@@ -2735,6 +3102,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
                         <p className="message-sender">{senderName}</p>
                         <p className="message-text">{displayText}</p>
                         {renderMessageMediaPreview(message, (preview) => setMediaPreviewModal(preview))}
+                        {renderMessageUrlPreviews(message.urlPreviews)}
                         {showMediaCaption ? <p className="message-media-caption">{mediaCaption}</p> : null}
                         <p className="queue-meta">{messageKindLabel(message.messageType)}</p>
                         {isStatusPost ? <p className="message-status-chip">Status Post</p> : null}
@@ -2799,6 +3167,84 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
               </button>
               <form className="home-ai-composer conversation-manual-composer" onSubmit={submitManualReply}>
                 <div className="home-ai-composer-field conversation-manual-composer-field">
+                  <div className="conversation-action-dock">
+                    <button
+                      type="button"
+                      className={`conversation-action-plus ${composerActionsOpen ? "active" : ""}`}
+                      onClick={() => {
+                        setComposerActionsOpen((open) => !open);
+                        setComposerPanel(null);
+                      }}
+                      disabled={!canUseManualReply || manualReplyRecord.pending}
+                      aria-label="Open message actions"
+                      aria-expanded={composerActionsOpen}
+                      title="Message actions"
+                    >
+                      <PlusIcon />
+                    </button>
+                    {composerActionsOpen ? (
+                      <div className="conversation-action-menu" role="menu" aria-label="Message actions">
+                        <button
+                          type="button"
+                          role="menuitem"
+                          onClick={() => mediaFileInputRef.current?.click()}
+                          disabled={!canUseMediaReply || mediaUploadRecord.pending}
+                          title={canUseMediaReply ? "Send a photo or video" : "Photo and video sending is available for WhatsApp and Instagram threads"}
+                        >
+                          <PhotoIcon />
+                          <span>Photo / video</span>
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          onClick={() => {
+                            setComposerPanel((panel) => (panel === "memes" ? null : "memes"));
+                            setMemePrompt((current) => current || manualReplyText.trim());
+                          }}
+                          disabled={!canUseMediaReply}
+                          title={canUseMediaReply ? "Generate or send a meme" : "Meme sending is available for WhatsApp and Instagram threads"}
+                        >
+                          <MemeIcon />
+                          <span>Meme</span>
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          onClick={() => setComposerPanel((panel) => (panel === "stickers" ? null : "stickers"))}
+                          disabled={!canUseStickerReply}
+                          title={canUseStickerReply ? "Send a sticker" : "Sticker sending is available for WhatsApp threads"}
+                        >
+                          <StickerIcon />
+                          <span>Sticker</span>
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          onClick={queueVoiceNoteReply}
+                          disabled={!canUseVoiceNoteReply || !manualReplyText.trim() || voiceNoteRecord.pending}
+                          title={canUseVoiceNoteReply ? "Send composer text as a voice note" : "Voice-note sending is available for WhatsApp threads"}
+                        >
+                          <MicIcon />
+                          <span>Voice note</span>
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+                  <input
+                    ref={mediaFileInputRef}
+                    className="sr-only"
+                    type="file"
+                    accept="image/*,video/*"
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      event.target.value = "";
+                      if (file) {
+                        uploadAndQueueMedia(file);
+                      }
+                    }}
+                    disabled={!canUseMediaReply || mediaUploadRecord.pending}
+                    aria-label="Choose media to send"
+                  />
                   <textarea
                     ref={manualReplyInputRef}
                     value={manualReplyText}
@@ -2824,9 +3270,95 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
                     <span className="sr-only">{manualReplyRecord.pending ? "Queueing" : "Send"}</span>
                   </button>
                 </div>
-                {manualReplyRecord.error ? (
+                {composerPanel === "stickers" ? (
+                  <div className="conversation-action-panel" aria-label="Quick stickers">
+                    {quickStickers.length > 0 ? (
+                      quickStickers.map((asset) => (
+                        <button
+                          key={asset._id}
+                          type="button"
+                          className="conversation-asset-choice"
+                          onClick={() => queueManualMediaReply(asset)}
+                          disabled={!canUseStickerReply || getRecord(`${mediaReplyKey}:${asset._id}`).pending}
+                        >
+                          {asset.fileUrl ? (
+                            // eslint-disable-next-line @next/next/no-img-element -- Convex storage URLs are already generated runtime asset URLs for tiny composer previews.
+                            <img src={asset.fileUrl} alt="" loading="lazy" />
+                          ) : (
+                            <StickerIcon />
+                          )}
+                          <span>{trim(asset.label || "Sticker", 42)}</span>
+                        </button>
+                      ))
+                    ) : (
+                      <p className="queue-meta">No enabled stickers yet. Add stickers in Media Settings.</p>
+                    )}
+                  </div>
+                ) : null}
+                {composerPanel === "memes" ? (
+                  <div className="conversation-action-panel conversation-meme-panel" aria-label="Meme actions">
+                    <div className="conversation-meme-generator">
+                      <label>
+                        <span className="queue-meta">Prompt</span>
+                        <input
+                          type="text"
+                          value={memePrompt}
+                          onChange={(event) => setMemePrompt(event.target.value)}
+                          placeholder="Describe the meme reaction..."
+                          disabled={memeGenerateRecord.pending}
+                        />
+                      </label>
+                      <label>
+                        <span className="queue-meta">Caption</span>
+                        <input
+                          type="text"
+                          value={memeCaption}
+                          onChange={(event) => setMemeCaption(event.target.value)}
+                          placeholder="Optional caption"
+                          disabled={memeGenerateRecord.pending}
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        onClick={generateAndQueueMeme}
+                        disabled={!canUseMediaReply || memeGenerateRecord.pending || !(memePrompt.trim() || manualReplyText.trim())}
+                      >
+                        {memeGenerateRecord.pending ? "Generating..." : "Generate & Send"}
+                      </button>
+                    </div>
+                    {quickMemes.length > 0 ? (
+                      <div className="conversation-asset-grid">
+                        {quickMemes.map((asset) => (
+                          <button
+                            key={asset._id}
+                            type="button"
+                            className="conversation-asset-choice"
+                            onClick={() => queueManualMediaReply(asset, manualReplyText)}
+                            disabled={!canUseMediaReply || getRecord(`${mediaReplyKey}:${asset._id}`).pending}
+                          >
+                            {asset.fileUrl ? (
+                              // eslint-disable-next-line @next/next/no-img-element -- Convex storage URLs are already generated runtime asset URLs for tiny composer previews.
+                              <img src={asset.fileUrl} alt="" loading="lazy" />
+                            ) : (
+                              <MemeIcon />
+                            )}
+                            <span>{trim(asset.label || "Meme", 42)}</span>
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="queue-meta">No enabled memes or media yet.</p>
+                    )}
+                  </div>
+                ) : null}
+                {manualReplyRecord.error || mediaUploadRecord.error || voiceNoteRecord.error || mediaReplyRecord.error || memeGenerateRecord.error ? (
                   <p className="queue-meta action-inline-error conversation-manual-error" role="alert">
-                    {manualReplyRecord.error}
+                    {manualReplyRecord.error ||
+                      mediaUploadRecord.error ||
+                      voiceNoteRecord.error ||
+                      mediaReplyRecord.error ||
+                      memeGenerateRecord.error}
                   </p>
                 ) : null}
               </form>
@@ -3225,7 +3757,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
               <header className="conversation-inspector-header">
                 {renderThreadAvatar(thread.thread.title || thread.thread.jid, thread.thread.avatarPreview, "conversation-inspector-avatar")}
                 <div>
-                  <p className="conversation-kicker">Person Summary</p>
+                  <p className="conversation-kicker">{isBusiness ? "Customer Summary" : "Person Summary"}</p>
                   <h3>{threadGrounding?.theirName?.trim() || thread.thread.title || thread.thread.jid}</h3>
                   <p className="queue-meta">{thread.thread.jid}</p>
                 </div>
@@ -3237,20 +3769,20 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
                   <strong>{thread.thread.isIgnored ? "Off" : "On"}</strong>
                 </div>
                 <div>
-                  <span>Review</span>
+                  <span>{isBusiness ? "Sales review" : "Review"}</span>
                   <strong>{reviewItemCount}</strong>
                 </div>
                 <div>
-                  <span>Trust</span>
+                  <span>{isBusiness ? "Confidence" : "Trust"}</span>
                   <strong>{relationshipState ? `${Math.round(relationshipState.trustScore * 100)}%` : "-"}</strong>
                 </div>
               </div>
 
               <section className="conversation-inspector-section">
                 <div className="conversation-inspector-section-head">
-                  <p className="queue-title">Context</p>
+                  <p className="queue-title">{isBusiness ? "Customer Context" : "Context"}</p>
                   <span className={`conversation-chip ${relationshipState?.conflictFlag || relationshipState?.repairNeeded ? "warn" : "ok"}`}>
-                    {relationshipState?.conflictFlag || relationshipState?.repairNeeded ? "Needs care" : "Clear"}
+                    {relationshipState?.conflictFlag || relationshipState?.repairNeeded ? (isBusiness ? "Needs owner" : "Needs care") : "Clear"}
                   </span>
                 </div>
                 <dl className="conversation-inspector-list">
@@ -3277,7 +3809,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
                     <dd>{thread.conversationState?.nextMove ? thread.conversationState.nextMove.replace("_", " ") : "None"}</dd>
                   </div>
                   <div>
-                    <dt>Mutual check-in</dt>
+                    <dt>{isBusiness ? "Customer check-in" : "Mutual check-in"}</dt>
                     <dd>{mutualCheckInAgeDays === undefined ? "None" : `${mutualCheckInAgeDays}d ago`}</dd>
                   </div>
                 </dl>
@@ -3286,7 +3818,7 @@ function ConversationsContent({ initialThreadId }: { initialThreadId?: string })
 
               <section className="conversation-inspector-section">
                 <div className="conversation-inspector-section-head">
-                  <p className="queue-title">Style</p>
+                  <p className="queue-title">{isBusiness ? "Brand Style" : "Style"}</p>
                   {!isMobileViewport ? (
                     <button type="button" className="btn btn-ghost" onClick={() => setSettingsModalOpen(true)}>
                       Full Settings

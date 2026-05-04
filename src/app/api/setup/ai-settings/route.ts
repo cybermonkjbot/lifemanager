@@ -12,8 +12,8 @@ import { DEFAULT_INSTANCE_SETUP_PREFERENCES, type InstanceSetupPreferences } fro
 import { requireRuntimeControlApiAccess } from "@/lib/instance-guard";
 import {
   isLoopbackHostname,
+  remoteSetupAccessMessage,
   requestHasValidSetupBootstrapSecret,
-  setupBootstrapConfigured,
 } from "@/lib/setup-bootstrap-auth";
 import { rateLimitJsonResponse } from "@/lib/rate-limit";
 import { generateSetupPreferencesWithAiTool } from "@/worker/ai";
@@ -66,10 +66,7 @@ export async function POST(request: NextRequest) {
     const hasValidSetupSecret = requestHasValidSetupBootstrapSecret(request.headers);
 
     if (!currentState.setupCompleted && !isLocalBootstrap && !hasValidSetupSecret) {
-      const message = setupBootstrapConfigured()
-        ? "Remote setup requires the configured setup bootstrap secret."
-        : "Remote setup is disabled until SLM_SETUP_SECRET is configured. Complete setup from localhost instead.";
-      return NextResponse.json({ error: message }, { status: 403 });
+      return NextResponse.json({ error: remoteSetupAccessMessage() }, { status: 403 });
     }
 
     if (currentState.setupCompleted) {

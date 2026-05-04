@@ -4,6 +4,7 @@ export type InstanceReplyPacePreset = "measured" | "deliberate" | "unhurried";
 export type InstanceMimicryPreset = "light" | "balanced" | "close";
 export type InstanceSoulPrivacyLevel = "setup_only" | "ai_usable" | "never_mention";
 export type InstanceServiceMode = "hosted" | "self_hosted";
+export type InstanceProductUse = "personal" | "business";
 
 export type InstanceLegalAcceptance = {
   accepted: boolean;
@@ -57,6 +58,7 @@ export type InstanceSoulProfile = {
 export type InstanceSoulPrivacy = Record<keyof InstanceSoulProfile, InstanceSoulPrivacyLevel>;
 
 export type InstanceSetupPreferences = {
+  productUse: InstanceProductUse;
   serviceMode: InstanceServiceMode;
   selfHosted: InstanceSelfHostedConfig;
   autonomyMode: InstanceAutonomyMode;
@@ -106,6 +108,7 @@ export const DEFAULT_INSTANCE_ACCOUNT_PROFILE: InstanceAccountProfile = {
 };
 
 export const DEFAULT_INSTANCE_SETUP_PREFERENCES: InstanceSetupPreferences = {
+  productUse: "personal",
   serviceMode: "hosted",
   selfHosted: {
     convexUrl: "",

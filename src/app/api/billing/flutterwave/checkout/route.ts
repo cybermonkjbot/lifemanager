@@ -12,6 +12,8 @@ export const dynamic = "force-dynamic";
 
 type Plan = "personal_connector" | "business_whatsapp";
 
+const CHECKOUT_UNAVAILABLE_MESSAGE = "Checkout is not available right now. Contact support and we'll help you get set up.";
+
 function cleanBaseUrl(value: string) {
   const trimmed = value.trim();
   if (!trimmed) {
@@ -29,10 +31,10 @@ function parsePlan(value: unknown, fallback: string): Plan {
   throw new Error("Choose a hosted subscription plan.");
 }
 
-function parseAmount(value: string, label: string) {
+function parseAmount(value: string) {
   const amount = Number(value);
   if (!Number.isFinite(amount) || amount <= 0) {
-    throw new Error(`${label} is not configured.`);
+    throw new Error(CHECKOUT_UNAVAILABLE_MESSAGE);
   }
   return amount;
 }
@@ -48,13 +50,13 @@ async function readPlanConfig(plan: Plan) {
   const currency = (currencyRaw || "NGN").trim().toUpperCase();
   if (plan === "personal_connector") {
     return {
-      amount: parseAmount(personalAmountRaw, "Personal plan amount"),
+      amount: parseAmount(personalAmountRaw),
       currency,
       paymentPlanId: personalPlanId.trim(),
     };
   }
   return {
-    amount: parseAmount(businessAmountRaw, "Business plan amount"),
+    amount: parseAmount(businessAmountRaw),
     currency,
     paymentPlanId: businessPlanId.trim(),
   };
@@ -79,24 +81,24 @@ export async function POST(request: NextRequest) {
   try {
     const tenantSession = await verifyTenantSessionToken(request.cookies.get(getTenantSessionCookieName())?.value);
     if (!tenantSession || (tenantSession.role !== "owner" && tenantSession.role !== "admin")) {
-      return NextResponse.json({ error: "Tenant owner or admin access is required." }, { status: 403 });
+      return NextResponse.json({ error: "Only an account owner or admin can manage billing." }, { status: 403 });
     }
 
     const localConfig = await readLocalInstanceConfig();
     const tenantEmail = localConfig?.account?.email || "";
     if (!tenantEmail) {
-      throw new Error("Tenant email is not configured locally.");
+      throw new Error("Add your account email before starting checkout.");
     }
     const body = await request.json().catch(() => ({})) as { plan?: unknown };
     const plan = parsePlan(body.plan, localConfig?.account?.billingStatus === "self_hosted" ? "self_hosted" : "personal_connector");
     const config = await readPlanConfig(plan);
     if (!config.paymentPlanId) {
-      throw new Error("Flutterwave payment plan ID is not configured for this plan.");
+      throw new Error(CHECKOUT_UNAVAILABLE_MESSAGE);
     }
 
     const secretKey = await resolveManagedSecretValue("flutterwave.secretKey");
     if (!secretKey) {
-      throw new Error("Flutterwave secret key is not configured.");
+      throw new Error(CHECKOUT_UNAVAILABLE_MESSAGE);
     }
     const baseUrl =
       cleanBaseUrl(await resolveManagedSecretValue("billing.redirectBaseUrl")) ||

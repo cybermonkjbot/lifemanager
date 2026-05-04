@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   assertTenantConnectorEnabled,
+  connectorPlanUnavailableMessage,
   isTenantBillingActive,
   isTenantConnectorEnabled,
   tenantBillingInactiveReason,
@@ -41,7 +42,7 @@ test("billing access allows unexpired trials and blocks expired trials", () => {
   assert.equal(isTenantBillingActive({ billingStatus: "trialing", trialEndsAt: now - 1 }, now), false);
   assert.equal(
     tenantBillingInactiveReason({ billingStatus: "trialing", trialEndsAt: now - 1 }, now),
-    "Tenant trial has expired.",
+    "Your trial has ended. Choose a plan to keep using hosted features.",
   );
 });
 
@@ -50,7 +51,7 @@ test("billing access blocks active subscriptions after their explicit expiry", (
   assert.equal(isTenantBillingActive({ billingStatus: "active", trialEndsAt: 0, subscriptionExpiresAt: now }, now), false);
   assert.equal(
     tenantBillingInactiveReason({ billingStatus: "active", trialEndsAt: 0, subscriptionExpiresAt: now }, now),
-    "Tenant subscription has expired.",
+    "Your subscription has ended. Restore billing to keep using hosted features.",
   );
 });
 
@@ -73,21 +74,23 @@ test("billing access never pauses self-hosted tenants", () => {
   );
 });
 
-test("connector entitlement defaults keep WhatsApp on and new connectors off", async () => {
+test("connector entitlement defaults include personal local connectors", async () => {
   assert.equal(await isTenantConnectorEnabled(mockCtx(), activePersonal, "whatsapp"), true);
   assert.equal(await isTenantConnectorEnabled(mockCtx(), activePersonal, "instagram"), false);
-  assert.equal(await isTenantConnectorEnabled(mockCtx(), activePersonal, "imessage"), false);
-  assert.equal(await isTenantConnectorEnabled(mockCtx(), activePersonal, "telegram"), false);
+  assert.equal(await isTenantConnectorEnabled(mockCtx(), activePersonal, "imessage"), true);
+  assert.equal(await isTenantConnectorEnabled(mockCtx(), activePersonal, "telegram"), true);
 });
 
-test("connector entitlement defaults allow Instagram for business and self-hosted plans only", async () => {
+test("connector entitlement defaults allow all connectors for self-hosted tenants", async () => {
   const business: TenantBillingSnapshot = { ...activePersonal, plan: "business_whatsapp" };
   const selfHosted: TenantBillingSnapshot = { ...activePersonal, plan: "self_hosted", serviceMode: "self_hosted" };
 
   assert.equal(await isTenantConnectorEnabled(mockCtx(), business, "instagram"), true);
+  assert.equal(await isTenantConnectorEnabled(mockCtx(), business, "imessage"), true);
+  assert.equal(await isTenantConnectorEnabled(mockCtx(), business, "telegram"), true);
   assert.equal(await isTenantConnectorEnabled(mockCtx(), selfHosted, "instagram"), true);
-  assert.equal(await isTenantConnectorEnabled(mockCtx(), selfHosted, "imessage"), false);
-  assert.equal(await isTenantConnectorEnabled(mockCtx(), selfHosted, "telegram"), false);
+  assert.equal(await isTenantConnectorEnabled(mockCtx(), selfHosted, "imessage"), true);
+  assert.equal(await isTenantConnectorEnabled(mockCtx(), selfHosted, "telegram"), true);
 });
 
 test("connector entitlement config overrides provider defaults", async () => {
@@ -98,10 +101,17 @@ test("connector entitlement config overrides provider defaults", async () => {
 
 test("assertTenantConnectorEnabled blocks disabled providers", async () => {
   await assert.rejects(
-    () => assertTenantConnectorEnabled(mockCtx(), activePersonal, "telegram"),
-    /telegram is disabled for this tenant plan/,
+    () => assertTenantConnectorEnabled(mockCtx("false"), activePersonal, "telegram"),
+    /Telegram isn't included in this account's current plan/,
   );
-  await assert.doesNotReject(() => assertTenantConnectorEnabled(mockCtx("true"), activePersonal, "telegram"));
+  await assert.doesNotReject(() => assertTenantConnectorEnabled(mockCtx(), activePersonal, "telegram"));
+});
+
+test("connector plan unavailable message stays customer-facing", () => {
+  assert.equal(
+    connectorPlanUnavailableMessage("imessage"),
+    "iMessage isn't included in this account's current plan. Contact support if you think you should have access.",
+  );
 });
 
 test("tenant connector provider parsing ignores non-connector scopes", () => {

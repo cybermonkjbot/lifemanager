@@ -69,7 +69,7 @@ const DEFAULT_CONFIG: SelfImprovementConfig = {
   intervalMinutes: 240,
   codexPath: process.env.CODEX_CLI_PATH || "codex",
   codexModel: process.env.CODEX_SELF_IMPROVE_MODEL || process.env.CODEX_FALLBACK_MODEL || "gpt-5.4",
-  codexSandbox: "workspace-write",
+  codexSandbox: parseCodexSandbox(process.env.CODEX_SELF_IMPROVE_SANDBOX, "workspace-write"),
   timeoutMs: 300_000,
   outputDir: ".slm/self-improvement",
   maxContextChars: 120_000,
@@ -127,6 +127,16 @@ function truncate(text: string, maxChars: number) {
 
 function sleep(ms: number) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+}
+
+function parseCodexSandbox(
+  value: string | undefined,
+  fallback: SelfImprovementConfig["codexSandbox"],
+): SelfImprovementConfig["codexSandbox"] {
+  if (value === "read-only" || value === "workspace-write" || value === "danger-full-access") {
+    return value;
+  }
+  return fallback;
 }
 
 function parseCliArgs(argv: string[]): CliArgs {
@@ -203,6 +213,9 @@ function mergeConfig(raw: Partial<SelfImprovementConfig>): SelfImprovementConfig
   const merged: SelfImprovementConfig = {
     ...DEFAULT_CONFIG,
     ...raw,
+    codexPath: process.env.CODEX_CLI_PATH || raw.codexPath || DEFAULT_CONFIG.codexPath,
+    codexModel: process.env.CODEX_SELF_IMPROVE_MODEL || process.env.CODEX_FALLBACK_MODEL || raw.codexModel || DEFAULT_CONFIG.codexModel,
+    codexSandbox: parseCodexSandbox(process.env.CODEX_SELF_IMPROVE_SANDBOX, raw.codexSandbox || DEFAULT_CONFIG.codexSandbox),
     sources: Array.isArray(raw.sources) && raw.sources.length > 0 ? raw.sources : DEFAULT_CONFIG.sources,
   };
 

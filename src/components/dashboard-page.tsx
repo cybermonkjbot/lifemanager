@@ -1,11 +1,14 @@
 import { DashboardShell } from "@/components/dashboard-shell";
 import { requireAuthenticatedPageAccess } from "@/lib/instance-guard";
+import { getLocalProductUse } from "@/lib/product-mode";
 import { getConvexUrl } from "@/lib/runtime-env";
 import type { ReactNode } from "react";
 
 type DashboardPageProps = {
   title: string;
   subtitle: string;
+  businessTitle?: string;
+  businessSubtitle?: string;
   children: ReactNode;
   showLogWatcher?: boolean;
   logWatcherDefaultExpanded?: boolean;
@@ -16,6 +19,8 @@ type DashboardPageProps = {
 export async function DashboardPage({
   title,
   subtitle,
+  businessTitle,
+  businessSubtitle,
   children,
   showLogWatcher = false,
   logWatcherDefaultExpanded = true,
@@ -23,11 +28,14 @@ export async function DashboardPage({
   hideShellChrome = false,
 }: DashboardPageProps) {
   await requireAuthenticatedPageAccess();
+  const productUse = await getLocalProductUse();
+  const resolvedTitle = productUse === "business" && businessTitle ? businessTitle : title;
+  const resolvedSubtitle = productUse === "business" && businessSubtitle ? businessSubtitle : subtitle;
 
   return (
     <DashboardShell
-      title={title}
-      subtitle={subtitle}
+      title={resolvedTitle}
+      subtitle={resolvedSubtitle}
       convexUrl={getConvexUrl()}
       showLogWatcher={showLogWatcher}
       logWatcherDefaultExpanded={logWatcherDefaultExpanded}

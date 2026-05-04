@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { Message } from "@photon-ai/imessage-kit";
 import {
+  iMessageDirection,
   iMessageAtMs,
   iMessageSenderJid,
+  iMessageThreadKind,
   iMessageThreadJid,
   isIMessagePlatformSupported,
   normalizeIMessageText,
@@ -58,6 +60,10 @@ test("iMessage normalization handles reactions and ids", () => {
   assert.equal(iMessageThreadJid(reaction), "chat-1");
   assert.equal(iMessageSenderJid(reaction), "person@example.com");
   assert.equal(iMessageSenderJid(imessage({ chatId: "", participant: "" })), "imessage:unknown");
+  assert.equal(iMessageDirection(imessage({ isFromMe: false })), "inbound");
+  assert.equal(iMessageDirection(imessage({ isFromMe: true })), "outbound");
+  assert.equal(iMessageThreadKind(imessage({ chatKind: "dm" })), "direct");
+  assert.equal(iMessageThreadKind(imessage({ chatKind: "group" })), "group");
 });
 
 test("iMessage date and platform guards are explicit", () => {

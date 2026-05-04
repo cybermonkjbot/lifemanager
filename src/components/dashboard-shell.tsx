@@ -116,9 +116,23 @@ export async function DashboardShell({
     tenantSession?.role === "owner" ||
     tenantSession?.role === "admin" ||
     Boolean(masqueradeSession);
-  const visibleNavItems = dashboardNavItems.filter(
-    (item) => (!item.adminOnly || adminEnabled) && (!item.runtimeControlOnly || canManageRuntime),
-  );
+  const productUse = localConfig?.preferences.productUse || "personal";
+  const visibleNavItems = dashboardNavItems
+    .filter(
+      (item) =>
+        (!item.adminOnly || adminEnabled) &&
+        (!item.runtimeControlOnly || canManageRuntime) &&
+        (!item.businessOnly || productUse === "business"),
+    )
+    .map((item) =>
+      productUse === "business"
+        ? {
+            ...item,
+            label: item.businessLabel || item.label,
+            description: item.businessDescription || item.description,
+          }
+        : item,
+    );
   const billingBanner = await loadBillingBannerState(convexUrl);
 
   return (

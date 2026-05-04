@@ -28,6 +28,7 @@ import {
   getSetupBootstrapCookieName,
   getSetupBootstrapCookieOptions,
   isLoopbackHostname,
+  remoteSetupAccessMessage,
   requestHasValidSetupBootstrapSecret,
   setupBootstrapConfigured,
 } from "@/lib/setup-bootstrap-auth";
@@ -40,6 +41,9 @@ import {
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+const MANAGED_SETUP_FAILED_MESSAGE =
+  "We couldn't finish managed setup. Check your internet connection and try again. If this keeps happening, contact support.";
 
 type SetupInstancePayload = {
   pin?: unknown;
@@ -175,10 +179,7 @@ export async function POST(request: NextRequest) {
     const isLocalBootstrap = isLoopbackHostname(request.nextUrl.hostname);
     const hasValidSetupSecret = requestHasValidSetupBootstrapSecret(request.headers);
     if (!currentState.setupCompleted && !isLocalBootstrap && !hasValidSetupSecret) {
-      const message = setupBootstrapConfigured()
-        ? "Remote setup requires the configured setup bootstrap secret."
-        : "Remote setup is disabled until SLM_SETUP_SECRET is configured. Complete setup from localhost instead.";
-      return NextResponse.json({ error: message }, { status: 403 });
+      return NextResponse.json({ error: remoteSetupAccessMessage() }, { status: 403 });
     }
 
     const pinSource = await resolveInstancePinSource();
@@ -283,6 +284,7 @@ export async function POST(request: NextRequest) {
           displayName: nextAccount.displayName,
           deviceId: nextAccount.deviceId,
           serviceMode: "hosted",
+          plan: nextPreferences.productUse === "business" ? "business_whatsapp" : "personal_connector",
           ...(backendPinRecord
             ? {
                 pinSalt: backendPinRecord.salt,
@@ -323,14 +325,15 @@ export async function POST(request: NextRequest) {
           nextAccount.connectorTokenExpiresAt = connectorTokenExpiresAt;
         }
       } catch (error) {
-        tenantRegistrationError = getErrorMessage(error);
+        void error;
+        tenantRegistrationError = MANAGED_SETUP_FAILED_MESSAGE;
       }
     }
 
     if (wantsCompletion && nextPreferences.serviceMode === "hosted" && !nextAccount.tenantId) {
       return NextResponse.json(
         {
-          error: tenantRegistrationError || "Managed tenant registration failed. Check Convex URL and admin backend secret.",
+          error: tenantRegistrationError || MANAGED_SETUP_FAILED_MESSAGE,
         },
         { status: 502 },
       );

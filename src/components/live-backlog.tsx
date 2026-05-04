@@ -1,6 +1,7 @@
 "use client";
 
 import { ActionNotices } from "@/components/action-notices";
+import { confirmAppDialog } from "@/components/app-confirm-dialog";
 import { SegmentedControl } from "@/components/app-ui";
 import { EmptyState } from "@/components/empty-state";
 import { LoadingBlock } from "@/components/loading-state";
@@ -60,6 +61,9 @@ type BacklogItem = {
   relationshipOverride?: RelationshipValue;
   recommendation: "answer" | "answer_with_ack" | "restart" | "already_queued";
   score: number;
+  businessIntent?: string;
+  businessSignalLabels?: string[];
+  businessSignalUrgent?: boolean;
   snoozedUntil?: number;
   snoozeReason?: string;
   isSnoozed: boolean;
@@ -126,8 +130,25 @@ function recommendationLabel(value: BacklogItem["recommendation"]) {
   return "Reply";
 }
 
+function businessRecommendationLabel(value: BacklogItem["recommendation"]) {
+  if (value === "restart") {
+    return "Follow up";
+  }
+  if (value === "answer_with_ack") {
+    return "Reply with context";
+  }
+  if (value === "already_queued") {
+    return "Already in Sales Review";
+  }
+  return "Reply";
+}
+
 function draftModeLabel(mode: "answer" | "restart") {
   return mode === "restart" ? "Reconnect" : "Reply";
+}
+
+function businessDraftModeLabel(mode: "answer" | "restart") {
+  return mode === "restart" ? "Follow up" : "Reply";
 }
 
 function recommendationHint(item: BacklogItem) {
@@ -141,6 +162,20 @@ function recommendationHint(item: BacklogItem) {
     return "A reply is already waiting in Review.";
   }
   return "A direct reply should clear this.";
+}
+
+function businessRecommendationHint(item: BacklogItem) {
+  const labels = item.businessSignalLabels || [];
+  if (labels.length > 0) {
+    return `${labels.slice(0, 2).join(" · ")} detected. Keep the next step clear and brand-safe.`;
+  }
+  if (item.recommendation === "restart") {
+    return "This customer thread has cooled off. Follow up with a light next step.";
+  }
+  if (item.recommendation === "already_queued") {
+    return "A customer reply is already waiting in Sales Review.";
+  }
+  return "Reply clearly and avoid promises that need confirmation.";
 }
 
 function formatRelationship(value: RelationshipValue) {
@@ -233,6 +268,8 @@ function BacklogContent() {
 
   const backlog = useQuery(api.backlog.list, queryArgs) as BacklogItem[] | undefined;
   const queue = useQuery(api.queue.list, { ...tenantScope, provider: providerFilter }) as QueueData | undefined;
+  const settings = useQuery(api.settings.get, tenantScope) as { productUse?: "personal" | "business" } | undefined;
+  const isBusiness = settings?.productUse === "business";
   const loading = backlog === undefined;
   const items = useMemo(() => backlog || [], [backlog]);
   const reviewDrafts = useMemo(
@@ -274,9 +311,9 @@ function BacklogContent() {
   }, [items, tab]);
   const leadItemId = visibleItems[0]?.stateId || "";
   const backlogTabs = [
-    { id: "all", label: "Needs attention", count: counts.all - counts.snoozed },
+    { id: "all", label: isBusiness ? "Leads waiting" : "Needs attention", count: counts.all - counts.snoozed },
     { id: "answer", label: "Reply", count: counts.answer },
-    { id: "restart", label: "Reconnect", count: counts.restart },
+    { id: "restart", label: isBusiness ? "Follow up" : "Reconnect", count: counts.restart },
   ] satisfies Array<{ id: BacklogTab; label: string; count: number }>;
 
   const onRefresh = () => {
@@ -305,8 +342,13 @@ function BacklogContent() {
     }
   };
 
-  const onClearAll = () => {
-    const confirmed = window.confirm("Clear the catch-up list now? Old unresolved messages will not reappear.");
+  const onClearAll = async () => {
+    const confirmed = await confirmAppDialog({
+      title: "Clear catch-up list?",
+      message: "Old unresolved messages will not reappear.",
+      confirmLabel: "Clear list",
+      tone: "danger",
+    });
     if (!confirmed) {
       return;
     }
@@ -452,9 +494,10 @@ function BacklogContent() {
                 getRecord(restartKey).pending;
 
               const recommendedMode = item.recommendation === "restart" ? "restart" : "answer";
-              const recommendedLabel = draftModeLabel(recommendedMode);
+              const recommendedLabel = isBusiness ? businessDraftModeLabel(recommendedMode) : draftModeLabel(recommendedMode);
               const alreadyQueued = item.recommendation === "already_queued";
               const displayName = threadDisplayName(item);
+              const signalLabels = isBusiness ? item.businessSignalLabels || [] : [];
 
               return (
                 <article
@@ -473,7 +516,14 @@ function BacklogContent() {
                         </div>
                         <div className="backlog-badges">
                           <span className="backlog-badge">{formatRelationship(item.relationship)}</span>
-                          <span className="backlog-badge">{recommendationLabel(item.recommendation)}</span>
+                          <span className="backlog-badge">
+                            {isBusiness ? businessRecommendationLabel(item.recommendation) : recommendationLabel(item.recommendation)}
+                          </span>
+                          {signalLabels.slice(0, 2).map((label) => (
+                            <span className={`backlog-badge ${item.businessSignalUrgent ? "warn" : ""}`} key={label}>
+                              {label}
+                            </span>
+                          ))}
                         </div>
                       </div>
                       <div className="backlog-row-signal">
@@ -492,7 +542,15 @@ function BacklogContent() {
                     </p>
                     <p className="queue-meta backlog-recommendation-line">
                       <strong>{alreadyQueued ? "Already in Review" : `${recommendedLabel} suggested`}</strong>
-                      <span>{alreadyQueued ? "Open Review before creating another reply." : recommendationHint(item)}</span>
+                      <span>
+                        {alreadyQueued
+                          ? isBusiness
+                            ? "Open Sales Review before creating another customer reply."
+                            : "Open Review before creating another reply."
+                          : isBusiness
+                            ? businessRecommendationHint(item)
+                            : recommendationHint(item)}
+                      </span>
                     </p>
 
                   </div>
@@ -512,7 +570,11 @@ function BacklogContent() {
                             disabled={isPending}
                             aria-disabled={isPending}
                           >
-                            {recommendedMode === "restart" ? "Create reconnect" : "Create reply"}
+                            {recommendedMode === "restart"
+                              ? isBusiness
+                                ? "Create follow-up"
+                                : "Create reconnect"
+                              : "Create reply"}
                           </button>
                         )}
                       </div>
@@ -532,7 +594,11 @@ function BacklogContent() {
               <EmptyState
                 variant="backlog"
                 title={emptyStateMessage(tab)}
-                description="When a conversation needs a reply or a gentle reconnect, it will appear here."
+                description={
+                  isBusiness
+                    ? "When a customer or lead needs price, payment, delivery, or follow-up attention, it will appear here."
+                    : "When a conversation needs a reply or a gentle reconnect, it will appear here."
+                }
               />
             ) : null}
           </div>
@@ -540,7 +606,7 @@ function BacklogContent() {
 
         <aside className="backlog-side-rail" aria-label="Catch-up controls">
           <div className="backlog-control-deck">
-            <h2 className="backlog-rail-title">Choose what to catch up on</h2>
+            <h2 className="backlog-rail-title">{isBusiness ? "Choose which leads to recover" : "Choose what to catch up on"}</h2>
             <div className="backlog-control-topline">
               <ProviderFilter value={providerFilter} onChange={setProviderFilter} label="Conversation source" />
               <SegmentedControl label="Catch-up views" value={tab} options={backlogTabs} onChange={setTab} className="backlog-tabs" />
@@ -550,7 +616,7 @@ function BacklogContent() {
               <div className="backlog-quick-views" aria-label="Quick views">
                 {[
                   { id: "custom", label: "Custom" },
-                  { id: "reconnect_only", label: "Reconnect only" },
+                  { id: "reconnect_only", label: isBusiness ? "Follow-up only" : "Reconnect only" },
                 ].map((item) => (
                   <button
                     key={item.id}
@@ -602,7 +668,7 @@ function BacklogContent() {
             disabled={getRecord("backlog:clear-all").pending}
             aria-disabled={getRecord("backlog:clear-all").pending}
           >
-            {getRecord("backlog:clear-all").pending ? "Clearing..." : "Clear catch-up list"}
+            {getRecord("backlog:clear-all").pending ? "Clearing..." : isBusiness ? "Clear lead list" : "Clear catch-up list"}
           </button>
         </aside>
       </div>
@@ -610,8 +676,8 @@ function BacklogContent() {
       <UIModal
         open={Boolean(reviewThreadId)}
         onClose={closeReviewModal}
-        title="Review reply"
-        description="Check the draft, then send, edit, or discard it."
+        title={isBusiness ? "Review customer reply" : "Review reply"}
+        description={isBusiness ? "Check the customer draft, then send, edit, or discard it." : "Check the draft, then send, edit, or discard it."}
         size="wide"
       >
         {queue === undefined ? <LoadingBlock label="Loading draft..." rows={2} compact /> : null}

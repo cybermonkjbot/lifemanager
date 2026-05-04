@@ -5,6 +5,7 @@ import { type AiDeterministicMode, DEFAULT_APP_CONFIG, getConfig, setConfigValue
 import { classifyThreadKind } from "./lib/threadEligibility";
 import { resolveTenantForMutation, resolveTenantForQuery } from "./lib/tenantSecurity";
 import { assertTenantBillingActive } from "./lib/billingAccess";
+import { syncStorefrontProfileFromConfig } from "./lib/storefrontProfile";
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(value, max));
@@ -75,16 +76,13 @@ function isAiDeterministicMode(value: string): value is AiDeterministicMode {
   return ALLOWED_AI_DETERMINISTIC_MODE_SET.has(value as AiDeterministicMode);
 }
 
-function isDirectWhatsAppThread(thread: {
+function isDirectMessageThread(thread: {
   provider?: "whatsapp" | "instagram" | "imessage" | "telegram";
   jid: string;
   isGroup: boolean;
   threadKind?: "direct" | "group" | "broadcast_or_system";
 }) {
   const provider = thread.provider || "whatsapp";
-  if (provider !== "whatsapp") {
-    return false;
-  }
   const kind = thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup, provider });
   return kind === "direct";
 }
@@ -102,25 +100,17 @@ async function upsertRomanticPartnerMappings(
   let matchedThreads = 0;
 
   for (const jid of romanticPartnerJids) {
-    const threadByProvider = tenantId
+    const threadByJid = tenantId
       ? await ctx.db
           .query("threads")
-          .withIndex("by_tenantId_and_provider_and_jid", (q) =>
-            q.eq("tenantId", tenantId).eq("provider", "whatsapp").eq("jid", jid),
-          )
+          .withIndex("by_tenantId_and_jid", (q) => q.eq("tenantId", tenantId).eq("jid", jid))
           .first()
       : await ctx.db
           .query("threads")
-          .withIndex("by_provider_and_jid", (q) => q.eq("provider", "whatsapp").eq("jid", jid))
+          .withIndex("by_jid", (q) => q.eq("jid", jid))
           .first();
-    const threadByJid =
-      threadByProvider ||
-      (await ctx.db
-        .query("threads")
-        .withIndex("by_jid", (q) => q.eq("jid", jid))
-        .first());
 
-    if (!threadByJid || !isDirectWhatsAppThread(threadByJid)) {
+    if (!threadByJid || !isDirectMessageThread(threadByJid)) {
       continue;
     }
 
@@ -201,6 +191,7 @@ export const get = query({
 export const saveOnboardingPreset = mutation({
   args: {
     ...tenantScopeArgs,
+    productUse: v.optional(v.union(v.literal("personal"), v.literal("business"))),
     autonomyMode: v.union(v.literal("review_first"), v.literal("autopilot")),
     replyPace: v.union(v.literal("measured"), v.literal("deliberate"), v.literal("unhurried")),
     quietHoursEnabled: v.boolean(),
@@ -214,6 +205,7 @@ export const saveOnboardingPreset = mutation({
     const quietHoursStartHour = clampInt(args.quietHoursStartHour, 0, 23);
     const quietHoursEndHour = clampInt(args.quietHoursEndHour, 0, 23);
 
+    await setScopedConfigValue(ctx, tenantId, "productUse", args.productUse || "personal");
     await setScopedConfigValue(ctx, tenantId, "autonomyPaused", args.autonomyMode === "review_first" ? "true" : "false");
     await setScopedConfigValue(ctx, tenantId, "humanDelayMinMs", String(pace.humanDelayMinMs));
     await setScopedConfigValue(ctx, tenantId, "humanDelayMaxMs", String(pace.humanDelayMaxMs));
@@ -257,6 +249,15 @@ export const setStatusBuilderEnabled = mutation({
 export const save = mutation({
   args: {
     ...tenantScopeArgs,
+    productUse: v.optional(v.union(v.literal("personal"), v.literal("business"))),
+    businessBrandName: v.optional(v.string()),
+    businessBrandVoice: v.optional(v.string()),
+    businessOfferSummary: v.optional(v.string()),
+    storefrontEnabled: v.optional(v.boolean()),
+    storefrontSlug: v.optional(v.string()),
+    storefrontFeeBps: v.optional(v.number()),
+    liveChatEnabled: v.optional(v.boolean()),
+    liveChatWelcomeMessage: v.optional(v.string()),
     ignoreGroupsByDefault: v.boolean(),
     reactionsEnabled: v.boolean(),
     stickersEnabled: v.boolean(),
@@ -369,6 +370,14 @@ export const save = mutation({
     instagramSendMaxGlobalInWindow: v.optional(v.number()),
     instagramStoryCadenceHours: v.optional(v.number()),
     instagramStoryDailyMaxPosts: v.optional(v.number()),
+    selfChatOpenClawEnabled: v.optional(v.boolean()),
+    selfChatOpenClawCliPath: v.optional(v.string()),
+    selfChatOpenClawAgentId: v.optional(v.string()),
+    selfChatOpenClawTimeoutMs: v.optional(v.number()),
+    selfChatCodexEnabled: v.optional(v.boolean()),
+    selfChatCodexCliPath: v.optional(v.string()),
+    selfChatCodexModel: v.optional(v.string()),
+    selfChatCodexSandbox: v.optional(v.union(v.literal("read-only"), v.literal("workspace-write"), v.literal("danger-full-access"))),
   },
   handler: async (ctx, args) => {
     const tenantId = await resolveTenantForOptionalMutation(ctx, args);
@@ -398,6 +407,21 @@ export const save = mutation({
       .filter((item): item is AiDeterministicMode => isAiDeterministicMode(item))
       .slice(0, 8);
     const normalized = {
+      productUse: args.productUse ?? DEFAULT_APP_CONFIG.productUse,
+      businessBrandName: args.businessBrandName?.trim().slice(0, 120) || "",
+      businessBrandVoice: args.businessBrandVoice?.trim().slice(0, 2000) || "",
+      businessOfferSummary: args.businessOfferSummary?.trim().slice(0, 4000) || "",
+      storefrontEnabled: args.storefrontEnabled ?? DEFAULT_APP_CONFIG.storefrontEnabled,
+      storefrontSlug: (args.storefrontSlug || "")
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9-]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 80),
+      storefrontFeeBps: clampInt(args.storefrontFeeBps ?? DEFAULT_APP_CONFIG.storefrontFeeBps, 0, 2000),
+      liveChatEnabled: args.liveChatEnabled ?? DEFAULT_APP_CONFIG.liveChatEnabled,
+      liveChatWelcomeMessage:
+        args.liveChatWelcomeMessage?.trim().slice(0, 600) || DEFAULT_APP_CONFIG.liveChatWelcomeMessage,
       ignoreGroupsByDefault: args.ignoreGroupsByDefault,
       reactionsEnabled: args.reactionsEnabled,
       stickersEnabled: args.stickersEnabled,
@@ -657,6 +681,18 @@ export const save = mutation({
         1,
         24,
       ),
+      selfChatOpenClawEnabled: args.selfChatOpenClawEnabled ?? DEFAULT_APP_CONFIG.selfChatOpenClawEnabled,
+      selfChatOpenClawCliPath: args.selfChatOpenClawCliPath?.trim() || DEFAULT_APP_CONFIG.selfChatOpenClawCliPath,
+      selfChatOpenClawAgentId: args.selfChatOpenClawAgentId?.trim() || DEFAULT_APP_CONFIG.selfChatOpenClawAgentId,
+      selfChatOpenClawTimeoutMs: clampInt(
+        args.selfChatOpenClawTimeoutMs ?? DEFAULT_APP_CONFIG.selfChatOpenClawTimeoutMs,
+        1_000,
+        24 * 60 * 60 * 1000,
+      ),
+      selfChatCodexEnabled: args.selfChatCodexEnabled ?? DEFAULT_APP_CONFIG.selfChatCodexEnabled,
+      selfChatCodexCliPath: args.selfChatCodexCliPath?.trim() || DEFAULT_APP_CONFIG.selfChatCodexCliPath,
+      selfChatCodexModel: args.selfChatCodexModel?.trim() || DEFAULT_APP_CONFIG.selfChatCodexModel,
+      selfChatCodexSandbox: args.selfChatCodexSandbox ?? DEFAULT_APP_CONFIG.selfChatCodexSandbox,
     };
 
     // Keep ranges valid after clamping.
@@ -683,6 +719,16 @@ export const save = mutation({
 
     const romanticSyncResult = await upsertRomanticPartnerMappings(ctx, normalized.romanticPartnerJids, tenantId);
 
+    await setScopedConfigValue(ctx, tenantId, "productUse", normalized.productUse);
+    await setScopedConfigValue(ctx, tenantId, "businessBrandName", normalized.businessBrandName);
+    await setScopedConfigValue(ctx, tenantId, "businessBrandVoice", normalized.businessBrandVoice);
+    await setScopedConfigValue(ctx, tenantId, "businessOfferSummary", normalized.businessOfferSummary);
+    await setScopedConfigValue(ctx, tenantId, "storefrontEnabled", normalized.storefrontEnabled ? "true" : "false");
+    await setScopedConfigValue(ctx, tenantId, "storefrontSlug", normalized.storefrontSlug);
+    await setScopedConfigValue(ctx, tenantId, "storefrontFeeBps", String(normalized.storefrontFeeBps));
+    await setScopedConfigValue(ctx, tenantId, "liveChatEnabled", normalized.liveChatEnabled ? "true" : "false");
+    await setScopedConfigValue(ctx, tenantId, "liveChatWelcomeMessage", normalized.liveChatWelcomeMessage);
+    await syncStorefrontProfileFromConfig(ctx, tenantId, normalized);
     await setScopedConfigValue(ctx, tenantId, "ignoreGroupsByDefault", normalized.ignoreGroupsByDefault ? "true" : "false");
     await setScopedConfigValue(ctx, tenantId, "reactionsEnabled", normalized.reactionsEnabled ? "true" : "false");
     await setScopedConfigValue(ctx, tenantId, "stickersEnabled", normalized.stickersEnabled ? "true" : "false");
@@ -818,6 +864,14 @@ export const save = mutation({
     await setScopedConfigValue(ctx, tenantId, "instagramSendMaxGlobalInWindow", String(normalized.instagramSendMaxGlobalInWindow));
     await setScopedConfigValue(ctx, tenantId, "instagramStoryCadenceHours", String(normalized.instagramStoryCadenceHours));
     await setScopedConfigValue(ctx, tenantId, "instagramStoryDailyMaxPosts", String(normalized.instagramStoryDailyMaxPosts));
+    await setScopedConfigValue(ctx, tenantId, "selfChatOpenClawEnabled", normalized.selfChatOpenClawEnabled ? "true" : "false");
+    await setScopedConfigValue(ctx, tenantId, "selfChatOpenClawCliPath", normalized.selfChatOpenClawCliPath);
+    await setScopedConfigValue(ctx, tenantId, "selfChatOpenClawAgentId", normalized.selfChatOpenClawAgentId);
+    await setScopedConfigValue(ctx, tenantId, "selfChatOpenClawTimeoutMs", String(normalized.selfChatOpenClawTimeoutMs));
+    await setScopedConfigValue(ctx, tenantId, "selfChatCodexEnabled", normalized.selfChatCodexEnabled ? "true" : "false");
+    await setScopedConfigValue(ctx, tenantId, "selfChatCodexCliPath", normalized.selfChatCodexCliPath);
+    await setScopedConfigValue(ctx, tenantId, "selfChatCodexModel", normalized.selfChatCodexModel);
+    await setScopedConfigValue(ctx, tenantId, "selfChatCodexSandbox", normalized.selfChatCodexSandbox);
 
     await ctx.db.insert("systemEvents", {
       tenantId,

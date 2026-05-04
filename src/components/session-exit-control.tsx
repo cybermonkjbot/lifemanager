@@ -25,7 +25,7 @@ export function SessionExitModal({ open, onClose }: SessionExitModalProps) {
       description="Choose whether to keep your app connections ready for next time."
     >
       <p className="ui-modal-confirmation-copy">
-        Lock only sends you back to the unlock screen. Disconnect apps also removes the saved WhatsApp and Instagram sessions from this device, so reconnecting will require setup again.
+        Lock only sends you back to the unlock screen. Disconnect apps also removes saved WhatsApp, Instagram, iMessage, and Telegram access from this device where applicable, so reconnecting will require setup again.
       </p>
       <div className="session-exit-actions">
         <form action="/api/auth/pin/logout" method="post">

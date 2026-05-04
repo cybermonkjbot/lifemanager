@@ -159,6 +159,7 @@ function QueueContent() {
   }, []);
 
   const queue = useQuery(api.queue.list, { ...tenantScope, provider: providerFilter }) as QueueData | undefined;
+  const settings = useQuery(api.settings.get, tenantScope) as { productUse?: "personal" | "business" } | undefined;
   const todosData = useQuery(api.todos.list, { ...tenantScope, todoLimit: 120, candidateLimit: 1 }) as
     | { todos: OpenTodoItem[]; candidates: TodoCandidateItem[] }
     | undefined;
@@ -170,6 +171,7 @@ function QueueContent() {
   const openTodos = todosData?.todos ?? EMPTY_OPEN_TODOS;
   const guardrailFlags = queue?.guardrailFlags ?? EMPTY_GUARDRAILS;
   const socialActions = queue?.socialActions ?? EMPTY_SOCIAL_ACTIONS;
+  const isBusiness = settings?.productUse === "business";
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -707,8 +709,12 @@ function QueueContent() {
         <EmptyState
           variant="queue"
           compact
-          title="No reply drafts waiting."
-          description="New drafts will appear here only when there is something ready for review."
+          title={isBusiness ? "No customer drafts waiting." : "No reply drafts waiting."}
+          description={
+            isBusiness
+              ? "Customer replies will appear here when they need approval before sending."
+              : "New drafts will appear here only when there is something ready for review."
+          }
         />
       ) : null}
     </div>
@@ -762,8 +768,12 @@ function QueueContent() {
         <EmptyState
           variant="followups"
           compact
-          title="No follow-ups waiting."
-          description="Confirmed reminders and suggested follow-ups will show up here when they need attention."
+          title={isBusiness ? "No sales follow-ups waiting." : "No follow-ups waiting."}
+          description={
+            isBusiness
+              ? "Lead nudges, payment reminders, and customer check-ins will show up here when they need attention."
+              : "Confirmed reminders and suggested follow-ups will show up here when they need attention."
+          }
         />
       ) : null}
     </div>
@@ -794,12 +804,16 @@ function QueueContent() {
         <EmptyState
           variant="tasks"
           compact
-          title="No open conversation tasks."
-          description="Tasks created from conversations will collect here until they are marked done."
+          title={isBusiness ? "No open customer tasks." : "No open conversation tasks."}
+          description={
+            isBusiness
+              ? "Order, payment, delivery, and customer-service tasks will collect here until they are marked done."
+              : "Tasks created from conversations will collect here until they are marked done."
+          }
         />
       ) : null}
 
-      <p className="queue-meta">Suggested tasks ({todoCandidates.length})</p>
+      <p className="queue-meta">{isBusiness ? "Suggested order/service tasks" : "Suggested tasks"} ({todoCandidates.length})</p>
       {queueLoading ? <LoadingBlock label="Loading task suggestions…" rows={2} compact /> : null}
       {todoCandidates.map((item) => {
         const key = `todo:${item._id}`;
@@ -823,8 +837,12 @@ function QueueContent() {
         <EmptyState
           variant="tasks"
           compact
-          title="No task suggestions need review."
-          description="When Odogwu HQ spots a useful task candidate, it will hold it here first."
+          title={isBusiness ? "No business task suggestions need review." : "No task suggestions need review."}
+          description={
+            isBusiness
+              ? "When OdogwuHQ spots a customer task candidate, it will hold it here first."
+              : "When Odogwu HQ spots a useful task candidate, it will hold it here first."
+          }
         />
       ) : null}
     </div>
@@ -894,9 +912,9 @@ function QueueContent() {
   );
 
   const queueTabs = [
-    { id: "needsReply", label: "Needs reply", count: counts.needsReply },
-    { id: "followups", label: "Follow-ups", count: counts.followups },
-    { id: "todos", label: "Tasks", count: counts.todos },
+    { id: "needsReply", label: isBusiness ? "Customer replies" : "Needs reply", count: counts.needsReply },
+    { id: "followups", label: isBusiness ? "Sales follow-ups" : "Follow-ups", count: counts.followups },
+    { id: "todos", label: isBusiness ? "Order tasks" : "Tasks", count: counts.todos },
     { id: "social", label: "Social", count: counts.social },
     { id: "guardrails", label: "Safety", count: counts.guardrails },
   ] satisfies Array<{ id: QueueTab; label: string; count: number }>;
@@ -1003,11 +1021,17 @@ function QueueContent() {
         onClose={() => setReviewState(null)}
         title={
           reviewState?.kind === "needsReply"
-            ? "Review reply"
+            ? isBusiness
+              ? "Review customer reply"
+              : "Review reply"
             : reviewState?.kind === "followups"
-              ? "Review follow-up"
+              ? isBusiness
+                ? "Review sales follow-up"
+                : "Review follow-up"
             : reviewState?.kind === "todos"
-              ? "Review task"
+              ? isBusiness
+                ? "Review order task"
+                : "Review task"
               : reviewState?.kind === "social"
                 ? "Review Instagram action"
                 : "Safety flag"

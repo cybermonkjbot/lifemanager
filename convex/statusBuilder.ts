@@ -110,6 +110,14 @@ export function stableUnitRandom(seed: string) {
   return (hash >>> 0) / 0x100000000;
 }
 
+export function buildStatusBuilderIdempotencyKey(args: {
+  tenantId?: Id<"tenantAccounts">;
+  cadenceBucket: number;
+  statusFormat: "text" | "meme";
+}) {
+  return `status-builder:${args.tenantId || "legacy"}:${args.cadenceBucket}:${args.statusFormat}`;
+}
+
 export function isWithinHourWindow(hour: number, startHour: number, endHour: number) {
   if (startHour === endHour) {
     return false;
@@ -411,6 +419,19 @@ async function runStatusBuilder(ctx: MutationCtx, tenantId?: Id<"tenantAccounts"
     const sendKind: "text" | "meme" = useTextPost ? "text" : "meme";
     const reviewRoll = stableUnitRandom(`status-review|${seed}`);
     const requiresReview = reviewRoll < config.statusBuilderReviewRatio;
+    const idempotencyKey = buildStatusBuilderIdempotencyKey({
+      tenantId,
+      cadenceBucket,
+      statusFormat,
+    });
+    const existingForCadence = await ctx.db
+      .query("outbox")
+      .withIndex("by_idempotencyKey", (q) => q.eq("idempotencyKey", idempotencyKey))
+      .first();
+    if (existingForCadence?.isStatusPost && existingForCadence.status === "failed") {
+      await shouldLogSkip("failed_current_cadence");
+      return { queued: false, reason: "failed_current_cadence" as const, outboxId: existingForCadence._id };
+    }
 
     const sourceMessageId = await ctx.db.insert("messages", {
       tenantId,
@@ -460,7 +481,7 @@ async function runStatusBuilder(ctx: MutationCtx, tenantId?: Id<"tenantAccounts"
       statusFormat,
       statusReviewRequired: requiresReview,
       sendAt: now + 1200,
-      idempotencyKey: `status-builder:${tenantId || "legacy"}:${cadenceBucket}:${statusFormat}`,
+      idempotencyKey,
       provider: "heuristic",
       now,
     });

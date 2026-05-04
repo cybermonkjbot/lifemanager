@@ -26,10 +26,10 @@ const STATUS_QUESTION_WORD_PATTERN = /\b(what|why|when|where|who|how|which)\b/i;
 const STATUS_DIRECT_QUESTION_START_PATTERN = /^(can|could|would|will|should|do|does|did|is|are|am|was|were|have|has|had|anyone)\b/i;
 const STATUS_QUESTION_CUE_PATTERN = /\b(let me know|tell me|thoughts|opinion|opinions)\b/i;
 const DECLARATIVE_STATUS_FALLBACKS = [
-  "Little progress still counts today.",
-  "Good energy and steady focus all day.",
-  "Small wins are stacking up nicely.",
-  "Keeping it simple and moving forward.",
+  "The signal gets clearer after the noise fades.",
+  "Staying close to the trends, but closer to the fundamentals.",
+  "Culture moves fast; pattern recognition still wins.",
+  "A little context changes the whole moment.",
 ];
 const STATUS_INTEREST_STOPWORDS = new Set([
   "a",

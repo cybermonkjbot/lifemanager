@@ -25,7 +25,7 @@ export default function CodeLabError({ error, reset }: CodeLabErrorProps) {
         <p>
           {missingConvexFunction
             ? "The editor is installed locally, but the active Convex deployment does not have the Code Lab functions yet. Run `bunx convex dev --once`, then retry."
-            : error.message || "Something interrupted the editor workspace."}
+            : error.message || "Something interrupted the editor account."}
         </p>
         <div className="code-lab-error-actions">
           <button className="btn btn-primary" type="button" onClick={reset}>

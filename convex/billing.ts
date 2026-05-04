@@ -76,17 +76,17 @@ async function requireTenantCheckoutAccess(ctx: MutationCtx, args: {
 }) {
   const tenant = await ctx.db.get(args.tenantId);
   if (!tenant) {
-    throw new Error("Tenant was not found.");
+    throw new Error("We couldn't find this account.");
   }
   if (tenant.serviceMode !== "hosted") {
-    throw new Error("Subscriptions are only available for hosted tenants.");
+    throw new Error("Billing checkout is only available for hosted accounts.");
   }
   const device = await ctx.db
     .query("tenantDevices")
     .withIndex("by_tenantId_and_deviceId", (q) => q.eq("tenantId", args.tenantId).eq("deviceId", args.deviceId.trim()))
     .unique();
   if (!device) {
-    throw new Error("Tenant device was not recognized.");
+    throw new Error("This device is not linked to the account.");
   }
   const emailNormalized = args.email.trim().toLowerCase();
   const user = await ctx.db
@@ -94,7 +94,7 @@ async function requireTenantCheckoutAccess(ctx: MutationCtx, args: {
     .withIndex("by_tenantId_and_emailNormalized", (q) => q.eq("tenantId", args.tenantId).eq("emailNormalized", emailNormalized))
     .unique();
   if (tenant.emailNormalized !== emailNormalized && !user) {
-    throw new Error("Tenant email was not recognized.");
+    throw new Error("This email is not linked to the account.");
   }
   return {
     tenant,
@@ -533,14 +533,16 @@ export const buildTenantReport = internalQuery({
       .query("providerRuns")
       .withIndex("by_tenantId_and_createdAt", (q) => q.eq("tenantId", args.tenantId).gte("createdAt", windowStartAt))
       .take(1200);
-    const whatsappOutboxRows = await ctx.db
-      .query("outbox")
-      .withIndex("by_tenantId_and_messageProvider_and_status_and_sendAt", (q) => q.eq("tenantId", args.tenantId).eq("messageProvider", "whatsapp").eq("status", "sent").gte("sendAt", windowStartAt))
-      .take(1000);
-    const instagramOutboxRows = await ctx.db
-      .query("outbox")
-      .withIndex("by_tenantId_and_messageProvider_and_status_and_sendAt", (q) => q.eq("tenantId", args.tenantId).eq("messageProvider", "instagram").eq("status", "sent").gte("sendAt", windowStartAt))
-      .take(1000);
+    const outboxRowsByProvider = await Promise.all(
+      (["whatsapp", "instagram", "imessage", "telegram"] as const).map((messageProvider) =>
+        ctx.db
+          .query("outbox")
+          .withIndex("by_tenantId_and_messageProvider_and_status_and_sendAt", (q) =>
+            q.eq("tenantId", args.tenantId).eq("messageProvider", messageProvider).eq("status", "sent").gte("sendAt", windowStartAt),
+          )
+          .take(1000),
+      ),
+    );
     const events = await ctx.db
       .query("systemEvents")
       .withIndex("by_tenantId_and_createdAt", (q) => q.eq("tenantId", args.tenantId).gte("createdAt", windowStartAt))
@@ -569,7 +571,7 @@ export const buildTenantReport = internalQuery({
         providerRuns: providerRuns.length,
         providerSuccess: successRuns,
         providerErrors: errorRuns,
-        outboundSent: whatsappOutboxRows.length + instagramOutboxRows.length,
+        outboundSent: outboxRowsByProvider.reduce((sum, rows) => sum + rows.length, 0),
         estimatedCostUsd,
       },
       alerts,

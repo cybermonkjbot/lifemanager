@@ -1,7 +1,7 @@
 import { v } from "convex/values";
 import type { Id } from "./_generated/dataModel";
-import { mutation, type MutationCtx } from "./_generated/server";
-import { resolveTenantConnectorForMutation } from "./lib/tenantSecurity";
+import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
+import { resolveTenantConnectorForMutation, resolveTenantForQuery } from "./lib/tenantSecurity";
 
 const providerValidator = v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("imessage"), v.literal("telegram"));
 const authStateValidator = v.union(
@@ -10,11 +10,61 @@ const authStateValidator = v.union(
   v.literal("expired"),
   v.literal("unknown"),
 );
+const tenantScopeArgs = {
+  tenantId: v.optional(v.id("tenantAccounts")),
+  connectorTokenHash: v.optional(v.string()),
+};
 
 function cleanOptionalText(value: string | undefined) {
   const trimmed = (value || "").trim();
   return trimmed || undefined;
 }
+
+async function resolveTenantForOptionalQuery(
+  ctx: QueryCtx,
+  args: { tenantId?: Id<"tenantAccounts">; connectorTokenHash?: string },
+) {
+  if (args.connectorTokenHash) {
+    return await resolveTenantForQuery(ctx, args);
+  }
+  return args.tenantId;
+}
+
+export const list = query({
+  args: {
+    ...tenantScopeArgs,
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForOptionalQuery(ctx, args);
+    const limit = Math.min(Math.max(Math.round(args.limit ?? 80), 1), 200);
+    const rows = tenantId
+      ? await ctx.db
+          .query("tenantConnectedAccounts")
+          .withIndex("by_tenantId", (q) => q.eq("tenantId", tenantId))
+          .order("desc")
+          .take(limit)
+      : await ctx.db.query("tenantConnectedAccounts").order("desc").take(limit);
+
+    return rows.map((account) => ({
+      _id: account._id,
+      tenantId: account.tenantId,
+      deviceId: account.deviceId,
+      provider: account.provider,
+      providerAccountId: account.providerAccountId,
+      accountLabel: account.accountLabel,
+      displayName: account.displayName,
+      phoneNumberMasked: account.phoneNumberMasked,
+      username: account.username,
+      authState: account.authState,
+      connectedAt: account.connectedAt,
+      disconnectedAt: account.disconnectedAt,
+      lastSeenAt: account.lastSeenAt,
+      createdAt: account.createdAt,
+      updatedAt: account.updatedAt,
+    }));
+  },
+});
 
 async function upsertTenantDevice(
   ctx: MutationCtx,

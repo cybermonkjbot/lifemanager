@@ -53,7 +53,7 @@ export async function GET(request: NextRequest) {
   const redirect = new URL("/system", request.url);
   try {
     if (!secretKey) {
-      throw new Error("Flutterwave secret key is not configured.");
+      throw new Error("We couldn't verify the payment right now. Contact support and we'll help you finish setup.");
     }
     const txRef = request.nextUrl.searchParams.get("tx_ref") || undefined;
     const transactionId = request.nextUrl.searchParams.get("transaction_id") || undefined;

@@ -20,6 +20,13 @@ test("detectCheckInSignalType recognizes English and Naija check-in prompts", ()
   assert.equal(detectCheckInSignalType("how's your mind today?"), "checkin_prompt");
   assert.equal(detectCheckInSignalType("you've been quiet, hope you're holding up"), "checkin_prompt");
   assert.equal(detectCheckInSignalType("checking on you"), "checkin_prompt");
+  assert.equal(detectCheckInSignalType("everything still okay"), "checkin_prompt");
+  assert.equal(detectCheckInSignalType("hope your side is settled"), "checkin_prompt");
+  assert.equal(detectCheckInSignalType("everything okay on your side"), "checkin_prompt");
+  assert.equal(detectCheckInSignalType("everything's okay your side"), "checkin_prompt");
+  assert.equal(detectCheckInSignalType("hope say all dey well"), "checkin_prompt");
+  assert.equal(detectCheckInSignalType("your end fine"), "checkin_prompt");
+  assert.equal(detectCheckInSignalType("you fine"), "checkin_prompt");
 });
 
 test("detectCheckInSignalType recognizes check-in responses", () => {

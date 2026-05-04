@@ -21,6 +21,7 @@ import {
   resolveLongSilenceReopenWeeks,
 } from "../../convex/lib/outboundGuard";
 import { hasPidginCasualSignal, hasPidginSignal } from "../../shared/pidgin-lexicon";
+import { assessBusinessSignal } from "../../shared/business-signals";
 import {
   buildRomancePromptFingerprint,
   ROMANCE_BASE_VARIANT_COUNT,
@@ -167,6 +168,13 @@ const logger = pino({
 });
 
 type RuntimeSettings = {
+  productUse?: "personal" | "business";
+  businessBrandName?: string;
+  businessBrandVoice?: string;
+  businessOfferSummary?: string;
+  storefrontEnabled?: boolean;
+  storefrontSlug?: string;
+  liveChatEnabled?: boolean;
   reactionsEnabled: boolean;
   stickersEnabled: boolean;
   memesEnabled: boolean;
@@ -256,6 +264,14 @@ type RuntimeSettings = {
   topicLeadPivotEnabled: boolean;
   topicLeadPivotMinVibeScore: number;
   topicLeadPivotCooldownMinutes: number;
+  selfChatOpenClawEnabled?: boolean;
+  selfChatOpenClawCliPath?: string;
+  selfChatOpenClawAgentId?: string;
+  selfChatOpenClawTimeoutMs?: number;
+  selfChatCodexEnabled?: boolean;
+  selfChatCodexCliPath?: string;
+  selfChatCodexModel?: string;
+  selfChatCodexSandbox?: "read-only" | "workspace-write" | "danger-full-access";
 };
 
 type StyleProfileSnapshot = {
@@ -279,6 +295,29 @@ type ContactMemoryFactSnapshot = {
 type ContactFactsSnapshot = {
   facts?: ContactMemoryFactSnapshot[];
 } | null;
+
+type StorefrontSellingProductSnapshot = {
+  _id: Id<"storefrontProducts">;
+  slug: string;
+  name: string;
+  description: string;
+  price: number;
+  currency: string;
+  stockStatus: "in_stock" | "limited" | "preorder" | "sold_out";
+  tags?: string[];
+  salesNotes?: string;
+};
+
+type StorefrontSellingSearchSnapshot = {
+  profile: {
+    slug: string;
+    displayName: string;
+    offerSummary?: string;
+    brandVoice?: string;
+    liveChatEnabled?: boolean;
+  } | null;
+  products: StorefrontSellingProductSnapshot[];
+};
 
 type RomanceMorningStateSnapshot = {
   threadId: string;
@@ -402,6 +441,16 @@ type ThreadContextSnapshot = {
     direction: "inbound" | "outbound";
     isStatus?: boolean;
     text: string;
+    urlPreviews?: Array<{
+      title?: string;
+      description?: string;
+      domain?: string;
+      siteName?: string;
+      canonicalUrl?: string;
+      normalizedUrl?: string;
+      sourceUrl?: string;
+      status?: string;
+    }>;
     messageType?: string;
     whatsappMessageId?: string;
     senderJid?: string;
@@ -433,6 +482,32 @@ type ThreadContextSnapshot = {
     dyingScore?: number;
   }>;
 } | null;
+
+type ThreadHistoryLineMessage = {
+  direction: "inbound" | "outbound";
+  text: string;
+  urlPreviews?: Array<{
+    title?: string;
+    description?: string;
+    domain?: string;
+    siteName?: string;
+    status?: string;
+  }>;
+};
+
+function formatThreadHistoryLine(message: ThreadHistoryLineMessage) {
+  const actor = message.direction === "inbound" ? "Them" : "Me";
+  const text = message.text || "";
+  const previewLines = (message.urlPreviews || [])
+    .filter((preview) => preview.status !== "failed")
+    .slice(0, 2)
+    .map((preview) => {
+      const title = preview.title || preview.domain || preview.siteName || "link";
+      const description = preview.description ? ` - ${preview.description}` : "";
+      return `[URL preview: ${title}${description}]`;
+    });
+  return `${actor}: ${[text, ...previewLines].filter(Boolean).join(" ")}`;
+}
 
 type ConversationReplyGuidanceSnapshot = {
   enabled: boolean;
@@ -1187,6 +1262,40 @@ function compactLogText(value: string, maxChars: number) {
     return normalized;
   }
   return `${normalized.slice(0, Math.max(0, maxChars - 3))}...`;
+}
+
+function formatCatalogMoney(value: number, currency: string) {
+  const rounded = Math.round(value * 100) / 100;
+  return `${currency || "NGN"} ${rounded.toLocaleString()}`;
+}
+
+function buildStorefrontBuyingLink(slug: string, productSlug?: string) {
+  const baseUrl = (
+    process.env.NEXT_PUBLIC_APP_URL ||
+    process.env.ODOGWU_PUBLIC_APP_URL ||
+    process.env.ODOGWU_HOSTED_DASHBOARD_URL ||
+    "https://odogwuhq.com"
+  ).replace(/\/+$/, "");
+  const productQuery = productSlug ? `?product=${encodeURIComponent(productSlug)}` : "";
+  return `${baseUrl}/shop/${encodeURIComponent(slug)}${productQuery}#order`;
+}
+
+function buildStorefrontSellingHints(catalog: StorefrontSellingSearchSnapshot | null) {
+  if (!catalog?.profile || catalog.products.length === 0) {
+    return [];
+  }
+  const buyingLink = buildStorefrontBuyingLink(catalog.profile.slug);
+  const productLines = catalog.products.slice(0, 5).map((product, index) => {
+    const tags = product.tags?.length ? ` Tags: ${product.tags.slice(0, 3).join(", ")}.` : "";
+    const notes = product.salesNotes ? ` Notes: ${compactLogText(product.salesNotes, 90)}.` : "";
+    return `Product ${index + 1}: ${product.name}; price ${formatCatalogMoney(product.price, product.currency)}; availability ${product.stockStatus.replace("_", " ")}; buy link ${buildStorefrontBuyingLink(catalog.profile?.slug || "", product.slug)}; ${compactLogText(product.description, 110)}.${tags}${notes}`;
+  });
+  return [
+    `Business storefront: ${catalog.profile.displayName}. Buying link: ${buyingLink}`,
+    "Selling rule: use only the product names, prices, availability, and notes listed here. If none fit, say you will confirm instead of inventing.",
+    "Selling rule: when customer shows buying intent, guide them to choose/confirm and share the buying link naturally.",
+    ...productLines,
+  ];
 }
 
 function formatAttemptUsage(attempt: AiAttempt) {
@@ -2419,7 +2528,7 @@ function resolveTextEmojiAllowlist() {
 
   const getRuntimeSettings = async () => {
     const settings = await resolveTtlCache(runtimeSettingsCache, SETTINGS_CACHE_TTL_MS, async () => {
-      return (await convex.query(convexRefs.settingsGet, {})) as RuntimeSettings | null;
+      return (await convex.query(convexRefs.settingsGet, tenantConnectorArgs())) as RuntimeSettings | null;
     });
     applyRuntimeConcurrency(settings);
     return settings;
@@ -4757,6 +4866,7 @@ function resolveTextEmojiAllowlist() {
     if (contactJids.size > 0) {
       void convex
         .mutation(convexRefs.threadsUpsertContactMetadata, {
+          ...tenantConnectorArgs(),
           provider: "whatsapp",
           jids: [...contactJids],
           savedName: normalizeDisplayName(row.name),
@@ -4881,6 +4991,7 @@ function resolveTextEmojiAllowlist() {
     const threadKind = classifyThreadKindFromJid(threadJid);
     const threadId = (await convex
       .mutation(convexRefs.threadsUpsertMetadata, {
+        ...tenantConnectorArgs(),
         provider: "whatsapp",
         threadJid,
         title: threadTitle,
@@ -5088,15 +5199,15 @@ function resolveTextEmojiAllowlist() {
     }
     return Math.max(5_000, Math.min(Math.round(raw), 5 * 60_000));
   })();
-  const CODEX_CLI_PATH = (process.env.CODEX_CLI_PATH || "codex").trim() || "codex";
+  const DEFAULT_CODEX_CLI_PATH = (process.env.CODEX_CLI_PATH || "codex").trim() || "codex";
+  const DEFAULT_CODEX_MODEL = (process.env.CODEX_FALLBACK_MODEL || "gpt-5.2").trim() || "gpt-5.2";
   const SELF_CONTROL_SMART_ROUTING_ENABLED = !["0", "false", "off", "no"].includes(
     (process.env.SLM_SELF_CONTROL_SMART_ROUTING_ENABLED || "1").trim().toLowerCase(),
   );
   const SELF_CONTROL_MANAGER_ENABLED = !["0", "false", "off", "no"].includes(
     (process.env.SLM_SELF_CONTROL_MANAGER_ENABLED || "1").trim().toLowerCase(),
   );
-  const SELF_CONTROL_MANAGER_MODEL =
-    (process.env.SLM_SELF_CONTROL_MANAGER_MODEL || process.env.CODEX_FALLBACK_MODEL || "gpt-5.2").trim() || "gpt-5.2";
+  const SELF_CONTROL_MANAGER_MODEL = (process.env.SLM_SELF_CONTROL_MANAGER_MODEL || "").trim();
   const SELF_CONTROL_MANAGER_MAX_STEPS = (() => {
     const raw = Number(process.env.SLM_SELF_CONTROL_MANAGER_MAX_STEPS || 3);
     if (!Number.isFinite(raw)) {
@@ -5111,8 +5222,7 @@ function resolveTextEmojiAllowlist() {
     }
     return Math.max(5_000, Math.min(Math.round(raw), 180_000));
   })();
-  const SELF_CONTROL_SMART_ROUTER_MODEL =
-    (process.env.SLM_SELF_CONTROL_ROUTER_MODEL || process.env.CODEX_FALLBACK_MODEL || "gpt-5.2").trim() || "gpt-5.2";
+  const SELF_CONTROL_SMART_ROUTER_MODEL = (process.env.SLM_SELF_CONTROL_ROUTER_MODEL || "").trim();
   const SELF_CONTROL_SMART_ROUTER_TIMEOUT_MS = (() => {
     const raw = Number(process.env.SLM_SELF_CONTROL_ROUTER_TIMEOUT_MS || 45_000);
     if (!Number.isFinite(raw)) {
@@ -5120,20 +5230,38 @@ function resolveTextEmojiAllowlist() {
     }
     return Math.max(5_000, Math.min(Math.round(raw), 180_000));
   })();
-  const OPENCLAW_CLI_PATH = (process.env.SLM_OPENCLAW_CLI_PATH || "openclaw").trim() || "openclaw";
-  const OPENCLAW_AGENT_ID = (process.env.SLM_OPENCLAW_AGENT_ID || "main").trim() || "main";
-  const OPENCLAW_AGENT_TIMEOUT_MS = (() => {
+  const DEFAULT_OPENCLAW_CLI_PATH = (process.env.SLM_OPENCLAW_CLI_PATH || "openclaw").trim() || "openclaw";
+  const DEFAULT_OPENCLAW_AGENT_ID = (process.env.SLM_OPENCLAW_AGENT_ID || "main").trim() || "main";
+  const DEFAULT_OPENCLAW_AGENT_TIMEOUT_MS = (() => {
     const raw = Number(process.env.SLM_OPENCLAW_AGENT_TIMEOUT_MS || 6 * 60 * 60 * 1000);
     if (!Number.isFinite(raw)) {
       return 6 * 60 * 60 * 1000;
     }
     return Math.max(1_000, Math.min(Math.round(raw), 24 * 60 * 60 * 1000));
   })();
-  const OPENCLAW_PROBE_TIMEOUT_MS = Math.max(1_000, Math.min(OPENCLAW_AGENT_TIMEOUT_MS, 8_000));
   const OPENCLAW_MAX_COMMAND_CHARS = 2_000;
   const OPENCLAW_MAX_STDIO_CHARS = 1_024 * 1_024;
   const OPENCLAW_MAX_FILES_PER_REPLY = 4;
   const OPENCLAW_MAX_FILE_BYTES = 24 * 1024 * 1024;
+  const resolveSelfChatOpenClawEnabled = (runtimeSettings: RuntimeSettings | null) =>
+    runtimeSettings?.selfChatOpenClawEnabled ?? true;
+  const resolveSelfChatOpenClawCliPath = (runtimeSettings: RuntimeSettings | null) =>
+    runtimeSettings?.selfChatOpenClawCliPath?.trim() || DEFAULT_OPENCLAW_CLI_PATH;
+  const resolveSelfChatOpenClawAgentId = (runtimeSettings: RuntimeSettings | null) =>
+    runtimeSettings?.selfChatOpenClawAgentId?.trim() || DEFAULT_OPENCLAW_AGENT_ID;
+  const resolveSelfChatOpenClawTimeoutMs = (runtimeSettings: RuntimeSettings | null) =>
+    Math.max(
+      1_000,
+      Math.min(Math.round(runtimeSettings?.selfChatOpenClawTimeoutMs ?? DEFAULT_OPENCLAW_AGENT_TIMEOUT_MS), 24 * 60 * 60 * 1000),
+    );
+  const resolveSelfChatCodexEnabled = (runtimeSettings: RuntimeSettings | null) =>
+    runtimeSettings?.selfChatCodexEnabled ?? true;
+  const resolveSelfChatCodexCliPath = (runtimeSettings: RuntimeSettings | null) =>
+    runtimeSettings?.selfChatCodexCliPath?.trim() || DEFAULT_CODEX_CLI_PATH;
+  const resolveSelfChatCodexModel = (runtimeSettings: RuntimeSettings | null, overrideModel?: string) =>
+    overrideModel?.trim() || runtimeSettings?.selfChatCodexModel?.trim() || DEFAULT_CODEX_MODEL;
+  const resolveSelfChatCodexSandbox = (runtimeSettings: RuntimeSettings | null) =>
+    runtimeSettings?.selfChatCodexSandbox || "workspace-write";
 
   const resolveSelfControlThread = (messageKey: SelfControlMessageKey): ResolvedSelfControlThread | null => {
     const rawThreadJid = getThreadJid(messageKey as Parameters<typeof getThreadJid>[0]);
@@ -5684,10 +5812,24 @@ function resolveTextEmojiAllowlist() {
       };
     }
 
+    const runtimeSettings = await getRuntimeSettings();
+    if (!resolveSelfChatCodexEnabled(runtimeSettings)) {
+      return {
+        hasError: true,
+        responseText: formatAssistantReply("codex", "the Codex environment is disconnected in Settings."),
+      };
+    }
+
     const bunBin = process.env.BUN_BIN || "bun";
     const child = spawn(bunBin, ["run", "self-improve", "--", "--prompt", prompt], {
       cwd: process.cwd(),
-      env: process.env,
+      env: {
+        ...process.env,
+        CODEX_CLI_PATH: resolveSelfChatCodexCliPath(runtimeSettings),
+        CODEX_FALLBACK_MODEL: resolveSelfChatCodexModel(runtimeSettings),
+        CODEX_SELF_IMPROVE_MODEL: resolveSelfChatCodexModel(runtimeSettings),
+        CODEX_SELF_IMPROVE_SANDBOX: resolveSelfChatCodexSandbox(runtimeSettings),
+      },
       stdio: ["pipe", "pipe", "pipe"],
     });
 
@@ -5703,6 +5845,10 @@ function resolveTextEmojiAllowlist() {
   };
 
   const buildSelfImproveStatusText = async () => {
+    const runtimeSettings = await getRuntimeSettings();
+    if (!resolveSelfChatCodexEnabled(runtimeSettings)) {
+      return formatAssistantReply("codex", "disconnected in Settings.");
+    }
     const active = await isSelfImproveRunActive();
     const latest = await readLatestSelfImproveMeta();
     if (active) {
@@ -5724,6 +5870,10 @@ function resolveTextEmojiAllowlist() {
   };
 
   const buildSelfImproveLatestText = async () => {
+    const runtimeSettings = await getRuntimeSettings();
+    if (!resolveSelfChatCodexEnabled(runtimeSettings)) {
+      return formatAssistantReply("codex", "disconnected in Settings.");
+    }
     const [latest, latestReport] = await Promise.all([readLatestSelfImproveMeta(), readLatestSelfImproveReport()]);
     if (!latest?.runId && !latestReport.trim()) {
       return formatAssistantReply("codex", "no completed improve tasks yet.");
@@ -6032,7 +6182,19 @@ function resolveTextEmojiAllowlist() {
     return next.slice(next.length - OPENCLAW_MAX_STDIO_CHARS);
   };
 
-  const runOpenClawCli = async (cliArgs: string[], timeoutMs: number) => {
+  const runOpenClawCli = async (cliArgs: string[], timeoutMs: number, runtimeSettings?: RuntimeSettings | null) => {
+    const effectiveSettings = runtimeSettings ?? (await getRuntimeSettings());
+    if (!resolveSelfChatOpenClawEnabled(effectiveSettings)) {
+      return {
+        stdout: "",
+        stderr: "",
+        exitCode: null,
+        signal: null,
+        timedOut: false,
+        spawnError: "OpenClaw environment is disconnected in Settings.",
+      };
+    }
+    const openClawCliPath = resolveSelfChatOpenClawCliPath(effectiveSettings);
     return await new Promise<{
       stdout: string;
       stderr: string;
@@ -6046,7 +6208,7 @@ function resolveTextEmojiAllowlist() {
       let timedOut = false;
       let spawnError = "";
 
-      const child = spawn(OPENCLAW_CLI_PATH, cliArgs, {
+      const child = spawn(openClawCliPath, cliArgs, {
         cwd: process.cwd(),
         env: process.env,
         stdio: ["ignore", "pipe", "pipe"],
@@ -6095,11 +6257,12 @@ function resolveTextEmojiAllowlist() {
     commandText: string,
   ): Promise<{ route: SelfControlSmartRoute; source: "model" | "fallback"; detail?: string }> => {
     const fallbackRoute = fallbackSelfControlSmartRoute(commandText);
-    if (!SELF_CONTROL_SMART_ROUTING_ENABLED) {
+    const runtimeSettings = await getRuntimeSettings();
+    if (!SELF_CONTROL_SMART_ROUTING_ENABLED || !resolveSelfChatCodexEnabled(runtimeSettings)) {
       return {
         route: fallbackRoute,
         source: "fallback",
-        detail: "smart routing disabled",
+        detail: SELF_CONTROL_SMART_ROUTING_ENABLED ? "codex environment disconnected" : "smart routing disabled",
       };
     }
 
@@ -6121,8 +6284,17 @@ function resolveTextEmojiAllowlist() {
       let spawnError = "";
 
       const child = spawn(
-        CODEX_CLI_PATH,
-        ["exec", "--model", SELF_CONTROL_SMART_ROUTER_MODEL, "--output-last-message", outFile, prompt],
+        resolveSelfChatCodexCliPath(runtimeSettings),
+        [
+          "exec",
+          "--model",
+          resolveSelfChatCodexModel(runtimeSettings, SELF_CONTROL_SMART_ROUTER_MODEL),
+          "--sandbox",
+          resolveSelfChatCodexSandbox(runtimeSettings),
+          "--output-last-message",
+          outFile,
+          prompt,
+        ],
         {
           cwd: process.cwd(),
           env: process.env,
@@ -6198,8 +6370,13 @@ function resolveTextEmojiAllowlist() {
   const runSelfControlManagerPlannerWithCodex = async (
     commandText: string,
   ): Promise<{ plan: SelfControlManagerPlan | null; source: "model" | "fallback"; detail?: string }> => {
-    if (!SELF_CONTROL_MANAGER_ENABLED) {
-      return { plan: null, source: "fallback", detail: "manager disabled" };
+    const runtimeSettings = await getRuntimeSettings();
+    if (!SELF_CONTROL_MANAGER_ENABLED || !resolveSelfChatCodexEnabled(runtimeSettings)) {
+      return {
+        plan: null,
+        source: "fallback",
+        detail: SELF_CONTROL_MANAGER_ENABLED ? "codex environment disconnected" : "manager disabled",
+      };
     }
 
     const prompt = buildSelfControlManagerPrompt(commandText);
@@ -6219,8 +6396,17 @@ function resolveTextEmojiAllowlist() {
       let timedOut = false;
       let spawnError = "";
       const child = spawn(
-        CODEX_CLI_PATH,
-        ["exec", "--model", SELF_CONTROL_MANAGER_MODEL, "--output-last-message", outFile, prompt],
+        resolveSelfChatCodexCliPath(runtimeSettings),
+        [
+          "exec",
+          "--model",
+          resolveSelfChatCodexModel(runtimeSettings, SELF_CONTROL_MANAGER_MODEL),
+          "--sandbox",
+          resolveSelfChatCodexSandbox(runtimeSettings),
+          "--output-last-message",
+          outFile,
+          prompt,
+        ],
         {
           cwd: process.cwd(),
           env: process.env,
@@ -6357,7 +6543,7 @@ function resolveTextEmojiAllowlist() {
     }
 
     if (args.step.tool === "settings_get") {
-      const settings = await convex.query(convexRefs.settingsGet, {});
+      const settings = await convex.query(convexRefs.settingsGet, tenantConnectorArgs());
       return {
         handled: true,
         lines: [
@@ -6625,7 +6811,15 @@ function resolveTextEmojiAllowlist() {
   };
 
   const buildOpenClawStatusText = async () => {
-    const probe = await runOpenClawCli(["--version"], OPENCLAW_PROBE_TIMEOUT_MS);
+    const runtimeSettings = await getRuntimeSettings();
+    if (!resolveSelfChatOpenClawEnabled(runtimeSettings)) {
+      return formatAssistantReply("openclaw", "disconnected in Settings.");
+    }
+    const probe = await runOpenClawCli(
+      ["--version"],
+      Math.max(1_000, Math.min(resolveSelfChatOpenClawTimeoutMs(runtimeSettings), 8_000)),
+      runtimeSettings,
+    );
     const probeDetail = compactLogText(
       [probe.spawnError, probe.stderr, probe.stdout]
         .map((part) => (part || "").trim())
@@ -6652,6 +6846,7 @@ function resolveTextEmojiAllowlist() {
   const runOpenClawCommand = async (args: {
     command: OpenClawCommand;
   }): Promise<{ responseText: string; hasError: boolean }> => {
+    const runtimeSettings = await getRuntimeSettings();
     if (args.command.action === "help") {
       return {
         responseText: buildOpenClawHelpText(),
@@ -6684,8 +6879,9 @@ function resolveTextEmojiAllowlist() {
     }
 
     const cli = await runOpenClawCli(
-      ["agent", "--agent", OPENCLAW_AGENT_ID, "--message", input, "--json"],
-      OPENCLAW_AGENT_TIMEOUT_MS,
+      ["agent", "--agent", resolveSelfChatOpenClawAgentId(runtimeSettings), "--message", input, "--json"],
+      resolveSelfChatOpenClawTimeoutMs(runtimeSettings),
+      runtimeSettings,
     );
     const parsed = parseOpenClawJsonFromStdout(cli.stdout);
     const replyText =
@@ -6746,9 +6942,11 @@ function resolveTextEmojiAllowlist() {
         })
         .catch(() => undefined);
 
+      const runtimeSettings = await getRuntimeSettings();
       const cli = await runOpenClawCli(
-        ["agent", "--agent", OPENCLAW_AGENT_ID, "--message", args.command.input.trim(), "--json"],
-        OPENCLAW_AGENT_TIMEOUT_MS,
+        ["agent", "--agent", resolveSelfChatOpenClawAgentId(runtimeSettings), "--message", args.command.input.trim(), "--json"],
+        resolveSelfChatOpenClawTimeoutMs(runtimeSettings),
+        runtimeSettings,
       );
       const parsed = parseOpenClawJsonFromStdout(cli.stdout);
       const rawReplyText = extractOpenClawReplyText(parsed);
@@ -8387,9 +8585,7 @@ function resolveTextEmojiAllowlist() {
             threadId: ingest.threadId,
             includeStatusMessages: isStatusBroadcast,
           })) as ThreadContextSnapshot);
-        historyLines = (threadContext?.messages || []).map((m) => {
-          return `${m.direction === "inbound" ? "Them" : "Me"}: ${m.text}`;
-        });
+        historyLines = (threadContext?.messages || []).map(formatThreadHistoryLine);
         styleHints = threadContext?.memory?.styleNotes || [];
         styleProfile = await getStyleProfileForThread(ingest.threadId);
         adaptiveHints = await getAdaptiveHintsForPath({
@@ -8423,6 +8619,56 @@ function resolveTextEmojiAllowlist() {
           caption: effectiveParsed.kind === "document" ? effectiveParsed.caption : undefined,
         });
       }
+
+      let storefrontCatalog: StorefrontSellingSearchSnapshot | null = null;
+      const businessSignal = shouldGenerateAiText ? assessBusinessSignal(inboundTextForAi) : { intent: "none" as const, labels: [] };
+      const shouldUseStorefrontCatalog =
+        shouldGenerateAiText &&
+        runtimeSettings?.productUse === "business" &&
+        runtimeSettings?.storefrontEnabled !== false &&
+        businessSignal.intent !== "none" &&
+        !isStatusBroadcast;
+      if (shouldUseStorefrontCatalog) {
+        storefrontCatalog = (await convex
+          .query(convexRefs.storefrontSearchProductsForSelling, {
+            ...tenantConnectorArgs(),
+            query: inboundTextForAi,
+            limit: 5,
+          })
+          .catch(() => null)) as StorefrontSellingSearchSnapshot | null;
+        const storefrontHints = buildStorefrontSellingHints(storefrontCatalog);
+        if (storefrontHints.length > 0) {
+          styleHints = [
+            ...styleHints,
+            `Business intent: ${businessSignal.intent}${businessSignal.labels.length ? ` (${businessSignal.labels.join(", ")})` : ""}.`,
+            ...storefrontHints,
+          ];
+          await convex
+            .mutation(convexRefs.systemRecordEvent, {
+              source: "ai",
+              eventType: "ai.business.catalog_context",
+              threadId: ingest.threadId,
+              toolRunId,
+              detail: compactLogText(
+                `intent=${businessSignal.intent} products=${storefrontCatalog?.products.length || 0} slug=${storefrontCatalog?.profile?.slug || "none"}`,
+                280,
+              ),
+            })
+            .catch(() => undefined);
+        }
+      }
+      const effectiveRuntimeAiConfigForReply =
+        storefrontCatalog?.products.length
+          ? {
+              ...runtimeAiConfigForReply,
+              replyPolicyInstruction: [
+                runtimeAiConfigForReply.replyPolicyInstruction || "",
+                "Business selling mode: answer price, availability, delivery, payment, and buying questions using the supplied storefront catalog only. Never invent products, prices, discounts, stock, payment details, or delivery promises. If the customer wants to buy, guide them to confirm the product and use the supplied buying link.",
+              ]
+                .filter(Boolean)
+                .join("\n"),
+            }
+          : runtimeAiConfigForReply;
 
       if (shouldGenerateAiText && runtimeSettings?.conversationIntelligenceEnabled !== false) {
         conversationGuidance = (await convex
@@ -8556,9 +8802,7 @@ function resolveTextEmojiAllowlist() {
               threadId: ingest.threadId,
               includeStatusMessages: isStatusBroadcast,
             })) as ThreadContextSnapshot;
-            historyLines = (threadContext?.messages || []).map((m) => {
-              return `${m.direction === "inbound" ? "Them" : "Me"}: ${m.text}`;
-            });
+            historyLines = (threadContext?.messages || []).map(formatThreadHistoryLine);
 
             const refreshedOrchestration = await runWorkerContextToolOrchestration({
               convex,
@@ -8656,7 +8900,7 @@ function resolveTextEmojiAllowlist() {
                   vibeNotes: threadContext.grounding.vibeNotes || "",
                 }
               : undefined,
-            runtime: runtimeAiConfigForReply,
+            runtime: effectiveRuntimeAiConfigForReply,
             modelToolContext: buildModelToolContext({
               convex,
               threadId: String(ingest.threadId),
@@ -9571,9 +9815,7 @@ function resolveTextEmojiAllowlist() {
         }
       | null;
 
-    let historyLines = (threadContext?.messages || []).map((m) => {
-      return `${m.direction === "inbound" ? "Them" : "Me"}: ${m.text}`;
-    });
+    let historyLines = (threadContext?.messages || []).map(formatThreadHistoryLine);
     const persistedContextPack = normalizeContextPack(item.contextPack);
     if (persistedContextPack?.selectedHistoryLines.length) {
       const merged = [...persistedContextPack.selectedHistoryLines, ...historyLines];
@@ -10325,7 +10567,9 @@ function resolveTextEmojiAllowlist() {
     const statusStyleHints = [
       ...(persistedContextPack?.styleHints || []),
       "status",
-      "engagement",
+      "informed",
+      "current_trends",
+      "well_read",
       `demographic:${demographic}`,
       ...trendSearchPlan.interests.slice(0, 3).map((interest) => `interest:${interest}`),
       ...statusVoicePhrases.map((phrase) => `status_phrase:${phrase}`),
@@ -10334,7 +10578,7 @@ function resolveTextEmojiAllowlist() {
     ];
 
     const promptSeed = [
-      "Generate one WhatsApp status update as a confident, relatable statement.",
+      "Generate one WhatsApp status update as a confident, informed observation.",
       `Audience size: ${audienceCount}.`,
       `Audience mix: ${demographic}.`,
       `Trending topics from my chats: ${trendTheme}.`,
@@ -10343,9 +10587,11 @@ function resolveTextEmojiAllowlist() {
       ...(statusVoicePhrases.length > 0 ? [`My recurring status phrases: ${statusVoicePhrases.join(" | ")}.`] : []),
       ...(internetTrendLines.length > 0 ? [`Internet trend pulse: ${internetTrendLines.join(" | ")}.`] : []),
       `Required format: ${requestedFormat === "meme" ? "short meme caption" : "text-only status"}.`,
-      "Style: concise, playful, human, and natural.",
-      "Do not sound like marketing, spam, or clickbait.",
-      "Do not ask questions or invite answers.",
+      "Goal: make me read as well learned, culturally aware, and informed about current trends.",
+      "Use one concrete trend signal or broad pattern when available; avoid vague motivational filler.",
+      "Style: concise, thoughtful, human, and natural.",
+      "Do not sound like marketing, spam, clickbait, motivational fluff, or a random personal check-in.",
+      "Never ask questions, use question marks, or invite answers.",
       "Keep under 140 characters. Use at most one emoji.",
     ].join("\n");
     const statusContextPack =
@@ -10565,7 +10811,10 @@ function resolveTextEmojiAllowlist() {
           .catch(() => undefined);
       }
     }
-    const normalizedText = resolvedFormat === "text" ? forceDeclarativeStatusText(normalizedTextBase) : normalizedTextBase;
+    const normalizedText = forceDeclarativeStatusText(normalizedTextBase);
+    if (resolvedFormat === "meme" && mediaCaption) {
+      mediaCaption = normalizedText;
+    }
 
     const primaryConfidence = clamp(runtimeSettings?.aiPrimaryConfidence ?? 0.78, 0.01, 1);
     const fallbackConfidence = clamp(runtimeSettings?.aiFallbackConfidence ?? 0.58, 0.01, 1);
@@ -10903,6 +11152,34 @@ function resolveTextEmojiAllowlist() {
 
               let effectiveMessageText = hydrated.messageText;
               let effectiveMediaCaption = hydrated.mediaCaption || hydrated.messageText;
+              if (isStatusBroadcastSend) {
+                const declarativeStatusText = forceDeclarativeStatusText(effectiveMessageText);
+                const declarativeStatusCaption = forceDeclarativeStatusText(effectiveMediaCaption || effectiveMessageText);
+                const statusTextChanged =
+                  declarativeStatusText !== effectiveMessageText ||
+                  declarativeStatusCaption !== effectiveMediaCaption;
+                effectiveMessageText = declarativeStatusText;
+                effectiveMediaCaption = declarativeStatusCaption;
+                if (statusTextChanged) {
+                  await convex
+                    .mutation(convexRefs.outboxRewriteClaimedMessage, {
+                      ...tenantConnectorArgs(),
+                      outboxId: item.outboxId as Id<"outbox">,
+                      messageText: effectiveMessageText,
+                      mediaCaption: hydrated.sendKind === "meme" ? effectiveMediaCaption : undefined,
+                    })
+                    .catch(() => undefined);
+                  await convex
+                    .mutation(convexRefs.systemRecordEvent, {
+                      source: "worker",
+                      eventType: "status.question_suppressed",
+                      threadId: item.threadId as Id<"threads">,
+                      outboxId: item.outboxId as Id<"outbox">,
+                      detail: "Question-like status text was rewritten before send.",
+                    })
+                    .catch(() => undefined);
+                }
+              }
               const quotedMessageOptions = buildQuotedMessageOptions(hydrated);
               let threadForEmojiPolicy: ThreadContextSnapshot = null;
               let emojiPolicyApplied = false;

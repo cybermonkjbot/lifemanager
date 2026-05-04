@@ -8,6 +8,7 @@ import { convexRefs } from "../convex-refs";
 import { getWorkerCommand } from "../runtime/worker-command";
 import { ensureWorkerStopped, getWorkerRuntimeStatus } from "../runtime/worker-lock";
 import {
+  connectorPlanUnavailableMessage,
   readLocalTenantConnectorCredentials,
   tenantConnectorEnv,
   verifyLocalTenantConnectorAccess,
@@ -220,7 +221,7 @@ class IMessageSetupManager {
     if (!(await verifyLocalTenantConnectorAccess("imessage"))) {
       this.setState({
         status: "error",
-        message: "iMessage is disabled for this tenant plan. Enable it from admin entitlements before connecting.",
+        message: connectorPlanUnavailableMessage("imessage"),
       });
       return this.getState();
     }

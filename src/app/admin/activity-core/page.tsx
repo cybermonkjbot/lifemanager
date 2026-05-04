@@ -13,7 +13,7 @@ export default async function AdminActivityCorePage() {
       eyebrow="Signal Operations"
       description="Audit live activity, media events, and backend signal classification from one operator surface."
     >
-      <LiveActivityCore splineSceneUrl={splineSceneUrl} />
+      <LiveActivityCore splineSceneUrl={splineSceneUrl} showAccountFilter />
     </AdminLivePage>
   );
 }

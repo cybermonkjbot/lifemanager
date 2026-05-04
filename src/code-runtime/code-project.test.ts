@@ -192,3 +192,24 @@ end`,
   assert.equal(bundle.manifest.sdkCalls[0]?.args[0]?.kind, "string");
   assert.equal(bundle.manifest.outboundHttp[0]?.secretUrlKey, "ops.paymentWebhookUrl");
 });
+
+test("compileCodeProject accepts time helper calls in project action arguments", () => {
+  const bundle = compileCodeProject([
+    {
+      path: "main.odo",
+      content: `project PaidConsults version "1.0"
+export webhook paidConsultation
+on webhook.received as hook
+do
+  followups.create(
+    title: "Confirm paid consultation",
+    thread: hook.payload.thread,
+    due: time.tomorrow_at("09:00")
+  )
+end`,
+    },
+  ]);
+
+  assert.equal(bundle.diagnostics.length, 0);
+  assert.equal(bundle.manifest.sdkCalls.some((call) => call.call === "time.tomorrow_at"), true);
+});

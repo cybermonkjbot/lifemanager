@@ -58,6 +58,8 @@ type SetupWizardProps = {
   includeVoiceOption?: boolean;
   onWhatsAppConnectedChange?: (connected: boolean) => void;
   onInstagramConnectedChange?: (connected: boolean) => void;
+  onIMessageConnectedChange?: (connected: boolean) => void;
+  onTelegramConnectedChange?: (connected: boolean) => void;
 };
 
 type SetupWizardScreen = "options" | "whatsapp" | "pairing" | "instagram" | "imessage" | "telegram" | "voice";
@@ -342,6 +344,8 @@ function SetupWizardContent({
   includeVoiceOption = true,
   onWhatsAppConnectedChange,
   onInstagramConnectedChange,
+  onIMessageConnectedChange,
+  onTelegramConnectedChange,
 }: {
   liveState: SetupState | null | undefined;
   instagramLiveState: SetupState | null | undefined;
@@ -355,6 +359,8 @@ function SetupWizardContent({
   includeVoiceOption?: boolean;
   onWhatsAppConnectedChange?: (connected: boolean) => void;
   onInstagramConnectedChange?: (connected: boolean) => void;
+  onIMessageConnectedChange?: (connected: boolean) => void;
+  onTelegramConnectedChange?: (connected: boolean) => void;
 }) {
   const [localState, setLocalState] = useState<SetupState | null>(null);
   const [voiceState, setVoiceState] = useState<VoiceSetupState | null>(null);
@@ -400,6 +406,7 @@ function SetupWizardContent({
   const imessageConnected = imessageStatus === "connected" || imessageLiveState?.listenerActive === true;
   const imessageStatusText = !isMacLike && !imessageConnected ? "macOS Only" : imessageLiveState?.listenerActive ? "Connected" : statusLabel(imessageStatus);
   const telegramStatus = telegramLiveState?.status ?? "idle";
+  const telegramConnected = telegramStatus === "connected" || telegramLiveState?.listenerActive === true;
   const telegramStatusText = telegramLiveState?.listenerActive ? "Connected" : statusLabel(telegramStatus);
   const whatsappStatusText = state?.listenerActive ? "Connected" : statusLabel(status);
   const voiceStatusText = voiceStatusLabel(voiceState?.status);
@@ -430,6 +437,14 @@ function SetupWizardContent({
   useEffect(() => {
     onInstagramConnectedChange?.(instagramConnected);
   }, [instagramConnected, onInstagramConnectedChange]);
+
+  useEffect(() => {
+    onIMessageConnectedChange?.(imessageConnected);
+  }, [imessageConnected, onIMessageConnectedChange]);
+
+  useEffect(() => {
+    onTelegramConnectedChange?.(telegramConnected);
+  }, [telegramConnected, onTelegramConnectedChange]);
 
   const refreshVoiceState = useCallback(async () => {
     try {
@@ -950,6 +965,7 @@ function SetupWizardContent({
               realtimeEnabled={realtimeEnabled}
               setupSecret={setupSecret}
               showNotices={showNotices}
+              onConnectedChange={onIMessageConnectedChange}
             />
           </section>
 
@@ -959,6 +975,7 @@ function SetupWizardContent({
               realtimeEnabled={realtimeEnabled}
               setupSecret={setupSecret}
               showNotices={showNotices}
+              onConnectedChange={onTelegramConnectedChange}
             />
           </section>
 
@@ -1301,7 +1318,7 @@ export function VoiceSetupPanel({
     [promptText, saveVoiceSample, stopAudioAnalyzer, stopMediaStream],
   );
 
-  const startRecording = () => {
+  const startRecording = async () => {
     setRecordingError(null);
     setAutoSaveStatus("idle");
     setPreviewProgress(0);
@@ -1316,6 +1333,15 @@ export function VoiceSetupPanel({
     if (typeof MediaRecorder === "undefined") {
       setRecordingError("Browser does not support MediaRecorder.");
       return;
+    }
+
+    const desktopPermissions = window.odogwuDesktopNative;
+    if (desktopPermissions?.requestPermission) {
+      const permission = await desktopPermissions.requestPermission("microphone").catch(() => null);
+      if (permission && !permission.granted) {
+        setRecordingError(permission.message || "Microphone access is required to record a voice sample.");
+        return;
+      }
     }
 
     setRecordedBlob(null);
@@ -1692,11 +1718,13 @@ function IMessageSetupPanel({
   realtimeEnabled,
   setupSecret,
   showNotices = true,
+  onConnectedChange,
 }: {
   liveState: SetupState | null | undefined;
   realtimeEnabled: boolean;
   setupSecret?: string;
   showNotices?: boolean;
+  onConnectedChange?: (connected: boolean) => void;
 }) {
   const [localState, setLocalState] = useState<SetupState | null>(null);
   const { runAction, isPending, anyPending, notices, dismissNotice } = useActionStateRegistry();
@@ -1714,6 +1742,8 @@ function IMessageSetupPanel({
   const pendingStop = isPending("setup:imessage:stop");
   const pendingRestart = isPending("setup:imessage:restart_worker");
   const pendingReset = isPending("setup:imessage:reset");
+  const pendingFullDiskAccess = isPending("setup:imessage:full_disk_access");
+  const needsFullDiskAccess = isMac && state?.databaseReadable === false && !isConnected;
   const canStart = !anyPending && isMac;
   const canRefresh = !anyPending;
   const canStop = !pendingStop && !pendingReset && (status !== "idle" || Boolean(state?.listenerActive));
@@ -1723,6 +1753,10 @@ function IMessageSetupPanel({
     () => (setupSecret ? { [getSetupBootstrapHeaderName()]: setupSecret } : undefined),
     [setupSecret],
   );
+
+  useEffect(() => {
+    onConnectedChange?.(isConnected);
+  }, [isConnected, onConnectedChange]);
 
   const refresh = useCallback(() => {
     void runAction(
@@ -1735,6 +1769,45 @@ function IMessageSetupPanel({
       { pendingLabel: "Refreshing...", suppressSuccessNotice: true },
     );
   }, [runAction, setupHeaders]);
+
+  const requestFullDiskAccess = useCallback(() => {
+    void runAction(
+      "setup:imessage:full_disk_access",
+      async () => {
+        const permission = await window.odogwuDesktopNative?.requestPermission("full-disk-access");
+        if (!permission) {
+          throw new Error("Open macOS Privacy & Security > Full Disk Access, then allow this app or the terminal running it.");
+        }
+        if (!permission.granted && permission.settingsOpened) {
+          throw new Error("Enable Odogwu HQ, or the terminal running the dev app, in Full Disk Access. Restart the app after changing it.");
+        }
+        if (!permission.granted) {
+          throw new Error(permission.message || "Full Disk Access is required for iMessage.");
+        }
+        refresh();
+      },
+      {
+        pendingLabel: "Opening Full Disk Access...",
+        suppressSuccessNotice: true,
+      },
+    );
+  }, [refresh, runAction]);
+
+  const startIMessage = useCallback(() => {
+    if (needsFullDiskAccess) {
+      requestFullDiskAccess();
+      return;
+    }
+    void runAction(
+      "setup:imessage:start",
+      async () => {
+        const response = await fetch("/api/setup/imessage/start", { method: "POST", headers: setupHeaders });
+        const next = await readSetupResponse(response);
+        setLocalState(next);
+      },
+      { pendingLabel: "Starting iMessage..." },
+    );
+  }, [needsFullDiskAccess, requestFullDiskAccess, runAction, setupHeaders]);
 
   const postAction = (key: string, path: string, pendingLabel: string) => {
     void runAction(
@@ -1771,11 +1844,11 @@ function IMessageSetupPanel({
         <button
           className="btn btn-primary"
           type="button"
-          onClick={() => postAction("setup:imessage:start", "/api/setup/imessage/start", "Starting iMessage...")}
+          onClick={startIMessage}
           disabled={!canStart}
           aria-disabled={!canStart}
         >
-          {pendingStart ? "Starting..." : isConnected ? "Start again" : "Start iMessage"}
+          {pendingFullDiskAccess ? "Opening..." : pendingStart ? "Starting..." : needsFullDiskAccess ? "Open Full Disk Access" : isConnected ? "Start again" : "Start iMessage"}
         </button>
         <button className="btn btn-ghost" type="button" onClick={refresh} disabled={!canRefresh} aria-disabled={!canRefresh}>
           {pendingRefresh ? "Refreshing..." : "Refresh"}
@@ -1823,11 +1896,13 @@ function TelegramSetupPanel({
   realtimeEnabled,
   setupSecret,
   showNotices = true,
+  onConnectedChange,
 }: {
   liveState: SetupState | null | undefined;
   realtimeEnabled: boolean;
   setupSecret?: string;
   showNotices?: boolean;
+  onConnectedChange?: (connected: boolean) => void;
 }) {
   const [localState, setLocalState] = useState<SetupState | null>(null);
   const [phoneNumber, setPhoneNumber] = useState("");
@@ -1858,6 +1933,10 @@ function TelegramSetupPanel({
     () => (setupSecret ? { [getSetupBootstrapHeaderName()]: setupSecret } : undefined),
     [setupSecret],
   );
+
+  useEffect(() => {
+    onConnectedChange?.(isConnected);
+  }, [isConnected, onConnectedChange]);
 
   const refresh = useCallback(() => {
     void runAction(
@@ -2367,6 +2446,8 @@ function SetupWizardRealtimeWrapper({
   includeVoiceOption,
   onWhatsAppConnectedChange,
   onInstagramConnectedChange,
+  onIMessageConnectedChange,
+  onTelegramConnectedChange,
 }: {
   embedded?: boolean;
   initialScreen?: SetupWizardScreen;
@@ -2375,6 +2456,8 @@ function SetupWizardRealtimeWrapper({
   includeVoiceOption?: boolean;
   onWhatsAppConnectedChange?: (connected: boolean) => void;
   onInstagramConnectedChange?: (connected: boolean) => void;
+  onIMessageConnectedChange?: (connected: boolean) => void;
+  onTelegramConnectedChange?: (connected: boolean) => void;
 }) {
   const tenantScope = useTenantScopeArgs();
   const liveState = useQuery(api.system.setupStatus, { ...tenantScope, provider: "whatsapp" }) as SetupState | null | undefined;
@@ -2395,6 +2478,8 @@ function SetupWizardRealtimeWrapper({
       includeVoiceOption={includeVoiceOption}
       onWhatsAppConnectedChange={onWhatsAppConnectedChange}
       onInstagramConnectedChange={onInstagramConnectedChange}
+      onIMessageConnectedChange={onIMessageConnectedChange}
+      onTelegramConnectedChange={onTelegramConnectedChange}
     />
   );
 }
@@ -2408,6 +2493,8 @@ export function SetupWizard({
   includeVoiceOption = true,
   onWhatsAppConnectedChange,
   onInstagramConnectedChange,
+  onIMessageConnectedChange,
+  onTelegramConnectedChange,
 }: SetupWizardProps) {
   if (!realtimeEnabled) {
     return (
@@ -2424,6 +2511,8 @@ export function SetupWizard({
         includeVoiceOption={includeVoiceOption}
         onWhatsAppConnectedChange={onWhatsAppConnectedChange}
         onInstagramConnectedChange={onInstagramConnectedChange}
+        onIMessageConnectedChange={onIMessageConnectedChange}
+        onTelegramConnectedChange={onTelegramConnectedChange}
       />
     );
   }
@@ -2437,6 +2526,8 @@ export function SetupWizard({
       includeVoiceOption={includeVoiceOption}
       onWhatsAppConnectedChange={onWhatsAppConnectedChange}
       onInstagramConnectedChange={onInstagramConnectedChange}
+      onIMessageConnectedChange={onIMessageConnectedChange}
+      onTelegramConnectedChange={onTelegramConnectedChange}
     />
   );
 }

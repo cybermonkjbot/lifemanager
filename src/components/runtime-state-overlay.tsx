@@ -9,7 +9,9 @@ type SetupStatus =
   | "authenticating"
   | "qr_ready"
   | "code_ready"
+  | "code_required"
   | "challenge_required"
+  | "password_required"
   | "connecting"
   | "syncing"
   | "connected"
@@ -25,13 +27,16 @@ type SetupSnapshot = {
 } | null;
 
 type RuntimeState = "normal" | "paused" | "offline" | "error";
+type MessageProvider = "whatsapp" | "instagram" | "imessage" | "telegram";
 
 type ProviderIssue = {
-  provider: "whatsapp" | "instagram" | "imessage" | "telegram";
+  provider: MessageProvider;
   state: Exclude<RuntimeState, "normal" | "paused">;
   detail: string;
   hasAuth: boolean;
 };
+
+const PROVIDERS: MessageProvider[] = ["whatsapp", "instagram", "imessage", "telegram"];
 
 const TRANSITIONAL_SETUP_STATES = new Set<SetupStatus>([
   "starting",
@@ -54,15 +59,21 @@ function compactMessage(value: string | undefined, maxChars: number) {
   return `${trimmed.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
 }
 
-function evaluateProviderState(provider: "whatsapp" | "instagram" | "imessage" | "telegram", setup: SetupSnapshot) {
-  const label =
-    provider === "whatsapp"
-      ? "WhatsApp"
-      : provider === "instagram"
-        ? "Instagram"
-        : provider === "imessage"
-          ? "iMessage"
-          : "Telegram";
+function providerLabel(provider: MessageProvider) {
+  if (provider === "instagram") {
+    return "Instagram";
+  }
+  if (provider === "imessage") {
+    return "iMessage";
+  }
+  if (provider === "telegram") {
+    return "Telegram";
+  }
+  return "WhatsApp";
+}
+
+function evaluateProviderState(provider: MessageProvider, setup: SetupSnapshot) {
+  const label = providerLabel(provider);
   if (!setup) {
     return provider === "whatsapp"
       ? {
@@ -127,22 +138,20 @@ export function RuntimeStateOverlay({ canManageRuntime = true }: { canManageRunt
     return null;
   }
 
-  const whatsappSetup = runtimeStatus.providers.whatsapp as SetupSnapshot;
-  const instagramSetup = runtimeStatus.providers.instagram as SetupSnapshot;
-  const imessageSetup = runtimeStatus.providers.imessage as SetupSnapshot;
-  const telegramSetup = runtimeStatus.providers.telegram as SetupSnapshot;
-
-  const issues = [
-    evaluateProviderState("whatsapp", whatsappSetup),
-    evaluateProviderState("instagram", instagramSetup),
-    evaluateProviderState("imessage", imessageSetup),
-    evaluateProviderState("telegram", telegramSetup),
-  ].filter(Boolean) as ProviderIssue[];
+  const setupByProvider: Record<MessageProvider, SetupSnapshot> = {
+    whatsapp: runtimeStatus.providers.whatsapp as SetupSnapshot,
+    instagram: runtimeStatus.providers.instagram as SetupSnapshot,
+    imessage: runtimeStatus.providers.imessage as SetupSnapshot,
+    telegram: runtimeStatus.providers.telegram as SetupSnapshot,
+  };
+  const issues = PROVIDERS.map((provider) => evaluateProviderState(provider, setupByProvider[provider])).filter(
+    Boolean,
+  ) as ProviderIssue[];
 
   const autonomyPaused = Boolean(runtimeStatus.autonomyPaused);
   const hasError = issues.some((issue) => issue.state === "error");
   const hasOffline = issues.some((issue) => issue.state === "offline");
-  const whatsappIssue = issues.find((issue) => issue.provider === "whatsapp");
+  const reconnectIssue = issues.find((issue) => issue.state === "error") || issues.find((issue) => issue.state === "offline");
 
   const state: RuntimeState = hasError ? "error" : hasOffline ? "offline" : autonomyPaused ? "paused" : "normal";
 
@@ -155,20 +164,20 @@ export function RuntimeStateOverlay({ canManageRuntime = true }: { canManageRunt
     state === "paused"
       ? "Automation is paused. Resume it when you are ready to send automatically."
       : compactMessage(issues.map((issue) => issue.detail).join(" | "), 260);
-  const showWhatsAppReconnect = canManageRuntime && Boolean(whatsappIssue) && state !== "paused";
+  const showReconnect = canManageRuntime && Boolean(reconnectIssue) && state !== "paused";
 
-  const reconnectWhatsApp = async () => {
-    if (!whatsappIssue) {
+  const reconnectProvider = async () => {
+    if (!reconnectIssue) {
       return;
     }
     setReconnectError("");
-    if (!whatsappIssue.hasAuth) {
-      window.location.href = "/setup?connect=whatsapp";
+    if (!reconnectIssue.hasAuth) {
+      window.location.href = `/setup?connect=${reconnectIssue.provider}`;
       return;
     }
     setReconnectPending(true);
     try {
-      const response = await fetch("/api/setup/whatsapp/restart-worker", {
+      const response = await fetch(`/api/setup/${reconnectIssue.provider}/restart-worker`, {
         method: "POST",
       });
       const payload = (await response.json()) as { status?: string; message?: string; redirectPath?: string; error?: string };
@@ -177,10 +186,12 @@ export function RuntimeStateOverlay({ canManageRuntime = true }: { canManageRunt
           window.location.href = payload.redirectPath;
           return;
         }
-        throw new Error(payload.message || payload.error || "Could not reconnect WhatsApp.");
+        throw new Error(payload.message || payload.error || `Could not reconnect ${providerLabel(reconnectIssue.provider)}.`);
       }
     } catch (error) {
-      setReconnectError(error instanceof Error ? error.message : "Could not reconnect WhatsApp.");
+      setReconnectError(
+        error instanceof Error ? error.message : `Could not reconnect ${providerLabel(reconnectIssue.provider)}.`,
+      );
     } finally {
       setReconnectPending(false);
     }
@@ -199,15 +210,21 @@ export function RuntimeStateOverlay({ canManageRuntime = true }: { canManageRunt
             </p>
           ) : null}
         </div>
-        {showWhatsAppReconnect ? (
+        {showReconnect ? (
           <button
             type="button"
             className="btn btn-primary runtime-state-action"
-            onClick={reconnectWhatsApp}
+            onClick={reconnectProvider}
             disabled={reconnectPending}
             aria-disabled={reconnectPending}
           >
-            {reconnectPending ? "Reconnecting..." : whatsappIssue?.hasAuth ? "Reconnect WhatsApp" : "Connect WhatsApp"}
+            {reconnectPending
+              ? "Reconnecting..."
+              : reconnectIssue
+                ? reconnectIssue.hasAuth
+                  ? `Reconnect ${providerLabel(reconnectIssue.provider)}`
+                  : `Connect ${providerLabel(reconnectIssue.provider)}`
+                : "Reconnect"}
           </button>
         ) : null}
       </div>

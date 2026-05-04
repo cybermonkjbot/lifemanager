@@ -193,7 +193,7 @@ export async function POST(request: Request) {
   if (!gatewayApiKeyConfigured()) {
     return openAiErrorResponse(
       503,
-      "API gateway is disabled until SLM_API_GATEWAY_KEY is configured.",
+      "API access is not available for this account yet.",
       "api_error",
       "gateway_disabled",
     );

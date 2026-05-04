@@ -24,7 +24,7 @@ export type UnifiedMediaItem = {
   contextTriggers?: string[];
   contextAvoid?: string[];
   contextConfidence?: number;
-  thread?: { _id: string; jid: string; title?: string } | null;
+  thread?: { _id: string; jid: string; title?: string; provider?: "whatsapp" | "instagram" | "imessage" | "telegram" } | null;
   message?:
     | {
         _id: string;

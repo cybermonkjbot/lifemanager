@@ -226,6 +226,56 @@ export const renameProject = mutation({
   },
 });
 
+export const deleteProject = mutation({
+  args: {
+    ...tenantScopeArgs,
+    projectId: v.id("codeProjects"),
+  },
+  handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForOptionalMutation(ctx, args);
+    const project = await getOwnedProject(ctx, args.projectId, tenantId);
+    const now = Date.now();
+
+    const files = await ctx.db
+      .query("codeFiles")
+      .withIndex("by_projectId_and_updatedAt", (q) => q.eq("projectId", project._id))
+      .take(500);
+    const versions = await ctx.db
+      .query("codeProjectVersions")
+      .withIndex("by_projectId_and_createdAt", (q) => q.eq("projectId", project._id))
+      .take(500);
+    const testSuites = await ctx.db
+      .query("codeTestSuites")
+      .withIndex("by_projectId_and_createdAt", (q) => q.eq("projectId", project._id))
+      .take(500);
+    const runs = await ctx.db
+      .query("codeProjectRuns")
+      .withIndex("by_projectId_and_createdAt", (q) => q.eq("projectId", project._id))
+      .take(500);
+    const runSteps = await ctx.db
+      .query("codeProjectRunSteps")
+      .withIndex("by_projectId_and_createdAt", (q) => q.eq("projectId", project._id))
+      .take(500);
+
+    for (const row of runSteps) await ctx.db.delete(row._id);
+    for (const row of runs) await ctx.db.delete(row._id);
+    for (const row of testSuites) await ctx.db.delete(row._id);
+    for (const row of versions) await ctx.db.delete(row._id);
+    for (const row of files) await ctx.db.delete(row._id);
+    await ctx.db.delete(project._id);
+
+    await ctx.db.insert("systemEvents", {
+      tenantId,
+      source: "dashboard",
+      eventType: "code.project.deleted",
+      detail: `${project.name} deleted from Code Lab.`,
+      createdAt: now,
+    });
+
+    return { projectId: project._id, name: project.name };
+  },
+});
+
 export const saveProjectFiles = mutation({
   args: {
     ...tenantScopeArgs,

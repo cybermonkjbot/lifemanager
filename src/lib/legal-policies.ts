@@ -21,20 +21,20 @@ export const privacyPolicy: LegalPolicy = {
   title: "Privacy Policy",
   updatedLabel,
   intro: [
-    "This Privacy Policy explains how OdogwuHQ handles information when you use the private desktop console, hosted service, self-hosted mode, WhatsApp and Instagram setup, AI features, billing, and admin tools.",
+    "This Privacy Policy explains how OdogwuHQ handles information when you use the private desktop console, hosted service, self-hosted mode, connected-app setup, AI features, billing, and admin tools.",
   ],
   sections: [
     {
       heading: "What OdogwuHQ Processes",
       body: [
-        "OdogwuHQ is an AI communication double for WhatsApp and Instagram. To run the product, it may process setup details such as your email, display name, device ID, service mode, PIN configuration, channel preferences, quiet hours, autonomy mode, mimicry settings, AI provider settings, and optional profile details used to shape the assistant's voice.",
-        "When you connect WhatsApp or Instagram, OdogwuHQ may process message text, thread identifiers, contact or account labels, usernames, masked phone numbers, group status, reactions, captions, timestamps, media references, draft replies, sent-message records, follow-ups, todos, rules, guardrails, and worker or delivery status.",
+        "OdogwuHQ is an AI communication double for connected messaging apps such as WhatsApp, Instagram, iMessage, and Telegram. To run the product, it may process setup details such as your email, display name, device ID, service mode, PIN configuration, channel preferences, quiet hours, autonomy mode, mimicry settings, AI provider settings, and optional profile details used to shape the assistant's voice.",
+        "When you connect a messaging app, OdogwuHQ may process message text, thread identifiers, contact or account labels, usernames, masked phone numbers, group status, reactions, captions, timestamps, media references, draft replies, sent-message records, follow-ups, todos, rules, guardrails, and worker or delivery status.",
       ],
     },
     {
       heading: "Local Data and Sessions",
       body: [
-        "The desktop console stores local runtime state under the configured data directory, commonly .slm. This may include instance setup state, local PIN records, unlock/session secrets, encrypted connector-token material, and optional soul profile markdown. WhatsApp and Instagram login sessions may be stored in local auth directories such as .wa_auth and .ig_auth unless you configure different paths.",
+        "The desktop console stores local runtime state under the configured data directory, commonly .slm. This may include instance setup state, local PIN records, unlock/session secrets, encrypted connector-token material, connected-app session files, and optional soul profile markdown.",
         "You are responsible for protecting the device where OdogwuHQ runs, local auth folders, environment files, provider keys, backups, and logs. Anyone with access to those materials may be able to read messages, control the connector, or access the console.",
       ],
     },
@@ -89,13 +89,13 @@ export const termsAndConditions: LegalPolicy = {
   title: "Terms and Conditions",
   updatedLabel,
   intro: [
-    "These Terms govern access to and use of OdogwuHQ, including the desktop console, hosted backend, self-hosted mode, WhatsApp and Instagram connectors, AI features, billing flows, and admin tools.",
+    "These Terms govern access to and use of OdogwuHQ, including the desktop console, hosted backend, self-hosted mode, messaging connectors, AI features, billing flows, and admin tools.",
   ],
   sections: [
     {
       heading: "Using OdogwuHQ",
       body: [
-        "OdogwuHQ helps monitor WhatsApp and Instagram conversations, draft replies in your style, maintain follow-ups, manage media and status workflows, and send messages when the configured mode and controls allow it. OdogwuHQ is not WhatsApp, Instagram, Meta, Convex, Flutterwave, Azure, OpenAI, or any other third-party provider.",
+        "OdogwuHQ helps monitor connected messaging conversations, draft replies in your style, maintain follow-ups, manage supported media and status workflows, and send messages when the configured mode and controls allow it. OdogwuHQ is not WhatsApp, Instagram, iMessage, Telegram, Meta, Apple, Convex, Flutterwave, Azure, OpenAI, or any other third-party provider.",
         "You must provide accurate setup information, keep control of your email, device, local PIN, social accounts, provider credentials, and billing account, and comply with the laws and platform rules that apply to your messages and connected accounts.",
       ],
     },
@@ -119,7 +119,7 @@ export const termsAndConditions: LegalPolicy = {
       body: [
         "AI outputs may be incomplete, inaccurate, delayed, offensive, or inconsistent with your intent. Review queues, rules, guardrails, quiet hours, per-thread settings, and pause controls reduce risk but do not replace human judgment.",
         "You are responsible for messages drafted, approved, or sent by your instance, including activity in autopilot mode. Do not rely on OdogwuHQ for emergency communication, legal advice, medical advice, financial advice, therapy, or any high-stakes decision.",
-        "WhatsApp and Instagram may limit, suspend, or terminate accounts for automation, unusual activity, policy violations, or other reasons. OdogwuHQ cannot guarantee connected-account availability or message delivery.",
+        "Connected messaging providers may limit, suspend, or terminate accounts for automation, unusual activity, policy violations, or other reasons. OdogwuHQ cannot guarantee connected-account availability or message delivery.",
       ],
     },
     {

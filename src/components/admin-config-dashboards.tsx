@@ -64,6 +64,12 @@ export type AdminUserRow = {
   createdBy?: string;
 };
 
+type SeedDefaultConfigsResult = {
+  seeded: number;
+  skipped: number;
+  overwrite: boolean;
+};
+
 const PLAN_LABELS: Record<AdminPlanId, string> = {
   personal_connector: "Personal Connector",
   business_whatsapp: "Business WhatsApp",
@@ -82,6 +88,17 @@ async function readJson<T>(response: Response, fallbackMessage: string) {
     throw new Error(body.error || fallbackMessage);
   }
   return body;
+}
+
+async function seedMissingDefaultConfigs() {
+  return await readJson<{ result: SeedDefaultConfigsResult }>(
+    await fetch("/api/admin/default-configs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ overwrite: false }),
+    }),
+    "Failed to seed default configs.",
+  );
 }
 
 function ToggleField({
@@ -160,6 +177,7 @@ function AdminConfigToolbar({
 export function AdminSubscriptionConfigDashboard({ initialConfig }: { initialConfig: AdminSubscriptionConfig }) {
   const [config, setConfig] = useState(initialConfig);
   const [saving, setSaving] = useState(false);
+  const [seeding, setSeeding] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
 
@@ -184,6 +202,20 @@ export function AdminSubscriptionConfigDashboard({ initialConfig }: { initialCon
     }
   }
 
+  async function seedDefaults() {
+    setSeeding(true);
+    setNotice("");
+    setError("");
+    try {
+      const body = await seedMissingDefaultConfigs();
+      setNotice(`Seeded ${body.result.seeded} defaults; ${body.result.skipped} existing values preserved.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to seed default configs.");
+    } finally {
+      setSeeding(false);
+    }
+  }
+
   return (
     <section className="admin-config-stack">
       {error ? <p className="admin-alert" role="alert">{error}</p> : null}
@@ -192,9 +224,14 @@ export function AdminSubscriptionConfigDashboard({ initialConfig }: { initialCon
         title="Plan Setup"
         detail={`${PLAN_IDS.filter((planId) => config.plans[planId].enabled).length} plans enabled`}
         action={(
-          <button className="btn admin-primary-action" type="button" onClick={saveConfig} disabled={saving}>
-            {saving ? "Saving..." : "Save subscription config"}
-          </button>
+          <>
+            <button className="btn" type="button" onClick={seedDefaults} disabled={seeding || saving}>
+              {seeding ? "Seeding..." : "Seed missing defaults"}
+            </button>
+            <button className="btn admin-primary-action" type="button" onClick={saveConfig} disabled={saving || seeding}>
+              {saving ? "Saving..." : "Save subscription config"}
+            </button>
+          </>
         )}
       />
       <section className="admin-data-panel admin-config-panel">
@@ -237,6 +274,7 @@ export function AdminSubscriptionConfigDashboard({ initialConfig }: { initialCon
 export function AdminEntitlementsDashboard({ initialConfig }: { initialConfig: AdminSubscriptionConfig }) {
   const [config, setConfig] = useState(initialConfig);
   const [saving, setSaving] = useState(false);
+  const [seeding, setSeeding] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
 
@@ -261,6 +299,20 @@ export function AdminEntitlementsDashboard({ initialConfig }: { initialConfig: A
     }
   }
 
+  async function seedDefaults() {
+    setSeeding(true);
+    setNotice("");
+    setError("");
+    try {
+      const body = await seedMissingDefaultConfigs();
+      setNotice(`Seeded ${body.result.seeded} defaults; ${body.result.skipped} existing values preserved.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to seed default configs.");
+    } finally {
+      setSeeding(false);
+    }
+  }
+
   return (
     <section className="admin-config-stack">
       {error ? <p className="admin-alert" role="alert">{error}</p> : null}
@@ -269,9 +321,14 @@ export function AdminEntitlementsDashboard({ initialConfig }: { initialConfig: A
         title="Entitlement Matrix"
         detail="Seats, devices, channels, and monthly AI limits by plan"
         action={(
-          <button className="btn admin-primary-action" type="button" onClick={saveConfig} disabled={saving}>
-            {saving ? "Saving..." : "Save entitlements"}
-          </button>
+          <>
+            <button className="btn" type="button" onClick={seedDefaults} disabled={seeding || saving}>
+              {seeding ? "Seeding..." : "Seed missing defaults"}
+            </button>
+            <button className="btn admin-primary-action" type="button" onClick={saveConfig} disabled={saving || seeding}>
+              {saving ? "Saving..." : "Save entitlements"}
+            </button>
+          </>
         )}
       />
       <div className="admin-config-grid admin-config-grid-three">
@@ -307,6 +364,7 @@ export function AdminEntitlementsDashboard({ initialConfig }: { initialConfig: A
 export function AdminPlatformConfigDashboard({ initialConfig }: { initialConfig: AdminPlatformConfig }) {
   const [config, setConfig] = useState(initialConfig);
   const [saving, setSaving] = useState(false);
+  const [seeding, setSeeding] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const update = (patch: Partial<AdminPlatformConfig>) => setConfig((prev) => ({ ...prev, ...patch }));
@@ -384,6 +442,20 @@ export function AdminPlatformConfigDashboard({ initialConfig }: { initialConfig:
     }
   }
 
+  async function seedDefaults() {
+    setSeeding(true);
+    setNotice("");
+    setError("");
+    try {
+      const body = await seedMissingDefaultConfigs();
+      setNotice(`Seeded ${body.result.seeded} defaults; ${body.result.skipped} existing values preserved.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to seed default configs.");
+    } finally {
+      setSeeding(false);
+    }
+  }
+
   return (
     <section className="admin-config-stack">
       {error ? <p className="admin-alert" role="alert">{error}</p> : null}
@@ -392,9 +464,14 @@ export function AdminPlatformConfigDashboard({ initialConfig }: { initialConfig:
         title="Runtime Controls"
         detail="AI behavior, queue limits, rate limits, and retention"
         action={(
-          <button className="btn admin-primary-action" type="button" onClick={saveConfig} disabled={saving}>
-            {saving ? "Saving..." : "Save platform config"}
-          </button>
+          <>
+            <button className="btn" type="button" onClick={seedDefaults} disabled={seeding || saving}>
+              {seeding ? "Seeding..." : "Seed missing defaults"}
+            </button>
+            <button className="btn admin-primary-action" type="button" onClick={saveConfig} disabled={saving || seeding}>
+              {saving ? "Saving..." : "Save platform config"}
+            </button>
+          </>
         )}
       />
       <div className="admin-config-grid admin-config-grid-three">

@@ -91,6 +91,7 @@ export const registerFromDesktop = mutation({
     displayName: v.optional(v.string()),
     deviceId: v.string(),
     serviceMode: v.union(v.literal("hosted"), v.literal("self_hosted")),
+    plan: v.optional(v.union(v.literal("personal_connector"), v.literal("business_whatsapp"))),
     pinSalt: v.optional(v.string()),
     pinHash: v.optional(v.string()),
     pinUpdatedAt: v.optional(v.number()),
@@ -110,7 +111,7 @@ export const registerFromDesktop = mutation({
       .withIndex("by_emailNormalized", (q) => q.eq("emailNormalized", emailNormalized))
       .unique();
     const serviceMode = args.serviceMode;
-    const plan = serviceMode === "self_hosted" ? "self_hosted" : "personal_connector";
+    const plan = serviceMode === "self_hosted" ? "self_hosted" : args.plan || "personal_connector";
     const billingStatus = existing?.billingStatus || "trialing";
     const trialStartedAt = existing?.trialStartedAt || now;
     const trialEndsAt = existing?.trialEndsAt || trialStartedAt + TRIAL_DAYS * DAY_MS;
@@ -235,7 +236,7 @@ export const issueConnectorToken = mutation({
       .withIndex("by_emailNormalized", (q) => q.eq("emailNormalized", emailNormalized))
       .unique();
     if (!tenant || !tenant.pinHash || tenant.pinHash !== args.pinHash) {
-      throw new Error("Invalid tenant PIN.");
+      throw new Error("Invalid PIN.");
     }
 
     const now = Date.now();
@@ -245,7 +246,7 @@ export const issueConnectorToken = mutation({
 
     const deviceId = args.deviceId.trim();
     if (!deviceId) {
-      throw new Error("Device ID is required.");
+      throw new Error("This device could not be identified. Restart setup and try again.");
     }
 
     const existingDevice = await ctx.db

@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { AppConfirmDialogHost } from "@/components/app-confirm-dialog";
 import { DesktopUpdateBanner } from "@/components/desktop-update-banner";
 import "./globals.css";
 
@@ -16,6 +17,7 @@ export default function RootLayout({
     <html lang="en" className="h-full">
       <body className="min-h-full">
         {children}
+        <AppConfirmDialogHost />
         <DesktopUpdateBanner />
       </body>
     </html>

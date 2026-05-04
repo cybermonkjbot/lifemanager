@@ -11,6 +11,8 @@ const args = [
   "build",
   "src/worker/index.ts",
   "src/worker/instagram.ts",
+  "src/worker/imessage.ts",
+  "src/worker/telegram.ts",
   "--target",
   "node",
   "--format",

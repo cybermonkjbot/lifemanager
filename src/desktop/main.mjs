@@ -1,7 +1,7 @@
-import { app, BrowserWindow, clipboard, ipcMain, Menu, screen, shell } from "electron";
+import { app, BrowserWindow, clipboard, ipcMain, Menu, screen, shell, systemPreferences } from "electron";
 import { spawn } from "node:child_process";
 import { createDecipheriv, createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { accessSync, constants as fsConstants, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { request } from "node:http";
 import { dirname, join, resolve } from "node:path";
@@ -19,6 +19,14 @@ const desktopRuntimeCookieName = "odogwu_desktop_runtime";
 const desktopRuntimeHeaderName = "x-odogwu-desktop-runtime";
 const desktopRuntimeSecret = process.env.ODOGWU_DESKTOP_RUNTIME_SECRET || randomBytes(32).toString("base64url");
 const children = new Set();
+const connectorProviders = ["whatsapp", "instagram", "imessage", "telegram"];
+const connectorLabels = {
+  whatsapp: "WhatsApp",
+  instagram: "Instagram",
+  imessage: "iMessage",
+  telegram: "Telegram",
+};
+const desktopPermissionKinds = new Set(["microphone", "full-disk-access"]);
 
 let mainWindow = null;
 let currentAppUrl = "";
@@ -289,6 +297,141 @@ function desktopAppUrlPatterns(appUrl) {
   ];
 }
 
+function isDesktopAppOrigin(appUrl, origin) {
+  try {
+    const appOrigin = new URL(appUrl);
+    const targetOrigin = new URL(origin);
+    const loopback = targetOrigin.hostname === "127.0.0.1" || targetOrigin.hostname === "localhost";
+    return loopback && targetOrigin.port === appOrigin.port && targetOrigin.protocol === appOrigin.protocol;
+  } catch {
+    return false;
+  }
+}
+
+function normalizePermissionKind(kind) {
+  const normalized = String(kind || "").trim().toLowerCase();
+  return desktopPermissionKinds.has(normalized) ? normalized : "";
+}
+
+function getIMessageDatabasePath() {
+  const configured = String(process.env.SLM_IMESSAGE_DATABASE_PATH || "").trim();
+  return configured || join(app.getPath("home"), "Library", "Messages", "chat.db");
+}
+
+function canReadIMessageDatabase() {
+  if (process.platform !== "darwin") {
+    return false;
+  }
+  try {
+    accessSync(getIMessageDatabasePath(), fsConstants.R_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function getMicrophonePermissionState() {
+  if (process.platform !== "darwin" && process.platform !== "win32") {
+    return {
+      kind: "microphone",
+      status: "granted",
+      granted: true,
+      canAsk: false,
+      requiresManualGrant: false,
+      message: "Microphone access is managed by the browser runtime on this platform.",
+    };
+  }
+
+  const status = systemPreferences.getMediaAccessStatus("microphone");
+  return {
+    kind: "microphone",
+    status,
+    granted: status === "granted",
+    canAsk: process.platform === "darwin" && status === "not-determined",
+    requiresManualGrant: status === "denied" || status === "restricted",
+    message:
+      status === "granted"
+        ? "Microphone access is available."
+        : status === "not-determined"
+          ? "macOS can ask for microphone access when you record a voice sample."
+          : "Microphone access is blocked. Enable it in macOS Privacy & Security settings.",
+  };
+}
+
+function getFullDiskAccessPermissionState(settingsOpened = false) {
+  const readable = canReadIMessageDatabase();
+  return {
+    kind: "full-disk-access",
+    status: readable ? "granted" : process.platform === "darwin" ? "denied" : "restricted",
+    granted: readable,
+    canAsk: false,
+    requiresManualGrant: process.platform === "darwin" && !readable,
+    settingsOpened,
+    databasePath: process.platform === "darwin" ? getIMessageDatabasePath() : "",
+    message: readable
+      ? "Messages database access is available."
+      : process.platform === "darwin"
+        ? "Full Disk Access must be enabled for Odogwu HQ, or for the terminal running the dev app, before iMessage can start."
+        : "Full Disk Access is only needed for local iMessage on macOS.",
+  };
+}
+
+function getDesktopPermissionState(kind) {
+  if (kind === "microphone") {
+    return getMicrophonePermissionState();
+  }
+  if (kind === "full-disk-access") {
+    return getFullDiskAccessPermissionState();
+  }
+  return {
+    kind: String(kind || ""),
+    status: "unknown",
+    granted: false,
+    canAsk: false,
+    requiresManualGrant: false,
+    message: "Unknown permission.",
+  };
+}
+
+async function openDesktopPermissionSettings(kind) {
+  if (process.platform !== "darwin") {
+    return false;
+  }
+
+  const paneUrl =
+    kind === "microphone"
+      ? "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+      : "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles";
+  await shell.openExternal(paneUrl);
+  return true;
+}
+
+async function requestDesktopPermission(kind) {
+  if (kind === "microphone") {
+    if (process.platform === "darwin") {
+      const before = getMicrophonePermissionState();
+      if (before.status === "not-determined") {
+        await systemPreferences.askForMediaAccess("microphone");
+      } else if (before.requiresManualGrant) {
+        await openDesktopPermissionSettings(kind);
+      }
+      return getMicrophonePermissionState();
+    }
+    return getMicrophonePermissionState();
+  }
+
+  if (kind === "full-disk-access") {
+    const before = getFullDiskAccessPermissionState();
+    if (before.requiresManualGrant) {
+      const settingsOpened = await openDesktopPermissionSettings(kind);
+      return getFullDiskAccessPermissionState(settingsOpened);
+    }
+    return before;
+  }
+
+  return getDesktopPermissionState(kind);
+}
+
 function deriveLocalSecretKey(secret) {
   return createHash("sha256").update(`odogwu-local-secret:${secret}`).digest();
 }
@@ -374,15 +517,21 @@ function readDesktopServiceEnv(dataDir) {
 
 function getDesktopProcessEnv(extra = {}) {
   const dataDir = getDesktopDataDir();
-  const whatsappConnectorEntry = join(projectRoot, "dist", "connector", "index.mjs");
-  const instagramConnectorEntry = join(projectRoot, "dist", "connector", "instagram.mjs");
+  const connectorEntries = {
+    whatsapp: join(projectRoot, "dist", "connector", "index.mjs"),
+    instagram: join(projectRoot, "dist", "connector", "instagram.mjs"),
+    imessage: join(projectRoot, "dist", "connector", "imessage.mjs"),
+    telegram: join(projectRoot, "dist", "connector", "telegram.mjs"),
+  };
   return {
     ODOGWU_DESKTOP: "1",
     NEXT_PUBLIC_ODOGWU_DESKTOP: "1",
     ODOGWU_DESKTOP_RUNTIME_SECRET: desktopRuntimeSecret,
     ODOGWU_DESKTOP_NODE_BIN: getPackagedNodeBin(),
-    ODOGWU_CONNECTOR_WHATSAPP_ENTRY: whatsappConnectorEntry,
-    ODOGWU_CONNECTOR_INSTAGRAM_ENTRY: instagramConnectorEntry,
+    ODOGWU_CONNECTOR_WHATSAPP_ENTRY: connectorEntries.whatsapp,
+    ODOGWU_CONNECTOR_INSTAGRAM_ENTRY: connectorEntries.instagram,
+    ODOGWU_CONNECTOR_IMESSAGE_ENTRY: connectorEntries.imessage,
+    ODOGWU_CONNECTOR_TELEGRAM_ENTRY: connectorEntries.telegram,
     SLM_DATA_DIR: dataDir,
     SLM_WORKER_ID: process.env.SLM_WORKER_ID || "desktop-whatsapp",
     WHATSAPP_AUTH_PATH: ensureDir(process.env.WHATSAPP_AUTH_PATH || join(dataDir, "whatsapp-auth")),
@@ -438,7 +587,7 @@ async function startLocalAppRuntime(port) {
   return appUrl;
 }
 
-function startWhatsappWorker(appUrl) {
+function startConnectorWorker(appUrl, provider) {
   if (process.env.ODOGWU_DESKTOP_START_WORKER === "0") {
     return null;
   }
@@ -446,13 +595,16 @@ function startWhatsappWorker(appUrl) {
   const env = getDesktopProcessEnv({
     ODOGWU_DESKTOP_APP_URL: appUrl,
     SLM_APP_START_CMD: "",
+    SLM_WORKER_ID: process.env.SLM_WORKER_ID || `desktop-${provider}`,
   });
+  const label = `${connectorLabels[provider]} connector`;
+  const entryEnvName = `ODOGWU_CONNECTOR_${provider.toUpperCase()}_ENTRY`;
 
-  if (!isDev && existsSync(env.ODOGWU_CONNECTOR_WHATSAPP_ENTRY)) {
+  if (!isDev && existsSync(env[entryEnvName])) {
     return spawnManaged(
-      "WhatsApp connector",
+      label,
       getPackagedNodeBin(),
-      [env.ODOGWU_CONNECTOR_WHATSAPP_ENTRY],
+      [env[entryEnvName]],
       {
         ...env,
         ELECTRON_RUN_AS_NODE: "1",
@@ -460,7 +612,15 @@ function startWhatsappWorker(appUrl) {
     );
   }
 
-  return spawnManaged("WhatsApp connector", getBunBin(), ["run", "worker"], env);
+  const script = provider === "whatsapp" ? "worker" : `worker:${provider}`;
+  return spawnManaged(label, getBunBin(), ["run", script], env);
+}
+
+function startConnectorWorkers(appUrl) {
+  return connectorProviders
+    .filter((provider) => provider !== "imessage" || process.platform === "darwin")
+    .map((provider) => startConnectorWorker(appUrl, provider))
+    .filter(Boolean);
 }
 
 function createNavigationMenuItems(appUrl) {
@@ -902,6 +1062,29 @@ async function createWindow(appUrl) {
       });
     },
   );
+  mainWindow.webContents.session.setPermissionCheckHandler((_webContents, permission, requestingOrigin, details) => {
+    if (!isDesktopAppOrigin(appUrl, requestingOrigin)) {
+      return false;
+    }
+    if (permission === "media" && details?.mediaType === "audio") {
+      return getMicrophonePermissionState().granted;
+    }
+    return false;
+  });
+  mainWindow.webContents.session.setPermissionRequestHandler((_webContents, permission, callback, details) => {
+    const origin = details?.securityOrigin || details?.requestingUrl || details?.embeddingOrigin || "";
+    if (!isDesktopAppOrigin(appUrl, origin)) {
+      callback(false);
+      return;
+    }
+    if (permission === "media" && details?.mediaTypes?.includes("audio") && !details.mediaTypes.includes("video")) {
+      void requestDesktopPermission("microphone")
+        .then((state) => callback(Boolean(state.granted)))
+        .catch(() => callback(false));
+      return;
+    }
+    callback(false);
+  });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     try {
@@ -1023,6 +1206,31 @@ ipcMain.handle("desktop-native-open-path", async (_event, path) => {
   return { ok: true };
 });
 
+ipcMain.handle("desktop-permission-get", (_event, kind) => {
+  const permissionKind = normalizePermissionKind(kind);
+  if (!permissionKind) {
+    return getDesktopPermissionState(kind);
+  }
+  return getDesktopPermissionState(permissionKind);
+});
+
+ipcMain.handle("desktop-permission-request", async (_event, kind) => {
+  const permissionKind = normalizePermissionKind(kind);
+  if (!permissionKind) {
+    return getDesktopPermissionState(kind);
+  }
+  return await requestDesktopPermission(permissionKind);
+});
+
+ipcMain.handle("desktop-permission-open-settings", async (_event, kind) => {
+  const permissionKind = normalizePermissionKind(kind);
+  if (!permissionKind) {
+    return { ok: false, error: "Unknown permission." };
+  }
+  const opened = await openDesktopPermissionSettings(permissionKind);
+  return { ok: opened, permission: getDesktopPermissionState(permissionKind) };
+});
+
 async function stopChildren() {
   const active = [...children];
   for (const child of active) {
@@ -1071,7 +1279,7 @@ if (!gotSingleInstanceLock) {
       const port = Number(process.env.ODOGWU_DESKTOP_PORT || "") || (await findOpenPort());
       const appUrl = await startLocalAppRuntime(port);
       currentAppUrl = appUrl;
-      startWhatsappWorker(appUrl);
+      startConnectorWorkers(appUrl);
       createMenu(appUrl);
       configureDockMenu(appUrl);
       configureWindowsJumpList();

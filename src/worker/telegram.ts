@@ -383,7 +383,7 @@ async function run() {
       })
       .catch(() => null);
     if (!verifiedConnector) {
-      logger.warn("Hosted worker connector is inactive, billing expired, or Telegram is disabled for this tenant plan.");
+      logger.warn("Hosted worker connector is inactive, billing expired, or Telegram is not included in this account plan.");
       return;
     }
   }

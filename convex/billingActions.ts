@@ -141,13 +141,13 @@ export const sendSubscriptionEmail = internalAction({
     const titles = {
       subscription_active: "Your OdogwuHQ subscription is active",
       subscription_canceled: "Your OdogwuHQ subscription was canceled",
-      subscription_paused: "Your OdogwuHQ workspace is paused",
+      subscription_paused: "Your OdogwuHQ account is paused",
       payment_failed: "Your OdogwuHQ payment needs attention",
     } as const;
     const body = {
       subscription_active: `Your ${report.tenant.plan.replace(/_/g, " ")} subscription is active through ${formatDate(report.tenant.subscriptionExpiresAt)}.`,
       subscription_canceled: "Your subscription has been canceled. Hosted connectors will stay unavailable until billing is restored.",
-      subscription_paused: "Your workspace has been paused because the trial or paid subscription expired. Hosted login and connector access are now blocked until billing is restored.",
+      subscription_paused: "Your account has been paused because the trial or paid subscription expired. Hosted login and connector access are now blocked until billing is restored.",
       payment_failed: "Flutterwave reported a payment issue. Please update your payment method to avoid service pause.",
     }[args.kind];
 

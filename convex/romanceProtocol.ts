@@ -59,11 +59,8 @@ function resolveLocalDayStart(now: number) {
   return date.getTime();
 }
 
-function isDirectWhatsAppThread(thread: Pick<Doc<"threads">, "provider" | "jid" | "isGroup" | "threadKind">) {
+function isDirectMessageThread(thread: Pick<Doc<"threads">, "provider" | "jid" | "isGroup" | "threadKind">) {
   const provider = thread.provider || "whatsapp";
-  if (provider !== "whatsapp") {
-    return false;
-  }
   const kind = thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup, provider });
   return kind === "direct";
 }
@@ -480,7 +477,7 @@ async function runRomanceMorning(ctx: MutationCtx, tenantId?: Id<"tenantAccounts
     for (const threadIdRaw of candidateThreadIds) {
       const threadId = threadIdRaw as Id<"threads">;
       const thread = await ctx.db.get(threadId);
-      if (!thread || !isDirectWhatsAppThread(thread) || thread.isIgnored || thread.isArchived) {
+      if (!thread || !isDirectMessageThread(thread) || thread.isIgnored || thread.isArchived) {
         summary.skippedThreadState += 1;
         continue;
       }

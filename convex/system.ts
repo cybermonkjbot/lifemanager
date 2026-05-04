@@ -30,10 +30,20 @@ const tenantScopeArgs = {
   connectorTokenHash: v.optional(v.string()),
 };
 
+const connectionProviderValidator = v.union(
+  v.literal("all"),
+  v.literal("whatsapp"),
+  v.literal("instagram"),
+  v.literal("imessage"),
+  v.literal("telegram"),
+);
+const CONNECTION_PROVIDERS = ["whatsapp", "instagram", "imessage", "telegram"] as const;
+type ConnectionProvider = (typeof CONNECTION_PROVIDERS)[number];
+
 async function getProviderConnectionHistory(
   ctx: QueryCtx,
   tenantId: Id<"tenantAccounts"> | undefined,
-  provider: "whatsapp" | "instagram" | "imessage" | "telegram",
+  provider: ConnectionProvider,
 ) {
   const history: {
     hasConnectedBefore: boolean;
@@ -106,6 +116,30 @@ function providerLabel(provider: "whatsapp" | "instagram" | "imessage" | "telegr
   return "WhatsApp";
 }
 
+function compactActivityText(value: string | undefined, maxLength = 180) {
+  const normalized = (value || "").replace(/\s+/g, " ").trim();
+  return normalized.length > maxLength ? `${normalized.slice(0, Math.max(0, maxLength - 1)).trim()}…` : normalized;
+}
+
+function messageActivityTitle(message: {
+  direction: "inbound" | "outbound";
+  messageType?: string;
+  isStatus?: boolean;
+}) {
+  if (message.isStatus) return message.direction === "outbound" ? "Posted status" : "Viewed status";
+  if (message.messageType === "reaction") return message.direction === "outbound" ? "Reacted to post/message" : "Received reaction";
+  if (message.messageType === "image" || message.messageType === "video" || message.messageType === "audio" || message.messageType === "document") {
+    return message.direction === "outbound" ? `Sent ${message.messageType}` : `Received ${message.messageType}`;
+  }
+  return message.direction === "outbound" ? "Sent message" : "Received message";
+}
+
+function instagramActionTitle(actionKind: "like_media" | "comment_media" | "follow_user") {
+  if (actionKind === "like_media") return "Liked post";
+  if (actionKind === "comment_media") return "Commented on post";
+  return "Followed user";
+}
+
 function providerSetupMode(provider: "whatsapp" | "instagram" | "imessage" | "telegram") {
   if (provider === "instagram") {
     return "password" as const;
@@ -147,7 +181,7 @@ async function getOutboxRowsByTenantAndStatus(
   limit: number,
 ) {
   const rows = await Promise.all(
-    (["whatsapp", "instagram", undefined] as const).map((messageProvider) =>
+    (["whatsapp", "instagram", "imessage", "telegram", undefined] as const).map((messageProvider) =>
       ctx.db
         .query("outbox")
         .withIndex("by_tenantId_and_messageProvider_and_status_and_sendAt", (q) =>
@@ -1038,6 +1072,128 @@ export const logFeed = query({
   },
 });
 
+export const connectionActivityFeed = query({
+  args: {
+    ...tenantScopeArgs,
+    provider: v.optional(connectionProviderValidator),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForOptionalQuery(ctx, args);
+    const provider = args.provider || "all";
+    const limit = Math.min(Math.max(Math.round(args.limit ?? 80), 20), 160);
+    const messageLimit = Math.min(Math.max(limit * 2, 80), 260);
+    const socialLimit = Math.min(Math.max(limit, 40), 160);
+    const providers = provider === "all" ? CONNECTION_PROVIDERS : ([provider] as ConnectionProvider[]);
+
+    const recentMessages = tenantId
+      ? (
+          await Promise.all(
+            providers.flatMap((item) => {
+              const providerCandidates = item === "whatsapp" ? ([item, undefined] as const) : ([item] as const);
+              return providerCandidates.map((candidate) =>
+                ctx.db
+                  .query("messages")
+                  .withIndex("by_tenantId_and_provider_and_createdAt", (q) =>
+                    q.eq("tenantId", tenantId).eq("provider", candidate),
+                  )
+                  .order("desc")
+                  .take(messageLimit),
+              );
+            }),
+          )
+        )
+          .flat()
+          .sort((a, b) => b.createdAt - a.createdAt)
+          .slice(0, messageLimit)
+      : provider === "all"
+        ? await ctx.db.query("messages").withIndex("by_createdAt").order("desc").take(messageLimit)
+        : await ctx.db
+            .query("messages")
+            .withIndex("by_provider_and_createdAt", (q) => q.eq("provider", provider))
+            .order("desc")
+            .take(messageLimit);
+
+    const threadIds = [...new Set(recentMessages.map((message) => message.threadId))];
+    const threadById = new Map<Id<"threads">, { jid: string; title?: string; provider?: ConnectionProvider }>();
+    await Promise.all(
+      threadIds.map(async (threadId) => {
+        const thread = await ctx.db.get(threadId);
+        if (!thread) return;
+        threadById.set(threadId, {
+          jid: thread.jid,
+          title: thread.title,
+          provider: thread.provider,
+        });
+      }),
+    );
+
+    const messageItems = recentMessages.map((message) => {
+      const thread = threadById.get(message.threadId);
+      const messageProvider = (message.provider || thread?.provider || "whatsapp") as ConnectionProvider;
+      const threadLabel = thread?.title || thread?.jid || "Unknown thread";
+      const messageText = compactActivityText(message.mediaCaption || message.text || message.reactionEmoji || "", 180);
+      return {
+        id: `message:${message._id}`,
+        provider: messageProvider,
+        source: "messages",
+        activityType: message.isStatus ? "post" : message.messageType || "message",
+        title: messageActivityTitle(message),
+        detail: messageText ? `${threadLabel} · ${messageText}` : threadLabel,
+        status: message.direction === "outbound" ? "completed" : "observed",
+        createdAt: message.messageAt || message.createdAt,
+      };
+    });
+
+    const instagramActions =
+      provider === "all" || provider === "instagram"
+        ? tenantId
+          ? (
+              await Promise.all(
+                (["pending_review", "approved", "claimed", "completed", "failed", "rejected"] as const).map((status) =>
+                  ctx.db
+                    .query("instagramSocialActions")
+                    .withIndex("by_tenantId_and_status_and_createdAt", (q) => q.eq("tenantId", tenantId).eq("status", status))
+                    .order("desc")
+                    .take(socialLimit),
+                ),
+              )
+            )
+              .flat()
+              .sort((a, b) => b.createdAt - a.createdAt)
+              .slice(0, socialLimit)
+          : (
+              await Promise.all(
+                (["pending_review", "approved", "claimed", "completed", "failed", "rejected"] as const).map((status) =>
+                  ctx.db.query("instagramSocialActions").withIndex("by_status_and_createdAt", (q) => q.eq("status", status)).order("desc").take(socialLimit),
+                ),
+              )
+            )
+              .flat()
+              .sort((a, b) => b.createdAt - a.createdAt)
+              .slice(0, socialLimit)
+        : [];
+
+    const socialItems = instagramActions.map((action) => {
+      const target = action.targetUsername || action.targetUserId || action.targetMediaId || "Instagram target";
+      const comment = action.commentText ? ` · "${compactActivityText(action.commentText, 120)}"` : "";
+      const reason = action.reason ? ` · ${compactActivityText(action.reason, 160)}` : "";
+      return {
+        id: `instagram-social:${action._id}`,
+        provider: "instagram" as const,
+        source: "instagramSocialActions",
+        activityType: action.actionKind,
+        title: instagramActionTitle(action.actionKind),
+        detail: `${target}${comment}${reason}`,
+        status: action.status,
+        createdAt: action.completedAt || action.updatedAt || action.createdAt,
+      };
+    });
+
+    return [...messageItems, ...socialItems].sort((a, b) => b.createdAt - a.createdAt).slice(0, limit);
+  },
+});
+
 export const recordEvent = mutation({
   args: {
     ...tenantScopeArgs,
@@ -1192,7 +1348,9 @@ export const upsertSetupStatus = mutation({
       v.literal("authenticating"),
       v.literal("qr_ready"),
       v.literal("code_ready"),
+      v.literal("code_required"),
       v.literal("challenge_required"),
+      v.literal("password_required"),
       v.literal("connecting"),
       v.literal("syncing"),
       v.literal("connected"),

@@ -693,7 +693,7 @@ async function applyPublicEditionDefaults(outDir) {
   let onboarding = await readText(outDir, onboardingPath);
   onboarding = onboarding
     .replace(
-      "The desktop connector keeps WhatsApp on this machine. You can use the managed backend after a 7 day trial, or point the app at your own servers.",
+      "The desktop connector keeps connected-app sessions on this machine. You can use the managed backend after a 7 day trial, or point the app at your own servers.",
       "This public build starts in self-hosted mode. Use your own Convex deployment and AI keys, or use Odogwu Cloud if you want the managed backend.",
     )
     .replace(
@@ -705,12 +705,12 @@ async function applyPublicEditionDefaults(outDir) {
       "<strong>Use Odogwu Cloud</strong>\n                  <span>Managed backend, updates, and AI control plane. Opens the hosted service outside this self-hosted build.</span>",
     )
     .replace(
-      "<span>Managed trial: 7 days.</span>\n                  <span>Monthly subscription: ₦5,000.</span>\n                  <span>WhatsApp session remains local.</span>",
-      "<span>Odogwu Cloud keeps the backend, updates, and AI control plane managed for you.</span>\n                  <span>WhatsApp session remains local.</span>",
+      "<span>Managed trial: 7 days.</span>\n                  <span>Monthly subscription: ₦5,000.</span>\n                  <span>Connected-app sessions remain local.</span>",
+      "<span>Odogwu Cloud keeps the backend, updates, and AI control plane managed for you.</span>\n                  <span>Connected-app sessions remain local.</span>",
     )
     .replace(
-      "<span>7 day trial.</span>\n                <span>₦5,000/month.</span>\n                <span>WhatsApp session remains local.</span>",
-      "<span>Self-hosted edition.</span>\n                <span>Use Odogwu Cloud if you want the backend, updates, and AI control plane managed for you.</span>\n                <span>WhatsApp session remains local.</span>",
+      "<span>7 day trial.</span>\n                <span>₦5,000/month.</span>\n                <span>Connected-app sessions remain local.</span>",
+      "<span>Self-hosted edition.</span>\n                <span>Use Odogwu Cloud if you want the backend, updates, and AI control plane managed for you.</span>\n                <span>Connected-app sessions remain local.</span>",
     )
     .replace(
       '<details className="setup-advanced">',

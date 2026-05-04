@@ -226,6 +226,21 @@ test("postProcessReplyText falls back when reply is only a stock claim", () => {
   assert.equal(output, "All good.");
 });
 
+test("postProcessReplyText strips welfare tails from simple call actions", () => {
+  const output = postProcessReplyText({
+    text: "Okay, I’ll ring Mum’s number now, everything still okay?",
+    inboundText: "call mom's number instead",
+    historyLines: [
+      "Them: daddy asked me to call",
+      "Me: Alright, I’ll call Daddy now, everything okay?",
+      "Them: yes",
+      "Them: call mom's number instead",
+    ],
+  });
+
+  assert.equal(output, "Okay, I’ll ring Mum’s number now");
+});
+
 test("postProcessReplyText strips gendered wording when gender is unknown", () => {
   const output = postProcessReplyText({
     text: "Thanks bro, you handled this well.",
@@ -665,6 +680,19 @@ test("detectConversationSteeringMode flags pause requests", () => {
     historyLines: [],
   });
   assert.equal(mode, "pause");
+});
+
+test("detectConversationSteeringMode catches looping check-ins without question marks", () => {
+  const mode = detectConversationSteeringMode({
+    inboundText: "yess o",
+    historyLines: [
+      "Me: Alright then, I'll reach him shortly, hope your side is settled",
+      "Them: yes",
+      "Me: Okay, I'll ring Mum's number now, everything's okay your side",
+      "Them: yea",
+    ],
+  });
+  assert.equal(mode, "loop");
 });
 
 test("detectConversationSteeringMode flags night sign-offs as pause requests", () => {
@@ -1182,7 +1210,7 @@ test("describeInboundImageWithFallback returns heuristic fallback when Azure con
     });
     assert.equal(result.provider, "heuristic");
     assert.match(result.description, /wild status/i);
-    assert.match(result.error || "", /endpoint\/key missing/i);
+    assert.match(result.error || "", /AI setup is incomplete/i);
   } finally {
     restoreAiEnv(snapshot);
   }
@@ -3202,6 +3230,127 @@ test("generateReplyWithFallback accepts one-word binary answers in manual review
 
     assert.equal(result.guardrailBlocked, false);
     assert.equal(result.text, "Yes.");
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback accepts tiny acknowledgements for low-stakes updates", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  const requestBodies: string[] = [];
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      requestBodies.push(typeof init?.body === "string" ? init.body : "");
+      return new Response(JSON.stringify({ output_text: "Noted." }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "I sent it",
+      historyLines: ["Them: I sent it"],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "manual_review",
+      },
+    });
+
+    assert.equal(result.guardrailBlocked, false);
+    assert.equal(result.text, "Noted.");
+    assert.ok(requestBodies.some((body) => /Small acknowledgement mode/i.test(body)));
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback keeps simple relay requests compact", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  const requestBodies: string[] = [];
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      requestBodies.push(typeof init?.body === "string" ? init.body : "");
+      return new Response(JSON.stringify({ output_text: "Okay, I'll tell him now." }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "Please can you tell Abel to help me open the door?",
+      historyLines: [
+        "Them: Good evening",
+        "Them: Please can you tell Abel to help me open the door?",
+      ],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "manual_review",
+      },
+    });
+
+    assert.equal(result.guardrailBlocked, false);
+    assert.equal(result.text, "Okay, I'll tell him now.");
+    assert.ok(requestBodies.some((body) => /Simple relay\/action handoff mode/i.test(body)));
+    assert.ok(requestBodies.some((body) => /do not send a separate greeting-only check-in/i.test(body)));
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreAiEnv(snapshot);
+  }
+});
+
+test("generateReplyWithFallback keeps simple call actions compact", async () => {
+  const snapshot = clearAiEnv();
+  const originalFetch = globalThis.fetch;
+  const requestBodies: string[] = [];
+
+  process.env.AZURE_AI_ENDPOINT = "https://example.com/openai/v1";
+  process.env.AZURE_AI_API_KEY = "test-key";
+
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      requestBodies.push(typeof init?.body === "string" ? init.body : "");
+      return new Response(JSON.stringify({ output_text: "Okay, I'll call now." }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await generateReplyWithFallback({
+      inboundText: "call mom's number instead",
+      historyLines: [
+        "Them: daddy asked me to call",
+        "Me: Alright, I’ll call Daddy now, everything okay?",
+        "Them: yes",
+        "Them: call mom's number instead",
+      ],
+      styleHints: [],
+      runtime: {
+        apiStyle: "responses",
+        fallbackMode: "azure_only",
+        qualityGateMode: "manual_review",
+      },
+    });
+
+    assert.equal(result.guardrailBlocked, false);
+    assert.equal(result.text, "Okay, I'll call now.");
+    assert.ok(requestBodies.some((body) => /Simple call action mode/i.test(body)));
+    assert.ok(requestBodies.some((body) => /ignore the earlier one/i.test(body)));
   } finally {
     globalThis.fetch = originalFetch;
     restoreAiEnv(snapshot);

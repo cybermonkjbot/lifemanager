@@ -26,12 +26,12 @@ export function isTenantBillingActive(tenant: TenantBillingSnapshot, now = Date.
 
 export function tenantBillingInactiveReason(tenant: TenantBillingSnapshot, now = Date.now()) {
   if (tenant.billingStatus === "trialing" && tenant.trialEndsAt < now) {
-    return "Tenant trial has expired.";
+    return "Your trial has ended. Choose a plan to keep using hosted features.";
   }
   if (tenant.billingStatus === "active" && typeof tenant.subscriptionExpiresAt === "number" && tenant.subscriptionExpiresAt <= now) {
-    return "Tenant subscription has expired.";
+    return "Your subscription has ended. Restore billing to keep using hosted features.";
   }
-  return "Tenant subscription is not active.";
+  return "Your account needs an active subscription to use hosted features.";
 }
 
 function connectorConfigKey(provider: ConnectorProvider) {
@@ -48,13 +48,30 @@ function connectorConfigKey(provider: ConnectorProvider) {
 }
 
 function defaultConnectorEnabled(plan: TenantBillingSnapshot["plan"], provider: ConnectorProvider) {
+  if (plan === "self_hosted") {
+    return true;
+  }
   if (provider === "whatsapp") {
     return true;
   }
   if (provider === "instagram") {
-    return plan === "business_whatsapp" || plan === "self_hosted";
+    return plan === "business_whatsapp";
   }
-  return false;
+  return provider === "imessage" || provider === "telegram";
+}
+
+export function connectorPlanUnavailableMessage(provider: ConnectorProvider | undefined) {
+  const label =
+    provider === "whatsapp"
+      ? "WhatsApp"
+      : provider === "instagram"
+        ? "Instagram"
+        : provider === "imessage"
+          ? "iMessage"
+          : provider === "telegram"
+            ? "Telegram"
+            : "This connector";
+  return `${label} isn't included in this account's current plan. Contact support if you think you should have access.`;
 }
 
 export async function isTenantConnectorEnabled(
@@ -85,7 +102,7 @@ export async function assertTenantConnectorEnabled(
   provider: ConnectorProvider | undefined,
 ) {
   if (!(await isTenantConnectorEnabled(ctx, tenant, provider))) {
-    throw new Error(`${provider || "Connector"} is disabled for this tenant plan.`);
+    throw new Error(connectorPlanUnavailableMessage(provider));
   }
 }
 
@@ -99,7 +116,32 @@ export async function assertTenantBillingActive(
   }
   const tenant = await ctx.db.get(tenantId);
   if (!tenant || !isTenantBillingActive(tenant, now)) {
-    throw new Error(tenant ? tenantBillingInactiveReason(tenant, now) : "Tenant subscription is not active.");
+    throw new Error(tenant ? tenantBillingInactiveReason(tenant, now) : "Your account needs an active subscription to use hosted features.");
+  }
+}
+
+export async function isTenantBusinessSellingEnabled(
+  ctx: QueryCtx | MutationCtx,
+  tenantId: Id<"tenantAccounts"> | undefined,
+  now = Date.now(),
+) {
+  if (!tenantId) {
+    return true;
+  }
+  const tenant = await ctx.db.get(tenantId);
+  if (!tenant || !isTenantBillingActive(tenant, now)) {
+    return false;
+  }
+  return tenant.serviceMode === "self_hosted" || tenant.plan === "business_whatsapp";
+}
+
+export async function assertTenantBusinessSellingEnabled(
+  ctx: QueryCtx | MutationCtx,
+  tenantId: Id<"tenantAccounts"> | undefined,
+  now = Date.now(),
+) {
+  if (!(await isTenantBusinessSellingEnabled(ctx, tenantId, now))) {
+    throw new Error("Storefront, livechat, and order intents are included in the business plan.");
   }
 }
 

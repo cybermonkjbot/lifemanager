@@ -12,6 +12,28 @@ type AutonomyControlsProps = {
   fallbackPaused?: boolean;
 };
 
+type MessageProvider = "whatsapp" | "instagram" | "imessage" | "telegram";
+
+type SetupSnapshot = {
+  hasAuth?: boolean;
+  listenerActive?: boolean;
+} | null;
+
+const PROVIDERS: MessageProvider[] = ["whatsapp", "instagram", "imessage", "telegram"];
+
+function providerLabel(provider: MessageProvider) {
+  if (provider === "instagram") {
+    return "Instagram";
+  }
+  if (provider === "imessage") {
+    return "iMessage";
+  }
+  if (provider === "telegram") {
+    return "Telegram";
+  }
+  return "WhatsApp";
+}
+
 function ControlsView({
   autonomyPaused,
   statusTone,
@@ -21,6 +43,7 @@ function ControlsView({
   pendingLabel,
   restartPending,
   restartPendingLabel,
+  restartLabel,
   canRestartWorker,
   error,
   onToggle,
@@ -36,6 +59,7 @@ function ControlsView({
   pendingLabel?: string;
   restartPending?: boolean;
   restartPendingLabel?: string;
+  restartLabel?: string;
   canRestartWorker?: boolean;
   error?: string;
   onToggle?: () => void;
@@ -82,7 +106,7 @@ function ControlsView({
           disabled={restartPending || !canRestartWorker}
           aria-disabled={restartPending || !canRestartWorker}
         >
-          {restartPending ? restartPendingLabel || "Restarting..." : "Restart Worker"}
+          {restartPending ? restartPendingLabel || "Restarting..." : restartLabel || "Restart Worker"}
         </button>
       ) : null}
 
@@ -100,8 +124,14 @@ function ControlsRealtime({ fallbackPaused }: { fallbackPaused?: boolean }) {
   const runtimeStatus = useRuntimeStatus();
   const pauseAutonomy = useMutation(api.system.pauseAutonomy);
   const resumeAutonomy = useMutation(api.system.resumeAutonomy);
-  const setup = runtimeStatus?.providers.whatsapp;
   const statusLoading = runtimeStatus === undefined;
+  const setupByProvider: Record<MessageProvider, SetupSnapshot | undefined> = {
+    whatsapp: runtimeStatus?.providers.whatsapp,
+    instagram: runtimeStatus?.providers.instagram,
+    imessage: runtimeStatus?.providers.imessage,
+    telegram: runtimeStatus?.providers.telegram,
+  };
+  const restartableProviders = PROVIDERS.filter((provider) => setupByProvider[provider]?.hasAuth === true);
 
   const billingBlocked = runtimeStatus?.billing.blocked === true;
   const autonomyPaused = billingBlocked || (runtimeStatus?.autonomyPaused ?? fallbackPaused ?? false);
@@ -122,7 +152,9 @@ function ControlsRealtime({ fallbackPaused }: { fallbackPaused?: boolean }) {
   const { runAction, getRecord, notices, dismissNotice } = useActionStateRegistry();
   const record = getRecord(key);
   const restartRecord = getRecord(restartKey);
-  const canRestartWorker = Boolean(setup?.hasAuth);
+  const canRestartWorker = restartableProviders.length > 0;
+  const restartLabel =
+    restartableProviders.length === 1 ? `Restart ${providerLabel(restartableProviders[0])}` : "Restart Workers";
 
   const toggle = () => {
     void runAction(
@@ -145,17 +177,28 @@ function ControlsRealtime({ fallbackPaused }: { fallbackPaused?: boolean }) {
     void runAction(
       restartKey,
       async () => {
-        const response = await fetch("/api/setup/whatsapp/restart-worker", {
-          method: "POST",
-        });
-        const payload = (await response.json()) as { status?: string; message?: string; error?: string };
-        if (!response.ok || payload.status === "error") {
-          throw new Error(payload.message || payload.error || "Failed to restart worker.");
+        if (restartableProviders.length === 0) {
+          throw new Error("No connected providers have saved credentials to restart.");
+        }
+        const results = await Promise.all(
+          restartableProviders.map(async (provider) => {
+            const response = await fetch(`/api/setup/${provider}/restart-worker`, {
+              method: "POST",
+            });
+            const payload = (await response.json()) as { status?: string; message?: string; error?: string };
+            if (!response.ok || payload.status === "error") {
+              throw new Error(`${providerLabel(provider)}: ${payload.message || payload.error || "Failed to restart worker."}`);
+            }
+            return provider;
+          }),
+        );
+        if (results.length === 0) {
+          throw new Error("No workers were restarted.");
         }
       },
       {
-        pendingLabel: "Restarting worker...",
-        successMessage: "Worker restart requested.",
+        pendingLabel: restartableProviders.length === 1 ? `Restarting ${providerLabel(restartableProviders[0])}...` : "Restarting workers...",
+        successMessage: restartableProviders.length === 1 ? `${providerLabel(restartableProviders[0])} restart requested.` : "Worker restarts requested.",
       },
     );
   };
@@ -171,6 +214,7 @@ function ControlsRealtime({ fallbackPaused }: { fallbackPaused?: boolean }) {
         pendingLabel={record.pendingLabel}
         restartPending={restartRecord.pending || statusLoading}
         restartPendingLabel={restartRecord.pendingLabel}
+        restartLabel={restartLabel}
         canRestartWorker={canRestartWorker && !statusLoading}
         error={record.error || (billingBlocked ? runtimeStatus?.billing.reason : undefined)}
         onToggle={statusLoading ? undefined : toggle}

@@ -39,6 +39,12 @@ export function setupBootstrapConfigured() {
   return getSetupBootstrapSecret().length > 0;
 }
 
+export function remoteSetupAccessMessage() {
+  return setupBootstrapConfigured()
+    ? "This remote setup link is missing or invalid. Open setup again from an approved device."
+    : "Remote setup is not available yet. Complete setup on this device, or ask an administrator to enable remote setup.";
+}
+
 export function isLoopbackHostname(hostname: string | null | undefined) {
   const normalized = normalizeHostname(hostname);
   return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1" || normalized === "[::1]";

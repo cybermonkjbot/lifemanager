@@ -5,6 +5,7 @@ import {
   hasRecentManualIntervention,
   isManualInterventionMessage,
   resolveClaimOutreachMode,
+  resolveOutboxClaimLeaseMs,
   resolveOutboxFreshnessReferenceAt,
 } from "./outbox";
 
@@ -124,6 +125,12 @@ test("resolveClaimOutreachMode prefers explicit outreachMode and falls back to r
     }),
     "proactive",
   );
+});
+
+test("resolveOutboxClaimLeaseMs extends status posts beyond the default lease", () => {
+  assert.equal(resolveOutboxClaimLeaseMs({ baseLeaseMs: 45_000 }), 45_000);
+  assert.equal(resolveOutboxClaimLeaseMs({ isStatusPost: true, baseLeaseMs: 45_000 }), 10 * 60 * 1000);
+  assert.equal(resolveOutboxClaimLeaseMs({ isStatusPost: true, baseLeaseMs: 12 * 60 * 1000 }), 10 * 60 * 1000);
 });
 
 test("isManualInterventionMessage detects live outbound without toolRunId", () => {

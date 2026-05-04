@@ -3,7 +3,12 @@ import { LiveMemes } from "@/components/live-memes";
 
 export default async function MemesPage() {
   return (
-    <DashboardPage title="Memes" subtitle="Generate meme assets, preview outputs, and keep sending under review.">
+    <DashboardPage
+      title="Memes"
+      subtitle="Generate meme assets, preview outputs, and keep sending under review."
+      businessTitle="Campaign Media"
+      businessSubtitle="Generate reusable offer, campaign, and customer-facing media under review."
+    >
       <LiveMemes />
     </DashboardPage>
   );

@@ -1,6 +1,7 @@
 "use client";
 
 import { ActionNotices } from "@/components/action-notices";
+import { confirmAppDialog } from "@/components/app-confirm-dialog";
 import { LoadingIndicator } from "@/components/loading-state";
 import { useTenantScopeArgs } from "@/components/tenant-scope-provider";
 import { UIModal } from "@/components/ui-modal";
@@ -10,6 +11,7 @@ import {
   runCodeProjectTests,
   type CodeProjectBundle,
   type CodeProjectFile,
+  type CodeProjectTestResult,
   type ProjectDiagnostic,
 } from "@/code-runtime";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
@@ -22,7 +24,7 @@ import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { useAction, useMutation, useQuery } from "convex/react";
 import { useRouter } from "next/navigation";
-import type { ButtonHTMLAttributes, MutableRefObject, ReactNode } from "react";
+import type { ButtonHTMLAttributes, MouseEvent, MutableRefObject, ReactNode } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 type FileDialogMode = "create" | "rename" | "duplicate";
@@ -30,6 +32,12 @@ type FileDialogState = {
   mode: FileDialogMode;
   path: string;
   sourcePath?: string;
+} | null;
+
+type ProjectContextMenuState = {
+  projectId: Id<"codeProjects">;
+  x: number;
+  y: number;
 } | null;
 
 type CodeIconName =
@@ -835,6 +843,30 @@ function diagnosticLine(diagnostic: ProjectDiagnostic) {
   return `${diagnostic.filePath}:${diagnostic.line}:${diagnostic.column} ${diagnostic.severity} ${diagnostic.message}`;
 }
 
+function formatProjectTestOutput(result: CodeProjectTestResult & { testSuiteId?: string }) {
+  const lines = [
+    result.passed ? "Code Lab tests passed." : "Code Lab tests failed.",
+    `${result.bundle.files.length} file(s) checked, ${result.bundle.manifest.handlers.length} handler(s), ${result.bundle.manifest.sdkCalls.length} SDK call(s).`,
+  ];
+
+  if (result.testSuiteId) lines.push(`suite ${result.testSuiteId}`);
+
+  if (result.diagnostics.length) {
+    lines.push("");
+    lines.push(...result.diagnostics.map(diagnosticLine));
+  } else {
+    lines.push("No diagnostics.");
+  }
+
+  if (result.trace.length) {
+    lines.push("");
+    lines.push("Trace:");
+    lines.push(...result.trace.map((item) => `${item.status.toUpperCase()} ${item.summary}`));
+  }
+
+  return lines.join("\n");
+}
+
 function codeCompletions(filePathsRef: { current: string[] }) {
   return (context: CompletionContext) => {
     const word = context.matchBefore(/[A-Za-z_./]*/);
@@ -1076,6 +1108,7 @@ export function CodeLab() {
   const projects = useQuery(api.code.listProjects, { ...tenantScope, limit: 80 }) as CodeProjectRow[] | undefined;
   const createProject = useMutation(api.code.createProject);
   const renameProject = useMutation(api.code.renameProject);
+  const deleteProject = useMutation(api.code.deleteProject);
   const saveProjectFiles = useMutation(api.code.saveProjectFiles);
   const publishProject = useMutation(api.code.publishProject);
   const setProjectEnabled = useMutation(api.code.setProjectEnabled);
@@ -1098,6 +1131,7 @@ export function CodeLab() {
   const [canvasPreview, setCanvasPreview] = useState<GeneratedCanvasPreview | null>(null);
   const [cursorOffset, setCursorOffset] = useState(0);
   const [aiSuggestion, setAiSuggestion] = useState<string | null>(null);
+  const [projectContextMenu, setProjectContextMenu] = useState<ProjectContextMenuState>(null);
   const detail = useQuery(
     api.code.getProject,
     selectedProjectId ? { ...tenantScope, projectId: selectedProjectId, runLimit: 20 } : "skip",
@@ -1132,6 +1166,22 @@ export function CodeLab() {
     };
   }, [detail, loadedProjectId]);
 
+  useEffect(() => {
+    if (!projectContextMenu) return;
+    const close = () => setProjectContextMenu(null);
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
+    window.addEventListener("click", close);
+    window.addEventListener("contextmenu", close);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("contextmenu", close);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [projectContextMenu]);
+
   const activeFile = files.find((file) => file.path === activePath) || files[0] || starterProjectFiles[0];
   const compileResult = useMemo(() => compileCodeProject(files), [files]);
   const localTestResult = useMemo(() => runCodeProjectTests(files), [files]);
@@ -1148,6 +1198,7 @@ export function CodeLab() {
   const activeStatus = selectedProjectId ? detail?.project?.status || "draft" : "draft";
   const webhookBase = detail?.project?.webhookSlug ? `/api/code/webhooks/${detail.project.webhookSlug}` : "/api/code/webhooks/{projectSlug}";
   const activeFileDirty = savedFileContentByPath.get(activeFile.path) !== activeFile.content;
+  const contextProject = projects?.find((project) => project._id === projectContextMenu?.projectId) || null;
 
   const writeTerminal = (label: string, value?: unknown) => {
     const timestamp = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date());
@@ -1168,6 +1219,7 @@ export function CodeLab() {
   };
 
   const startProjectRename = (project: CodeProjectRow) => {
+    setProjectContextMenu(null);
     setEditingProjectId(project._id);
     setEditingProjectName(project.name);
   };
@@ -1194,6 +1246,46 @@ export function CodeLab() {
     cancelProjectRename();
   };
 
+  const openProjectContextMenu = (event: MouseEvent, project: CodeProjectRow) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setSelectedProjectId(project._id);
+    setLoadedProjectId(null);
+    setProjectContextMenu({
+      projectId: project._id,
+      x: Math.min(event.clientX, window.innerWidth - 220),
+      y: Math.min(event.clientY, window.innerHeight - 156),
+    });
+  };
+
+  const onDeleteProject = async (project: CodeProjectRow) => {
+    setProjectContextMenu(null);
+    const confirmed = await confirmAppDialog({
+      title: "Delete project?",
+      message: `${project.name} and its files, test runs, and versions will be removed.`,
+      confirmLabel: "Delete",
+      tone: "danger",
+    });
+    if (!confirmed) return;
+
+    void runAction(
+      "code-project:delete",
+      async () => {
+        await deleteProject({ ...tenantScope, projectId: project._id });
+        if (selectedProjectId === project._id) {
+          setSelectedProjectId(null);
+          setLoadedProjectId(null);
+          setFiles(cleanProjectFiles());
+          selectActivePath("main.odo");
+          setLastSavedFilesJson("");
+          setDescription("");
+        }
+        writeTerminal("delete", `${project.name} deleted.`);
+      },
+      { pendingLabel: "Deleting project...", successMessage: "Project deleted." },
+    );
+  };
+
   const onCreateProject = () => {
     void runAction(
       "code-project:create",
@@ -1205,7 +1297,7 @@ export function CodeLab() {
         selectActivePath("main.odo");
         setLastSavedFilesJson(stableFilesJson(result.files));
       },
-      { pendingLabel: "Creating project...", successMessage: "Project workspace created." },
+      { pendingLabel: "Creating project...", successMessage: "Project account created." },
     );
   };
 
@@ -1233,7 +1325,7 @@ export function CodeLab() {
       async () => {
         const result = await runProjectTestsRemote({ ...tenantScope, projectId: selectedProjectId || undefined, files });
         setLocalTestJson(JSON.stringify(result, null, 2));
-        writeTerminal("test", result);
+        writeTerminal("test", formatProjectTestOutput(result));
       },
       { pendingLabel: "Running project tests...", successMessage: "Project tests completed." },
     );
@@ -1266,7 +1358,7 @@ export function CodeLab() {
         writeTerminal("save", `${files.length} file(s) synced to Convex.`);
         const tests = await runProjectTestsRemote({ ...tenantScope, projectId, files });
         setLocalTestJson(JSON.stringify(tests, null, 2));
-        writeTerminal("test", tests);
+        writeTerminal("test", formatProjectTestOutput(tests));
         if (!tests.passed) throw new Error("Tests failed. Fix inline diagnostics before publishing.");
         await publishProject({ ...tenantScope, projectId });
         writeTerminal("publish", "Done coding flow completed.");
@@ -1333,9 +1425,15 @@ export function CodeLab() {
     closeFileDialog();
   };
 
-  const onDeleteFile = () => {
+  const onDeleteFile = async () => {
     if (activeFile.path === "main.odo" || files.length <= 1) return;
-    if (!window.confirm(`Delete ${activeFile.path}?`)) return;
+    const confirmed = await confirmAppDialog({
+      title: "Delete file?",
+      message: activeFile.path,
+      confirmLabel: "Delete",
+      tone: "danger",
+    });
+    if (!confirmed) return;
     setFiles((current) => current.filter((file) => file.path !== activeFile.path));
     selectActivePath("main.odo");
   };
@@ -1346,15 +1444,20 @@ export function CodeLab() {
     selectActivePath(restored.some((file) => file.path === "main.odo") ? "main.odo" : restored[0]?.path || "main.odo");
   };
 
-  const onToggleEnabled = (enabled: boolean) => {
-    if (!selectedProjectId) return;
+  const onToggleProjectEnabled = (projectId: Id<"codeProjects">, enabled: boolean) => {
+    setProjectContextMenu(null);
     void runAction(
       `code-project:enabled:${enabled}`,
       async () => {
-        await setProjectEnabled({ ...tenantScope, projectId: selectedProjectId, enabled });
+        await setProjectEnabled({ ...tenantScope, projectId, enabled });
       },
       { pendingLabel: enabled ? "Enabling..." : "Disabling...", successMessage: enabled ? "Project enabled." : "Project disabled." },
     );
+  };
+
+  const onToggleEnabled = (enabled: boolean) => {
+    if (!selectedProjectId) return;
+    onToggleProjectEnabled(selectedProjectId, enabled);
   };
 
   const saveRecord = getRecord("code-project:save");
@@ -1484,7 +1587,7 @@ export function CodeLab() {
           <CodeIconButton className="btn btn-ghost" icon="spark" label="Load starter project" onClick={() => {
             setFiles(starterProjectFiles);
             selectActivePath("main.odo");
-            writeTerminal("starter", "Starter project loaded into the workspace.");
+            writeTerminal("starter", "Starter project loaded into the account.");
           }}>
             Starter
           </CodeIconButton>
@@ -1511,7 +1614,7 @@ export function CodeLab() {
       <div className="code-lab-grid">
         <aside className="code-lab-sidebar">
           <div className="code-lab-sidebar-head">
-            <span className="queue-meta">Workspace</span>
+            <span className="queue-meta">Account</span>
             {projects === undefined ? <LoadingIndicator label="Loading..." /> : null}
           </div>
           <button className="btn btn-secondary code-lab-wide-button" type="button" onClick={onCreateProject} disabled={createRecord.pending}>
@@ -1527,6 +1630,7 @@ export function CodeLab() {
                 setSelectedProjectId(project._id);
                 setLoadedProjectId(null);
               }}
+              onContextMenu={(event) => openProjectContextMenu(event, project)}
               onKeyDown={(event) => {
                 if (event.key !== "Enter" && event.key !== " ") return;
                 event.preventDefault();
@@ -1569,6 +1673,29 @@ export function CodeLab() {
               <span>{project.status} · {formatDate(project.updatedAt)}</span>
             </div>
           ))}
+          {contextProject ? (
+            <div
+              className="code-project-context-menu"
+              role="menu"
+              style={{ left: projectContextMenu?.x, top: projectContextMenu?.y }}
+              onClick={(event) => event.stopPropagation()}
+              onContextMenu={(event) => event.preventDefault()}
+            >
+              <button type="button" role="menuitem" onClick={() => startProjectRename(contextProject)}>
+                Rename
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => onToggleProjectEnabled(contextProject._id, contextProject.status !== "published")}
+              >
+                {contextProject.status === "published" ? "Disable" : "Enable"}
+              </button>
+              <button className="danger" type="button" role="menuitem" onClick={() => void onDeleteProject(contextProject)}>
+                Delete
+              </button>
+            </div>
+          ) : null}
 
           <div className="code-lab-sidebar-section">Files</div>
           <div className="code-file-actions">
@@ -1607,7 +1734,7 @@ export function CodeLab() {
               <CodeIconButton icon="spark" label="Load starter project" onClick={() => {
                 setFiles(starterProjectFiles);
                 selectActivePath("main.odo");
-                writeTerminal("starter", "Starter project loaded into the workspace.");
+                writeTerminal("starter", "Starter project loaded into the account.");
               }} />
               <CodeIconButton icon="diagram" label={canvasRecord.pending ? "Drawing canvas" : "Generate canvas"} onClick={onGenerateCanvas} disabled={canvasRecord.pending} />
               <CodeIconButton icon="wand" label={suggestRecord.pending ? "Thinking" : "Suggest code"} onClick={onSuggestCode} disabled={suggestRecord.pending} />
@@ -1623,7 +1750,7 @@ export function CodeLab() {
               <span>Terminal</span>
               <CodeIconButton icon="terminal" label="Preview terminal output" onClick={() => {
                 setLocalTestJson(JSON.stringify(localTestResult, null, 2));
-                writeTerminal("preview", localTestResult);
+                writeTerminal("preview", formatProjectTestOutput(localTestResult));
               }} />
               <CodeIconButton icon={terminalOpen ? "eyeOff" : "eye"} label={terminalOpen ? "Hide terminal" : "Show terminal"} onClick={() => setTerminalOpen((open) => !open)} />
               <CodeIconButton icon="trash" label="Clear terminal" onClick={() => {

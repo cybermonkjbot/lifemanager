@@ -26,6 +26,10 @@ type AuthenticatedTenantIdentity = {
   isSuperAdmin: boolean;
 };
 
+const WORKSPACE_ACCESS_DENIED_MESSAGE = "You do not have access to this account.";
+const CONNECTOR_ACCESS_MESSAGE = "This account connection could not be verified. Reconnect the app and try again.";
+const BILLING_REQUIRED_MESSAGE = "Your account needs an active subscription to use hosted features.";
+
 function requireConvexAuthForTenantArgs() {
   return process.env.ODOGWU_REQUIRE_CONVEX_AUTH === "1";
 }
@@ -56,10 +60,10 @@ async function resolveTenantFromAuthenticatedIdentity(
     return args.tenantId || authIdentity.tenantId;
   }
   if (!authIdentity.tenantId) {
-    throw new Error("Tenant access denied.");
+    throw new Error(WORKSPACE_ACCESS_DENIED_MESSAGE);
   }
   if (args.tenantId && args.tenantId !== authIdentity.tenantId) {
-    throw new Error("Tenant access denied.");
+    throw new Error(WORKSPACE_ACCESS_DENIED_MESSAGE);
   }
   return authIdentity.tenantId;
 }
@@ -77,7 +81,7 @@ export async function resolveTenantConnectorForMutation(
 ): Promise<VerifiedTenantConnector | undefined> {
   if (!args.connectorTokenHash) {
     if (args.tenantId) {
-      throw new Error("Connector token is required for tenant-scoped writes.");
+      throw new Error(CONNECTOR_ACCESS_MESSAGE);
     }
     return undefined;
   }
@@ -88,15 +92,15 @@ export async function resolveTenantConnectorForMutation(
     .withIndex("by_tokenHash", (q) => q.eq("tokenHash", args.connectorTokenHash || ""))
     .unique();
   if (!token || token.status !== "active" || (token.expiresAt && token.expiresAt <= now)) {
-    throw new Error("Invalid connector token.");
+    throw new Error(CONNECTOR_ACCESS_MESSAGE);
   }
   if (args.tenantId && args.tenantId !== token.tenantId) {
-    throw new Error("Connector token does not belong to this tenant.");
+    throw new Error(CONNECTOR_ACCESS_MESSAGE);
   }
 
   const tenant = await ctx.db.get(token.tenantId);
   if (!tenant || !isTenantBillingActive(tenant, now)) {
-    throw new Error(tenant ? tenantBillingInactiveReason(tenant, now) : "Tenant subscription is not active.");
+    throw new Error(tenant ? tenantBillingInactiveReason(tenant, now) : BILLING_REQUIRED_MESSAGE);
   }
   await assertTenantConnectorEnabled(ctx, tenant, asConnectorProvider(args.provider) || asConnectorProvider(args.messageProvider));
 
@@ -136,15 +140,15 @@ export async function resolveTenantForQuery(
     .withIndex("by_tokenHash", (q) => q.eq("tokenHash", args.connectorTokenHash || ""))
     .unique();
   if (!token || token.status !== "active" || (token.expiresAt && token.expiresAt <= now)) {
-    throw new Error("Invalid connector token.");
+    throw new Error(CONNECTOR_ACCESS_MESSAGE);
   }
   if (args.tenantId && args.tenantId !== token.tenantId) {
-    throw new Error("Connector token does not belong to this tenant.");
+    throw new Error(CONNECTOR_ACCESS_MESSAGE);
   }
 
   const tenant = await ctx.db.get(token.tenantId);
   if (!tenant || !isTenantBillingActive(tenant, now)) {
-    throw new Error(tenant ? tenantBillingInactiveReason(tenant, now) : "Tenant subscription is not active.");
+    throw new Error(tenant ? tenantBillingInactiveReason(tenant, now) : BILLING_REQUIRED_MESSAGE);
   }
   await assertTenantConnectorEnabled(ctx, tenant, asConnectorProvider(args.provider) || asConnectorProvider(args.messageProvider));
   return token.tenantId;
@@ -158,6 +162,6 @@ export function assertTenantOwned(
     return;
   }
   if (documentTenantId !== authorizedTenantId) {
-    throw new Error("Tenant access denied.");
+    throw new Error(WORKSPACE_ACCESS_DENIED_MESSAGE);
   }
 }

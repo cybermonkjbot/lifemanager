@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { ConvexHttpClient } from "convex/browser";
-import type { Message } from "@photon-ai/imessage-kit";
+import type { Chat, Message } from "@photon-ai/imessage-kit";
 import type { Id } from "../../convex/_generated/dataModel";
 import { convexRefs } from "../lib/convex-refs";
 import { acquireWorkerLock, releaseWorkerLockSync } from "../lib/runtime/worker-lock";
@@ -32,6 +32,10 @@ function clamp(value: number, min: number, max: number) {
     return min;
   }
   return Math.max(min, Math.min(value, max));
+}
+
+function readIntEnv(name: string, fallback: number, min: number, max: number) {
+  return Math.round(clamp(Number(process.env[name] || fallback), min, max));
 }
 
 function connectorTokenHash() {
@@ -109,6 +113,14 @@ export function iMessageThreadJid(message: Message) {
 
 export function iMessageSenderJid(message: Message) {
   return message.participant || message.chatId || "imessage:unknown";
+}
+
+export function iMessageDirection(message: Message): "inbound" | "outbound" {
+  return message.isFromMe ? "outbound" : "inbound";
+}
+
+export function iMessageThreadKind(message: Message, chat?: Chat): "direct" | "group" {
+  return message.chatKind === "group" || chat?.kind === "group" ? "group" : "direct";
 }
 
 export function isIMessagePlatformSupported(platform: NodeJS.Platform = process.platform) {
@@ -202,6 +214,93 @@ async function ingestMessage(convex: ConvexHttpClient, message: Message) {
   });
 }
 
+async function ingestHistoricalMessage(convex: ConvexHttpClient, message: Message, chat?: Chat) {
+  const jid = message.chatId || chat?.chatId || iMessageThreadJid(message);
+  const text = normalizeIMessageText(message);
+  if (!jid || !text) {
+    return false;
+  }
+
+  const threadKind = iMessageThreadKind(message, chat);
+  await convex.mutation(convexRefs.inboundIngestHistorical, {
+    ...tenantConnectorArgs(),
+    provider: "imessage",
+    ingestMode: "history_sync",
+    direction: iMessageDirection(message),
+    threadJid: jid,
+    senderJid: message.isFromMe ? "imessage:me" : iMessageSenderJid(message),
+    senderTitle: chat?.name || message.participant || undefined,
+    text,
+    messageType: normalizeIMessageType(message),
+    reactionEmoji: message.reaction?.emoji || undefined,
+    reactionTargetWhatsAppMessageId: message.reaction?.targetMessageId || undefined,
+    isGroup: threadKind === "group",
+    threadKind,
+    isArchived: chat?.isArchived,
+    archivedAt: chat?.isArchived ? Date.now() : undefined,
+    providerMessageId: message.id,
+    messageAt: iMessageAtMs(message),
+  });
+  return true;
+}
+
+async function syncRecentIMessageHistory(
+  convex: ConvexHttpClient,
+  sdk: {
+    listChats(query?: { sortBy?: "recent"; limit?: number }): Promise<readonly Chat[]>;
+    getMessages(query?: { chatId?: string; limit?: number }): Promise<readonly Message[]>;
+  },
+) {
+  const chatLimit = readIntEnv("SLM_IMESSAGE_HISTORY_CHAT_LIMIT", 80, 0, 300);
+  const messagesPerChat = readIntEnv("SLM_IMESSAGE_HISTORY_MESSAGES_PER_CHAT", 8, 0, 50);
+  if (chatLimit <= 0 && messagesPerChat <= 0) {
+    return { chats: 0, messages: 0 };
+  }
+
+  const chats = chatLimit > 0 ? await sdk.listChats({ sortBy: "recent", limit: chatLimit }) : [];
+  let syncedMessages = 0;
+  for (const chat of chats) {
+    await convex
+      .mutation(convexRefs.threadsUpsertMetadata, {
+        ...tenantConnectorArgs(),
+        provider: "imessage",
+        threadJid: chat.chatId,
+        title: chat.name || undefined,
+        isGroup: chat.kind === "group",
+        threadKind: chat.kind === "group" ? "group" : "direct",
+        isArchived: chat.isArchived,
+        archivedAt: chat.isArchived ? Date.now() : undefined,
+        lastMessageAt: chat.lastMessageAt?.getTime(),
+      })
+      .catch((error) => {
+        const detail = error instanceof Error ? error.message : String(error);
+        logger.warn({ err: detail, chatId: chat.chatId }, "Failed to upsert iMessage chat metadata");
+      });
+
+    if (messagesPerChat <= 0) {
+      continue;
+    }
+
+    const messages = await sdk.getMessages({ chatId: chat.chatId, limit: messagesPerChat }).catch((error) => {
+      const detail = error instanceof Error ? error.message : String(error);
+      logger.warn({ err: detail, chatId: chat.chatId }, "Failed to read iMessage history for chat");
+      return [] as readonly Message[];
+    });
+    for (const message of [...messages].reverse()) {
+      const synced = await ingestHistoricalMessage(convex, message, chat).catch((error) => {
+        const detail = error instanceof Error ? error.message : String(error);
+        logger.warn({ err: detail, providerMessageId: message.id, chatId: chat.chatId }, "Failed to sync iMessage history");
+        return false;
+      });
+      if (synced) {
+        syncedMessages += 1;
+      }
+    }
+  }
+
+  return { chats: chats.length, messages: syncedMessages };
+}
+
 async function processOutboxItem(convex: ConvexHttpClient, sdk: { send(request: { to: string; text?: string }): Promise<void> }, item: OutboxClaimedItem) {
   if (item.sendKind !== "text") {
     await convex.mutation(convexRefs.outboxMarkFailed, {
@@ -292,7 +391,7 @@ async function run() {
       })
       .catch(() => null);
     if (!verifiedConnector) {
-      logger.warn("Hosted worker connector is inactive, billing expired, or iMessage is disabled for this tenant plan.");
+      logger.warn("Hosted worker connector is inactive, billing expired, or iMessage is not included in this account plan.");
       return;
     }
   }
@@ -320,6 +419,12 @@ async function run() {
         logger.warn({ err: detail, providerMessageId: message.id }, "Failed to ingest iMessage");
       });
     },
+    onFromMeMessage: async (message) => {
+      await ingestHistoricalMessage(convex, message).catch((error) => {
+        const detail = error instanceof Error ? error.message : String(error);
+        logger.warn({ err: detail, providerMessageId: message.id }, "Failed to ingest outgoing iMessage");
+      });
+    },
     onError: (error) => {
       logger.warn({ err: error.message }, "iMessage watcher error");
     },
@@ -327,6 +432,14 @@ async function run() {
 
   await reportSetupStatus(convex, "connected", "iMessage worker is watching Messages on this Mac.");
   await reportListener(convex, workerId, true, "iMessage worker listener is online.");
+  void syncRecentIMessageHistory(convex, sdk)
+    .then((result) => {
+      logger.info(result, "iMessage recent history sync finished");
+    })
+    .catch((error) => {
+      const detail = error instanceof Error ? error.message : String(error);
+      logger.warn({ err: detail }, "iMessage recent history sync failed");
+    });
 
   const outboxTimer = setInterval(() => {
     void pollOutbox(convex, sdk, workerId).catch((error) => {

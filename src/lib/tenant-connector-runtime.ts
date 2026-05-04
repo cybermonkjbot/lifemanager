@@ -69,3 +69,15 @@ export async function verifyLocalTenantConnectorAccess(provider: ConnectorProvid
     .catch(() => null);
   return Boolean(verified);
 }
+
+export function connectorPlanUnavailableMessage(provider: ConnectorProvider) {
+  const label =
+    provider === "whatsapp"
+      ? "WhatsApp"
+      : provider === "instagram"
+        ? "Instagram"
+        : provider === "imessage"
+          ? "iMessage"
+          : "Telegram";
+  return `${label} isn't included in this account's current plan. Contact support if you think you should have access.`;
+}

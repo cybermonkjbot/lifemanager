@@ -232,7 +232,8 @@ async function runOutreachBatch(ctx: MutationCtx, tenantId?: Id<"tenantAccounts"
         continue;
       }
 
-      const threadKind = thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup });
+      const messageProvider = thread.provider || "whatsapp";
+      const threadKind = thread.threadKind || classifyThreadKind({ jid: thread.jid, isGroupHint: thread.isGroup, provider: messageProvider });
       if (threadKind === "group") {
         continue;
       }
@@ -242,7 +243,7 @@ async function runOutreachBatch(ctx: MutationCtx, tenantId?: Id<"tenantAccounts"
       }
 
       let explicitIgnore = null;
-      for (const candidateJid of directIgnoreRuleCandidates({ jid, provider: "whatsapp" })) {
+      for (const candidateJid of directIgnoreRuleCandidates({ jid, provider: messageProvider })) {
         explicitIgnore = await ctx.db
           .query("ignoreRules")
           .withIndex("by_target", (q) => q.eq("targetType", "contact").eq("targetValue", candidateJid))
@@ -252,14 +253,14 @@ async function runOutreachBatch(ctx: MutationCtx, tenantId?: Id<"tenantAccounts"
         }
       }
       if (!explicitIgnore) {
-        const lookupKey = directIgnoreContactKey({ jid, provider: "whatsapp" });
+        const lookupKey = directIgnoreContactKey({ jid, provider: messageProvider });
         if (lookupKey) {
           const rules = await ctx.db
             .query("ignoreRules")
             .withIndex("by_type", (q) => q.eq("targetType", "contact"))
             .take(IGNORE_CONTACT_FALLBACK_SCAN_LIMIT);
           explicitIgnore =
-            rules.find((rule) => directIgnoreContactKey({ jid: rule.targetValue, provider: "whatsapp" }) === lookupKey) || null;
+            rules.find((rule) => directIgnoreContactKey({ jid: rule.targetValue, provider: messageProvider }) === lookupKey) || null;
         }
       }
 
@@ -351,7 +352,7 @@ async function runOutreachBatch(ctx: MutationCtx, tenantId?: Id<"tenantAccounts"
 
       eligible.push({
         threadId: thread._id,
-        messageProvider: thread.provider || "whatsapp",
+        messageProvider,
         jid,
         name: extractDisplayName(thread.title, jid),
         sourceMessageId: latestMessage._id,

@@ -15,8 +15,8 @@ import { type InstanceSetupPreferences } from "@/lib/instance-setup-types";
 import { syncInstancePreferencesToConvex } from "@/lib/instance-setup-sync";
 import {
   isLoopbackHostname,
+  remoteSetupAccessMessage,
   requestHasValidSetupBootstrapSecret,
-  setupBootstrapConfigured,
 } from "@/lib/setup-bootstrap-auth";
 import { rateLimitJsonResponse } from "@/lib/rate-limit";
 
@@ -183,10 +183,7 @@ export async function POST(request: NextRequest) {
     const isLocalBootstrap = isLoopbackHostname(request.nextUrl.hostname);
     const hasValidSetupSecret = requestHasValidSetupBootstrapSecret(request.headers);
     if (!currentState.setupCompleted && !isLocalBootstrap && !hasValidSetupSecret) {
-      const message = setupBootstrapConfigured()
-        ? "Remote setup requires the configured setup bootstrap secret."
-        : "Remote setup is disabled until SLM_SETUP_SECRET is configured. Complete setup from localhost instead.";
-      return NextResponse.json({ error: message }, { status: 403 });
+      return NextResponse.json({ error: remoteSetupAccessMessage() }, { status: 403 });
     }
 
     const preferences = sanitizeInstanceSetupPreferences({

@@ -35,6 +35,15 @@ const ALLOWED_AI_DETERMINISTIC_MODE_SET = new Set<AiDeterministicMode>([
 ]);
 
 export type AppConfig = {
+  productUse: "personal" | "business";
+  businessBrandName: string;
+  businessBrandVoice: string;
+  businessOfferSummary: string;
+  storefrontEnabled: boolean;
+  storefrontSlug: string;
+  storefrontFeeBps: number;
+  liveChatEnabled: boolean;
+  liveChatWelcomeMessage: string;
   autonomyPaused: boolean;
   ignoreGroupsByDefault: boolean;
   reactionsEnabled: boolean;
@@ -146,9 +155,26 @@ export type AppConfig = {
   instagramSendMaxGlobalInWindow: number;
   instagramStoryCadenceHours: number;
   instagramStoryDailyMaxPosts: number;
+  selfChatOpenClawEnabled: boolean;
+  selfChatOpenClawCliPath: string;
+  selfChatOpenClawAgentId: string;
+  selfChatOpenClawTimeoutMs: number;
+  selfChatCodexEnabled: boolean;
+  selfChatCodexCliPath: string;
+  selfChatCodexModel: string;
+  selfChatCodexSandbox: "read-only" | "workspace-write" | "danger-full-access";
 };
 
 export const DEFAULT_APP_CONFIG: AppConfig = {
+  productUse: "personal",
+  businessBrandName: "",
+  businessBrandVoice: "",
+  businessOfferSummary: "",
+  storefrontEnabled: false,
+  storefrontSlug: "",
+  storefrontFeeBps: 250,
+  liveChatEnabled: false,
+  liveChatWelcomeMessage: "Hi, I can help you choose, order, or ask a quick question.",
   autonomyPaused: DEFAULT_AUTONOMY_PAUSED,
   ignoreGroupsByDefault: DEFAULT_IGNORE_GROUPS,
   reactionsEnabled: true,
@@ -260,6 +286,14 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
   instagramSendMaxGlobalInWindow: 40,
   instagramStoryCadenceHours: 3,
   instagramStoryDailyMaxPosts: 6,
+  selfChatOpenClawEnabled: true,
+  selfChatOpenClawCliPath: "openclaw",
+  selfChatOpenClawAgentId: "main",
+  selfChatOpenClawTimeoutMs: 6 * 60 * 60 * 1000,
+  selfChatCodexEnabled: true,
+  selfChatCodexCliPath: "codex",
+  selfChatCodexModel: "gpt-5.2",
+  selfChatCodexSandbox: "workspace-write",
 };
 
 function parseBoolean(value: string | undefined, fallback: boolean) {
@@ -346,6 +380,29 @@ function parseStatusPostAudienceMode(
   return fallback;
 }
 
+function parseCodexSandbox(value: string | undefined, fallback: AppConfig["selfChatCodexSandbox"]): AppConfig["selfChatCodexSandbox"] {
+  if (value === "read-only" || value === "workspace-write" || value === "danger-full-access") {
+    return value;
+  }
+  return fallback;
+}
+
+function parseProductUse(value: string | undefined, fallback: AppConfig["productUse"]): AppConfig["productUse"] {
+  if (value === "business" || value === "personal") {
+    return value;
+  }
+  return fallback;
+}
+
+function parseSlug(value: string | undefined) {
+  return (value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+}
+
 function parseAiDeterministicModes(value: string | undefined, fallback: AiDeterministicMode[]) {
   const parsed = parseList(value)
     .map((item) => item.trim().toLowerCase())
@@ -362,11 +419,23 @@ export async function getConfig(ctx: QueryCtx | MutationCtx, tenantId?: Id<"tena
     ? await ctx.db
         .query("appConfig")
         .withIndex("by_tenantId_and_key", (q) => q.eq("tenantId", tenantId))
-        .take(120)
-    : await ctx.db.query("appConfig").take(120);
+        .take(300)
+    : await ctx.db
+        .query("appConfig")
+        .withIndex("by_tenantId_and_key", (q) => q.eq("tenantId", undefined))
+        .take(300);
   const map = new Map(rows.map((row) => [row.key, row.value]));
 
   return {
+    productUse: parseProductUse(map.get("productUse"), DEFAULT_APP_CONFIG.productUse),
+    businessBrandName: (map.get("businessBrandName") ?? DEFAULT_APP_CONFIG.businessBrandName).trim().slice(0, 120),
+    businessBrandVoice: (map.get("businessBrandVoice") ?? DEFAULT_APP_CONFIG.businessBrandVoice).trim().slice(0, 2000),
+    businessOfferSummary: (map.get("businessOfferSummary") ?? DEFAULT_APP_CONFIG.businessOfferSummary).trim().slice(0, 4000),
+    storefrontEnabled: parseBoolean(map.get("storefrontEnabled"), DEFAULT_APP_CONFIG.storefrontEnabled),
+    storefrontSlug: parseSlug(map.get("storefrontSlug") ?? DEFAULT_APP_CONFIG.storefrontSlug),
+    storefrontFeeBps: Math.round(clamp(parseNumber(map.get("storefrontFeeBps"), DEFAULT_APP_CONFIG.storefrontFeeBps), 0, 2000)),
+    liveChatEnabled: parseBoolean(map.get("liveChatEnabled"), DEFAULT_APP_CONFIG.liveChatEnabled),
+    liveChatWelcomeMessage: (map.get("liveChatWelcomeMessage") ?? DEFAULT_APP_CONFIG.liveChatWelcomeMessage).trim().slice(0, 600),
     autonomyPaused: parseBoolean(map.get("autonomyPaused"), DEFAULT_APP_CONFIG.autonomyPaused),
     ignoreGroupsByDefault: parseBoolean(map.get("ignoreGroupsByDefault"), DEFAULT_APP_CONFIG.ignoreGroupsByDefault),
     reactionsEnabled: parseBoolean(map.get("reactionsEnabled"), DEFAULT_APP_CONFIG.reactionsEnabled),
@@ -698,6 +767,34 @@ export async function getConfig(ctx: QueryCtx | MutationCtx, tenantId?: Id<"tena
     instagramStoryDailyMaxPosts: Math.round(
       clamp(parseNumber(map.get("instagramStoryDailyMaxPosts"), DEFAULT_APP_CONFIG.instagramStoryDailyMaxPosts), 1, 24),
     ),
+    selfChatOpenClawEnabled: parseBoolean(
+      map.get("selfChatOpenClawEnabled"),
+      DEFAULT_APP_CONFIG.selfChatOpenClawEnabled,
+    ),
+    selfChatOpenClawCliPath:
+      (map.get("selfChatOpenClawCliPath") || process.env.SLM_OPENCLAW_CLI_PATH || DEFAULT_APP_CONFIG.selfChatOpenClawCliPath).trim() ||
+      DEFAULT_APP_CONFIG.selfChatOpenClawCliPath,
+    selfChatOpenClawAgentId:
+      (map.get("selfChatOpenClawAgentId") || process.env.SLM_OPENCLAW_AGENT_ID || DEFAULT_APP_CONFIG.selfChatOpenClawAgentId).trim() ||
+      DEFAULT_APP_CONFIG.selfChatOpenClawAgentId,
+    selfChatOpenClawTimeoutMs: Math.round(
+      clamp(
+        parseNumber(map.get("selfChatOpenClawTimeoutMs"), DEFAULT_APP_CONFIG.selfChatOpenClawTimeoutMs),
+        1_000,
+        24 * 60 * 60 * 1000,
+      ),
+    ),
+    selfChatCodexEnabled: parseBoolean(map.get("selfChatCodexEnabled"), DEFAULT_APP_CONFIG.selfChatCodexEnabled),
+    selfChatCodexCliPath:
+      (map.get("selfChatCodexCliPath") || process.env.CODEX_CLI_PATH || DEFAULT_APP_CONFIG.selfChatCodexCliPath).trim() ||
+      DEFAULT_APP_CONFIG.selfChatCodexCliPath,
+    selfChatCodexModel:
+      (map.get("selfChatCodexModel") || process.env.CODEX_FALLBACK_MODEL || DEFAULT_APP_CONFIG.selfChatCodexModel).trim() ||
+      DEFAULT_APP_CONFIG.selfChatCodexModel,
+    selfChatCodexSandbox: parseCodexSandbox(
+      map.get("selfChatCodexSandbox"),
+      DEFAULT_APP_CONFIG.selfChatCodexSandbox,
+    ),
   };
 }
 
@@ -708,10 +805,11 @@ export async function setConfigValue(ctx: MutationCtx, key: string, value: strin
         .withIndex("by_tenantId_and_key", (q) => q.eq("tenantId", tenantId))
         .take(120)
       ).find((row) => row.key === key)
-    : await ctx.db
+    : (await ctx.db
         .query("appConfig")
-        .withIndex("by_key", (q) => q.eq("key", key))
-        .first();
+        .withIndex("by_tenantId_and_key", (q) => q.eq("tenantId", undefined))
+        .take(300)
+      ).find((row) => row.key === key);
 
   const updatedAt = Date.now();
   if (existing) {

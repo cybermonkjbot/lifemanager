@@ -12,8 +12,9 @@ import Link from "next/link";
 import { CSSProperties, useMemo, useRef, useState } from "react";
 
 type ActivityStatus = "active" | "paused" | "non-active";
-type ActivityFeedFilter = "all" | "activity" | "media";
+type ActivityFeedFilter = "all" | "activity" | "connections" | "media";
 type MediaFilter = "all" | "stickers" | "memes" | "images" | "video" | "audio" | "documents";
+type ConnectionProviderFilter = "all" | "whatsapp" | "instagram" | "imessage" | "telegram";
 
 type ActivityLogRow = {
   id: string;
@@ -23,14 +24,26 @@ type ActivityLogRow = {
   createdAt: number;
 };
 
+type ConnectionActivityRow = {
+  id: string;
+  provider: Exclude<ConnectionProviderFilter, "all">;
+  source: string;
+  activityType: string;
+  title: string;
+  detail: string;
+  status: string;
+  createdAt: number;
+};
+
 type ActivityCoreNode = {
   id: string;
   source: string;
+  provider?: ConnectionActivityRow["provider"];
   title: string;
   detail: string;
   createdAt: number;
   status: ActivityStatus;
-  stream: "activity" | "media";
+  stream: "activity" | "connection" | "media";
   mediaKind?: UnifiedMediaItem["kind"];
   mediaPreviewUrl?: string | null;
   eventType?: string;
@@ -50,6 +63,7 @@ type ActivityCoreNode = {
     threadId?: string;
     threadJid?: string;
     threadTitle?: string;
+    threadProvider?: ConnectionActivityRow["provider"];
     messageText?: string;
     messageCaption?: string;
     messageType?: string;
@@ -60,6 +74,19 @@ type ActivityCoreNode = {
 
 type LiveActivityCoreProps = {
   splineSceneUrl: string;
+  showAccountFilter?: boolean;
+};
+
+type ConnectedAccountRow = {
+  _id: string;
+  tenantId: string;
+  provider: Exclude<ConnectionProviderFilter, "all">;
+  providerAccountId: string;
+  accountLabel?: string;
+  displayName?: string;
+  phoneNumberMasked?: string;
+  username?: string;
+  authState: "connected" | "disconnected" | "expired" | "unknown";
 };
 
 const Spline = dynamic(() => import("@splinetool/react-spline"), { ssr: false });
@@ -74,7 +101,16 @@ const MAX_MEDIA_ZOOM = 5;
 const FEED_FILTERS: Array<{ id: ActivityFeedFilter; label: string }> = [
   { id: "all", label: "All Signals" },
   { id: "activity", label: "Activity" },
+  { id: "connections", label: "Connections" },
   { id: "media", label: "Media" },
+];
+
+const CONNECTION_FILTERS: Array<{ id: ConnectionProviderFilter; label: string }> = [
+  { id: "all", label: "All Connections" },
+  { id: "whatsapp", label: "WhatsApp" },
+  { id: "instagram", label: "Instagram" },
+  { id: "imessage", label: "iMessage" },
+  { id: "telegram", label: "Telegram" },
 ];
 
 const MEDIA_FILTERS: Array<{ id: MediaFilter; label: string }> = [
@@ -112,13 +148,41 @@ function classifyActivityStatus(eventType: string, detail: string): ActivityStat
   return "non-active";
 }
 
+function logMatchesConnection(row: ActivityLogRow, provider: ConnectionProviderFilter) {
+  if (provider === "all") return true;
+  const signal = `${row.source} ${row.eventType} ${row.detail}`.toLowerCase();
+  if (provider === "imessage") return signal.includes("imessage") || signal.includes("iMessage".toLowerCase());
+  return signal.includes(provider);
+}
+
+function accountSignalFragments(account: ConnectedAccountRow | null) {
+  if (!account) return [];
+  return [account.providerAccountId, account.accountLabel, account.displayName, account.phoneNumberMasked, account.username]
+    .map((value) => (value || "").trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function logMatchesAccount(row: ActivityLogRow, account: ConnectedAccountRow | null) {
+  if (!account) return true;
+  const signal = `${row.source} ${row.eventType} ${row.detail}`.toLowerCase();
+  return accountSignalFragments(account).some((fragment) => signal.includes(fragment));
+}
+
 function sourceLabel(source: string) {
+  if (source === "whatsapp") return "WhatsApp";
+  if (source === "instagram") return "Instagram";
+  if (source === "imessage") return "iMessage";
+  if (source === "telegram") return "Telegram";
   if (source === "worker") return "Worker";
   if (source === "convex") return "Backend";
   if (source === "dashboard") return "UI";
   if (source === "ai") return "AI";
   if (source === "media") return "Media";
   return source;
+}
+
+function connectedAccountLabel(account: ConnectedAccountRow) {
+  return account.displayName || account.accountLabel || account.username || account.phoneNumberMasked || sourceLabel(account.provider);
 }
 
 function mediaKindLabel(kind: UnifiedMediaItem["kind"]) {
@@ -128,6 +192,12 @@ function mediaKindLabel(kind: UnifiedMediaItem["kind"]) {
   if (kind === "video") return "Video";
   if (kind === "audio") return "Audio";
   return "Document";
+}
+
+function classifyConnectionStatus(status: string): ActivityStatus {
+  if (status === "pending_review" || status === "approved" || status === "claimed") return "paused";
+  if (status === "failed" || status === "rejected") return "non-active";
+  return "active";
 }
 
 function classifyMediaStatus(item: UnifiedMediaItem): ActivityStatus {
@@ -203,9 +273,11 @@ function polarPlacement(index: number, total: number, mediaSpreadMode: boolean) 
   };
 }
 
-export function LiveActivityCore({ splineSceneUrl }: LiveActivityCoreProps) {
+export function LiveActivityCore({ splineSceneUrl, showAccountFilter = false }: LiveActivityCoreProps) {
   const tenantScope = useTenantScopeArgs();
   const [feedFilter, setFeedFilter] = useState<ActivityFeedFilter>("all");
+  const [connectionFilter, setConnectionFilter] = useState<ConnectionProviderFilter>("all");
+  const [connectedAccountFilter, setConnectedAccountFilter] = useState<string>("all");
   const [mediaFilter, setMediaFilter] = useState<MediaFilter>("all");
   const [coreZoom, setCoreZoom] = useState(DEFAULT_CORE_ZOOM);
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
@@ -222,75 +294,121 @@ export function LiveActivityCore({ splineSceneUrl }: LiveActivityCoreProps) {
   const mediaViewportRef = useRef<HTMLDivElement | null>(null);
 
   const logs = useQuery(api.system.logFeed, { ...tenantScope, limit: 56 }) as ActivityLogRow[] | undefined;
+  const connectedAccounts = useQuery(
+    api.connectedAccounts.list,
+    showAccountFilter ? { ...tenantScope, limit: 80 } : "skip",
+  ) as ConnectedAccountRow[] | undefined;
+  const selectedConnectedAccount = useMemo(
+    () => (connectedAccountFilter === "all" ? null : connectedAccounts?.find((account) => account._id === connectedAccountFilter) || null),
+    [connectedAccountFilter, connectedAccounts],
+  );
+  const effectiveConnectionFilter = selectedConnectedAccount?.provider || connectionFilter;
+  const connectionRows = useQuery(api.system.connectionActivityFeed, {
+    ...tenantScope,
+    provider: effectiveConnectionFilter,
+    limit: 96,
+  }) as ConnectionActivityRow[] | undefined;
   const mediaItems = useQuery(api.media.listUnifiedMedia, { ...tenantScope, filter: mediaFilter, limit: 120 }) as UnifiedMediaItem[] | undefined;
   const splineSource = useMemo(() => resolveSplineSource(splineSceneUrl), [splineSceneUrl]);
 
   const activityNodes = useMemo<ActivityCoreNode[]>(
     () =>
-      (logs || []).map((row) => ({
-        id: row.id,
-        source: row.source,
-        title: row.eventType,
+      (logs || [])
+        .filter((row) => logMatchesConnection(row, effectiveConnectionFilter) && logMatchesAccount(row, selectedConnectedAccount))
+        .map((row) => ({
+          id: `activity:${row.id}`,
+          source: row.source,
+          title: row.eventType,
+          detail: row.detail,
+          createdAt: row.createdAt,
+          status: classifyActivityStatus(row.eventType, row.detail),
+          stream: "activity",
+          eventType: row.eventType,
+        })),
+    [effectiveConnectionFilter, logs, selectedConnectedAccount],
+  );
+
+  const connectionNodes = useMemo<ActivityCoreNode[]>(
+    () =>
+      (connectionRows || []).map((row) => ({
+        id: `connection:${row.id}`,
+        source: row.provider,
+        provider: row.provider,
+        title: row.title,
         detail: row.detail,
         createdAt: row.createdAt,
-        status: classifyActivityStatus(row.eventType, row.detail),
-        stream: "activity",
-        eventType: row.eventType,
+        status: classifyConnectionStatus(row.status),
+        stream: "connection",
+        eventType: `${row.provider}.${row.activityType}`,
       })),
-    [logs],
+    [connectionRows],
   );
 
   const mediaNodes = useMemo<ActivityCoreNode[]>(
     () =>
-      (mediaItems || []).map((item) => ({
-        id: item.id,
-        source: "media",
-        title: `${mediaKindLabel(item.kind)} · ${item.source === "message" ? "Message" : "Library"}`,
-        detail: mediaNodeDetail(item),
-        createdAt: item.createdAt,
-        status: classifyMediaStatus(item),
-        stream: "media",
-        mediaKind: item.kind,
-        mediaPreviewUrl: canRenderInlineMediaPreview(item) ? item.url : null,
-        mediaDetails: {
-          source: item.source,
-          kind: item.kind,
-          mimeType: item.mimeType,
-          label: item.label,
-          url: item.url,
-          enabled: item.enabled,
-          tags: item.tags || [],
-          contextSummary: item.contextSummary,
-          contextTags: item.contextTags,
-          contextTriggers: item.contextTriggers,
-          contextAvoid: item.contextAvoid,
-          contextConfidence: item.contextConfidence,
-          threadId: item.thread?._id,
-          threadJid: item.thread?.jid,
-          threadTitle: item.thread?.title,
-          messageText: item.message?.text,
-          messageCaption: item.message?.mediaCaption,
-          messageType: item.message?.messageType,
-          messageDirection: item.message?.direction,
-          messageAt: item.message?.messageAt,
-        },
-      })),
-    [mediaItems],
+      (mediaItems || [])
+        .filter((item) => effectiveConnectionFilter === "all" || item.thread?.provider === effectiveConnectionFilter)
+        .map((item) => ({
+          id: `media:${item.id}`,
+          source: "media",
+          provider: item.thread?.provider,
+          title: `${mediaKindLabel(item.kind)} · ${item.source === "message" ? "Message" : "Library"}`,
+          detail: mediaNodeDetail(item),
+          createdAt: item.createdAt,
+          status: classifyMediaStatus(item),
+          stream: "media",
+          mediaKind: item.kind,
+          mediaPreviewUrl: canRenderInlineMediaPreview(item) ? item.url : null,
+          mediaDetails: {
+            source: item.source,
+            kind: item.kind,
+            mimeType: item.mimeType,
+            label: item.label,
+            url: item.url,
+            enabled: item.enabled,
+            tags: item.tags || [],
+            contextSummary: item.contextSummary,
+            contextTags: item.contextTags,
+            contextTriggers: item.contextTriggers,
+            contextAvoid: item.contextAvoid,
+            contextConfidence: item.contextConfidence,
+            threadId: item.thread?._id,
+            threadJid: item.thread?.jid,
+            threadTitle: item.thread?.title,
+            threadProvider: item.thread?.provider,
+            messageText: item.message?.text,
+            messageCaption: item.message?.mediaCaption,
+            messageType: item.message?.messageType,
+            messageDirection: item.message?.direction,
+            messageAt: item.message?.messageAt,
+          },
+        })),
+    [effectiveConnectionFilter, mediaItems],
   );
 
   const filteredNodes = useMemo(() => {
     const base =
       feedFilter === "activity"
         ? activityNodes
+        : feedFilter === "connections"
+          ? connectionNodes
         : feedFilter === "media"
           ? mediaNodes
-          : [...activityNodes, ...mediaNodes];
+          : [...connectionNodes, ...activityNodes, ...mediaNodes];
     return [...base].sort((a, b) => b.createdAt - a.createdAt).slice(0, MAX_CORE_NODES);
-  }, [activityNodes, feedFilter, mediaNodes]);
+  }, [activityNodes, connectionNodes, feedFilter, mediaNodes]);
 
   const logsLoading = logs === undefined;
+  const connectionsLoading = connectionRows === undefined;
   const mediaLoading = mediaItems === undefined;
-  const loading = feedFilter === "activity" ? logsLoading : feedFilter === "media" ? mediaLoading : logsLoading || mediaLoading;
+  const loading =
+    feedFilter === "activity"
+      ? logsLoading
+      : feedFilter === "connections"
+        ? connectionsLoading
+        : feedFilter === "media"
+          ? mediaLoading
+          : logsLoading || connectionsLoading || mediaLoading;
 
   const statusCounts = useMemo(() => {
     const counts: Record<ActivityStatus, number> = {
@@ -308,6 +426,10 @@ export function LiveActivityCore({ splineSceneUrl }: LiveActivityCoreProps) {
   const pausedScale = 1 + Math.min(statusCounts.paused, 16) * 0.04;
   const nonActiveScale = 1 + Math.min(statusCounts["non-active"], 16) * 0.04;
   const mediaSpreadMode = feedFilter === "media";
+  const showConnectionFilters =
+    feedFilter === "activity" || feedFilter === "connections" || connectionFilter !== "all" || Boolean(selectedConnectedAccount);
+  const showMediaFilters = feedFilter === "media" || (feedFilter === "all" && mediaFilter !== "all");
+  const showAccountChips = showAccountFilter && Boolean(connectedAccounts?.length);
 
   const stageStyle: CSSProperties = {
     position: "relative",
@@ -547,89 +669,78 @@ export function LiveActivityCore({ splineSceneUrl }: LiveActivityCoreProps) {
           </button>
           <p className="activity-core-filter-note">Core zoom: {(coreZoom * 100).toFixed(0)}%</p>
         </div>
-      </div>
 
-      <div className="activity-core-filter-panel">
-        <div className="activity-core-filter-row">
-          {FEED_FILTERS.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className={`activity-core-filter-chip ${feedFilter === item.id ? "is-active" : ""}`}
-              onClick={() => setFeedFilter(item.id)}
-            >
-              {item.label}
-            </button>
-          ))}
+        <div className="activity-core-canvas-controls" aria-label="Activity Core filters and status">
+          <div className="activity-core-filter-panel">
+            {showAccountChips ? (
+              <div className="activity-core-filter-row">
+                <button
+                  type="button"
+                  className={`activity-core-filter-chip ${connectedAccountFilter === "all" ? "is-active" : ""}`}
+                  onClick={() => setConnectedAccountFilter("all")}
+                >
+                  All Accounts
+                </button>
+                {connectedAccounts?.map((account) => (
+                  <button
+                    key={account._id}
+                    type="button"
+                    className={`activity-core-filter-chip ${connectedAccountFilter === account._id ? "is-active" : ""}`}
+                    onClick={() => {
+                      setConnectedAccountFilter(account._id);
+                      setConnectionFilter(account.provider);
+                    }}
+                  >
+                    {sourceLabel(account.provider)} · {connectedAccountLabel(account)}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            <div className="activity-core-filter-row">
+              {FEED_FILTERS.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  className={`activity-core-filter-chip ${feedFilter === item.id ? "is-active" : ""}`}
+                  onClick={() => setFeedFilter(item.id)}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+            {showConnectionFilters ? (
+              <div className="activity-core-filter-row">
+                {CONNECTION_FILTERS.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className={`activity-core-filter-chip ${effectiveConnectionFilter === item.id ? "is-active" : ""}`}
+                    onClick={() => {
+                      setConnectedAccountFilter("all");
+                      setConnectionFilter(item.id);
+                    }}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            {showMediaFilters ? (
+              <div className="activity-core-filter-row">
+                {MEDIA_FILTERS.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className={`activity-core-filter-chip ${mediaFilter === item.id ? "is-active" : ""}`}
+                    onClick={() => setMediaFilter(item.id)}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
         </div>
-        <div className="activity-core-filter-row">
-          {MEDIA_FILTERS.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className={`activity-core-filter-chip ${mediaFilter === item.id ? "is-active" : ""}`}
-              onClick={() => setMediaFilter(item.id)}
-              disabled={feedFilter === "activity"}
-            >
-              {item.label}
-            </button>
-          ))}
-        </div>
-        <p className="activity-core-filter-note">
-          Showing {filteredNodes.length} node{filteredNodes.length === 1 ? "" : "s"} · Feed: {feedFilter}
-          {feedFilter !== "activity" ? ` · Media: ${mediaFilter}` : ""}
-        </p>
-      </div>
-
-      <div className="activity-status-bar" style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-        <p
-          className="activity-status-pill status-active"
-          style={{
-            margin: 0,
-            border: "1px solid rgba(95, 255, 172, 0.58)",
-            borderRadius: 999,
-            padding: "6px 10px",
-            fontSize: "0.8rem",
-            letterSpacing: "0.02em",
-            boxShadow: "0 0 16px rgba(95, 255, 172, 0.28)",
-            background: "rgba(20, 41, 29, 0.45)",
-            color: "#d7ffec",
-          }}
-        >
-          Active · {statusCounts.active}
-        </p>
-        <p
-          className="activity-status-pill status-paused"
-          style={{
-            margin: 0,
-            border: "1px solid rgba(255, 199, 102, 0.56)",
-            borderRadius: 999,
-            padding: "6px 10px",
-            fontSize: "0.8rem",
-            letterSpacing: "0.02em",
-            boxShadow: "0 0 16px rgba(255, 199, 102, 0.25)",
-            background: "rgba(47, 33, 10, 0.42)",
-            color: "#ffe9ba",
-          }}
-        >
-          Paused · {statusCounts.paused}
-        </p>
-        <p
-          className="activity-status-pill status-non-active"
-          style={{
-            margin: 0,
-            border: "1px solid rgba(125, 167, 255, 0.58)",
-            borderRadius: 999,
-            padding: "6px 10px",
-            fontSize: "0.8rem",
-            letterSpacing: "0.02em",
-            boxShadow: "0 0 16px rgba(125, 167, 255, 0.24)",
-            background: "rgba(17, 24, 44, 0.48)",
-            color: "#d4e3ff",
-          }}
-        >
-          Non active · {statusCounts["non-active"]}
-        </p>
       </div>
 
       {loading ? <LoadingIndicator label="Loading activity…" /> : null}
@@ -799,6 +910,7 @@ export function LiveActivityCore({ splineSceneUrl }: LiveActivityCoreProps) {
                           </p>
                           <p className="queue-meta">
                             Source: {selectedNode.mediaDetails.source === "message" ? "Message timeline" : "Media library"}
+                            {selectedNode.mediaDetails.threadProvider ? ` · ${sourceLabel(selectedNode.mediaDetails.threadProvider)}` : ""}
                           </p>
                           {selectedNode.mediaDetails.tags.length ? (
                             <p className="queue-meta">Tags: {selectedNode.mediaDetails.tags.join(", ")}</p>

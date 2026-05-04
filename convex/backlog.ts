@@ -6,8 +6,9 @@ import { internalMutation, mutation, query } from "./_generated/server";
 import { assertTenantBillingActive, assertThreadTenantBillingActive } from "./lib/billingAccess";
 import { detectPromiseOrPlan, detectTodoCandidate, estimateHumanTiming, evaluateGuardrail, looksLikeQuestion } from "./lib/heuristics";
 import { classifyThreadKind, directIgnoreRuleCandidates } from "./lib/threadEligibility";
-import { setConfigValue } from "./lib/config";
+import { getConfig, setConfigValue } from "./lib/config";
 import { resolveTenantForQuery } from "./lib/tenantSecurity";
+import { assessBusinessSignal, type BusinessIntent } from "../shared/business-signals";
 
 type RelationshipKind = "girlfriend" | "relationship" | "friendship" | "casual" | "family" | "business";
 type ImportanceKind = "critical" | "high" | "medium" | "low";
@@ -27,6 +28,9 @@ type LiveSignals = {
   importance: ImportanceKind;
   recommendation: RecommendationKind;
   score: number;
+  businessIntent?: BusinessIntent;
+  businessSignalLabels?: string[];
+  businessSignalUrgent?: boolean;
 };
 
 const RELATIONSHIP_VALUES = ["girlfriend", "relationship", "friendship", "casual", "family", "business"] as const;
@@ -136,6 +140,7 @@ function computeScore(args: {
   latestText: string;
   ignored: boolean;
   hasQueuedWork: boolean;
+  businessSignalBoost?: number;
 }) {
   const pendingHours = msToHours(args.pendingAgeMs);
   const guardrail = evaluateGuardrail(args.latestText || "");
@@ -175,6 +180,7 @@ function computeScore(args: {
   if (hasTodo) {
     score += 7;
   }
+  score += args.businessSignalBoost || 0;
 
   if (guardrail.severity === "high") {
     score += 14;
@@ -249,6 +255,7 @@ async function computeLiveSignals(
   thread: ThreadLike,
   existing?: Doc<"backlogThreadState"> | null,
   clearedBefore?: number,
+  productUse: "personal" | "business" = "personal",
 ): Promise<LiveSignals> {
   const allMessages = await ctx.db
     .query("messages")
@@ -319,10 +326,16 @@ async function computeLiveSignals(
     .withIndex("by_thread", (q) => q.eq("threadId", thread._id))
     .first();
 
-  const relationship = resolveRelationship({
+  const latestUnresolvedText = latestUnresolved?.text || "";
+  const businessSignal = assessBusinessSignal(latestUnresolvedText);
+  const resolvedRelationship = resolveRelationship({
     override: existing?.relationshipOverride,
     profileSlug: setting?.profileSlug,
   });
+  const relationship =
+    productUse === "business" && !existing?.relationshipOverride && businessSignal.intent !== "none"
+      ? "business"
+      : resolvedRelationship;
 
   if (!oldestUnresolved || !latestUnresolved) {
     const fallbackImportance = existing?.importanceOverride || "low";
@@ -342,9 +355,10 @@ async function computeLiveSignals(
     relationship,
     pendingAgeMs,
     unresolvedCount,
-    latestText: latestUnresolved.text || "",
+    latestText: latestUnresolvedText,
     ignored: thread.isIgnored,
     hasQueuedWork,
+    businessSignalBoost: productUse === "business" ? businessSignal.scoreBoost : 0,
   });
 
   const autoImportance = scoreToImportance(score);
@@ -353,7 +367,7 @@ async function computeLiveSignals(
   const recommendation = recommendAction({
     relationship,
     pendingAgeMs,
-    latestText: latestUnresolved.text || "",
+    latestText: latestUnresolvedText,
     unresolvedCount,
     hasQueuedWork,
   });
@@ -363,13 +377,16 @@ async function computeLiveSignals(
     pendingSince: oldestUnresolved.messageAt,
     latestUnresolvedAt: latestUnresolved.messageAt,
     latestUnresolvedMessageId: latestUnresolved._id,
-    latestUnresolvedText: latestUnresolved.text,
+    latestUnresolvedText,
     lastInboundAt: latestInbound?.messageAt,
     lastOutboundAt,
     relationship,
     importance,
     recommendation,
     score,
+    businessIntent: productUse === "business" ? businessSignal.intent : "none",
+    businessSignalLabels: productUse === "business" ? businessSignal.labels : [],
+    businessSignalUrgent: productUse === "business" ? businessSignal.urgent : false,
   };
 }
 
@@ -476,7 +493,8 @@ async function refreshThreadSnapshot(ctx: MutationCtx, threadId: Id<"threads">) 
     .first();
 
   const clearedBefore = await getBacklogClearedBefore(ctx);
-  const signals = await computeLiveSignals(ctx, thread, existing, clearedBefore);
+  const config = await getConfig(ctx, thread.tenantId);
+  const signals = await computeLiveSignals(ctx, thread, existing, clearedBefore, config.productUse);
 
   return await upsertThreadState(ctx, {
     thread,
@@ -573,6 +591,9 @@ function buildAnswerDraftText(args: {
   }
 
   if (looksLikeQuestion(source)) {
+    if (args.relationship === "business") {
+      return `${ack}Thanks for reaching out. I just saw this and can help with the details. Let me confirm the right next step for you.`.trim();
+    }
     if (args.relationship === "girlfriend" || args.relationship === "relationship") {
       return `${ack}I just saw this. Yes, that works for me and I’m here now if you still want to talk through it.`.trim();
     }
@@ -581,6 +602,10 @@ function buildAnswerDraftText(args: {
 
   if (args.relationship === "girlfriend" || args.relationship === "relationship") {
     return `${ack}I just caught this and wanted to respond properly. I appreciate you reaching out.`.trim();
+  }
+
+  if (args.relationship === "business") {
+    return `${ack}Thanks for the message. I just caught this and I’m checking the best next step for you now.`.trim();
   }
 
   return `${ack}I just caught this and wanted to reply properly.`.trim();
@@ -603,7 +628,7 @@ function buildRestartDraftText(args: {
   }
 
   if (args.relationship === "business") {
-    return `${ack}Hi ${firstName}, circling back here. Hope you’re doing well this week.`.trim();
+    return `${ack}Hi ${firstName}, circling back here to see if you still need help with this.`.trim();
   }
 
   return `${ack}Hey ${firstName}, circling back here after being off-grid for a bit. How have you been?`.trim();
@@ -688,6 +713,8 @@ export const list = query({
           }
         }
 
+        const businessSignal = assessBusinessSignal(state.latestUnresolvedText || "");
+
         return {
           threadId: thread._id,
           stateId: state._id,
@@ -707,6 +734,9 @@ export const list = query({
           importanceOverride: state.importanceOverride,
           recommendation: state.recommendation,
           score: state.score,
+          businessIntent: businessSignal.intent,
+          businessSignalLabels: businessSignal.labels,
+          businessSignalUrgent: businessSignal.urgent,
           snoozedUntil: state.snoozedUntil,
           snoozeReason: state.snoozeReason,
           isSnoozed,
@@ -988,9 +1018,10 @@ export const ignoreThread = mutation({
 
     const threadKind = resolveThreadKind(thread);
     const targetType = resolveIgnoreTargetType(thread);
+    const threadProvider = thread.provider || "whatsapp";
     const ignoreTargets =
-      targetType === "contact" && (thread.provider || "whatsapp") === "whatsapp" && threadKind === "direct"
-        ? directIgnoreRuleCandidates({ jid: thread.jid, provider: "whatsapp" })
+      targetType === "contact" && threadKind === "direct"
+        ? directIgnoreRuleCandidates({ jid: thread.jid, provider: threadProvider })
         : [thread.jid];
 
     for (const targetValue of new Set(ignoreTargets)) {

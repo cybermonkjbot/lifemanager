@@ -606,7 +606,7 @@ function AdminRemoveTenantUserModal({ removingUser, pendingUserId, onClose, onRe
       description={removingUser ? `Remove ${removingUser.email} from this tenant.` : undefined}
     >
       <p className="ui-modal-confirmation-copy">
-        This user will lose access to the tenant workspace immediately.
+        This user will lose access to the tenant account immediately.
       </p>
       <div className="admin-modal-actions">
         <button className="btn btn-ghost" type="button" onClick={onClose}>

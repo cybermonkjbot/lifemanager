@@ -6,6 +6,8 @@ export default async function HomePage() {
     <DashboardPage
       title="Home"
       subtitle="Ask for a read on chats, drafts, follow-ups, and system state."
+      businessTitle="Business Home"
+      businessSubtitle="Ask for a read on customers, leads, drafts, follow-ups, and storefront activity."
       hideViewHeader
     >
       <HomeScreen />

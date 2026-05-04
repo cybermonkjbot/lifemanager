@@ -17,6 +17,15 @@ import Link from "next/link";
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type SettingsState = {
+  productUse: "personal" | "business";
+  businessBrandName: string;
+  businessBrandVoice: string;
+  businessOfferSummary: string;
+  storefrontEnabled: boolean;
+  storefrontSlug: string;
+  storefrontFeeBps: number;
+  liveChatEnabled: boolean;
+  liveChatWelcomeMessage: string;
   ignoreGroupsByDefault: boolean;
   reactionsEnabled: boolean;
   stickersEnabled: boolean;
@@ -102,6 +111,14 @@ type SettingsState = {
   instagramSendMaxGlobalInWindow: number;
   instagramStoryCadenceHours: number;
   instagramStoryDailyMaxPosts: number;
+  selfChatOpenClawEnabled: boolean;
+  selfChatOpenClawCliPath: string;
+  selfChatOpenClawAgentId: string;
+  selfChatOpenClawTimeoutMs: number;
+  selfChatCodexEnabled: boolean;
+  selfChatCodexCliPath: string;
+  selfChatCodexModel: string;
+  selfChatCodexSandbox: "read-only" | "workspace-write" | "danger-full-access";
   outreachEnabled: boolean;
   outreachCadenceHours: number;
   outreachMaxContactsPerRun: number;
@@ -239,10 +256,11 @@ type SetupState = {
   updatedAt?: number;
 };
 
-type SettingsTab = "runtime" | "automation" | "connections" | "voice" | "personality" | "media" | "style" | "rules";
+type SettingsTab = "runtime" | "business" | "automation" | "connections" | "voice" | "personality" | "media" | "style" | "rules";
 
 const SETTINGS_TABS: Array<{ id: SettingsTab; label: string }> = [
   { id: "runtime", label: "AI Runtime" },
+  { id: "business", label: "Business" },
   { id: "automation", label: "Automation" },
   { id: "connections", label: "Connections" },
   { id: "voice", label: "Voice" },
@@ -253,6 +271,7 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string }> = [
 ];
 const SETTINGS_TAB_SUMMARIES: Record<SettingsTab, string> = {
   runtime: "Model, reply limits, and quality checks.",
+  business: "Brand voice, storefront, livechat, and selling controls.",
   automation: "Quiet hours, pacing, outreach, and posting.",
   connections: "Messaging account sessions and workers.",
   voice: "Voice sample and local Vox generation.",
@@ -263,6 +282,7 @@ const SETTINGS_TAB_SUMMARIES: Record<SettingsTab, string> = {
 };
 const SETTINGS_TAB_KEYWORDS: Record<SettingsTab, string[]> = {
   runtime: ["ai", "temperature", "tokens", "confidence", "quality gate", "reply", "instruction", "runtime"],
+  business: ["business", "brand", "voice", "storefront", "shop", "livechat", "customer", "sales", "fee", "offer"],
   automation: [
     "quiet",
     "outreach",
@@ -295,6 +315,14 @@ const SETTINGS_TAB_KEYWORDS: Record<SettingsTab, string[]> = {
     "session",
     "credentials",
     "account",
+    "self chat",
+    "orchestrator",
+    "openclaw",
+    "claw",
+    "codex",
+    "environment",
+    "cli",
+    "agent",
   ],
   voice: ["voice", "voice note", "sample", "record", "microphone", "vox", "voxcpm", "local"],
   personality: ["profile", "persona", "intensity", "prompt", "tone", "personality"],
@@ -303,6 +331,17 @@ const SETTINGS_TAB_KEYWORDS: Record<SettingsTab, string[]> = {
   rules: ["rules", "ignore", "ignored", "contact", "group", "boundaries", "jid"],
 };
 const SETTINGS_TAB_FIELDS: Record<SettingsTab, Array<keyof SettingsState>> = {
+  business: [
+    "productUse",
+    "businessBrandName",
+    "businessBrandVoice",
+    "businessOfferSummary",
+    "storefrontEnabled",
+    "storefrontSlug",
+    "storefrontFeeBps",
+    "liveChatEnabled",
+    "liveChatWelcomeMessage",
+  ],
   runtime: [
     "aiFallbackMode",
     "aiModelFirstEnabled",
@@ -320,7 +359,16 @@ const SETTINGS_TAB_FIELDS: Record<SettingsTab, Array<keyof SettingsState>> = {
     "qualityGateMode",
     "qualityGateThreshold",
   ],
-  connections: [],
+  connections: [
+    "selfChatOpenClawEnabled",
+    "selfChatOpenClawCliPath",
+    "selfChatOpenClawAgentId",
+    "selfChatOpenClawTimeoutMs",
+    "selfChatCodexEnabled",
+    "selfChatCodexCliPath",
+    "selfChatCodexModel",
+    "selfChatCodexSandbox",
+  ],
   voice: [],
   automation: [
     "ignoreGroupsByDefault",
@@ -456,6 +504,15 @@ const BIT_COUNTS = [0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4];
 
 function toState(source: Partial<SettingsState> | undefined): SettingsState {
   return {
+    productUse: source?.productUse ?? "personal",
+    businessBrandName: source?.businessBrandName ?? "",
+    businessBrandVoice: source?.businessBrandVoice ?? "",
+    businessOfferSummary: source?.businessOfferSummary ?? "",
+    storefrontEnabled: source?.storefrontEnabled ?? false,
+    storefrontSlug: source?.storefrontSlug ?? "",
+    storefrontFeeBps: source?.storefrontFeeBps ?? 250,
+    liveChatEnabled: source?.liveChatEnabled ?? false,
+    liveChatWelcomeMessage: source?.liveChatWelcomeMessage ?? "Hi, I can help you choose, order, or ask a quick question.",
     ignoreGroupsByDefault: source?.ignoreGroupsByDefault ?? true,
     reactionsEnabled: source?.reactionsEnabled ?? true,
     stickersEnabled: source?.stickersEnabled ?? true,
@@ -544,6 +601,14 @@ function toState(source: Partial<SettingsState> | undefined): SettingsState {
     instagramSendMaxGlobalInWindow: source?.instagramSendMaxGlobalInWindow ?? 40,
     instagramStoryCadenceHours: source?.instagramStoryCadenceHours ?? 3,
     instagramStoryDailyMaxPosts: source?.instagramStoryDailyMaxPosts ?? 6,
+    selfChatOpenClawEnabled: source?.selfChatOpenClawEnabled ?? true,
+    selfChatOpenClawCliPath: source?.selfChatOpenClawCliPath ?? "openclaw",
+    selfChatOpenClawAgentId: source?.selfChatOpenClawAgentId ?? "main",
+    selfChatOpenClawTimeoutMs: source?.selfChatOpenClawTimeoutMs ?? 6 * 60 * 60 * 1000,
+    selfChatCodexEnabled: source?.selfChatCodexEnabled ?? true,
+    selfChatCodexCliPath: source?.selfChatCodexCliPath ?? "codex",
+    selfChatCodexModel: source?.selfChatCodexModel ?? "gpt-5.2",
+    selfChatCodexSandbox: source?.selfChatCodexSandbox ?? "workspace-write",
     outreachEnabled: source?.outreachEnabled ?? false,
     outreachCadenceHours: source?.outreachCadenceHours ?? 36,
     outreachMaxContactsPerRun: source?.outreachMaxContactsPerRun ?? 3,
@@ -663,6 +728,14 @@ function stateEquals(a: SettingsState, b: SettingsState) {
     nearlyEqual(a.instagramSendMaxGlobalInWindow, b.instagramSendMaxGlobalInWindow) &&
     nearlyEqual(a.instagramStoryCadenceHours, b.instagramStoryCadenceHours) &&
     nearlyEqual(a.instagramStoryDailyMaxPosts, b.instagramStoryDailyMaxPosts) &&
+    a.selfChatOpenClawEnabled === b.selfChatOpenClawEnabled &&
+    a.selfChatOpenClawCliPath === b.selfChatOpenClawCliPath &&
+    a.selfChatOpenClawAgentId === b.selfChatOpenClawAgentId &&
+    nearlyEqual(a.selfChatOpenClawTimeoutMs, b.selfChatOpenClawTimeoutMs) &&
+    a.selfChatCodexEnabled === b.selfChatCodexEnabled &&
+    a.selfChatCodexCliPath === b.selfChatCodexCliPath &&
+    a.selfChatCodexModel === b.selfChatCodexModel &&
+    a.selfChatCodexSandbox === b.selfChatCodexSandbox &&
     a.outreachEnabled === b.outreachEnabled &&
     nearlyEqual(a.outreachCadenceHours, b.outreachCadenceHours) &&
     nearlyEqual(a.outreachMaxContactsPerRun, b.outreachMaxContactsPerRun) &&
@@ -1260,10 +1333,6 @@ export function LiveSettings() {
   const remoteState = useMemo(() => toState(settings), [settings]);
   const defaultState = useMemo(() => toState(defaults), [defaults]);
   const knownContacts = useMemo(() => contacts || [], [contacts]);
-  const knownWhatsAppContacts = useMemo(
-    () => knownContacts.filter((contact) => (contact.provider || "whatsapp") === "whatsapp"),
-    [knownContacts],
-  );
   const profiles = profilesQuery || [];
   const availablePersonaPacks = personaPacks?.packs || [];
   const [tab, setTab] = useState<SettingsTab>("runtime");
@@ -1363,6 +1432,7 @@ export function LiveSettings() {
   const profileRecord = getRecord(profileKey);
   const mediaRecord = getRecord(mediaKey);
   const showRuntime = tab === "runtime";
+  const showBusiness = tab === "business";
   const showAutomation = tab === "automation";
   const showConnections = tab === "connections";
   const showVoice = tab === "voice";
@@ -1370,12 +1440,13 @@ export function LiveSettings() {
   const showMedia = tab === "media";
   const showStyle = tab === "style";
   const showRules = tab === "rules";
-  const showDraftActions = showRuntime || showAutomation;
+  const showDraftActions = showRuntime || showBusiness || showAutomation || showConnections;
   const tabDirtyMap = useMemo<Record<SettingsTab, boolean>>(() => {
     return {
+      business: SETTINGS_TAB_FIELDS.business.some((field) => fieldValueChanged(field, draft, remoteState)),
       runtime: SETTINGS_TAB_FIELDS.runtime.some((field) => fieldValueChanged(field, draft, remoteState)),
       automation: SETTINGS_TAB_FIELDS.automation.some((field) => fieldValueChanged(field, draft, remoteState)),
-      connections: false,
+      connections: SETTINGS_TAB_FIELDS.connections.some((field) => fieldValueChanged(field, draft, remoteState)),
       voice: false,
       personality: false,
       media: false,
@@ -1449,6 +1520,15 @@ export function LiveSettings() {
       async () => {
         await saveSettings({
           ...tenantScope,
+          productUse: draft.productUse,
+          businessBrandName: draft.businessBrandName,
+          businessBrandVoice: draft.businessBrandVoice,
+          businessOfferSummary: draft.businessOfferSummary,
+          storefrontEnabled: draft.storefrontEnabled,
+          storefrontSlug: draft.storefrontSlug,
+          storefrontFeeBps: Math.round(draft.storefrontFeeBps),
+          liveChatEnabled: draft.liveChatEnabled,
+          liveChatWelcomeMessage: draft.liveChatWelcomeMessage,
           ignoreGroupsByDefault: draft.ignoreGroupsByDefault,
           reactionsEnabled: draft.reactionsEnabled,
           stickersEnabled: draft.stickersEnabled,
@@ -1559,6 +1639,14 @@ export function LiveSettings() {
           statusPostAudienceMode: draft.statusPostAudienceMode,
           statusBuilderAudienceJids: draft.statusBuilderAudienceJids,
           statusBuilderAudienceSampleSize: Math.round(draft.statusBuilderAudienceSampleSize),
+          selfChatOpenClawEnabled: draft.selfChatOpenClawEnabled,
+          selfChatOpenClawCliPath: draft.selfChatOpenClawCliPath,
+          selfChatOpenClawAgentId: draft.selfChatOpenClawAgentId,
+          selfChatOpenClawTimeoutMs: Math.round(draft.selfChatOpenClawTimeoutMs),
+          selfChatCodexEnabled: draft.selfChatCodexEnabled,
+          selfChatCodexCliPath: draft.selfChatCodexCliPath,
+          selfChatCodexModel: draft.selfChatCodexModel,
+          selfChatCodexSandbox: draft.selfChatCodexSandbox,
         });
       },
       {
@@ -2079,6 +2167,146 @@ export function LiveSettings() {
           </header>
 
           <div className="panel-grid two-col settings-panel-grid">
+        {showBusiness ? (
+          <>
+            <article className="panel-card">
+              <ActionNotices notices={notices} onDismiss={dismissNotice} />
+              <h3>Business Identity</h3>
+              <form onSubmit={onSubmit} className="stack compact" aria-busy={record.pending}>
+                <label className="stack compact">
+                  <span className="queue-meta">Workspace mode</span>
+                  <SearchableSelect
+                    value={draft.productUse}
+                    onChange={(event) =>
+                      setDraft((prev) => ({
+                        ...prev,
+                        productUse: event.target.value === "business" ? "business" : "personal",
+                      }))
+                    }
+                    disabled={record.pending}
+                    aria-disabled={record.pending}
+                  >
+                    <option value="personal">Personal</option>
+                    <option value="business">Business</option>
+                  </SearchableSelect>
+                </label>
+                <label className="stack compact">
+                  <span className="queue-meta">Brand name</span>
+                  <input
+                    type="text"
+                    value={draft.businessBrandName}
+                    placeholder="Your business name"
+                    onChange={(event) => setDraft((prev) => ({ ...prev, businessBrandName: event.target.value }))}
+                    disabled={record.pending}
+                    aria-disabled={record.pending}
+                  />
+                </label>
+                <label className="stack compact">
+                  <span className="queue-meta">Brand voice</span>
+                  <textarea
+                    value={draft.businessBrandVoice}
+                    rows={5}
+                    placeholder="Warm, concise, helpful, premium, playful, formal, pidgin-safe, never pushy..."
+                    onChange={(event) => setDraft((prev) => ({ ...prev, businessBrandVoice: event.target.value }))}
+                    disabled={record.pending}
+                    aria-disabled={record.pending}
+                  />
+                  <span className="queue-meta">Used to steer customer replies, livechat answers, and sales follow-ups.</span>
+                </label>
+                <label className="stack compact">
+                  <span className="queue-meta">Offer summary</span>
+                  <textarea
+                    value={draft.businessOfferSummary}
+                    rows={6}
+                    placeholder="What you sell, who it is for, common buying questions, delivery/payment rules, and what OdogwuHQ must never invent."
+                    onChange={(event) => setDraft((prev) => ({ ...prev, businessOfferSummary: event.target.value }))}
+                    disabled={record.pending}
+                    aria-disabled={record.pending}
+                  />
+                </label>
+              </form>
+            </article>
+
+            <article className="panel-card">
+              <h3>Storefront & Livechat</h3>
+              <div className="stack compact">
+                <label className="settings-toggle-row">
+                  <input
+                    type="checkbox"
+                    checked={draft.storefrontEnabled}
+                    onChange={(event) => setDraft((prev) => ({ ...prev, storefrontEnabled: event.target.checked }))}
+                    disabled={record.pending}
+                    aria-disabled={record.pending}
+                  />
+                  <span>
+                    <strong>Hosted storefront</strong>
+                    <small>Publish a chat-aided shop controlled from this app.</small>
+                  </span>
+                </label>
+                <label className="stack compact">
+                  <span className="queue-meta">Storefront slug</span>
+                  <input
+                    type="text"
+                    value={draft.storefrontSlug}
+                    placeholder="your-brand"
+                    onChange={(event) =>
+                      setDraft((prev) => ({
+                        ...prev,
+                        storefrontSlug: event.target.value.toLowerCase().replace(/[^a-z0-9-]+/g, "-"),
+                      }))
+                    }
+                    disabled={record.pending}
+                    aria-disabled={record.pending}
+                  />
+                  <span className="queue-meta">Future public URL: /shop/{draft.storefrontSlug || "your-brand"}</span>
+                </label>
+                <label className="stack compact">
+                  <span className="queue-meta">Platform fee</span>
+                  <input
+                    type="number"
+                    min={0}
+                    max={20}
+                    step={0.1}
+                    value={draft.storefrontFeeBps / 100}
+                    onChange={(event) =>
+                      setDraft((prev) => ({
+                        ...prev,
+                        storefrontFeeBps: Math.round(parseNumber(event.target.value, prev.storefrontFeeBps / 100) * 100),
+                      }))
+                    }
+                    disabled={record.pending}
+                    aria-disabled={record.pending}
+                  />
+                  <span className="queue-meta">Small fee collected on storefront-assisted sales.</span>
+                </label>
+                <label className="settings-toggle-row">
+                  <input
+                    type="checkbox"
+                    checked={draft.liveChatEnabled}
+                    onChange={(event) => setDraft((prev) => ({ ...prev, liveChatEnabled: event.target.checked }))}
+                    disabled={record.pending}
+                    aria-disabled={record.pending}
+                  />
+                  <span>
+                    <strong>Embeddable livechat</strong>
+                    <small>Connect Odogwu livechat to the tenant inbox and their own website.</small>
+                  </span>
+                </label>
+                <label className="stack compact">
+                  <span className="queue-meta">Livechat welcome</span>
+                  <textarea
+                    value={draft.liveChatWelcomeMessage}
+                    rows={3}
+                    onChange={(event) => setDraft((prev) => ({ ...prev, liveChatWelcomeMessage: event.target.value }))}
+                    disabled={record.pending}
+                    aria-disabled={record.pending}
+                  />
+                </label>
+              </div>
+            </article>
+          </>
+        ) : null}
+
         {showRuntime ? (
           <>
             <article className="panel-card">
@@ -3448,15 +3676,187 @@ export function LiveSettings() {
         ) : null}
 
         {showConnections ? (
-          <article className="panel-card settings-connection-card">
-            <div className="settings-connection-header">
-              <div>
-                <h3>Connections</h3>
-                <p className="queue-meta">Manage local sessions for every messaging platform enabled for this workspace.</p>
+          <>
+            <article className="panel-card settings-connection-card">
+              <div className="settings-connection-header">
+                <div>
+                  <h3>Self-chat Orchestrator</h3>
+                  <p className="queue-meta">Connect local OpenClaw and Codex CLIs used when your self chat delegates work.</p>
+                </div>
               </div>
-            </div>
-            <SetupWizard realtimeEnabled embedded includeVoiceOption={false} showNotices={false} />
-          </article>
+              <div className="stack compact">
+                <div className="panel-grid two-col">
+                  <label className="stack compact">
+                    <span className="queue-meta">OpenClaw environment</span>
+                    <SearchableSelect
+                      value={draft.selfChatOpenClawEnabled ? "true" : "false"}
+                      onChange={(event) =>
+                        setDraft((prev) => ({
+                          ...prev,
+                          selfChatOpenClawEnabled: event.target.value === "true",
+                        }))
+                      }
+                      disabled={record.pending}
+                      aria-disabled={record.pending}
+                    >
+                      <option value="true">Connected</option>
+                      <option value="false">Disconnected</option>
+                    </SearchableSelect>
+                  </label>
+
+                  <label className="stack compact">
+                    <span className="queue-meta">Codex environment</span>
+                    <SearchableSelect
+                      value={draft.selfChatCodexEnabled ? "true" : "false"}
+                      onChange={(event) =>
+                        setDraft((prev) => ({
+                          ...prev,
+                          selfChatCodexEnabled: event.target.value === "true",
+                        }))
+                      }
+                      disabled={record.pending}
+                      aria-disabled={record.pending}
+                    >
+                      <option value="true">Connected</option>
+                      <option value="false">Disconnected</option>
+                    </SearchableSelect>
+                  </label>
+                </div>
+                <p className="queue-meta">
+                  Self chat auto-detects OpenClaw and Codex from the worker environment. Use overrides only when the command is installed outside PATH.
+                </p>
+                <details className="stack compact">
+                  <summary className="queue-meta">Advanced CLI overrides</summary>
+                  <div className="panel-grid two-col">
+                    <label className="stack compact">
+                      <span className="queue-meta">OpenClaw command</span>
+                      <input
+                        type="text"
+                        value={draft.selfChatOpenClawCliPath}
+                        onChange={(event) =>
+                          setDraft((prev) => ({
+                            ...prev,
+                            selfChatOpenClawCliPath: event.target.value,
+                          }))
+                        }
+                        placeholder="Auto-detect from PATH"
+                        disabled={record.pending}
+                        aria-disabled={record.pending}
+                      />
+                    </label>
+
+                    <label className="stack compact">
+                      <span className="queue-meta">OpenClaw agent</span>
+                      <input
+                        type="text"
+                        value={draft.selfChatOpenClawAgentId}
+                        onChange={(event) =>
+                          setDraft((prev) => ({
+                            ...prev,
+                            selfChatOpenClawAgentId: event.target.value,
+                          }))
+                        }
+                        placeholder="main"
+                        disabled={record.pending}
+                        aria-disabled={record.pending}
+                      />
+                    </label>
+
+                    <label className="stack compact">
+                      <span className="queue-meta">OpenClaw timeout (minutes)</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={1440}
+                        step={1}
+                        value={Math.round(draft.selfChatOpenClawTimeoutMs / 60_000)}
+                        onChange={(event) =>
+                          setDraft((prev) => ({
+                            ...prev,
+                            selfChatOpenClawTimeoutMs:
+                              parseNumber(event.target.value, Math.round(prev.selfChatOpenClawTimeoutMs / 60_000)) * 60_000,
+                          }))
+                        }
+                        disabled={record.pending}
+                        aria-disabled={record.pending}
+                      />
+                    </label>
+
+                    <label className="stack compact">
+                      <span className="queue-meta">Codex command</span>
+                      <input
+                        type="text"
+                        value={draft.selfChatCodexCliPath}
+                        onChange={(event) =>
+                          setDraft((prev) => ({
+                            ...prev,
+                            selfChatCodexCliPath: event.target.value,
+                          }))
+                        }
+                        placeholder="Auto-detect from PATH"
+                        disabled={record.pending}
+                        aria-disabled={record.pending}
+                      />
+                    </label>
+
+                    <label className="stack compact">
+                      <span className="queue-meta">Codex model</span>
+                      <input
+                        type="text"
+                        value={draft.selfChatCodexModel}
+                        onChange={(event) =>
+                          setDraft((prev) => ({
+                            ...prev,
+                            selfChatCodexModel: event.target.value,
+                          }))
+                        }
+                        placeholder="Auto-detect from environment"
+                        disabled={record.pending}
+                        aria-disabled={record.pending}
+                      />
+                    </label>
+
+                    <label className="stack compact">
+                      <span className="queue-meta">Codex sandbox</span>
+                      <SearchableSelect
+                        value={draft.selfChatCodexSandbox}
+                        onChange={(event) =>
+                          setDraft((prev) => ({
+                            ...prev,
+                            selfChatCodexSandbox:
+                              event.target.value === "read-only" || event.target.value === "danger-full-access"
+                                ? event.target.value
+                                : "workspace-write",
+                          }))
+                        }
+                        disabled={record.pending}
+                        aria-disabled={record.pending}
+                      >
+                        <option value="workspace-write">Workspace write</option>
+                        <option value="read-only">Read only</option>
+                        <option value="danger-full-access">Full local access</option>
+                      </SearchableSelect>
+                    </label>
+                  </div>
+                </details>
+                {record.error ? (
+                  <p className="queue-meta action-inline-error" role="alert">
+                    {record.error}
+                  </p>
+                ) : null}
+              </div>
+            </article>
+
+            <article className="panel-card settings-connection-card">
+              <div className="settings-connection-header">
+                <div>
+                  <h3>Connections</h3>
+                  <p className="queue-meta">Manage local sessions for every messaging platform enabled for this account.</p>
+                </div>
+              </div>
+              <SetupWizard realtimeEnabled embedded includeVoiceOption={false} showNotices={false} />
+            </article>
+          </>
         ) : null}
 
         {showVoice ? (
@@ -3484,13 +3884,13 @@ export function LiveSettings() {
           <div className="stack compact">
             <RecipientPickerField
               label="Romantic contacts"
-              helper="Select from previous WhatsApp contacts or paste one contact address."
-              contacts={knownWhatsAppContacts}
+              helper="Select from previous contacts or paste one contact address."
+              contacts={knownContacts}
               selectedJids={draft.romanticPartnerJids}
               disabled={record.pending}
               contactsLoading={contactsLoading}
-              addPlaceholder="Add from previous WhatsApp contacts"
-              inputPlaceholder="Paste a WhatsApp contact address"
+              addPlaceholder="Add from previous contacts"
+              inputPlaceholder="Paste a contact address"
               emptyLabel="No romantic contacts selected."
               onAdd={addRomanticPartner}
               onRemove={removeRomanticPartner}

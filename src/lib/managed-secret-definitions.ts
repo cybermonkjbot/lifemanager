@@ -87,7 +87,7 @@ export const MANAGED_SECRET_DEFINITIONS: ManagedSecretDefinition[] = [
   {
     key: "flutterwave.secretKey",
     label: "Flutterwave secret key",
-    description: "Server-side Flutterwave key used to initialize and verify subscription payments.",
+    description: "Server-side Flutterwave key used for subscriptions, storefront checkout, and payout transfers.",
     envNames: ["FLUTTERWAVE_SECRET_KEY", "FLW_SECRET_KEY"],
     secret: true,
   },

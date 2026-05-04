@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { compactSafeText, extractKeywords, isWithinHourWindow, relationshipLabel, stableHash, stableUnitRandom } from "./statusBuilder";
+import {
+  buildStatusBuilderIdempotencyKey,
+  compactSafeText,
+  extractKeywords,
+  isWithinHourWindow,
+  relationshipLabel,
+  stableHash,
+  stableUnitRandom,
+} from "./statusBuilder";
 
 test("stableHash is deterministic", () => {
   const seed = "trend|social|42|123";
@@ -21,6 +29,26 @@ test("stableUnitRandom avoids linear drift for sequential cadence buckets", () =
   const monotonicDescending = values.every((value, index) => index === 0 || value <= values[index - 1]);
   assert.equal(monotonicAscending || monotonicDescending, false);
   assert.equal(new Set(values.map((value) => value.toFixed(6))).size >= 7, true);
+});
+
+test("buildStatusBuilderIdempotencyKey is scoped by cadence and format", () => {
+  assert.equal(
+    buildStatusBuilderIdempotencyKey({
+      cadenceBucket: 493318,
+      statusFormat: "meme",
+    }),
+    "status-builder:legacy:493318:meme",
+  );
+  assert.notEqual(
+    buildStatusBuilderIdempotencyKey({
+      cadenceBucket: 493318,
+      statusFormat: "meme",
+    }),
+    buildStatusBuilderIdempotencyKey({
+      cadenceBucket: 493319,
+      statusFormat: "meme",
+    }),
+  );
 });
 
 test("isWithinHourWindow handles overnight windows", () => {

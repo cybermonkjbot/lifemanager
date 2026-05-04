@@ -14,7 +14,7 @@ import {
 import { convexRefs } from "../convex-refs";
 import { getWorkerCommand } from "../runtime/worker-command";
 import { ensureWorkerStopped, getWorkerRuntimeStatus } from "../runtime/worker-lock";
-import { verifyLocalTenantConnectorAccess } from "../tenant-connector-runtime";
+import { connectorPlanUnavailableMessage, verifyLocalTenantConnectorAccess } from "../tenant-connector-runtime";
 
 type InstagramSetupStatus = "idle" | "starting" | "authenticating" | "challenge_required" | "connected" | "error";
 type InstagramSetupMode = "password" | "challenge_code";
@@ -524,7 +524,7 @@ class InstagramSetupManager {
       this.setState({
         status: "error",
         mode: "password",
-        message: "Instagram is disabled for this tenant plan. Enable it from admin entitlements before connecting.",
+        message: connectorPlanUnavailableMessage("instagram"),
       });
       return this.getState();
     }

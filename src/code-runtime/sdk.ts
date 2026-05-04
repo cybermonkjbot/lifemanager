@@ -207,7 +207,13 @@ export const CODE_SDK_REGISTRY: Record<string, CodeSdkModule> = {
   },
   time: {
     description: "Use clock helpers in conditions and action arguments.",
-    operations: {},
+    operations: {
+      tomorrow_at: {
+        description: "Resolve a local wall-clock time on the next day.",
+        danger: "read",
+        requiredArgs: ["value"],
+      },
+    },
   },
 };
 

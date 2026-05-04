@@ -219,6 +219,7 @@ export function sanitizeInstanceSetupPreferences(
   value: Partial<InstanceSetupPreferences> | null | undefined,
 ): InstanceSetupPreferences {
   return {
+    productUse: normalizeStringUnion(value?.productUse, ["personal", "business"], DEFAULT_INSTANCE_SETUP_PREFERENCES.productUse),
     serviceMode: normalizeStringUnion(value?.serviceMode, ["hosted", "self_hosted"], DEFAULT_INSTANCE_SETUP_PREFERENCES.serviceMode),
     selfHosted: sanitizeSelfHostedConfig(value?.selfHosted || DEFAULT_INSTANCE_SETUP_PREFERENCES.selfHosted),
     autonomyMode: normalizeStringUnion(value?.autonomyMode, ["review_first", "autopilot"], DEFAULT_INSTANCE_SETUP_PREFERENCES.autonomyMode),

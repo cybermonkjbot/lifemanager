@@ -17,6 +17,7 @@ import {
 import type { EligibilityReason } from "./lib/threadEligibility";
 import { dedupeAliases, sanitizeExtractedAliasToken } from "./lib/aliasNormalization";
 import { resolveTenantForMutation } from "./lib/tenantSecurity";
+import { extractPreviewUrls } from "./lib/urlPreview";
 
 const INBOUND_STALE_GRACE_MS = 2 * 60 * 1000;
 const GHOST_MODE_DURATION_MS = 30 * 60 * 1000;
@@ -31,6 +32,7 @@ const IGNORE_CONTACT_FALLBACK_SCAN_LIMIT = 1000;
 const refConversationIntelligenceIngestMessageSignals = makeFunctionReference<"mutation">(
   "conversationIntelligence:ingestMessageSignals",
 );
+const refUrlPreviewFetchForMessage = makeFunctionReference<"action">("urlPreviews:fetchForMessage");
 type IngestMode = "live" | "history_sync" | "history_fetch";
 type InboundMessageType = "text" | "reaction" | "sticker" | "meme" | "image" | "video" | "audio" | "document";
 type MessageProvider = "whatsapp" | "instagram" | "imessage" | "telegram";
@@ -674,6 +676,10 @@ export const ingest = mutation({
       messageAt,
       createdAt: now,
     });
+    const previewUrls = messageType === "text" && !isStatusMessage ? extractPreviewUrls(normalizedText) : [];
+    if (previewUrls.length > 0) {
+      await ctx.scheduler.runAfter(0, refUrlPreviewFetchForMessage, { messageId }).catch(() => undefined);
+    }
     if (effectiveMessageId) {
       await ctx.db.insert("inboundDedupeKeys", {
         tenantId,
@@ -926,7 +932,7 @@ export const ingest = mutation({
         skipDraftGeneration: args.skipDraftGeneration,
       })
     ) {
-      await ctx.scheduler.runAfter(0, internal.draft.generate, {
+      await ctx.scheduler.runAfter(previewUrls.length > 0 ? 2_000 : 0, internal.draft.generate, {
         threadId: thread._id,
         sourceMessageId: messageId,
       });

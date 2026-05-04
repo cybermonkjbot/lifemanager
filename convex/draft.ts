@@ -161,7 +161,7 @@ export const getThreadBillingGate = internalQuery({
     }
     return {
       active: false as const,
-      reason: tenant ? tenantBillingInactiveReason(tenant) : "Tenant subscription is not active.",
+      reason: tenant ? tenantBillingInactiveReason(tenant) : "Your account needs an active subscription to use hosted features.",
     };
   },
 });
@@ -440,12 +440,20 @@ export const sendManualReply = mutation({
     threadId: v.id("threads"),
     sourceMessageId: v.id("messages"),
     text: v.string(),
+    sendKind: v.optional(v.union(v.literal("text"), v.literal("sticker"), v.literal("meme"), v.literal("voice_note"))),
+    mediaAssetId: v.optional(v.id("mediaAssets")),
+    mediaCaption: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const now = Date.now();
     const text = args.text.trim();
-    if (!text) {
+    const sendKind = args.sendKind || "text";
+    const mediaCaption = args.mediaCaption?.trim();
+    if ((sendKind === "text" || sendKind === "voice_note") && !text) {
       throw new Error("Reply text cannot be empty.");
+    }
+    if ((sendKind === "sticker" || sendKind === "meme") && !args.mediaAssetId) {
+      throw new Error(`${sendKind === "sticker" ? "Sticker" : "Media"} reply requires a media asset.`);
     }
     const thread = await ctx.db.get(args.threadId);
     if (!thread) {
@@ -495,14 +503,16 @@ export const sendManualReply = mutation({
       threadId: args.threadId,
       sourceMessageId: args.sourceMessageId,
       toolRunId: `manual:${now}`,
-      text,
-      sendKind: "text",
+      text: text || mediaCaption || (sendKind === "sticker" ? "[Sticker]" : "[Media]"),
+      sendKind,
+      mediaAssetId: args.mediaAssetId,
+      mediaCaption,
       status: "approved",
       confidence: 1,
       provider: "heuristic",
       delayMs: 0,
       typingMs: 0,
-      reason: "Manual reply from conversation thread.",
+      reason: `Manual ${sendKind.replace("_", " ")} reply from conversation thread.`,
       createdAt: now,
       updatedAt: now,
     });
@@ -512,10 +522,12 @@ export const sendManualReply = mutation({
       threadId: args.threadId,
       draftId,
       toolRunId: `manual:${now}`,
-      messageText: text,
-      sendKind: "text",
+      messageText: text || mediaCaption || "",
+      sendKind,
+      mediaAssetId: args.mediaAssetId,
+      mediaCaption,
       sendAt: now,
-      idempotencyKey: `manual:${args.threadId}:${args.sourceMessageId}:${now}`,
+      idempotencyKey: `manual:${sendKind}:${args.threadId}:${args.sourceMessageId}:${args.mediaAssetId || "text"}:${now}`,
       provider: "heuristic",
       now,
     });
@@ -526,8 +538,8 @@ export const sendManualReply = mutation({
       threadId: args.threadId,
       outboxId,
       detail: suppressedOutbox
-        ? `Manual reply queued and ${suppressedOutbox} active outbox item(s) suppressed.`
-        : "Manual reply queued from conversation thread.",
+        ? `Manual ${sendKind.replace("_", " ")} reply queued and ${suppressedOutbox} active outbox item(s) suppressed.`
+        : `Manual ${sendKind.replace("_", " ")} reply queued from conversation thread.`,
       createdAt: now,
     });
 

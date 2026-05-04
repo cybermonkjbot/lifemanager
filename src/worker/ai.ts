@@ -1010,6 +1010,7 @@ const ANTI_BEGGI_BEGGI_EN_VARIANTS: Record<AntiBeggiBeggiTone, string[]> = {
   ],
 };
 const WRAP_UP_PATTERNS = [
+  /^(yes+|yea+h?|yah+|yep+|yup+)(?:\s+(?:o+|sha|na|nah))?[.!]*$/i,
   /^(ok|okay|okey|oki|okie|cool|great|nice|perfect|fair|real|valid|facts|true true|seen|no stress|no worries|alright then|that'?s fine|all good|all gud|sounds good|done|resolved|all set|we good|we gud|bet+|say less+|k{1,4}|o+k+|works|copy|solid|valid|for sure|fs|fasho|word|heard|copy that|copy dat|sharp sharp|na so|ehen|roger|roger that|fair enough|fine by me)[.!]*$/i,
   /^(thanks|thank you|thx|ty|tnx|thnks|tysm|that helps|got it|gotcha|noted|understood|appreciate it|appreciate you|preciate it|preciate you)[.!]*$/i,
   /^(safe|safee|we move|we mov|no wahala|nwahala|sharp|copy o|na true|alright na|alrighty|alryt|alr|all good sha|we good abeg|noted boss|thanks o|thank you o+|thx abeg|na so|ehen|sharp sharp)[.!]*$/i,
@@ -1061,11 +1062,29 @@ const OLD_ENGLISH_VERB_ENDING_PATTERN = /\b[a-z]{3,}eth\b/i;
 const OLD_ENGLISH_MIRRORABLE_REPLY_PREFIX_PATTERN =
   /^(understood|got it|all good|no worries|sure|okay|ok|yes|yeah|yep|thanks|thank you|i can|i will|i'll|we can|let's|no problem)\b/i;
 const ACK_ONLY_PATTERNS = [
+  /^(yes+|yea+h?|yah+|yep+|yup+)(?:\s+(?:o+|sha|na|nah))?[.!]*$/i,
   /^(ok|okay|sure|cool|great|perfect|nice|done|noted|got it|understood|alright|aight|ight|alrighty|alryt|k{1,4}|o+k+|bet+|say less+|works|copy|copy dat|solid|valid|all set|we good|we gud|for sure|fs|sounds good|all good|all gud|fasho|word|heard|copy that|na so|ehen|sharp sharp)[.!]*$/i,
   /^(thanks|thank you|thx|ty|tnx|thnks|tysm|appreciate it|appreciate you)[.!]*$/i,
   /^(safe|safee|we move|we mov|no wahala|nwahala|sharp|copy o|na true|alright na|all good sha|we good abeg|noted boss|thanks o|thank you o+|thx abeg|na so|ehen|sharp sharp)[.!]*$/i,
   /^(thanks|thank you|thx|ty|appreciate it|appreciate you|preciate you)(?:\s+\w{2,12})?[.!]*$/i,
   /^(thanks|thank you|thx|ty|appreciate it|appreciate you)\s*,\s*(all good|we good|sounds good|got it|that helps|done|resolved|all set)[.!]*$/i,
+];
+const OUTBOUND_CHECKIN_PROMPT_PATTERNS = [
+  /\bhow (?:are|r) (?:you|u)\b/i,
+  /\bhow(?:'|’)s (?:your )?(?:day|mind|heart|body|week)\b/i,
+  /\bhow you dey\b/i,
+  /\bhow body\b/i,
+  /\b(?:are|r) (?:you|u) (?:good|okay|ok|alright|fine)\b/i,
+  /\b(?:you|u) (?:good|okay|ok|alright|fine)\b/i,
+  /\b(?:is )?(?:everything|everytin|everythin)(?:'|’)?s?(?: still)? (?:okay|ok|fine|alright|good|settled|well)\b/i,
+  /\b(?:all|everything|everytin|everythin)(?:'|’)?s? (?:still )?(?:okay|ok|fine|alright|good|settled|well) (?:on )?(?:your|ur) (?:side|end)\b/i,
+  /\bhope (?:say )?(?:(?:your|ur) (?:side|end)) (?:is |dey )?(?:settled|okay|ok|fine|alright|good|well)\b/i,
+  /\b(?:is )?(?:your|ur) (?:side|end) (?:is |dey )?(?:settled|okay|ok|fine|alright|good|well)\b/i,
+  /\bhope (?:say )?(?:everything|everytin|everythin|all) (?:is |dey )?(?:settled|okay|ok|fine|alright|good|well)\b/i,
+  /\bchecking (?:in|on you)\b/i,
+  /\bhope (?:say )?(?:you|u) (?:are|dey|feel(?:ing)?|(?:'|’)re) (?:okay|ok|fine|alright|good|well)\b/i,
+  /\bhope (?:you|u)(?:'|’)re holding up\b/i,
+  /\byou dey (?:okay|ok|alright|fine|good|well)\b/i,
 ];
 const LEAD_HANDOFF_PATTERNS = [
   /\b(up to you|you decide|your call|you choose|pick for me|surprise me)\b/i,
@@ -1074,6 +1093,34 @@ const LEAD_HANDOFF_PATTERNS = [
 ];
 const LOW_MOMENTUM_PATTERNS = [
   /^(hmm+|hmmm+|idk|i don't know|i dont know|not sure|whatever|anything|either one|you choose|up to you|fair|real|valid|facts|true true|seen|no stress|no worries|alright then|that'?s fine)[.!]*$/i,
+];
+const LOW_STAKES_ACK_BLOCKLIST_PATTERNS = [
+  /\?/,
+  /\b(can|could|would|will|should|please|pls|abeg|kindly|help|send|share|call|ring|check|confirm|review|explain|tell me|how|why|what|when|where|which|who)\b/i,
+  /\b(urgent|asap|emergency|hospital|accident|sick|pain|hurt|died|death|funeral|otp|password|pin|bank|transfer|money|loan|borrow)\b/i,
+];
+const LOW_STAKES_ACK_CUE_PATTERNS = [
+  /^(?:yes+|yea+h?|yah+|yep+|yup+|no+|nope|nah)(?:\s+(?:o+|sha|na|nah))?[.!]*$/i,
+  /^(?:ok|okay|k+|kk|cool|great|nice|perfect|sure|alright|noted|seen|done|copy|safe|sharp|bet+|solid|valid|facts|true true)[.!]*$/i,
+  /^(?:thanks?|thank you|thx|ty|tnx|appreciate (?:it|you)|no worries|no wahala|all good|we good|sounds good)[.!]*$/i,
+  /\b(?:done|sent|received|sorted|settled|resolved|all good|we good|no wahala|okay|ok|thanks|thank you)\b/i,
+];
+const SIMPLE_RELAY_REQUEST_PATTERNS = [
+  /\b(?:please\s+)?(?:can|could|would|will)\s+you\s+(?:please\s+)?(?:tell|ask|message|text|call|ring|remind|inform)\s+\p{L}[\p{L}'-]*\b[\s\S]{0,120}\b(?:help|open|close|bring|give|send|come|go|check|pick|drop)\b/iu,
+  /\b(?:please\s+)?(?:tell|ask|message|text|call|ring|remind|inform)\s+\p{L}[\p{L}'-]*\b[\s\S]{0,120}\b(?:help|open|close|bring|give|send|come|go|check|pick|drop)\b/iu,
+  /\b(?:help me|help us)\s+(?:tell|ask|message|text|call|ring|remind|inform)\s+\p{L}[\p{L}'-]*\b/iu,
+];
+const SIMPLE_CALL_ACTION_PATTERNS = [
+  /\b(?:dad|daddy|father|mum|mom|mummy|mommy|mother|papa|mama|uncle|auntie|aunty|brother|sister|[A-Z][\p{L}'-]*)\s+asked\s+me\s+to\s+call\b/iu,
+  /\b(?:please\s+)?(?:can|could|would|will)\s+you\s+(?:please\s+)?(?:call|ring|phone)\s+(?:dad|daddy|father|mum|mom|mummy|mommy|mother|papa|mama|uncle|auntie|aunty|him|her|them|[\p{L}'-]+)(?:'s)?(?:\s+number)?\b/iu,
+  /\b(?:call|ring|phone)\s+(?:dad|daddy|father|mum|mom|mummy|mommy|mother|papa|mama|uncle|auntie|aunty|him|her|them|[\p{L}'-]+)(?:'s)?(?:\s+number)?(?:\s+instead)?\b/iu,
+  /\b(?:call|ring|phone)\s+(?:now|back)\b/i,
+];
+const CALL_ACTION_WELFARE_TAIL_PATTERNS = [
+  /(?:[,.;]\s*)?(?:everything|everytin|everythin)(?:'|’)?s?(?: still)? (?:okay|ok|fine|alright|good|settled|well)(?: (?:on )?(?:your|ur) (?:side|end))?(?:,\s*(?:yes|yeah|yep))?\??\s*$/i,
+  /(?:[,.;]\s*)?hope (?:say )?(?:(?:your|ur) (?:side|end)|(?:everything|everytin|everythin|all)) (?:is |dey )?(?:settled|okay|ok|fine|alright|good|well)\??\s*$/i,
+  /(?:[,.;]\s*)?(?:are )?(?:you|u) (?:okay|ok|fine|alright|good)\??\s*$/i,
+  /(?:[,.;]\s*)?(?:your|ur) (?:side|end) (?:is |dey )?(?:settled|okay|ok|fine|alright|good|well)\??\s*$/i,
 ];
 const CLOSE_MODE_REOPEN_PATTERNS = [
   /\b(let me know|keep me posted)\b/i,
@@ -1311,6 +1358,72 @@ function isAckLike(text: string) {
   return ACK_ONLY_PATTERNS.some((pattern) => pattern.test(trimmed));
 }
 
+function shouldPreferSmallAcknowledgement(text: string) {
+  const normalized = normalizeOutboundText(text || "");
+  if (!normalized || normalized.length > 90) {
+    return false;
+  }
+  if (LOW_STAKES_ACK_BLOCKLIST_PATTERNS.some((pattern) => pattern.test(normalized))) {
+    return false;
+  }
+  return isAckLike(normalized) || LOW_STAKES_ACK_CUE_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+function hasSimpleRelayRequest(text: string) {
+  const normalized = normalizeOutboundText(text || "");
+  if (!normalized || normalized.length > 220) {
+    return false;
+  }
+  return SIMPLE_RELAY_REQUEST_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+function hasSimpleCallActionRequest(text: string) {
+  const normalized = normalizeOutboundText(text || "");
+  if (!normalized || normalized.length > 180) {
+    return false;
+  }
+  return SIMPLE_CALL_ACTION_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+function isCompactCallActionReply(text: string) {
+  const normalized = normalizeOutboundText(text || "");
+  return Boolean(normalized && countWords(normalized) <= 8 && /\b(call|ring|phone)\b/i.test(normalized));
+}
+
+function isOutboundCheckInPrompt(text: string) {
+  const normalized = normalizeOutboundText(text || "");
+  if (!normalized) {
+    return false;
+  }
+  return OUTBOUND_CHECKIN_PROMPT_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+function isOutboundConversationExtender(text: string) {
+  const normalized = normalizeOutboundText(text || "");
+  if (!normalized) {
+    return false;
+  }
+  return /\?/.test(normalized) || isOutboundCheckInPrompt(normalized);
+}
+
+function hasRecentOutboundCheckInPrompt(historyLines: string[], limit = 4) {
+  let seenOutbound = 0;
+  for (let index = historyLines.length - 1; index >= 0; index -= 1) {
+    const parsed = parseHistoryLine(historyLines[index] || "");
+    if (parsed.label !== "Me") {
+      continue;
+    }
+    seenOutbound += 1;
+    if (isOutboundCheckInPrompt(parsed.body)) {
+      return true;
+    }
+    if (seenOutbound >= limit) {
+      break;
+    }
+  }
+  return false;
+}
+
 function looksLoopingConversation(historyLines: string[]) {
   const recent = historyLines.slice(-10);
   if (recent.length < 4) {
@@ -1322,7 +1435,7 @@ function looksLoopingConversation(historyLines: string[]) {
   let maxInboundAckStreak = 0;
 
   for (const line of recent) {
-    if (line.startsWith("Me:") && /\?/.test(line)) {
+    if (line.startsWith("Me:") && isOutboundConversationExtender(line.replace(/^Me:\s*/, ""))) {
       outboundQuestions += 1;
     }
     if (line.startsWith("Them:")) {
@@ -1837,6 +1950,22 @@ function heuristicReply(input: string, historyLines: string[] = []) {
             "I'll go with the simpler option first so we can move quickly.",
             "Let's pick one and move now; we can adjust later if needed.",
           ]),
+    );
+  }
+
+  if (hasSimpleRelayRequest(input)) {
+    return finalize(
+      pidginMode
+        ? pickVariant(input, ["Okay, I go tell am now.", "Sharp, I go tell am now.", "No wahala, I go tell am."])
+        : pickVariant(input, ["Okay, I'll tell him now.", "Sure, I'll tell him now.", "On it, I'll tell him."]),
+    );
+  }
+
+  if (hasSimpleCallActionRequest(input)) {
+    return finalize(
+      pidginMode
+        ? pickVariant(input, ["Okay, I go call now.", "Sharp, I go call now.", "No wahala, I go call now."])
+        : pickVariant(input, ["Okay, I'll call now.", "On it, I'll call now.", "Alright, I'll call now."]),
     );
   }
 
@@ -2671,6 +2800,17 @@ function scoreMicroReplyFit(replyText: string, inboundText: string) {
   const closeAckReply = /^(ok|okay|k|kk|cool|great|perfect|bet|safe|seen|sharp|we good|all good)$/i.test(normalizedReply);
   if (ACK_ONLY_PATTERNS.some((pattern) => pattern.test(normalizedInbound)) && closeAckReply) {
     return 0.84;
+  }
+
+  const smallAckReply = /^(ok|okay|noted|seen|got it|copy|sharp|safe|cool|nice|done|all good|no wahala|no worries)$/i.test(
+    normalizedReply,
+  );
+  if (shouldPreferSmallAcknowledgement(inbound) && smallAckReply) {
+    return 0.9;
+  }
+
+  if (hasSimpleCallActionRequest(inbound) && isCompactCallActionReply(reply)) {
+    return 0.94;
   }
 
   if (inbound.length <= 28) {
@@ -3521,9 +3661,15 @@ function buildPrompt(args: {
       ? "Conversation guidance layer: anti-dwelling close is active. Send one short close line only. No follow-up question and no topic reopening."
       : args.conversationGuidance.shouldLeadPivot
         ? `Conversation guidance layer: controlled lead-pivot is active${args.conversationGuidance.leadPivotTheme ? ` (${args.conversationGuidance.leadPivotTheme})` : ""}. After a brief acknowledgment, ask one concise pivot question to move into a fresh lane.`
-        : args.conversationGuidance.shouldCheckIn
-          ? "Conversation guidance layer: mutual wellbeing check-in is due. If natural, include one concise check-in question."
-          : "";
+      : args.conversationGuidance.shouldCheckIn
+        ? hasRecentOutboundCheckInPrompt(recentHistory.map((line) => line.line)) || isAckLike(args.inboundText)
+          ? "Conversation guidance layer: a wellbeing check-in was already asked or just answered. Do not ask another check-in question; acknowledge briefly or close."
+          : "Conversation guidance layer: mutual wellbeing check-in is due. If natural, include one concise check-in question."
+        : "";
+  const antiRepeatedCheckInInstruction =
+    hasRecentOutboundCheckInPrompt(recentHistory.map((line) => line.line)) && isAckLike(args.inboundText)
+      ? "The latest inbound is a low-signal answer to a recent check-in. Do not ask if they are okay again, do not rephrase the same check-in, and do not add another welfare question."
+      : "";
   const isLeadOrFollowConversation =
     responseWorkbench.workbench.replyMode === "lead" || responseWorkbench.workbench.replyMode === "answer";
   const decisionFirstSteeringInstruction =
@@ -3538,6 +3684,15 @@ function buildPrompt(args: {
     isLeadOrFollowConversation
       ? "Do not bounce the decision back with broad prompts (for example: 'what do you think?', 'let me know', 'any thoughts?') unless the inbound explicitly asks for options."
       : "";
+  const smallAcknowledgementInstruction = shouldPreferSmallAcknowledgement(args.inboundText)
+    ? "Small acknowledgement mode: the latest inbound is low-stakes. Prefer a tiny natural acknowledgment of 1-4 words, such as 'Okay', 'Seen', 'Noted', 'Sharp', 'No wahala', or 'All good'. Do not expand, explain, ask a follow-up, or restate the conversation."
+    : "";
+  const simpleRelayInstruction = hasSimpleRelayRequest(args.inboundText)
+    ? "Simple relay/action handoff mode: the latest inbound asks you to tell/ask/call someone to do a small immediate thing. Reply with one compact action confirmation, ideally 4-8 words. Do not add a social check-in, do not repeat every detail, and do not open with a full greeting. Example shape: 'Okay, I’ll tell him now.'"
+    : "";
+  const simpleCallActionInstruction = hasSimpleCallActionRequest(args.inboundText)
+    ? "Simple call action mode: the latest inbound asks you to call someone, call back, or switch the number/person to call. Reply with one compact action confirmation, ideally 3-7 words. Do not add 'everything okay?', 'hope your side is settled?', or any wellbeing check. If the latest inbound changes the call target, follow the latest target and ignore the earlier one."
+    : "";
   const followConversationContinuityInstruction =
     responseWorkbench.workbench.replyMode === "answer"
       ? "FOLLOW conversation steering: stay anchored to the current thread and respond as a continuation, not a reset."
@@ -3602,6 +3757,7 @@ function buildPrompt(args: {
       "Sound conversational and specific, never stiff or corporate.",
       "Avoid customer-support phrasing (ticket, escalation, SLA, thanks for reaching out) and avoid email-style sign-offs.",
       "Directly react to something concrete in the latest inbound message (topic, emotion, or request).",
+      "If the recent chat contains a greeting followed by a concrete request, answer the concrete request in one compact line; do not send a separate greeting-only check-in.",
       "If someone says they are sick or had an accident, do not give care instructions (no 'take care', 'rest up', or medical tips). Use brief empathy and a get-better wish.",
       aiDisclosureInstruction,
       "Do not overpromise. If timing is uncertain, say you'll confirm shortly.",
@@ -3609,7 +3765,7 @@ function buildPrompt(args: {
       "When the other person hands you the choice or sounds indecisive, take the lead with one practical recommendation instead of bouncing back vague follow-up prompts.",
       emojiPolicyInstruction,
       "Avoid direct name address by default. Only use the contact's name if they used your name first in the latest message or disambiguation is required.",
-      "Avoid generic fillers like 'Noted', 'As an AI', 'I hope this message finds you well', or repetitive templates.",
+      "Avoid generic fillers when a real answer is needed. For pure low-stakes acknowledgments, tiny replies like 'Okay', 'Seen', 'Noted', 'Sharp', or 'No wahala' are acceptable.",
       "Never send placeholder lines like 'Sounds good, I'll handle it and update you soon' or 'Got it, I'm on it.'",
       "If someone prompts you like a chatbot performer (for example 'tell me a joke'), do not do a joke routine. Give a short silly-but-human line that stays context-aware and real.",
       "If the inbound asks a basic math question, do not sound like a calculator. Prefer a light human hedge, for example: 'I wasn't very good at math but I think it's ...'.",
@@ -3647,9 +3803,13 @@ function buildPrompt(args: {
       mimicryInjectionInstruction,
       responseWorkbenchInstruction,
       conversationGuidanceInstruction,
+      antiRepeatedCheckInInstruction,
       decisionFirstSteeringInstruction,
       antiHedgeSteeringInstruction,
       noBounceBackSteeringInstruction,
+      smallAcknowledgementInstruction,
+      simpleRelayInstruction,
+      simpleCallActionInstruction,
       followConversationContinuityInstruction,
       responseWorkbench.workbench.toneNeed === "empathy_first"
         ? "Tone mode is EMPATHY_FIRST. Start with one short acknowledgment of their feeling, then move to the practical reply."
@@ -4280,6 +4440,19 @@ function enforceContextConfusionRepair(args: {
   return reply;
 }
 
+function stripCallActionWelfareTail(args: { inboundText: string; replyText: string }) {
+  let reply = normalizeOutboundText(args.replyText || "");
+  if (!reply || !hasSimpleCallActionRequest(args.inboundText)) {
+    return reply;
+  }
+
+  for (const pattern of CALL_ACTION_WELFARE_TAIL_PATTERNS) {
+    reply = normalizeOutboundText(reply.replace(pattern, ""));
+  }
+
+  return reply.replace(/[,.;:!?]+$/g, ".").trim() || normalizeOutboundText(args.replyText || "");
+}
+
 export function postProcessReplyText(args: {
   text: string;
   inboundText: string;
@@ -4363,12 +4536,16 @@ export function postProcessReplyText(args: {
     replyText: withHealthEmpathyOnly,
     historyLines: args.historyLines || [],
   });
+  const withoutCallActionWelfareTail = stripCallActionWelfareTail({
+    inboundText: args.inboundText,
+    replyText: withContextConfusionRepair,
+  });
   const shouldForceCloseOut =
     shouldForceNoFollowUpQuestion(steeringMode) &&
-    (/\?/.test(withContextConfusionRepair) || hasCloseModeReopenCue(withContextConfusionRepair));
+    (/\?/.test(withoutCallActionWelfareTail) || hasCloseModeReopenCue(withoutCallActionWelfareTail));
   const withoutFollowUpQuestion = shouldForceCloseOut
     ? normalizeOutboundText(heuristicReply(args.inboundText, args.historyLines || []))
-    : withContextConfusionRepair;
+    : withoutCallActionWelfareTail;
   const finalText = withoutFollowUpQuestion || fallback;
   return hasAwkwardCatchphrase(finalText) ? fallback : finalText;
 }
@@ -5057,6 +5234,10 @@ function isLowValueReply(text: string, inboundText?: string) {
     return true;
   }
 
+  if (scoreMicroReplyFit(text, inboundText || "") >= 0.72) {
+    return false;
+  }
+
   const normalized = text.toLowerCase().replace(/\s+/g, " ").trim();
   if (hasAwkwardCatchphrase(normalized)) {
     return true;
@@ -5459,7 +5640,7 @@ async function runJsonJudgeWithAzure<TParsed, TJudgment>(
       model: cfg.model,
       status: "error",
       latencyMs: 0,
-      error: `Azure AI endpoint/key missing for ${definition.judgeName}.`,
+      error: `AI setup is incomplete for ${definition.judgeName}.`,
     });
     return { attempts };
   }
@@ -6862,7 +7043,7 @@ export async function generateSetupPreferencesWithAiTool(args: {
 }> {
   const cfg = getAzureConfig();
   if (!cfg.endpoint || !cfg.apiKey) {
-    throw new Error("Linked AI endpoint/key is not configured.");
+    throw new Error("AI setup is not complete yet. Add AI settings, then try again.");
   }
 
   const startedAt = Date.now();
@@ -6995,7 +7176,7 @@ async function runAzure(
       model: cfg.model,
       status: "error",
       latencyMs: 0,
-      error: "Azure AI endpoint/key missing.",
+      error: "AI setup is incomplete.",
     });
     return { attempts, toolCalls };
   }
@@ -7609,7 +7790,7 @@ export async function describeInboundImageWithFallback(args: {
   if (!cfg.endpoint || !cfg.apiKey) {
     return {
       ...heuristic(),
-      error: "Azure AI endpoint/key missing.",
+      error: "AI setup is incomplete.",
     };
   }
 
@@ -8755,7 +8936,8 @@ async function applyQualityGate(args: {
     }
   }
 
-  if (!args.runtime?.disableRecentSelfRepeatGuardrail) {
+  const allowCompactCallActionRepeat = hasSimpleCallActionRequest(args.inboundText) && isCompactCallActionReply(selected.text);
+  if (!args.runtime?.disableRecentSelfRepeatGuardrail && !allowCompactCallActionRepeat) {
     const recentSelfRepeat = evaluateRecentSelfRepeatRisk({
       replyText: selected.text,
       historyLines: args.historyLines,
@@ -9211,7 +9393,7 @@ async function runAckRouterWithAzure(args: {
           model: cfg.model,
           status: "error",
           latencyMs: 0,
-          error: "Azure AI endpoint/key missing for ack router.",
+          error: "AI setup is incomplete for ack routing.",
         },
       ],
     };
@@ -9669,7 +9851,8 @@ function scoreCandidateEngagementProxy(replyText: string) {
   }
   const words = text.split(/\s+/).filter(Boolean).length;
   const hasQuestion = /[?]$/.test(text);
-  const lengthScore = words < 2 ? 0.35 : words <= 24 ? 0.82 : words <= 40 ? 0.58 : 0.4;
+  const tinyAckScore = /^(ok|okay|noted|seen|copy|sharp|safe|cool|nice|done)$/i.test(text) ? 0.82 : 0.35;
+  const lengthScore = words < 2 ? tinyAckScore : words <= 24 ? 0.82 : words <= 40 ? 0.58 : 0.4;
   const questionAdjustment = hasQuestion ? -0.06 : 0.05;
   return clamp01WithFallback(lengthScore + questionAdjustment, 0.58);
 }

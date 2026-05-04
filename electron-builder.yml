@@ -24,6 +24,8 @@ npmRebuild: false
 mac:
   category: public.app-category.productivity
   icon: public/icons/icon.icns
+  extendInfo:
+    NSMicrophoneUsageDescription: Odogwu HQ uses the microphone only when you record a local voice sample.
   target:
     - target: dmg
       arch:

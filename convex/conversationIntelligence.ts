@@ -927,8 +927,17 @@ export const getReplyGuidance = query({
       conversationState?.lastMutualCheckInAt && conversationState.lastMutualCheckInAt > 0
         ? Math.floor((now - conversationState.lastMutualCheckInAt) / (24 * 60 * 60 * 1000))
         : undefined;
+    const daysSinceOutboundCheckIn =
+      conversationState?.lastOutboundCheckInAt && conversationState.lastOutboundCheckInAt > 0
+        ? Math.floor((now - conversationState.lastOutboundCheckInAt) / (24 * 60 * 60 * 1000))
+        : undefined;
+    const recentOutboundCheckIn =
+      daysSinceOutboundCheckIn !== undefined && daysSinceOutboundCheckIn < Math.max(1, config.checkInRecencyTargetDays);
+    const latestInboundAckLike = recentAckStreak > 0;
     const checkInDue =
-      !daysSinceMutualCheckIn || daysSinceMutualCheckIn >= Math.max(1, config.checkInRecencyTargetDays);
+      !recentOutboundCheckIn &&
+      !latestInboundAckLike &&
+      (!daysSinceMutualCheckIn || daysSinceMutualCheckIn >= Math.max(1, config.checkInRecencyTargetDays));
     const shouldCheckIn =
       config.conversationIntelligenceEnabled &&
       checkInDue &&

@@ -61,6 +61,7 @@ export async function syncInstancePreferencesToConvex(preferences: InstanceSetup
 
   const client = createConvexClient(url);
   await client.mutation(convexRefs.settingsSaveOnboardingPreset, {
+    productUse: preferences.productUse,
     autonomyMode: preferences.autonomyMode,
     replyPace: preferences.replyPace,
     quietHoursEnabled: preferences.quietHoursEnabled,

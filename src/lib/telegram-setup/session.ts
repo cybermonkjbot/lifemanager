@@ -9,6 +9,7 @@ import { getWorkerCommand } from "../runtime/worker-command";
 import { ensureWorkerStopped, getWorkerRuntimeStatus } from "../runtime/worker-lock";
 import { getRuntimeDataPath } from "../runtime/paths";
 import {
+  connectorPlanUnavailableMessage,
   readLocalTenantConnectorCredentials,
   tenantConnectorEnv,
   verifyLocalTenantConnectorAccess,
@@ -233,7 +234,7 @@ class TelegramSetupManager {
     if (!(await verifyLocalTenantConnectorAccess("telegram"))) {
       this.setState({
         status: "error",
-        message: "Telegram is disabled for this tenant plan. Enable it from admin entitlements before connecting.",
+        message: connectorPlanUnavailableMessage("telegram"),
       });
       return this.getState();
     }

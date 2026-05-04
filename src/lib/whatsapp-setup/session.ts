@@ -5,7 +5,12 @@ import { ConvexHttpClient } from "convex/browser";
 import { convexRefs } from "../convex-refs";
 import { getWorkerCommand } from "../runtime/worker-command";
 import { ensureWorkerStopped, getWorkerRuntimeStatus } from "../runtime/worker-lock";
-import { readLocalTenantConnectorCredentials, tenantConnectorEnv, verifyLocalTenantConnectorAccess } from "../tenant-connector-runtime";
+import {
+  connectorPlanUnavailableMessage,
+  readLocalTenantConnectorCredentials,
+  tenantConnectorEnv,
+  verifyLocalTenantConnectorAccess,
+} from "../tenant-connector-runtime";
 
 type SetupStatus = "idle" | "starting" | "qr_ready" | "code_ready" | "connecting" | "syncing" | "connected" | "error";
 export type SetupMode = "qr" | "pairing_code";
@@ -871,7 +876,7 @@ class WhatsAppSetupManager {
       this.setState({
         status: "error",
         mode,
-        message: "WhatsApp is disabled for this tenant plan. Enable it from admin entitlements before connecting.",
+        message: connectorPlanUnavailableMessage("whatsapp"),
         qrDataUrl: undefined,
         pairingCode: undefined,
       });

@@ -133,7 +133,7 @@ async function generateMermaidWithAi(args: {
   const endpoint = pickConfigValue(args.runtime.endpoint);
   const apiKey = pickConfigValue(args.runtime.apiKey);
   const model = pickConfigValue(args.runtime.model) || "gpt-5.4";
-  if (!endpoint || !apiKey) throw new Error("AI endpoint/key is not configured.");
+  if (!endpoint || !apiKey) throw new Error("AI features are not available yet. Add AI settings, then try again.");
 
   const apiStyle = inferApiStyle(endpoint, args.runtime.apiStyle);
   if (apiStyle === "responses") {

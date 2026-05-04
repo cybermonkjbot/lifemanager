@@ -545,7 +545,7 @@ export const listUnifiedMedia = query({
     const [recentMessages, recentAssets] = tenantId
       ? await Promise.all([
           Promise.all(
-            (["whatsapp", "instagram", undefined] as const).map((provider) =>
+            (["whatsapp", "instagram", "imessage", "telegram", undefined] as const).map((provider) =>
               ctx.db
                 .query("messages")
                 .withIndex("by_tenantId_and_provider_and_createdAt", (q) =>
@@ -603,6 +603,7 @@ export const listUnifiedMedia = query({
         _id: Id<"threads">;
         jid: string;
         title?: string;
+        provider?: "whatsapp" | "instagram" | "imessage" | "telegram";
       }
     >();
     await Promise.all(
@@ -615,6 +616,7 @@ export const listUnifiedMedia = query({
           _id: thread._id,
           jid: thread.jid,
           title: thread.title,
+          provider: thread.provider,
         });
       }),
     );

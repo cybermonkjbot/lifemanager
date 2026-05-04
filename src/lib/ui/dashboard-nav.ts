@@ -1,10 +1,13 @@
 export type DashboardNavItem = {
   href: string;
   label: string;
+  businessLabel?: string;
   description: string;
+  businessDescription?: string;
   primary?: boolean;
   adminOnly?: boolean;
   runtimeControlOnly?: boolean;
+  businessOnly?: boolean;
 };
 
 export const dashboardNavItems: DashboardNavItem[] = [
@@ -17,14 +20,25 @@ export const dashboardNavItems: DashboardNavItem[] = [
   {
     href: "/review",
     label: "Review",
+    businessLabel: "Sales Review",
     description: "Approve replies, confirm follow-ups, clear tasks, and check safety holds.",
+    businessDescription: "Approve customer replies, sales follow-ups, handoffs, and safety holds.",
     primary: true,
   },
   {
     href: "/conversations",
     label: "Conversations",
+    businessLabel: "Customers",
     description: "Inspect threads, context, drafts, and per-chat controls.",
+    businessDescription: "Inspect customer threads, lead context, drafts, and per-chat controls.",
     primary: true,
+  },
+  {
+    href: "/storefront",
+    label: "Storefront",
+    description: "Control the hosted chat-aided storefront and livechat embed.",
+    primary: true,
+    businessOnly: true,
   },
   {
     href: "/status",

@@ -25,6 +25,195 @@ export default defineSchema({
     .index("by_key", ["key"])
     .index("by_tenantId_and_key", ["tenantId", "key"]),
 
+  storefrontProfiles: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
+    slug: v.string(),
+    displayName: v.string(),
+    offerSummary: v.string(),
+    brandVoice: v.string(),
+    enabled: v.boolean(),
+    liveChatEnabled: v.boolean(),
+    liveChatWelcomeMessage: v.string(),
+    feeBps: v.number(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_slug", ["slug"])
+    .index("by_tenantId", ["tenantId"]),
+
+  storefrontProducts: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
+    slug: v.string(),
+    name: v.string(),
+    description: v.string(),
+    price: v.number(),
+    currency: v.string(),
+    stockStatus: v.union(v.literal("in_stock"), v.literal("limited"), v.literal("preorder"), v.literal("sold_out")),
+    imageUrl: v.optional(v.string()),
+    tags: v.array(v.string()),
+    salesNotes: v.optional(v.string()),
+    active: v.boolean(),
+    sortOrder: v.number(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_tenantId_and_slug", ["tenantId", "slug"])
+    .index("by_tenantId_and_active_and_sortOrder", ["tenantId", "active", "sortOrder"])
+    .index("by_tenantId_and_updatedAt", ["tenantId", "updatedAt"]),
+
+  storefrontOrderIntents: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
+    storefrontSlug: v.string(),
+    customerName: v.optional(v.string()),
+    customerContact: v.optional(v.string()),
+    customerMessage: v.optional(v.string()),
+    items: v.array(
+      v.object({
+        productId: v.optional(v.id("storefrontProducts")),
+        name: v.string(),
+        quantity: v.number(),
+        unitPrice: v.number(),
+        currency: v.string(),
+      }),
+    ),
+    estimatedTotal: v.number(),
+    currency: v.string(),
+    source: v.union(v.literal("hosted_shop"), v.literal("embed"), v.literal("manual")),
+    status: v.union(v.literal("new"), v.literal("contacted"), v.literal("confirmed"), v.literal("paid"), v.literal("closed"), v.literal("cancelled")),
+    threadId: v.optional(v.id("threads")),
+    sourceMessageId: v.optional(v.id("messages")),
+    followUpId: v.optional(v.id("followUps")),
+    paymentStatus: v.optional(v.union(v.literal("unpaid"), v.literal("pending"), v.literal("paid"), v.literal("failed"), v.literal("refunded"))),
+    paymentProvider: v.optional(v.union(v.literal("flutterwave"), v.literal("manual"))),
+    paymentTxRef: v.optional(v.string()),
+    paymentTransactionId: v.optional(v.string()),
+    paymentLink: v.optional(v.string()),
+    paymentAmount: v.optional(v.number()),
+    platformFeeAmount: v.optional(v.number()),
+    merchantReceivableAmount: v.optional(v.number()),
+    paidAt: v.optional(v.number()),
+    paymentUpdatedAt: v.optional(v.number()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_tenantId_and_status_and_createdAt", ["tenantId", "status", "createdAt"])
+    .index("by_tenantId_and_storefrontSlug_and_createdAt", ["tenantId", "storefrontSlug", "createdAt"])
+    .index("by_threadId", ["threadId"])
+    .index("by_paymentTxRef", ["paymentTxRef"]),
+
+  storefrontLiveChatSessions: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
+    storefrontSlug: v.string(),
+    visitorId: v.string(),
+    customerName: v.optional(v.string()),
+    customerContact: v.optional(v.string()),
+    status: v.union(v.literal("open"), v.literal("waiting"), v.literal("closed")),
+    threadId: v.optional(v.id("threads")),
+    createdAt: v.number(),
+    lastMessageAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_tenantId_and_status_and_lastMessageAt", ["tenantId", "status", "lastMessageAt"])
+    .index("by_storefrontSlug_and_visitorId", ["storefrontSlug", "visitorId"]),
+
+  storefrontPayoutAccounts: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
+    provider: v.union(v.literal("flutterwave"), v.literal("manual")),
+    country: v.string(),
+    currency: v.string(),
+    bankCode: v.string(),
+    bankName: v.string(),
+    accountNumber: v.optional(v.string()),
+    encryptedAccountNumber: v.optional(v.object({
+      algorithm: v.string(),
+      iv: v.string(),
+      tag: v.string(),
+      encryptedValue: v.string(),
+    })),
+    accountNumberLast4: v.string(),
+    accountName: v.string(),
+    businessLegalName: v.optional(v.string()),
+    kycStatus: v.union(v.literal("missing"), v.literal("submitted"), v.literal("verified"), v.literal("rejected")),
+    verificationNotes: v.optional(v.string()),
+    verifiedAt: v.optional(v.number()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_tenantId", ["tenantId"])
+    .index("by_kycStatus_and_updatedAt", ["kycStatus", "updatedAt"]),
+
+  storefrontPayoutBatches: defineTable({
+    currency: v.string(),
+    status: v.union(v.literal("draft"), v.literal("processing"), v.literal("paid"), v.literal("cancelled")),
+    payoutWindowStart: v.number(),
+    payoutWindowEnd: v.number(),
+    totalGrossAmount: v.number(),
+    totalFeeAmount: v.number(),
+    totalNetAmount: v.number(),
+    tenantCount: v.number(),
+    orderCount: v.number(),
+    notes: v.optional(v.string()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+    paidAt: v.optional(v.number()),
+  })
+    .index("by_status_and_createdAt", ["status", "createdAt"])
+    .index("by_currency_and_status_and_createdAt", ["currency", "status", "createdAt"]),
+
+  storefrontPayoutBatchItems: defineTable({
+    batchId: v.id("storefrontPayoutBatches"),
+    tenantId: v.optional(v.id("tenantAccounts")),
+    currency: v.string(),
+    grossAmount: v.number(),
+    feeAmount: v.number(),
+    netAmount: v.number(),
+    orderCount: v.number(),
+    status: v.union(v.literal("pending"), v.literal("paid"), v.literal("failed"), v.literal("cancelled")),
+    payoutAccountId: v.optional(v.id("storefrontPayoutAccounts")),
+    payoutAccountLabel: v.optional(v.string()),
+    transferProvider: v.optional(v.union(v.literal("flutterwave"), v.literal("manual"))),
+    transferReference: v.optional(v.string()),
+    transferId: v.optional(v.string()),
+    transferStatus: v.optional(v.union(v.literal("pending"), v.literal("processing"), v.literal("successful"), v.literal("failed"))),
+    failureReason: v.optional(v.string()),
+    externalReference: v.optional(v.string()),
+    notes: v.optional(v.string()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+    initiatedAt: v.optional(v.number()),
+    paidAt: v.optional(v.number()),
+  })
+    .index("by_batchId", ["batchId"])
+    .index("by_tenantId_and_status", ["tenantId", "status"])
+    .index("by_transferReference", ["transferReference"]),
+
+  storefrontLedgerEntries: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
+    orderIntentId: v.optional(v.id("storefrontOrderIntents")),
+    payoutBatchId: v.optional(v.id("storefrontPayoutBatches")),
+    payoutBatchItemId: v.optional(v.id("storefrontPayoutBatchItems")),
+    kind: v.union(
+      v.literal("gross_payment"),
+      v.literal("platform_fee"),
+      v.literal("merchant_receivable"),
+      v.literal("merchant_payout"),
+      v.literal("refund"),
+      v.literal("adjustment"),
+    ),
+    direction: v.union(v.literal("credit"), v.literal("debit")),
+    status: v.union(v.literal("available"), v.literal("payout_pending"), v.literal("paid"), v.literal("cancelled"), v.literal("reversed")),
+    amount: v.number(),
+    currency: v.string(),
+    description: v.string(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+    availableAt: v.optional(v.number()),
+  })
+    .index("by_orderIntentId_and_kind", ["orderIntentId", "kind"])
+    .index("by_tenantId_and_status_and_createdAt", ["tenantId", "status", "createdAt"])
+    .index("by_status_and_currency_and_createdAt", ["status", "currency", "createdAt"])
+    .index("by_payoutBatchId", ["payoutBatchId"]),
+
   managedSecrets: defineTable({
     key: v.string(),
     algorithm: v.string(),
@@ -258,7 +447,9 @@ export default defineSchema({
     .index("by_tenantId_and_threadKind_and_lastMessageAt", ["tenantId", "threadKind", "lastMessageAt"])
     .index("by_tenantId_and_provider_and_threadKind_and_lastMessageAt", ["tenantId", "provider", "threadKind", "lastMessageAt"])
     .index("by_lastMessageAt", ["lastMessageAt"])
+    .index("by_tenantId_and_lastMessageAt", ["tenantId", "lastMessageAt"])
     .index("by_provider_and_lastMessageAt", ["provider", "lastMessageAt"])
+    .index("by_tenantId_and_provider_and_lastMessageAt", ["tenantId", "provider", "lastMessageAt"])
     .index("by_threadKind_and_lastMessageAt", ["threadKind", "lastMessageAt"])
     .index("by_provider_and_threadKind_and_lastMessageAt", ["provider", "threadKind", "lastMessageAt"])
     .index("by_ignored", ["isIgnored"]),
@@ -347,6 +538,30 @@ export default defineSchema({
       searchField: "text",
       filterFields: ["threadId", "direction", "origin"],
     }),
+
+  messageUrlPreviews: defineTable({
+    tenantId: v.optional(v.id("tenantAccounts")),
+    provider: v.optional(v.union(v.literal("whatsapp"), v.literal("instagram"), v.literal("imessage"), v.literal("telegram"))),
+    threadId: v.id("threads"),
+    messageId: v.id("messages"),
+    sourceUrl: v.string(),
+    normalizedUrl: v.string(),
+    canonicalUrl: v.optional(v.string()),
+    domain: v.optional(v.string()),
+    title: v.optional(v.string()),
+    description: v.optional(v.string()),
+    imageUrl: v.optional(v.string()),
+    siteName: v.optional(v.string()),
+    status: v.union(v.literal("available"), v.literal("unavailable"), v.literal("failed")),
+    error: v.optional(v.string()),
+    fetchedAt: v.number(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_messageId", ["messageId"])
+    .index("by_messageId_and_normalizedUrl", ["messageId", "normalizedUrl"])
+    .index("by_threadId_and_createdAt", ["threadId", "createdAt"])
+    .index("by_tenantId_and_threadId_and_createdAt", ["tenantId", "threadId", "createdAt"]),
 
   messageEmbeddings: defineTable({
     threadId: v.id("threads"),
@@ -1179,7 +1394,9 @@ export default defineSchema({
       v.literal("authenticating"),
       v.literal("qr_ready"),
       v.literal("code_ready"),
+      v.literal("code_required"),
       v.literal("challenge_required"),
+      v.literal("password_required"),
       v.literal("connecting"),
       v.literal("syncing"),
       v.literal("connected"),
