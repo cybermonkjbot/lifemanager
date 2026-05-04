@@ -35,7 +35,7 @@ jobs:
           bun-version: 1.2.20
       - run: bun install --frozen-lockfile
       - run: bun run ${{ matrix.script }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: dist/desktop/**
