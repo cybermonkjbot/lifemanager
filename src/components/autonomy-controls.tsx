@@ -1,10 +1,11 @@
 "use client";
 
 import { ActionNotices } from "@/components/action-notices";
+import { useRuntimeStatus } from "@/components/runtime-status-provider";
 import { useTenantScopeArgs } from "@/components/tenant-scope-provider";
 import { useActionStateRegistry } from "@/lib/ui/action-state";
 import { api } from "../../convex/_generated/api";
-import { useMutation, useQuery } from "convex/react";
+import { useMutation } from "convex/react";
 
 type AutonomyControlsProps = {
   realtimeEnabled: boolean;
@@ -96,38 +97,16 @@ function ControlsView({
 
 function ControlsRealtime({ fallbackPaused }: { fallbackPaused?: boolean }) {
   const tenantScope = useTenantScopeArgs();
+  const runtimeStatus = useRuntimeStatus();
   const pauseAutonomy = useMutation(api.system.pauseAutonomy);
   const resumeAutonomy = useMutation(api.system.resumeAutonomy);
-  const setup = useQuery(api.system.setupStatus, { ...tenantScope, provider: "whatsapp" }) as
-    | {
-        hasAuth?: boolean;
-        listenerActive?: boolean;
-      }
-    | null
-    | undefined;
-  const instagramSetup = useQuery(api.system.setupStatus, { ...tenantScope, provider: "instagram" }) as
-    | {
-        listenerActive?: boolean;
-      }
-    | null
-    | undefined;
+  const setup = runtimeStatus?.providers.whatsapp;
+  const statusLoading = runtimeStatus === undefined;
 
-  const health = useQuery(api.system.health, tenantScope) as
-    | {
-        config?: { autonomyPaused?: boolean };
-        billing?: {
-          blocked?: boolean;
-          reason?: string;
-        };
-      }
-    | undefined;
-  const healthLoading = health === undefined;
-  const setupLoading = setup === undefined || instagramSetup === undefined;
-
-  const billingBlocked = health?.billing?.blocked === true;
-  const autonomyPaused = billingBlocked || (health?.config?.autonomyPaused ?? fallbackPaused ?? false);
-  const anyWorkerConnected = setup?.listenerActive === true || instagramSetup?.listenerActive === true;
-  const statusLabel = healthLoading || setupLoading
+  const billingBlocked = runtimeStatus?.billing.blocked === true;
+  const autonomyPaused = billingBlocked || (runtimeStatus?.autonomyPaused ?? fallbackPaused ?? false);
+  const anyWorkerConnected = runtimeStatus?.anyWorkerConnected === true;
+  const statusLabel = statusLoading
     ? "Loading..."
     : billingBlocked
       ? "Automation Billing Blocked"
@@ -188,14 +167,14 @@ function ControlsRealtime({ fallbackPaused }: { fallbackPaused?: boolean }) {
         statusTone={statusTone}
         toggleDisabled={billingBlocked}
         toggleLabel={billingBlocked ? "Billing Required" : undefined}
-        pending={record.pending || healthLoading}
+        pending={record.pending || statusLoading}
         pendingLabel={record.pendingLabel}
-        restartPending={restartRecord.pending || setupLoading}
+        restartPending={restartRecord.pending || statusLoading}
         restartPendingLabel={restartRecord.pendingLabel}
-        canRestartWorker={canRestartWorker && !setupLoading}
-        error={record.error || (billingBlocked ? health?.billing?.reason : undefined)}
-        onToggle={healthLoading ? undefined : toggle}
-        onRestartWorker={setupLoading ? undefined : restartWorker}
+        canRestartWorker={canRestartWorker && !statusLoading}
+        error={record.error || (billingBlocked ? runtimeStatus?.billing.reason : undefined)}
+        onToggle={statusLoading ? undefined : toggle}
+        onRestartWorker={statusLoading ? undefined : restartWorker}
         statusLabel={statusLabel}
       />
       <ActionNotices notices={notices} onDismiss={dismissNotice} />

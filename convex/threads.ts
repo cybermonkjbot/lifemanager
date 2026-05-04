@@ -177,15 +177,17 @@ export const list = query({
     const limit = Math.min(args.limit ?? 30, 100);
     const provider = args.provider || "all";
     const threads = tenantId
-      ? (
-          await ctx.db
+      ? provider === "all"
+        ? await ctx.db
             .query("threads")
-            .withIndex("by_tenantId_and_jid", (q) => q.eq("tenantId", tenantId))
-            .take(Math.max(limit * 4, 200))
-        )
-          .filter((thread) => provider === "all" || thread.provider === provider)
-          .sort((a, b) => b.lastMessageAt - a.lastMessageAt)
-          .slice(0, limit)
+            .withIndex("by_tenantId_and_lastMessageAt", (q) => q.eq("tenantId", tenantId))
+            .order("desc")
+            .take(limit)
+        : await ctx.db
+            .query("threads")
+            .withIndex("by_tenantId_and_provider_and_lastMessageAt", (q) => q.eq("tenantId", tenantId).eq("provider", provider))
+            .order("desc")
+            .take(limit)
       : provider === "all"
         ? await ctx.db
             .query("threads")
@@ -253,15 +255,21 @@ export const listContacts = query({
     const limit = Math.min(args.limit ?? 200, 500);
     const provider = args.provider || "all";
     const directCandidates = tenantId
-      ? (
-          await ctx.db
+      ? provider === "all"
+        ? await ctx.db
             .query("threads")
-            .withIndex("by_tenantId_and_jid", (q) => q.eq("tenantId", tenantId))
-            .take(Math.max(limit * 4, 300))
-        )
-          .filter((thread) => (provider === "all" || thread.provider === provider) && thread.threadKind === "direct")
-          .sort((a, b) => b.lastMessageAt - a.lastMessageAt)
-          .slice(0, limit)
+            .withIndex("by_tenantId_and_threadKind_and_lastMessageAt", (q) =>
+              q.eq("tenantId", tenantId).eq("threadKind", "direct"),
+            )
+            .order("desc")
+            .take(limit)
+        : await ctx.db
+            .query("threads")
+            .withIndex("by_tenantId_and_provider_and_threadKind_and_lastMessageAt", (q) =>
+              q.eq("tenantId", tenantId).eq("provider", provider).eq("threadKind", "direct"),
+            )
+            .order("desc")
+            .take(limit)
       : provider === "all"
         ? await ctx.db
             .query("threads")
@@ -1091,9 +1099,9 @@ export const get = query({
 
     const unresolvedGuardrails = await ctx.db
       .query("guardrailEvents")
-      .withIndex("by_resolvedAt_and_createdAt", (q) => q.eq("resolvedAt", undefined))
+      .withIndex("by_threadId_and_resolvedAt_and_createdAt", (q) => q.eq("threadId", args.threadId).eq("resolvedAt", undefined))
       .order("desc")
-      .take(260);
+      .take(24);
 
     const draftById = new Map<Id<"replyDrafts">, (typeof draftRows)[number]>();
     for (const draft of draftRows) {
@@ -1122,19 +1130,13 @@ export const get = query({
     }> = [];
 
     for (const row of unresolvedGuardrails) {
-      let include = row.threadId === args.threadId;
       let sourceMessageId: Id<"messages"> | undefined;
 
       if (row.draftId) {
         const draft = await getDraftById(row.draftId);
         if (draft?.threadId === args.threadId) {
-          include = true;
           sourceMessageId = draft.sourceMessageId;
         }
-      }
-
-      if (!include) {
-        continue;
       }
 
       guardrailFlags.push({
@@ -1146,9 +1148,6 @@ export const get = query({
         createdAt: row.createdAt,
       });
 
-      if (guardrailFlags.length >= 24) {
-        break;
-      }
     }
 
     const sourceMessageIds = new Set<Id<"messages">>();

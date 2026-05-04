@@ -1,8 +1,6 @@
 "use client";
 
-import { useTenantScopeArgs } from "@/components/tenant-scope-provider";
-import { api } from "../../convex/_generated/api";
-import { useQuery } from "convex/react";
+import { useRuntimeStatus } from "@/components/runtime-status-provider";
 import { useEffect } from "react";
 
 export type ProviderFilterValue = "all" | "whatsapp" | "instagram" | "imessage" | "telegram";
@@ -20,59 +18,22 @@ export function ProviderFilter({
   label = "Provider filter",
   allLabel = "All",
 }: ProviderFilterProps) {
-  const tenantScope = useTenantScopeArgs();
-  const instagramSetup = useQuery(api.system.setupStatus, { ...tenantScope, provider: "instagram" }) as
-    | {
-        status?: string;
-        hasAuth?: boolean;
-        listenerActive?: boolean;
-      }
-    | null
-    | undefined;
-  const instagramConnected = Boolean(
-    instagramSetup?.hasAuth || instagramSetup?.listenerActive || instagramSetup?.status === "connected",
-  );
-  const imessageSetup = useQuery(api.system.setupStatus, { ...tenantScope, provider: "imessage" }) as
-    | {
-        status?: string;
-        hasAuth?: boolean;
-        listenerActive?: boolean;
-      }
-    | null
-    | undefined;
-  const imessageConnected = Boolean(
-    imessageSetup?.hasAuth || imessageSetup?.listenerActive || imessageSetup?.status === "connected",
-  );
-  const telegramSetup = useQuery(api.system.setupStatus, { ...tenantScope, provider: "telegram" }) as
-    | {
-        status?: string;
-        hasAuth?: boolean;
-        listenerActive?: boolean;
-      }
-    | null
-    | undefined;
-  const telegramConnected = Boolean(
-    telegramSetup?.hasAuth || telegramSetup?.listenerActive || telegramSetup?.status === "connected",
-  );
+  const runtimeStatus = useRuntimeStatus();
+  const instagramConnected = runtimeStatus?.instagramConnected === true;
+  const imessageConnected = runtimeStatus?.imessageConnected === true;
+  const telegramConnected = runtimeStatus?.telegramConnected === true;
 
   useEffect(() => {
     if (
-      (!instagramConnected && instagramSetup !== undefined && value === "instagram") ||
-      (!imessageConnected && imessageSetup !== undefined && value === "imessage") ||
-      (!telegramConnected && telegramSetup !== undefined && value === "telegram")
+      runtimeStatus !== undefined &&
+      runtimeStatus !== null &&
+      ((!instagramConnected && value === "instagram") ||
+        (!imessageConnected && value === "imessage") ||
+        (!telegramConnected && value === "telegram"))
     ) {
       onChange("all");
     }
-  }, [
-    imessageConnected,
-    imessageSetup,
-    instagramConnected,
-    instagramSetup,
-    onChange,
-    telegramConnected,
-    telegramSetup,
-    value,
-  ]);
+  }, [imessageConnected, instagramConnected, onChange, runtimeStatus, telegramConnected, value]);
 
   return (
     <div className="queue-focus-tabs" role="tablist" aria-label={label}>

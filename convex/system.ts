@@ -181,6 +181,78 @@ async function getTenantBillingBlock(ctx: QueryCtx | MutationCtx, tenantId: Id<"
   };
 }
 
+async function readSetupStatusSnapshot(
+  ctx: QueryCtx,
+  tenantId: Id<"tenantAccounts"> | undefined,
+  provider: "whatsapp" | "instagram",
+) {
+  const connectionHistory = await getProviderConnectionHistory(ctx, tenantId, provider);
+  let record = tenantId
+    ? await ctx.db
+        .query("setupRuntime")
+        .withIndex("by_tenantId_and_provider", (q) => q.eq("tenantId", tenantId).eq("provider", provider))
+        .first()
+    : await ctx.db
+        .query("setupRuntime")
+        .withIndex("by_provider", (q) => q.eq("provider", provider))
+        .first();
+  if (!record && !tenantId && provider === "whatsapp") {
+    record = await ctx.db
+      .query("setupRuntime")
+      .withIndex("by_key", (q) => q.eq("key", "whatsapp"))
+      .first();
+  }
+
+  if (record) {
+    if (connectionHistory.hasActiveConnection && (record.listenerActive !== true || record.hasAuth !== true)) {
+      return {
+        ...record,
+        status: "connected" as const,
+        message: `${providerLabel(provider)} connected.`,
+        hasAuth: true,
+        listenerActive: true,
+        listenerLastSeenAt: connectionHistory.lastConnectionSeenAt ?? record.listenerLastSeenAt,
+        updatedAt: Math.max(record.updatedAt, connectionHistory.lastConnectionSeenAt ?? 0),
+        ...connectionHistory,
+      };
+    }
+    return {
+      ...record,
+      ...connectionHistory,
+    };
+  }
+
+  if (connectionHistory.hasConnectedBefore) {
+    const syntheticRecord = {
+      key: provider,
+      provider,
+      status: connectionHistory.hasActiveConnection ? ("connected" as const) : ("idle" as const),
+      mode: providerSetupMode(provider),
+      message: connectionHistory.hasActiveConnection ? `${providerLabel(provider)} connected.` : "Setup not started.",
+      hasAuth: connectionHistory.hasActiveConnection,
+      listenerActive: connectionHistory.hasActiveConnection ? true : undefined,
+      listenerLastSeenAt: connectionHistory.lastConnectionSeenAt,
+      updatedAt:
+        connectionHistory.lastConnectionSeenAt ||
+        connectionHistory.lastDisconnectedAt ||
+        connectionHistory.lastConnectedAt ||
+        Date.now(),
+      ...connectionHistory,
+    };
+    return tenantId ? { ...syntheticRecord, tenantId } : syntheticRecord;
+  }
+
+  return null;
+}
+
+function isProviderConnected(setup: {
+  status?: string;
+  hasAuth?: boolean;
+  listenerActive?: boolean;
+} | null) {
+  return Boolean(setup?.hasAuth || setup?.listenerActive || setup?.status === "connected");
+}
+
 export const health = query({
   args: tenantScopeArgs,
   handler: async (ctx, args) => {
@@ -407,6 +479,50 @@ export const health = query({
             "Review due queue size, inspect failed outbox rows, and reduce outbound throttles only if policy-safe.",
         },
       ],
+    };
+  },
+});
+
+export const runtimeStatus = query({
+  args: tenantScopeArgs,
+  handler: async (ctx, args) => {
+    const tenantId = await resolveTenantForOptionalQuery(ctx, args);
+    const [config, billingBlock, whatsapp, instagram, imessage, telegram] = await Promise.all([
+      getConfig(ctx, tenantId),
+      getTenantBillingBlock(ctx, tenantId),
+      readSetupStatusSnapshot(ctx, tenantId, "whatsapp"),
+      readSetupStatusSnapshot(ctx, tenantId, "instagram"),
+      readSetupStatusSnapshot(ctx, tenantId, "imessage"),
+      readSetupStatusSnapshot(ctx, tenantId, "telegram"),
+    ]);
+
+    const autonomyPaused = billingBlock ? true : config.autonomyPaused;
+
+    return {
+      autonomyPaused,
+      billing: billingBlock
+        ? {
+            blocked: true,
+            status: billingBlock.status,
+            reason: billingBlock.reason,
+          }
+        : {
+            blocked: false,
+          },
+      providers: {
+        whatsapp,
+        instagram,
+        imessage,
+        telegram,
+      },
+      anyWorkerConnected:
+        whatsapp?.listenerActive === true ||
+        instagram?.listenerActive === true ||
+        imessage?.listenerActive === true ||
+        telegram?.listenerActive === true,
+      instagramConnected: isProviderConnected(instagram),
+      imessageConnected: isProviderConnected(imessage),
+      telegramConnected: isProviderConnected(telegram),
     };
   },
 });
@@ -1062,65 +1178,7 @@ export const setupStatus = query({
   handler: async (ctx, args) => {
     const tenantId = await resolveTenantForOptionalQuery(ctx, args);
     const provider = args.provider || "whatsapp";
-    const connectionHistory = await getProviderConnectionHistory(ctx, tenantId, provider);
-    let record = tenantId
-      ? await ctx.db
-          .query("setupRuntime")
-          .withIndex("by_tenantId_and_provider", (q) => q.eq("tenantId", tenantId).eq("provider", provider))
-          .first()
-      : await ctx.db
-          .query("setupRuntime")
-          .withIndex("by_provider", (q) => q.eq("provider", provider))
-          .first();
-    if (!record && !tenantId && provider === "whatsapp") {
-      record = await ctx.db
-        .query("setupRuntime")
-        .withIndex("by_key", (q) => q.eq("key", "whatsapp"))
-        .first();
-    }
-
-    if (record) {
-      if (connectionHistory.hasActiveConnection && (record.listenerActive !== true || record.hasAuth !== true)) {
-        return {
-          ...record,
-          status: "connected" as const,
-          message: `${providerLabel(provider)} connected.`,
-          hasAuth: true,
-          listenerActive: true,
-          listenerLastSeenAt: connectionHistory.lastConnectionSeenAt ?? record.listenerLastSeenAt,
-          updatedAt: Math.max(record.updatedAt, connectionHistory.lastConnectionSeenAt ?? 0),
-          ...connectionHistory,
-        };
-      }
-      return {
-        ...record,
-        ...connectionHistory,
-      };
-    }
-
-    if (connectionHistory.hasConnectedBefore) {
-      const syntheticRecord = {
-        key: provider,
-        provider,
-        status: connectionHistory.hasActiveConnection ? ("connected" as const) : ("idle" as const),
-        mode: providerSetupMode(provider),
-        message: connectionHistory.hasActiveConnection
-          ? `${providerLabel(provider)} connected.`
-          : "Setup not started.",
-        hasAuth: connectionHistory.hasActiveConnection,
-        listenerActive: connectionHistory.hasActiveConnection ? true : undefined,
-        listenerLastSeenAt: connectionHistory.lastConnectionSeenAt,
-        updatedAt:
-          connectionHistory.lastConnectionSeenAt ||
-          connectionHistory.lastDisconnectedAt ||
-          connectionHistory.lastConnectedAt ||
-          Date.now(),
-        ...connectionHistory,
-      };
-      return tenantId ? { ...syntheticRecord, tenantId } : syntheticRecord;
-    }
-
-    return null;
+    return await readSetupStatusSnapshot(ctx, tenantId, provider);
   },
 });
 
