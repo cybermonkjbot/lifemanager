@@ -184,7 +184,7 @@ async function getTenantBillingBlock(ctx: QueryCtx | MutationCtx, tenantId: Id<"
 async function readSetupStatusSnapshot(
   ctx: QueryCtx,
   tenantId: Id<"tenantAccounts"> | undefined,
-  provider: "whatsapp" | "instagram",
+  provider: "whatsapp" | "instagram" | "imessage" | "telegram",
 ) {
   const connectionHistory = await getProviderConnectionHistory(ctx, tenantId, provider);
   let record = tenantId
