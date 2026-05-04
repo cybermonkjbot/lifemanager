@@ -1,8 +1,6 @@
 "use client";
 
-import { useTenantScopeArgs } from "@/components/tenant-scope-provider";
-import { api } from "../../convex/_generated/api";
-import { useQuery } from "convex/react";
+import { useRuntimeStatus } from "@/components/runtime-status-provider";
 import { useState } from "react";
 
 type SetupStatus =
@@ -112,29 +110,23 @@ function evaluateProviderState(provider: "whatsapp" | "instagram", setup: SetupS
 }
 
 export function RuntimeStateOverlay({ canManageRuntime = true }: { canManageRuntime?: boolean }) {
-  const tenantScope = useTenantScopeArgs();
   const [reconnectPending, setReconnectPending] = useState(false);
   const [reconnectError, setReconnectError] = useState("");
-  const whatsappSetup = useQuery(api.system.setupStatus, { ...tenantScope, provider: "whatsapp" }) as SetupSnapshot | undefined;
-  const instagramSetup = useQuery(api.system.setupStatus, { ...tenantScope, provider: "instagram" }) as SetupSnapshot | undefined;
-  const health = useQuery(api.system.health, tenantScope) as
-    | {
-        config?: {
-          autonomyPaused?: boolean;
-        };
-      }
-    | undefined;
+  const runtimeStatus = useRuntimeStatus();
 
-  if (whatsappSetup === undefined || instagramSetup === undefined || health === undefined) {
+  if (runtimeStatus == null) {
     return null;
   }
+
+  const whatsappSetup = runtimeStatus.providers.whatsapp as SetupSnapshot;
+  const instagramSetup = runtimeStatus.providers.instagram as SetupSnapshot;
 
   const issues = [
     evaluateProviderState("whatsapp", whatsappSetup),
     evaluateProviderState("instagram", instagramSetup),
   ].filter(Boolean) as ProviderIssue[];
 
-  const autonomyPaused = Boolean(health?.config?.autonomyPaused);
+  const autonomyPaused = Boolean(runtimeStatus.autonomyPaused);
   const hasError = issues.some((issue) => issue.state === "error");
   const hasOffline = issues.some((issue) => issue.state === "offline");
   const whatsappIssue = issues.find((issue) => issue.provider === "whatsapp");

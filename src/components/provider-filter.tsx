@@ -1,8 +1,6 @@
 "use client";
 
-import { useTenantScopeArgs } from "@/components/tenant-scope-provider";
-import { api } from "../../convex/_generated/api";
-import { useQuery } from "convex/react";
+import { useRuntimeStatus } from "@/components/runtime-status-provider";
 import { useEffect } from "react";
 
 export type ProviderFilterValue = "all" | "whatsapp" | "instagram";
@@ -20,24 +18,14 @@ export function ProviderFilter({
   label = "Provider filter",
   allLabel = "All",
 }: ProviderFilterProps) {
-  const tenantScope = useTenantScopeArgs();
-  const instagramSetup = useQuery(api.system.setupStatus, { ...tenantScope, provider: "instagram" }) as
-    | {
-        status?: string;
-        hasAuth?: boolean;
-        listenerActive?: boolean;
-      }
-    | null
-    | undefined;
-  const instagramConnected = Boolean(
-    instagramSetup?.hasAuth || instagramSetup?.listenerActive || instagramSetup?.status === "connected",
-  );
+  const runtimeStatus = useRuntimeStatus();
+  const instagramConnected = runtimeStatus?.instagramConnected === true;
 
   useEffect(() => {
-    if (!instagramConnected && value === "instagram") {
+    if (runtimeStatus !== undefined && runtimeStatus !== null && !instagramConnected && value === "instagram") {
       onChange("all");
     }
-  }, [instagramConnected, onChange, value]);
+  }, [instagramConnected, onChange, runtimeStatus, value]);
 
   return (
     <div className="queue-focus-tabs" role="tablist" aria-label={label}>

@@ -238,6 +238,10 @@ export default defineSchema({
     .index("by_provider_and_jid", ["provider", "jid"])
     .index("by_tenantId_and_provider_and_jid", ["tenantId", "provider", "jid"])
     .index("by_tenantId_and_jid", ["tenantId", "jid"])
+    .index("by_tenantId_and_lastMessageAt", ["tenantId", "lastMessageAt"])
+    .index("by_tenantId_and_provider_and_lastMessageAt", ["tenantId", "provider", "lastMessageAt"])
+    .index("by_tenantId_and_threadKind_and_lastMessageAt", ["tenantId", "threadKind", "lastMessageAt"])
+    .index("by_tenantId_and_provider_and_threadKind_and_lastMessageAt", ["tenantId", "provider", "threadKind", "lastMessageAt"])
     .index("by_lastMessageAt", ["lastMessageAt"])
     .index("by_provider_and_lastMessageAt", ["provider", "lastMessageAt"])
     .index("by_threadKind_and_lastMessageAt", ["threadKind", "lastMessageAt"])
@@ -822,6 +826,7 @@ export default defineSchema({
     createdAt: v.number(),
   })
     .index("by_createdAt", ["createdAt"])
+    .index("by_threadId_and_resolvedAt_and_createdAt", ["threadId", "resolvedAt", "createdAt"])
     .index("by_resolvedAt_and_createdAt", ["resolvedAt", "createdAt"]),
 
   providerRuns: defineTable({
